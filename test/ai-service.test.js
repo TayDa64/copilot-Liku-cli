@@ -20,8 +20,9 @@ describe('AI Service Metadata', () => {
       // Expected: Returns array like ['vision', 'text'] or ['text']
     });
 
-    test.skip('should return sessionToken status', () => {
-      // Expected: Returns 'present' or 'absent'
+    test.skip('should return sessionToken availability status', () => {
+      // Expected: Returns 'present' if session token exists, 'absent' otherwise
+      // Used to check if Copilot session is authenticated
     });
 
     test.skip('should include modelVersion', () => {

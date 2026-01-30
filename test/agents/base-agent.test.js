@@ -152,6 +152,8 @@ describe('BaseAgent', () => {
       agent.recordToolExecution('read', {}, {}, 200, true);
       agent.recordToolExecution('read', {}, {}, 300, true);
       
+      // Note: The implementation uses a cumulative moving average
+      // (total time / total calls), not a fixed-window rolling average
       expect(agent.metrics.avgResponseTimeMs).toBe(200);
     });
 
