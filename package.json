@@ -8,8 +8,11 @@
   },
   "scripts": {
     "start": "node scripts/start.js",
-    "test": "node scripts/test-grid.js",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage",
     "test:ui": "node scripts/test-ui-automation-baseline.js",
+    "test:grid": "node scripts/test-grid.js",
     "liku": "node src/cli/liku.js"
   },
   "keywords": [
@@ -22,5 +25,8 @@
   "license": "MIT",
   "dependencies": {
     "electron": "^35.7.5"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0"
   }
 }
