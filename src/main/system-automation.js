@@ -29,6 +29,10 @@ const ACTION_TYPES = {
   // Direct command execution (most reliable for terminal operations)
   RUN_COMMAND: 'run_command',       // Run shell command directly
   FOCUS_WINDOW: 'focus_window',     // Focus a specific window
+  BRING_WINDOW_TO_FRONT: 'bring_window_to_front',
+  SEND_WINDOW_TO_BACK: 'send_window_to_back',
+  MINIMIZE_WINDOW: 'minimize_window',
+  RESTORE_WINDOW: 'restore_window',
 };
 
 // Dangerous command patterns that require confirmation
@@ -479,6 +483,131 @@ public class WindowFocus {
 `;
     await executePowerShell(script);
     console.log(`[AUTOMATION] Focused window handle: ${hwnd}`);
+}
+
+/**
+ * Resolve window handle from action payload (handle, title, process, class)
+ */
+async function resolveWindowHandle(action = {}) {
+  const directHandle = action.hwnd ?? action.windowHandle;
+  if (directHandle !== undefined && directHandle !== null && Number.isFinite(Number(directHandle))) {
+    return Number(directHandle);
+  }
+
+  const title = (action.title || '').replace(/'/g, "''");
+  const processName = (action.processName || '').replace(/'/g, "''");
+  const className = (action.className || '').replace(/'/g, "''");
+
+  if (!title && !processName && !className) {
+    return null;
+  }
+
+  const script = `
+Add-Type @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public class WindowResolver {
+    [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc cb, IntPtr lParam);
+    [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
+    [DllImport("user32.dll")] public static extern int GetClassName(IntPtr hWnd, StringBuilder name, int count);
+    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
+    public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+    public static List<IntPtr> windows = new List<IntPtr>();
+    public static void Find() {
+        windows.Clear();
+        EnumWindows((h, l) => { if (IsWindowVisible(h)) windows.Add(h); return true; }, IntPtr.Zero);
+    }
+}
+'@
+
+$title = '${title}'.ToLower()
+$proc = '${processName}'
+$class = '${className}'.ToLower()
+
+[WindowResolver]::Find()
+foreach ($hwnd in [WindowResolver]::windows) {
+    $titleSB = New-Object System.Text.StringBuilder 256
+    $classSB = New-Object System.Text.StringBuilder 256
+    [void][WindowResolver]::GetWindowText($hwnd, $titleSB, 256)
+    [void][WindowResolver]::GetClassName($hwnd, $classSB, 256)
+
+    $t = $titleSB.ToString()
+    if ([string]::IsNullOrWhiteSpace($t)) { continue }
+    $c = $classSB.ToString()
+
+    if ($title -and -not $t.ToLower().Contains($title)) { continue }
+    if ($class -and -not $c.ToLower().Contains($class)) { continue }
+
+    if ($proc) {
+        $pid = 0
+        [void][WindowResolver]::GetWindowThreadProcessId($hwnd, [ref]$pid)
+        $p = Get-Process -Id $pid -ErrorAction SilentlyContinue
+        if (-not $p -or $p.ProcessName -ne $proc) { continue }
+    }
+
+    $hwnd.ToInt64()
+    exit
+}
+`;
+
+  try {
+    const output = await executePowerShell(script);
+    const parsed = Number(output);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+async function minimizeWindow(hwnd) {
+  const script = `
+Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+public class WinMin {
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+}
+'@
+[WinMin]::ShowWindow([IntPtr]::new(${hwnd}), 6) | Out-Null
+`;
+  await executePowerShell(script);
+}
+
+async function restoreWindow(hwnd) {
+  const script = `
+Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+public class WinRestore {
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+}
+'@
+[WinRestore]::ShowWindow([IntPtr]::new(${hwnd}), 9) | Out-Null
+`;
+  await executePowerShell(script);
+}
+
+async function sendWindowToBack(hwnd) {
+  const script = `
+Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+public class WinZ {
+  [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+  public static readonly IntPtr HWND_BOTTOM = new IntPtr(1);
+  public const uint SWP_NOSIZE = 0x0001;
+  public const uint SWP_NOMOVE = 0x0002;
+  public const uint SWP_NOACTIVATE = 0x0010;
+  public const uint SWP_NOOWNERZORDER = 0x0200;
+}
+'@
+[WinZ]::SetWindowPos([IntPtr]::new(${hwnd}), [WinZ]::HWND_BOTTOM, 0, 0, 0, 0, [WinZ]::SWP_NOSIZE -bor [WinZ]::SWP_NOMOVE -bor [WinZ]::SWP_NOACTIVATE -bor [WinZ]::SWP_NOOWNERZORDER) | Out-Null
+`;
+  await executePowerShell(script);
 }
 
 /**
@@ -1662,9 +1791,45 @@ async function executeAction(action) {
         break;
 
       case ACTION_TYPES.FOCUS_WINDOW:
-         await focusWindow(action.hwnd || action.windowHandle);
-         result.message = `Focused window handle ${action.hwnd || action.windowHandle}`;
-         break;
+      case ACTION_TYPES.BRING_WINDOW_TO_FRONT: {
+        const hwnd = await resolveWindowHandle(action);
+        if (!hwnd) {
+          throw new Error('Window not found. Provide hwnd/windowHandle or title/processName/className.');
+        }
+        await focusWindow(hwnd);
+        result.message = `Brought window ${hwnd} to front`;
+        break;
+      }
+
+      case ACTION_TYPES.SEND_WINDOW_TO_BACK: {
+        const hwnd = await resolveWindowHandle(action);
+        if (!hwnd) {
+          throw new Error('Window not found. Provide hwnd/windowHandle or title/processName/className.');
+        }
+        await sendWindowToBack(hwnd);
+        result.message = `Sent window ${hwnd} to back`;
+        break;
+      }
+
+      case ACTION_TYPES.MINIMIZE_WINDOW: {
+        const hwnd = await resolveWindowHandle(action);
+        if (!hwnd) {
+          throw new Error('Window not found. Provide hwnd/windowHandle or title/processName/className.');
+        }
+        await minimizeWindow(hwnd);
+        result.message = `Minimized window ${hwnd}`;
+        break;
+      }
+
+      case ACTION_TYPES.RESTORE_WINDOW: {
+        const hwnd = await resolveWindowHandle(action);
+        if (!hwnd) {
+          throw new Error('Window not found. Provide hwnd/windowHandle or title/processName/className.');
+        }
+        await restoreWindow(hwnd);
+        result.message = `Restored window ${hwnd}`;
+        break;
+      }
         
       default:
         throw new Error(`Unknown action type: ${action.type}`);
@@ -1787,6 +1952,10 @@ module.exports = {
   drag,
   sleep,
   getActiveWindowTitle,
+  resolveWindowHandle,
+  minimizeWindow,
+  restoreWindow,
+  sendWindowToBack,
   // Semantic element-based automation (preferred approach)
   findElementByText,
   clickElementByText,

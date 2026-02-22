@@ -20,3 +20,7 @@ Thumbs.db
 
 # Electron
 out/
+
+# Extracted PDF text (keep index files only)
+docs/pdf/*.txt
+!docs/pdf/*.index.txt

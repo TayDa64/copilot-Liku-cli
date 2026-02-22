@@ -23,9 +23,25 @@ function loadUI() {
  *   liku window                     # List all windows
  *   liku window "Visual Studio"    # Focus window by title
  *   liku window --active           # Show active window info
+ *   liku window --front "Notepad"   # Bring window to front
+ *   liku window --back "Notepad"    # Send window to back
+ *   liku window --minimize "Notepad"
+ *   liku window --restore "Notepad"
  */
 async function run(args, options) {
   loadUI();
+
+  const titleFromArgs = args.length > 0 ? args.join(' ') : null;
+  const getTarget = (preferredTitle = null) => {
+    const title = preferredTitle || titleFromArgs || options.title || null;
+    if (options.hwnd) {
+      return { hwnd: Number(options.hwnd) };
+    }
+    if (title) {
+      return { title };
+    }
+    return null;
+  };
   
   // Show active window info
   if (options.active) {
@@ -48,6 +64,56 @@ ${highlight('Active Window:')}
 `);
     }
     return { success: true, window: win };
+  }
+
+  if (options.front || options.back || options.minimize || options.restore || options.maximize) {
+    const operation = options.front ? 'front'
+      : options.back ? 'back'
+      : options.minimize ? 'minimize'
+      : options.maximize ? 'maximize'
+      : 'restore';
+
+    const preferredTitle =
+      typeof options.front === 'string' ? options.front
+        : typeof options.back === 'string' ? options.back
+          : typeof options.minimize === 'string' ? options.minimize
+            : typeof options.maximize === 'string' ? options.maximize
+              : typeof options.restore === 'string' ? options.restore
+                : null;
+
+    const target = getTarget(preferredTitle);
+    if (!target) {
+      error('No target window specified. Pass title text or --hwnd <handle>.');
+      return { success: false, error: 'No target window specified' };
+    }
+
+    if (!options.quiet) {
+      info(`Window op: ${operation} (${target.hwnd ? `hwnd=${target.hwnd}` : `title="${target.title}"`})`);
+    }
+
+    let result;
+    if (operation === 'front') {
+      result = await ui.bringWindowToFront(target);
+    } else if (operation === 'back') {
+      result = await ui.sendWindowToBack(target);
+    } else if (operation === 'minimize') {
+      result = await ui.minimizeWindow(target);
+    } else if (operation === 'maximize') {
+      result = await ui.maximizeWindow(target);
+    } else {
+      result = await ui.restoreWindow(target);
+    }
+
+    if (!result?.success) {
+      error(`Window operation failed: ${operation}`);
+      return { success: false, error: `window ${operation} failed`, operation };
+    }
+
+    if (!options.quiet) {
+      success(`Window operation complete: ${operation}`);
+    }
+
+    return { success: true, operation, target, result };
   }
   
   // Focus window by title

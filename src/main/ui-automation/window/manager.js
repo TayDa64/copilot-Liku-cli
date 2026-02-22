@@ -162,33 +162,47 @@ $results | ConvertTo-Json -Compress
 }
 
 /**
+ * Resolve a target into window handle + optional window metadata
+ *
+ * @param {number|string|Object} target
+ * @returns {Promise<{hwnd: number|null, window: Object|null}>}
+ */
+async function resolveWindowTarget(target) {
+  if (typeof target === 'number') {
+    return { hwnd: target, window: null };
+  }
+
+  if (typeof target === 'string') {
+    const windows = await findWindows({ title: target });
+    if (windows.length > 0) {
+      return { hwnd: windows[0].hwnd, window: windows[0] };
+    }
+    return { hwnd: null, window: null };
+  }
+
+  if (typeof target === 'object' && target) {
+    if (target.hwnd) {
+      return { hwnd: Number(target.hwnd), window: target };
+    }
+    const windows = await findWindows(target);
+    if (windows.length > 0) {
+      return { hwnd: windows[0].hwnd, window: windows[0] };
+    }
+  }
+
+  return { hwnd: null, window: null };
+}
+
+/**
  * Focus a window (bring to foreground)
  * 
  * @param {number|string|Object} target - Window handle, title substring, or criteria object
  * @returns {Promise<{success: boolean, window: Object|null}>}
  */
 async function focusWindow(target) {
-  let hwnd = null;
-  let windowInfo = null;
-  
-  if (typeof target === 'number') {
-    hwnd = target;
-  } else if (typeof target === 'string') {
-    const windows = await findWindows({ title: target });
-    if (windows.length > 0) {
-      hwnd = windows[0].hwnd;
-      windowInfo = windows[0];
-    }
-  } else if (typeof target === 'object' && target.hwnd) {
-    hwnd = target.hwnd;
-    windowInfo = target;
-  } else if (typeof target === 'object') {
-    const windows = await findWindows(target);
-    if (windows.length > 0) {
-      hwnd = windows[0].hwnd;
-      windowInfo = windows[0];
-    }
-  }
+  const resolved = await resolveWindowTarget(target);
+  const hwnd = resolved.hwnd;
+  const windowInfo = resolved.window;
   
   if (!hwnd) {
     log(`focusWindow: No window found for target`, 'warn');
@@ -227,12 +241,76 @@ if ($fg -eq $hwnd) { "focused" } else { "failed" }
 }
 
 /**
+ * Bring window to front (foreground + top z-order)
+ *
+ * @param {number|string|Object} target
+ * @returns {Promise<{success: boolean, window: Object|null}>}
+ */
+async function bringWindowToFront(target) {
+  return focusWindow(target);
+}
+
+/**
+ * Send a window to back of z-order without activating it
+ *
+ * @param {number|string|Object} target
+ * @returns {Promise<{success: boolean, window: Object|null}>}
+ */
+async function sendWindowToBack(target) {
+  const resolved = await resolveWindowTarget(target);
+  const hwnd = resolved.hwnd;
+  const windowInfo = resolved.window;
+
+  if (!hwnd) {
+    log('sendWindowToBack: No window found for target', 'warn');
+    return { success: false, window: null };
+  }
+
+  const psScript = `
+Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+
+public class ZOrderHelper {
+    [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+
+    public static readonly IntPtr HWND_BOTTOM = new IntPtr(1);
+    public const uint SWP_NOSIZE = 0x0001;
+    public const uint SWP_NOMOVE = 0x0002;
+    public const uint SWP_NOACTIVATE = 0x0010;
+    public const uint SWP_NOOWNERZORDER = 0x0200;
+}
+'@
+
+$hwnd = [IntPtr]::new(${hwnd})
+$ok = [ZOrderHelper]::SetWindowPos(
+    $hwnd,
+    [ZOrderHelper]::HWND_BOTTOM,
+    0, 0, 0, 0,
+    [ZOrderHelper]::SWP_NOSIZE -bor [ZOrderHelper]::SWP_NOMOVE -bor [ZOrderHelper]::SWP_NOACTIVATE -bor [ZOrderHelper]::SWP_NOOWNERZORDER
+)
+if ($ok) { 'backed' } else { 'failed' }
+`;
+
+  const result = await executePowerShellScript(psScript);
+  const success = result.stdout.includes('backed');
+  log(`sendWindowToBack hwnd=${hwnd} - ${success ? 'success' : 'failed'}`);
+  return { success, window: windowInfo };
+}
+
+/**
  * Minimize a window
  * 
- * @param {number} hwnd - Window handle
+ * @param {number|string|Object} target - Window handle/title/criteria
  * @returns {Promise<{success: boolean}>}
  */
-async function minimizeWindow(hwnd) {
+async function minimizeWindow(target) {
+  const resolved = await resolveWindowTarget(target);
+  const hwnd = resolved.hwnd;
+  if (!hwnd) {
+    return { success: false };
+  }
+
   const psScript = `
 Add-Type @'
 using System;
@@ -252,10 +330,16 @@ public class MinHelper {
 /**
  * Maximize a window
  * 
- * @param {number} hwnd - Window handle
+ * @param {number|string|Object} target - Window handle/title/criteria
  * @returns {Promise<{success: boolean}>}
  */
-async function maximizeWindow(hwnd) {
+async function maximizeWindow(target) {
+  const resolved = await resolveWindowTarget(target);
+  const hwnd = resolved.hwnd;
+  if (!hwnd) {
+    return { success: false };
+  }
+
   const psScript = `
 Add-Type @'
 using System;
@@ -275,10 +359,16 @@ public class MaxHelper {
 /**
  * Restore a window to normal state
  * 
- * @param {number} hwnd - Window handle
+ * @param {number|string|Object} target - Window handle/title/criteria
  * @returns {Promise<{success: boolean}>}
  */
-async function restoreWindow(hwnd) {
+async function restoreWindow(target) {
+  const resolved = await resolveWindowTarget(target);
+  const hwnd = resolved.hwnd;
+  if (!hwnd) {
+    return { success: false };
+  }
+
   const psScript = `
 Add-Type @'
 using System;
@@ -298,7 +388,10 @@ public class RestoreHelper {
 module.exports = {
   getActiveWindow,
   findWindows,
+  resolveWindowTarget,
   focusWindow,
+  bringWindowToFront,
+  sendWindowToBack,
   minimizeWindow,
   maximizeWindow,
   restoreWindow,

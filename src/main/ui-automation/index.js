@@ -65,7 +65,10 @@ const {
 const {
   getActiveWindow,
   findWindows,
+  resolveWindowTarget,
   focusWindow,
+  bringWindowToFront,
+  sendWindowToBack,
   minimizeWindow,
   maximizeWindow,
   restoreWindow,
@@ -137,7 +140,10 @@ module.exports = {
   // Window operations
   getActiveWindow,
   findWindows,
+  resolveWindowTarget,
   focusWindow,
+  bringWindowToFront,
+  sendWindowToBack,
   minimizeWindow,
   maximizeWindow,
   restoreWindow,

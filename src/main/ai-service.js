@@ -346,6 +346,10 @@ When the user asks you to DO something, respond with a JSON action block:
 - \`{"type": "wait", "ms": <number>}\` - Wait milliseconds (IMPORTANT: add waits between multi-step actions!)
 - \`{"type": "screenshot"}\` - Take screenshot to verify result
 - \`{"type": "focus_window", "windowHandle": <number>}\` - Bring a window to the foreground (use if target is in background)
+- \`{"type": "bring_window_to_front", "title": "<partial title>"}\` - Bring matching background app to foreground
+- \`{"type": "send_window_to_back", "title": "<partial title>"}\` - Push matching window behind others without activating
+- \`{"type": "minimize_window", "title": "<partial title>"}\` - Minimize a specific window
+- \`{"type": "restore_window", "title": "<partial title>"}\` - Restore a minimized window
 - \`{"type": "run_command", "command": "<shell command>", "cwd": "<optional path>", "shell": "powershell|cmd|bash"}\` - **PREFERRED FOR SHELL TASKS**: Execute shell command directly and return output (timeout: 30s)
 
 ### Grid to Pixel Conversion:
@@ -1572,6 +1576,15 @@ function analyzeActionSafety(action, targetInfo = {}) {
     case 'drag':
       result.riskLevel = ActionRiskLevel.MEDIUM;
       break;
+    case 'focus_window':
+    case 'bring_window_to_front':
+      result.riskLevel = ActionRiskLevel.LOW;
+      break;
+    case 'send_window_to_back':
+    case 'minimize_window':
+    case 'restore_window':
+      result.riskLevel = ActionRiskLevel.LOW;
+      break;
     case 'run_command':
       // Analyze command safety
       const cmd = (action.command || '').toLowerCase();
@@ -1675,6 +1688,16 @@ function describeAction(action, targetInfo = {}) {
       return `Scroll ${action.direction} ${action.amount || 3} times`;
     case 'drag':
       return `Drag from (${action.fromX}, ${action.fromY}) to (${action.toX}, ${action.toY})`;
+    case 'focus_window':
+      return `Focus window ${action.windowHandle || action.hwnd || action.title || action.processName || ''}`.trim();
+    case 'bring_window_to_front':
+      return `Bring window to front ${action.windowHandle || action.hwnd || action.title || action.processName || ''}`.trim();
+    case 'send_window_to_back':
+      return `Send window to back ${action.windowHandle || action.hwnd || action.title || action.processName || ''}`.trim();
+    case 'minimize_window':
+      return `Minimize window ${action.windowHandle || action.hwnd || action.title || action.processName || ''}`.trim();
+    case 'restore_window':
+      return `Restore window ${action.windowHandle || action.hwnd || action.title || action.processName || ''}`.trim();
     case 'wait':
       return `Wait ${action.ms}ms`;
     case 'screenshot':

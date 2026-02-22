@@ -7,7 +7,10 @@
 const {
   getActiveWindow,
   findWindows,
+  resolveWindowTarget,
   focusWindow,
+  bringWindowToFront,
+  sendWindowToBack,
   minimizeWindow,
   maximizeWindow,
   restoreWindow,
@@ -16,7 +19,10 @@ const {
 module.exports = {
   getActiveWindow,
   findWindows,
+  resolveWindowTarget,
   focusWindow,
+  bringWindowToFront,
+  sendWindowToBack,
   minimizeWindow,
   maximizeWindow,
   restoreWindow,
