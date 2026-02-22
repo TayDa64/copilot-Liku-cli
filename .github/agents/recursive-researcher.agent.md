@@ -3,6 +3,7 @@
 name: recursive-researcher
 description: RLM-inspired Researcher agent. Gathers context and information using Recursive Long-Context (RLC) patterns for massive inputs and codebases.
 target: vscode
+disable-model-invocation: false
 tools: ['search/codebase', 'search', 'read', 'web/fetch', 'todo']
 handoffs:
   - label: Back to Supervisor

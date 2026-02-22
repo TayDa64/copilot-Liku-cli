@@ -1,0 +1,35 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.5.2.0
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{827E0CD3-B72D-47B6-A68D-7590B98EB39B}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "native", "native", "{986E768A-9E42-6229-8E82-349DB5D13BDD}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "windows-uia-dotnet", "windows-uia-dotnet", "{7F58284C-EA3A-61D0-6B18-629AA8F1254C}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "WindowsUIA", "src\native\windows-uia-dotnet\WindowsUIA.csproj", "{92F1DE8C-D5F9-F6EC-E6AB-F626EC621C7A}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{92F1DE8C-D5F9-F6EC-E6AB-F626EC621C7A}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{92F1DE8C-D5F9-F6EC-E6AB-F626EC621C7A}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{92F1DE8C-D5F9-F6EC-E6AB-F626EC621C7A}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{92F1DE8C-D5F9-F6EC-E6AB-F626EC621C7A}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{986E768A-9E42-6229-8E82-349DB5D13BDD} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
+		{7F58284C-EA3A-61D0-6B18-629AA8F1254C} = {986E768A-9E42-6229-8E82-349DB5D13BDD}
+		{92F1DE8C-D5F9-F6EC-E6AB-F626EC621C7A} = {7F58284C-EA3A-61D0-6B18-629AA8F1254C}
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {AEF24062-72F4-42E3-80B3-1188C08651E5}
+	EndGlobalSection
+EndGlobal

@@ -3,6 +3,7 @@
 name: recursive-supervisor
 description: Supervisor agent. Orchestrates tasks, decomposes plans, manages handoffs to Builder/Verifier/Researcher.
 target: vscode
+disable-model-invocation: false
 tools: ['search/codebase', 'search', 'web/fetch', 'read/problems', 'search/usages', 'search/changes']
 handoffs:
   - label: Write READALL.md (Builder)
