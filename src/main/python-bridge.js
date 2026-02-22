@@ -16,6 +16,7 @@ const EventEmitter = require('events');
 const http = require('http');
 const { spawn } = require('child_process');
 const path = require('path');
+const fs = require('fs');
 
 // ---------------------------------------------------------------------------
 // Singleton instance
@@ -40,7 +41,7 @@ class PythonBridge extends EventEmitter {
     this.pythonPath = options.pythonPath || 'python';
     this.serverHost = options.serverHost || process.env.MUSE_GATEWAY_HOST || '127.0.0.1';
     this.serverPort = options.serverPort || Number(process.env.MUSE_GATEWAY_PORT || 8765);
-    this.cwd = options.cwd || path.resolve(__dirname, '..', '..', '..', '..', 'MUSE');
+    this.cwd = options.cwd || path.resolve(__dirname, '..', '..', '..', 'MUSE');
 
     /** @type {import('child_process').ChildProcess | null} */
     this._child = null;
@@ -56,6 +57,17 @@ class PythonBridge extends EventEmitter {
 
     /** True when we're connected to an externally-managed gateway (e.g. JUCE) */
     this._externalGateway = false;
+
+    /** Last child-process spawn error (if any) */
+    this._lastSpawnError = null;
+  }
+
+  _emitBridgeError(err) {
+    if (this.listenerCount('error') > 0) {
+      this.emit('error', err);
+    } else {
+      console.error('[PythonBridge] Unhandled bridge error:', err?.message || err);
+    }
   }
 
   // ------------------------------------------------------------------
@@ -117,6 +129,10 @@ class PythonBridge extends EventEmitter {
       // No gateway reachable; fall through to spawning.
     }
 
+    if (!fs.existsSync(this.cwd)) {
+      throw new Error(`PythonBridge cwd does not exist: ${this.cwd}`);
+    }
+
     // Spawn the child process
     const args = ['-m', 'multimodal_gen.server', '--gateway', '--verbose'];
 
@@ -147,7 +163,8 @@ class PythonBridge extends EventEmitter {
     this._child.on('error', (err) => {
       this._running = false;
       this._ready = false;
-      this.emit('error', err);
+      this._lastSpawnError = err;
+      this._emitBridgeError(err);
     });
 
     this._child.on('exit', (code, signal) => {
@@ -162,6 +179,13 @@ class PythonBridge extends EventEmitter {
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       await _sleep(intervalMs);
+
+      if (this._lastSpawnError) {
+        const spawnErr = this._lastSpawnError;
+        this._lastSpawnError = null;
+        await this.stop();
+        throw new Error(`PythonBridge spawn failed (${this.pythonPath}) in ${this.cwd}: ${spawnErr.message}`);
+      }
 
       try {
         const res = await this.call('ping', {});

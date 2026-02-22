@@ -2247,10 +2247,16 @@ function setupIPC() {
         chat: async (message, options = {}) => {
           const result = await aiService.sendMessage(message, {
             includeVisualContext: false,
-            maxContinuations: options.maxContinuations || 2
+            maxContinuations: options.maxContinuations || 2,
+            model: options.model || null
           });
           if (result.success) {
-            return { text: result.message, provider: result.provider };
+            return {
+              text: result.message,
+              provider: result.provider,
+              model: result.model,
+              modelVersion: result.modelVersion || null
+            };
           }
           throw new Error(result.error || 'AI service call failed');
         },

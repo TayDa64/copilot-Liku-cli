@@ -522,6 +522,122 @@ Always structure your response as:
   }
 
   /**
+   * Preflight gate for score plans before generation.
+   *
+   * Combines deterministic checks with a premium-model verifier pass.
+   * Returns pass/fail plus issues and recommendations.
+   */
+  async preflightScorePlanGate(scorePlan, context = {}) {
+    const issues = [];
+    const recommendations = [];
+
+    const required = ['schema_version', 'prompt', 'bpm', 'key', 'mode', 'sections', 'tracks'];
+    for (const key of required) {
+      if (scorePlan?.[key] === undefined || scorePlan?.[key] === null) {
+        issues.push(`Missing required field: ${key}`);
+      }
+    }
+
+    if (scorePlan?.schema_version !== 'score_plan_v1') {
+      issues.push('schema_version must be score_plan_v1');
+    }
+
+    if (typeof scorePlan?.bpm !== 'number' || Number.isNaN(scorePlan.bpm) || scorePlan.bpm < 30 || scorePlan.bpm > 220) {
+      issues.push('bpm out of valid range [30,220]');
+    }
+
+    if (!Array.isArray(scorePlan?.sections) || scorePlan.sections.length < 1) {
+      issues.push('sections must be a non-empty array');
+    }
+
+    if (!Array.isArray(scorePlan?.tracks) || scorePlan.tracks.length < 1) {
+      issues.push('tracks must be a non-empty array');
+    }
+
+    if (issues.length > 0) {
+      recommendations.push('Fix schema/shape issues before generation');
+    }
+
+    let modelReview = null;
+    const verifierModel = context.model || 'claude-sonnet-4.5';
+    try {
+      const reviewPrompt = `You are a strict music plan verifier. Evaluate this score plan for generation risk and musical coherence.
+
+Return JSON only with fields:
+{
+  "passed": boolean,
+  "issues": string[],
+  "recommendations": string[]
+}
+
+Prompt context:
+${context.prompt || ''}
+
+Score plan:
+${JSON.stringify(scorePlan, null, 2)}`;
+
+      const review = await this.chat(reviewPrompt, { model: verifierModel });
+      const text = (review?.text || '').trim();
+      const jsonText = text.startsWith('{') ? text : (text.match(/\{[\s\S]*\}/)?.[0] || '{}');
+      modelReview = JSON.parse(jsonText);
+    } catch (error) {
+      modelReview = {
+        passed: true,
+        issues: [],
+        recommendations: [`Model verifier unavailable: ${error.message}`]
+      };
+    }
+
+    if (Array.isArray(modelReview?.issues)) {
+      issues.push(...modelReview.issues);
+    }
+    if (Array.isArray(modelReview?.recommendations)) {
+      recommendations.push(...modelReview.recommendations);
+    }
+
+    const passed = issues.length === 0 && modelReview?.passed !== false;
+
+    this.addStructuredProof({
+      type: 'score-plan-preflight',
+      passed,
+      verifierModel,
+      issuesCount: issues.length,
+      recommendationsCount: recommendations.length
+    });
+
+    return {
+      passed,
+      verifierModel,
+      issues,
+      recommendations,
+      modelReview
+    };
+  }
+
+  /**
+   * Analyze rendered audio against target genre expectations.
+   */
+  async analyzeRenderedOutput(audioPath, genre = 'pop') {
+    await this.ensurePythonBridge();
+    this.log('info', 'Analyzing rendered output', { audioPath, genre });
+
+    const report = await this.pythonBridge.call('analyze_output', {
+      audio_path: audioPath,
+      genre,
+    });
+
+    this.addStructuredProof({
+      type: 'output-analysis',
+      audioPath,
+      genre,
+      passed: !!report?.passed,
+      genreMatchScore: report?.genre_match_score,
+    });
+
+    return report;
+  }
+
+  /**
    * Stop and release the PythonBridge.
    * @returns {Promise<void>}
    */

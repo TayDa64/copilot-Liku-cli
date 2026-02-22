@@ -241,6 +241,31 @@ function detectAgentIntent(text) {
   return null;
 }
 
+function extractFirstUrl(text) {
+  if (!text || typeof text !== 'string') return null;
+  const match = text.match(/https?:\/\/[^\s)]+/i);
+  return match ? match[0] : null;
+}
+
+function parseProduceOptions(rawText) {
+  if (!rawText || typeof rawText !== 'string') {
+    return { prompt: rawText || '', options: {} };
+  }
+
+  let prompt = rawText;
+  const options = {};
+
+  if (/--accept-generation\b|--allow-critic-fail\b/i.test(prompt)) {
+    options.allowCriticGateFailure = true;
+    prompt = prompt
+      .replace(/--accept-generation\b/ig, '')
+      .replace(/--allow-critic-fail\b/ig, '')
+      .trim();
+  }
+
+  return { prompt, options };
+}
+
 async function routeToAgent(text, agentType) {
   addMessage(`🤖 Routing to ${agentType} agent...`, 'system');
   showTypingIndicator();
@@ -250,7 +275,17 @@ async function routeToAgent(text, agentType) {
     switch (agentType) {
       case 'produce': {
         const cleaned = text.replace(/^\\s*\\/produce\\b\\s*/i, '');
-        result = await window.electronAPI.agentProduce({ prompt: cleaned || text });
+        const parsed = parseProduceOptions(cleaned || text);
+        const finalPrompt = parsed.prompt || (cleaned || text);
+        const referenceUrl = extractFirstUrl(finalPrompt);
+        const options = { ...parsed.options };
+        if (referenceUrl) {
+          options.referenceUrl = referenceUrl;
+        }
+        result = await window.electronAPI.agentProduce({
+          prompt: finalPrompt,
+          options
+        });
         break;
       }
       case 'research':

@@ -435,6 +435,16 @@ function setCopilotModel(model) {
 }
 
 /**
+ * Resolve a requested Copilot model key to a valid configured key.
+ */
+function resolveCopilotModelKey(requestedModel) {
+  if (requestedModel && COPILOT_MODELS[requestedModel]) {
+    return requestedModel;
+  }
+  return currentCopilotModel;
+}
+
+/**
  * Get available Copilot models
  */
 function getCopilotModels() {
@@ -862,7 +872,7 @@ function exchangeForCopilotSession() {
  * Call GitHub Copilot API
  * Uses session token (not OAuth token) - exchanges if needed
  */
-async function callCopilot(messages) {
+async function callCopilot(messages, modelOverride = null) {
   // Ensure we have OAuth token
   if (!apiKeys.copilot) {
     if (!loadCopilotToken()) {
@@ -881,10 +891,11 @@ async function callCopilot(messages) {
 
   return new Promise((resolve, reject) => {
     const hasVision = messages.some(m => Array.isArray(m.content));
-    const modelInfo = COPILOT_MODELS[currentCopilotModel] || COPILOT_MODELS['gpt-4o'];
+    const modelKey = resolveCopilotModelKey(modelOverride);
+    const modelInfo = COPILOT_MODELS[modelKey] || COPILOT_MODELS['gpt-4o'];
     const modelId = hasVision && !modelInfo.vision ? 'gpt-4o' : modelInfo.id;
     
-    console.log(`[Copilot] Vision request: ${hasVision}, Model: ${modelId}`);
+    console.log(`[Copilot] Vision request: ${hasVision}, Model: ${modelId} (key=${modelKey})`);
     
     const data = JSON.stringify({
       model: modelId,
@@ -1209,7 +1220,7 @@ function detectTruncation(response) {
  * Send a message and get AI response with auto-continuation
  */
 async function sendMessage(userMessage, options = {}) {
-  const { includeVisualContext = false, coordinates = null, maxContinuations = 2 } = options;
+  const { includeVisualContext = false, coordinates = null, maxContinuations = 2, model = null } = options;
 
   // Enhance message with coordinate context if provided
   let enhancedMessage = userMessage;
@@ -1222,6 +1233,7 @@ async function sendMessage(userMessage, options = {}) {
 
   try {
     let response;
+    let effectiveModel = currentCopilotModel;
     
     switch (currentProvider) {
       case 'copilot':
@@ -1232,7 +1244,8 @@ async function sendMessage(userMessage, options = {}) {
             throw new Error('Not authenticated with GitHub Copilot.\n\nTo authenticate:\n1. Type /login and authorize in browser\n2. Or set GH_TOKEN or GITHUB_TOKEN environment variable');
           }
         }
-        response = await callCopilot(messages);
+        effectiveModel = resolveCopilotModelKey(model);
+        response = await callCopilot(messages, effectiveModel);
         break;
         
       case 'openai':
@@ -1273,7 +1286,7 @@ async function sendMessage(userMessage, options = {}) {
         let continuation;
         switch (currentProvider) {
           case 'copilot':
-            continuation = await callCopilot(continueMessages);
+            continuation = await callCopilot(continueMessages, effectiveModel);
             break;
           case 'openai':
             continuation = await callOpenAI(continueMessages);
@@ -1312,6 +1325,8 @@ async function sendMessage(userMessage, options = {}) {
       success: true,
       message: response,
       provider: currentProvider,
+      model: effectiveModel,
+      modelVersion: COPILOT_MODELS[effectiveModel]?.id || null,
       hasVisualContext: includeVisualContext && visualContextBuffer.length > 0
     };
 
@@ -1319,7 +1334,8 @@ async function sendMessage(userMessage, options = {}) {
     return {
       success: false,
       error: error.message,
-      provider: currentProvider
+      provider: currentProvider,
+      model: resolveCopilotModelKey(model)
     };
   }
 }

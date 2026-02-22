@@ -561,11 +561,28 @@ Provide the change in unified diff format:
     const prompt = planPrompt || options.prompt || 'Score plan generation';
     this.log('info', 'Generating music from score plan', { prompt, options });
 
-    const result = await this.pythonBridge.call('generate_sync', {
-      prompt,
-      score_plan: scorePlan,
-      ...options,
-    });
+    const rpcTimeoutMs = Number(options.rpcTimeoutMs || 900000);
+    const watchdogIntervalMs = Number(options.watchdogIntervalMs || 15000);
+    const callStartedAt = Date.now();
+    const watchdog = setInterval(() => {
+      const elapsedSec = Math.floor((Date.now() - callStartedAt) / 1000);
+      this.log('info', 'Waiting on generate_sync...', {
+        elapsedSec,
+        rpcTimeoutMs,
+        prompt: prompt.slice(0, 80)
+      });
+    }, watchdogIntervalMs);
+
+    let result;
+    try {
+      result = await this.pythonBridge.call('generate_sync', {
+        prompt,
+        score_plan: scorePlan,
+        ...options,
+      }, rpcTimeoutMs);
+    } finally {
+      clearInterval(watchdog);
+    }
 
     if (options.trackProgress && result && result.task_id) {
       await this.pollProgress(result.task_id, options.progressIntervalMs, options.progressTimeoutMs);
