@@ -6,35 +6,44 @@
 
 ---
 
-## Agent-Model Assignments (as of 2026-02-23)
+## Agent-Model Assignments (updated 2026-02-23)
+Source: Burke Holland "Ultralight Orchestration" + community routing tests
 
 | Agent | Model | Identifier | Rationale |
 |-------|-------|------------|-----------|
-| **recursive-builder** | GPT-5.2 | `GPT-5.2 (copilot)` | Best structured code generation, precise diffs, native JSON tool-calling |
-| **recursive-verifier** | Claude Opus 4.6 | `Claude Opus 4.6 (copilot)` | Meticulous analysis, edge-case detection, thorough verification |
-| **recursive-researcher** | Gemini 2.5 Pro | `Gemini 2.5 Pro (copilot)` | 1M+ context window, excellent cross-document synthesis |
+| **recursive-builder** | GPT-5.3-Codex | `GPT-5.3-Codex (copilot)` | Routes reliably as subagent, 1x premium, best for code implementation |
+| **recursive-verifier** | GPT-5.3-Codex | `GPT-5.3-Codex (copilot)` | Routes reliably, thorough verification |
+| **recursive-researcher** | GPT-5.2 | `GPT-5.2 (copilot)` | Routes reliably, strong planning/research. Gemini 3 Pro (Preview) as fallback |
+| **recursive-supervisor** | (orchestrator) | Parent model (Claude Opus 4.6) | Delegates only, never implements |
 
 ---
 
 ## Model Routing (Copilot Infrastructure)
 
-### Verified Identifiers (2026-02-23)
+### Verified Identifiers (2026-02-23, updated with community findings)
 
-| Model | Identifier String | Works in `model:` field? | Works via `runSubagent`? |
-|-------|-------------------|--------------------------|--------------------------|
-| GPT-5.2 | `GPT-5.2 (copilot)` | Yes — `gpt-5.2 -> gpt-5.2-2025-12-11` | Yes (distinct routing) |
-| Gemini 2.5 Pro | `Gemini 2.5 Pro (copilot)` | Yes (self-identified when pinned) | Inherits parent model |
-| Claude Opus 4.6 | `Claude Opus 4.6 (copilot)` | Yes (generic path, empty deployment ID) | Inherits parent model |
+| Model | Identifier String | Routes as subagent? | Notes |
+|-------|-------------------|---------------------|-------|
+| GPT-5.2 | `GPT-5.2 (copilot)` | **Yes** — `gpt-5.2 -> gpt-5.2-2025-12-11` | Reliable |
+| GPT-5.3-Codex | `GPT-5.3-Codex (copilot)` | **Yes** — 1x premium, reliable | Recommended for coder/builder |
+| Gemini 3 Pro (Preview) | `Gemini 3 Pro (Preview) (copilot)` | Needs testing | Burke Holland uses this |
+| Claude Opus 4.6 | `Claude Opus 4.6 (copilot)` | **No** — falls to Sonnet/Haiku | Only works via model picker |
+| Claude Sonnet 4.5 | `Claude Sonnet 4.5 (copilot)` | **No** — same issue as Opus | Burke recommends for orchestrator only |
 
 ### Routing Rules
 - `model:` is a **fallback list** — first recognized model wins.
-- `runSubagent` inherits the parent conversation's model for most providers.
-  GPT-5.2 is the exception: it routes independently even from subagent calls.
-- To force a specific model: use the VS Code agent picker (user-invoked), not `runSubagent`.
+- **CRITICAL VS Code Setting**: `chat.customAgentInSubagent.enabled` MUST be `true` for subagent model routing to work.
+- User settings model override can force ALL agents to one model — check and remove any.
+- GPT-family models (5.2, 5.3-Codex) route reliably as subagents.
+- Claude models do NOT route as subagents — always inherit parent or fall to Haiku.
+- Gemini models need `Gemini 3 Pro (Preview) (copilot)` identifier (not `Gemini 2.5 Pro`).
 - `shouldContinue=false, reasons=undefined` in stop hook logs = normal successful completion.
+- **CRITICAL**: Single-model configs with an unresolvable identifier fall to `gpt-4o-mini`.
+- Use `github.copilot.debug.showChatLogView` to confirm actual model routed.
 
 ### Identifiers That Don't Resolve
 `Gemini 3 (copilot)`, `gemini-3`, `gemini-2.5-pro` (slug), `o3 (copilot)`, `Claude Opus 4.5 (copilot)`.
+`Gemini 2.5 Pro (copilot)` — resolves via agent picker but NOT via `runSubagent` (falls back).
 
 ---
 
@@ -190,15 +199,15 @@ use this format that works across all three:
 
 ## Practical Implications for Copilot-Liku Agents
 
-### Current assignment strategy (2026-02-23)
-Each agent is pinned to a single model. The `runSubagent` prompt should be formatted
-in the target model's preferred language:
+### Current assignment strategy (updated 2026-02-23)
+Based on Burke Holland "Ultralight Orchestration" + community routing tests.
+Use GPT-family models for subagents (reliable routing). Orchestrator stays as parent model.
 
 | Agent | Model | Prompt Format |
 |-------|-------|---------------|
-| recursive-builder | GPT-5.2 | Flattened JSON for instructions, markdown for context |
-| recursive-verifier | Claude Opus 4.6 | Flattened hierarchy XML |
-| recursive-researcher | Gemini 2.5 Pro | Flattened hierarchy XML |
+| recursive-builder | GPT-5.3-Codex | Flattened JSON for instructions, markdown for context |
+| recursive-verifier | GPT-5.3-Codex | Flattened JSON for instructions |
+| recursive-researcher | GPT-5.2 | Flattened JSON for instructions |
 
 ### When orchestrating subagents
 The supervisor (or parent agent) should format the prompt payload according to the

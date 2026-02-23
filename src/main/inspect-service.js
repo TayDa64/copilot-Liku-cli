@@ -304,11 +304,33 @@ async function detectRegions(options = {}) {
           label: e.Name || e.ClassName || '',
           role: e.ControlType?.replace('ControlType.', '') || 'element',
           bounds: e.Bounds,
-          confidence: e.IsEnabled ? 0.9 : 0.6
+          confidence: e.IsEnabled ? 0.9 : 0.6,
+          clickPoint: e.ClickablePoint || null
         })),
         'accessibility'
       );
       results.sources.push('accessibility');
+    }
+
+    // OCR-based region detection (when screenshot is available)
+    if (options.screenshot) {
+      try {
+        const ocrResult = await visualAwareness.extractTextFromImage(options.screenshot);
+        if (ocrResult && ocrResult.text && !ocrResult.error) {
+          // OCR returns text but not individual bounding boxes from Windows OCR
+          // Store as a single text-content region covering the screenshot area
+          updateRegions([{
+            label: 'OCR text content',
+            role: 'text',
+            bounds: { x: 0, y: 0, width: options.screenshot.width || 0, height: options.screenshot.height || 0 },
+            text: ocrResult.text,
+            confidence: 0.7
+          }], 'ocr');
+          results.sources.push('ocr');
+        }
+      } catch (ocrError) {
+        console.warn('[INSPECT] OCR detection skipped:', ocrError.message);
+      }
     }
 
     // Update window context

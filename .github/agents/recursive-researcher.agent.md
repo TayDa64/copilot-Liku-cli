@@ -2,9 +2,9 @@
 ---
 name: recursive-researcher
 description: RLM-inspired Researcher agent. Gathers context and information using Recursive Long-Context (RLC) patterns for massive inputs and codebases.
-disable-model-invocation: false
-model: "Gemini 2.5 Pro (copilot)"
+model: ['GPT-5.2 (copilot)', 'Gemini 3.1 Pro (Preview) (copilot)']
 target: vscode
+user-invokable: false
 tools: ['search/codebase', 'search', 'read', 'web/fetch', 'todo']
 handoffs:
   - label: Back to Supervisor
@@ -67,8 +67,8 @@ Stitch results back together coherently.
 2. [Finding with evidence]
 
 ### Evidence
-- `function foo()` in [src/utils.ts](src/utils.ts#L42)
-- Configuration in [config.json](config.json#L12)
+- `function foo()` in `src/utils.ts#L42`
+- Configuration in `config.json#L12`
 
 ### Gaps
 - Could not find information about X

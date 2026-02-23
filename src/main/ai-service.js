@@ -474,13 +474,14 @@ function getCurrentCopilotModel() {
 }
 
 /**
- * Add visual context (screenshot data)
+ * Add visual context (screenshot data) as a typed VisualFrame
+ * @param {Object} imageData - Raw image data with dataURL, width, height, etc.
  */
 function addVisualContext(imageData) {
-  visualContextBuffer.push({
-    ...imageData,
-    addedAt: Date.now()
-  });
+  const { createVisualFrame } = require('../shared/inspect-types');
+  const frame = createVisualFrame(imageData);
+  frame.addedAt = Date.now();
+  visualContextBuffer.push(frame);
 
   // Keep only recent visual context
   while (visualContextBuffer.length > MAX_VISUAL_CONTEXT) {
@@ -1245,6 +1246,12 @@ async function sendMessage(userMessage, options = {}) {
           }
         }
         effectiveModel = resolveCopilotModelKey(model);
+        // Enforce vision-capable model when visual context is included
+        if (includeVisualContext && COPILOT_MODELS[effectiveModel] && !COPILOT_MODELS[effectiveModel].vision) {
+          const visionFallback = AI_PROVIDERS.copilot.visionModel || 'gpt-4o';
+          console.log(`[AI] Model ${effectiveModel} lacks vision, upgrading to ${visionFallback} for visual context`);
+          effectiveModel = visionFallback;
+        }
         response = await callCopilot(messages, effectiveModel);
         break;
         

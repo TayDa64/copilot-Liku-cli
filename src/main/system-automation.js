@@ -1751,9 +1751,14 @@ async function executeAction(action) {
         break;
         
       case ACTION_TYPES.SCREENSHOT:
-        // This will be handled by the caller (main process)
+        // Scoped screenshot — caller resolves capture based on scope
         result.needsScreenshot = true;
-        result.message = 'Screenshot requested';
+        result.scope = action.scope || 'screen';         // screen | region | window | element
+        result.region = action.region || null;            // {x, y, width, height} for scope=region
+        result.hwnd = action.hwnd || null;                // window handle for scope=window
+        result.elementCriteria = action.elementCriteria || null; // {text, controlType} for scope=element
+        result.targetRegionId = action.targetRegionId || null;
+        result.message = `Screenshot requested (scope: ${result.scope})`;
         break;
       
       // Semantic element-based actions (MORE RELIABLE than coordinates)

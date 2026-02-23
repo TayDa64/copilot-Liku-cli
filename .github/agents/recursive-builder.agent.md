@@ -2,9 +2,9 @@
 ---
 name: recursive-builder
 description: RLM-inspired Builder agent. Implements decomposed plans from Supervisor with minimal diffs, local tests, and rationale. Focuses on code changes without full verification.
-model: "GPT-5.2 (copilot)"
+model: ['GPT-5.2 (copilot)', 'GPT-5.3-codex (copilot)']
 target: vscode
-disable-model-invocation: false
+user-invokable: false
 tools: ['vscode', 'execute', 'read', 'edit', 'search', 'todo']
 handoffs:
   - label: Back to Supervisor

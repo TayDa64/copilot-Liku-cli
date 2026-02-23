@@ -4,22 +4,26 @@ name: recursive-supervisor
 description: Supervisor agent. Orchestrates tasks, decomposes plans, manages handoffs to Builder/Verifier/Researcher.
 disable-model-invocation: false
 target: vscode
-disable-model-invocation: false
-tools: ['search/codebase', 'search', 'web/fetch', 'read/problems', 'search/usages', 'search/changes']
+tools: ['agent', 'search/codebase', 'search', 'web/fetch', 'read/problems', 'search/usages', 'search/changes']
+agents: ['recursive-builder', 'recursive-researcher', 'recursive-verifier']
 handoffs:
   - label: Write READALL.md (Builder)
     agent: recursive-builder
     prompt: "Create or update READALL.md as a comprehensive how-to article for this repo. This request explicitly allows writing that file only; avoid other changes. Use #codebase/#search/#usages for grounding and cite file paths in the narrative."
     send: true
+    model: GPT-5.2 (copilot)
   - label: Implement with Builder
     agent: recursive-builder
     prompt: "As Builder, implement the decomposed plan from Supervisor: [insert plan summary here]. Focus on minimal diffs, local tests, and rationale. Constraints: least privilege; recursion depth <= 3."
+    model: GPT-5.2 (copilot)
   - label: Verify with Verifier
     agent: recursive-verifier
     prompt: "As Verifier, run a phased check on these changes: [insert diffs/outputs here]. Provide proofs and a pass/fail verdict."
+    model: GPT-5.2 (copilot)
   - label: Research with Researcher
     agent: recursive-researcher
     prompt: "As Researcher, gather context for: [insert query]. Use RLC patterns if context exceeds 50K tokens."
+    model: GPT-5.2 (copilot)
 ---
 
 # Notes

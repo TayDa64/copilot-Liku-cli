@@ -4,6 +4,22 @@
  */
 
 /**
+ * Visual Frame Data Contract
+ * Standardized schema for any captured visual context (full screen, ROI, window, element)
+ * @typedef {Object} VisualFrame
+ * @property {string} dataURL - Base64 data URL of the image
+ * @property {number} width - Image width in pixels
+ * @property {number} height - Image height in pixels
+ * @property {number} timestamp - Capture timestamp (ms)
+ * @property {number} [originX] - X offset of the captured region on screen (0 for full screen)
+ * @property {number} [originY] - Y offset of the captured region on screen (0 for full screen)
+ * @property {string} coordinateSpace - Always 'screen-physical' for UIA/input compatibility
+ * @property {string} scope - 'screen' | 'region' | 'window' | 'element'
+ * @property {string} [sourceId] - Display/window source identifier
+ * @property {string} [sourceName] - Human-readable source name
+ */
+
+/**
  * Inspect Region Data Contract
  * Represents an actionable region on screen detected through various sources
  * @typedef {Object} InspectRegion
@@ -15,6 +31,8 @@
  * @property {number} confidence - Detection confidence 0-1
  * @property {string} source - Detection source (accessibility, ocr, heuristic)
  * @property {number} timestamp - When this region was detected
+ * @property {Object} [clickPoint] - Preferred click point {x, y} from UIA TryGetClickablePoint
+ * @property {string} coordinateSpace - Coordinate space (default 'screen-physical')
  */
 
 /**
@@ -43,6 +61,26 @@
  */
 
 /**
+ * Create a VisualFrame from capture data
+ * @param {Object} params - Capture parameters
+ * @returns {VisualFrame}
+ */
+function createVisualFrame(params) {
+  return {
+    dataURL: params.dataURL || '',
+    width: params.width || 0,
+    height: params.height || 0,
+    timestamp: params.timestamp || Date.now(),
+    originX: params.originX ?? params.x ?? 0,
+    originY: params.originY ?? params.y ?? 0,
+    coordinateSpace: 'screen-physical',
+    scope: params.scope || params.type || 'screen',
+    sourceId: params.sourceId || null,
+    sourceName: params.sourceName || null
+  };
+}
+
+/**
  * Create a new inspect region object
  * @param {Object} params - Region parameters
  * @returns {InspectRegion}
@@ -61,7 +99,9 @@ function createInspectRegion(params) {
     role: params.role || params.controlType || 'unknown',
     confidence: typeof params.confidence === 'number' ? params.confidence : 0.5,
     source: params.source || 'unknown',
-    timestamp: params.timestamp || Date.now()
+    timestamp: params.timestamp || Date.now(),
+    clickPoint: params.clickPoint || null,
+    coordinateSpace: params.coordinateSpace || 'screen-physical'
   };
 }
 
@@ -203,21 +243,54 @@ function findRegionAtPoint(x, y, regions) {
  * @returns {Object} AI-friendly format
  */
 function formatRegionForAI(region) {
+  const center = region.clickPoint
+    ? { x: region.clickPoint.x, y: region.clickPoint.y }
+    : {
+        x: Math.round(region.bounds.x + region.bounds.width / 2),
+        y: Math.round(region.bounds.y + region.bounds.height / 2)
+      };
   return {
     id: region.id,
     label: region.label,
     text: region.text,
     role: region.role,
     confidence: region.confidence,
-    center: {
-      x: Math.round(region.bounds.x + region.bounds.width / 2),
-      y: Math.round(region.bounds.y + region.bounds.height / 2)
-    },
+    center,
     bounds: region.bounds
   };
 }
 
+/**
+ * Resolve a region target from the regions array
+ * Supports targetRegionId (stable) or targetRegionIndex (display order)
+ * @param {Object} target - { targetRegionId?, targetRegionIndex? }
+ * @param {InspectRegion[]} regions - Current regions array
+ * @returns {{ region: InspectRegion, clickX: number, clickY: number } | null}
+ */
+function resolveRegionTarget(target, regions) {
+  if (!target || !regions || regions.length === 0) return null;
+
+  let region = null;
+  if (target.targetRegionId) {
+    region = regions.find(r => r.id === target.targetRegionId);
+  } else if (typeof target.targetRegionIndex === 'number') {
+    region = regions[target.targetRegionIndex];
+  }
+  if (!region) return null;
+
+  // Prefer clickPoint from UIA, fall back to bounds center
+  const clickX = region.clickPoint
+    ? region.clickPoint.x
+    : Math.round(region.bounds.x + region.bounds.width / 2);
+  const clickY = region.clickPoint
+    ? region.clickPoint.y
+    : Math.round(region.bounds.y + region.bounds.height / 2);
+
+  return { region, clickX, clickY };
+}
+
 module.exports = {
+  createVisualFrame,
   createInspectRegion,
   createWindowContext,
   createActionTrace,
@@ -226,5 +299,6 @@ module.exports = {
   isPointInRegion,
   findClosestRegion,
   findRegionAtPoint,
-  formatRegionForAI
+  formatRegionForAI,
+  resolveRegionTarget
 };

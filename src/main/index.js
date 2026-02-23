@@ -1124,18 +1124,16 @@ function setupIPC() {
       }
     }
 
-    // Check if we should include visual context (expanded triggers for agentic actions)
-    const includeVisualContext = message.toLowerCase().includes('screen') || 
-                                  message.toLowerCase().includes('see') ||
-                                  message.toLowerCase().includes('look') ||
-                                  message.toLowerCase().includes('show') ||
-                                  message.toLowerCase().includes('capture') ||
-                                  message.toLowerCase().includes('click') ||
-                                  message.toLowerCase().includes('type') ||
-                                  message.toLowerCase().includes('print') ||
-                                  message.toLowerCase().includes('open') ||
-                                  message.toLowerCase().includes('close') ||
-                                  visualContextHistory.length > 0;
+    // Deterministic visual context inclusion:
+    // 1. Always include if we already have captured frames (continuity)
+    // 2. Always include if inspect mode is active (region-grounded work)
+    // 3. Include on keyword match for explicit visual requests
+    const lowerMsg = message.toLowerCase();
+    const hasVisualKeyword = /\b(screen|see|look|show|capture|click|type|print|open|close|drag|scroll|find|element|button|window|region)\b/.test(lowerMsg);
+    const includeVisualContext = visualContextHistory.length > 0 ||
+                                  inspectService.isInspectModeActive() ||
+                                  inspectService.getRegions().length > 0 ||
+                                  hasVisualKeyword;
 
     // Send initial "thinking" indicator
     if (chatWindow) {
@@ -1328,6 +1326,22 @@ function setupIPC() {
       overlayWindow.setAlwaysOnTop(true, 'pop-up-menu');
     }
     
+    // Resolve region-targeted actions to absolute coordinates
+    const { resolveRegionTarget } = require('../shared/inspect-types');
+    const regions = inspectService.getRegions();
+    if (actionData.actions && regions.length > 0) {
+      for (const action of actionData.actions) {
+        if (action.targetRegionId || typeof action.targetRegionIndex === 'number') {
+          const resolved = resolveRegionTarget(action, regions);
+          if (resolved) {
+            action.x = resolved.clickX;
+            action.y = resolved.clickY;
+            action._resolvedFromRegion = resolved.region.id;
+          }
+        }
+      }
+    }
+
     try {
       const results = await aiService.executeActions(
         actionData,
@@ -1776,7 +1790,8 @@ function setupIPC() {
           y: 0,
           timestamp: Date.now(),
           sourceId: primarySource.id,
-          sourceName: primarySource.name
+          sourceName: primarySource.name,
+          scope: 'screen'
         };
 
         // Send to chat window
@@ -1844,7 +1859,7 @@ function setupIPC() {
           x,
           y,
           timestamp: Date.now(),
-          type: 'region'
+          scope: 'region'
         };
 
         if (chatWindow) {
@@ -2443,10 +2458,11 @@ const MAX_VISUAL_CONTEXT_ITEMS = 10;
  * Store visual context for AI processing
  */
 function storeVisualContext(imageData) {
-  visualContextHistory.push({
-    ...imageData,
-    id: `vc-${Date.now()}`
-  });
+  const { createVisualFrame } = require('../shared/inspect-types');
+  const frame = createVisualFrame(imageData);
+  frame.id = `vc-${Date.now()}`;
+
+  visualContextHistory.push(frame);
 
   // Keep only recent items
   if (visualContextHistory.length > MAX_VISUAL_CONTEXT_ITEMS) {
@@ -2460,7 +2476,7 @@ function storeVisualContext(imageData) {
   if (chatWindow) {
     chatWindow.webContents.send('visual-context-update', {
       count: visualContextHistory.length,
-      latest: imageData.timestamp
+      latest: frame.timestamp
     });
   }
 }
