@@ -1,54 +1,48 @@
 {
-  "version": 1,
   "hooks": {
-    "sessionStart": [
+    "SessionStart": [
       {
         "type": "command",
-        "bash": "pwsh -NoProfile -File scripts/session-start.ps1",
-        "powershell": "scripts/session-start.ps1",
+        "command": "./scripts/session-start.sh",
+        "windows": "powershell -NoProfile -File scripts\\session-start.ps1",
         "cwd": ".github/hooks",
-        "timeoutSec": 10,
-        "comment": "Initialize session logging and agent state"
+        "timeout": 10
       }
     ],
-    "preToolUse": [
+    "PreToolUse": [
       {
         "type": "command",
-        "bash": "pwsh -NoProfile -File scripts/security-check.ps1",
-        "powershell": "scripts/security-check.ps1",
+        "command": "./scripts/security-check.sh",
+        "windows": "powershell -NoProfile -File scripts\\security-check.ps1",
         "cwd": ".github/hooks",
-        "timeoutSec": 5,
-        "comment": "Block dangerous commands and enforce security policies"
+        "timeout": 5
       }
     ],
-    "postToolUse": [
+    "PostToolUse": [
       {
         "type": "command",
-        "bash": "pwsh -NoProfile -File scripts/audit-log.ps1",
-        "powershell": "scripts/audit-log.ps1",
+        "command": "./scripts/audit-log.sh",
+        "windows": "powershell -NoProfile -File scripts\\audit-log.ps1",
         "cwd": ".github/hooks",
-        "timeoutSec": 5,
-        "comment": "Log tool execution results for audit trail"
+        "timeout": 5
       }
     ],
-    "subagentStop": [
+    "SubagentStop": [
       {
         "type": "command",
-        "bash": "pwsh -NoProfile -File scripts/subagent-quality-gate.ps1",
-        "powershell": "scripts/subagent-quality-gate.ps1",
+        "command": "./scripts/subagent-quality-gate.sh",
+        "windows": "powershell -NoProfile -File scripts\\subagent-quality-gate.ps1",
         "cwd": ".github/hooks",
-        "timeoutSec": 10,
-        "comment": "Validate subagent output quality before returning to parent"
+        "timeout": 10
       }
     ],
-    "sessionEnd": [
+    "Stop": [
       {
         "type": "command",
-        "bash": "pwsh -NoProfile -File scripts/session-end.ps1",
-        "powershell": "scripts/session-end.ps1",
+        "command": "./scripts/session-end.sh",
+        "windows": "powershell -NoProfile -File scripts\\session-end.ps1",
         "cwd": ".github/hooks",
-        "timeoutSec": 15,
-        "comment": "Generate session summary and cleanup"
+        "timeout": 15
       }
     ]
   }
