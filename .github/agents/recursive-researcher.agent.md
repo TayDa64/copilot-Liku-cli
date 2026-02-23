@@ -4,10 +4,9 @@ name: recursive-researcher
 description: RLM-inspired Researcher agent. Gathers context and information using Recursive Long-Context (RLC) patterns for massive inputs and codebases.
 disable-model-invocation: false
 model:
-  - Gemini 3 (copilot)
+  - Gemini 2.5 Pro (copilot)
   - GPT-5.2 (copilot)
   - Claude Opus 4.6 (copilot)
-  - Claude Opus 4.5 (copilot)
 target: vscode
 tools: ['search/codebase', 'search', 'read', 'web/fetch', 'todo']
 handoffs:

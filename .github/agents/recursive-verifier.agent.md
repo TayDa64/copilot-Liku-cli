@@ -4,10 +4,9 @@ name: recursive-verifier
 description: RLM-inspired Verifier agent. Runs full phased pipeline on Builder changes, including Playwright E2E, and provides proofs/pass-fail. Ensures no regressions.
 disable-model-invocation: false
 model:
-  - Gemini 3 (copilot)
+  - Gemini 2.5 Pro (copilot)
   - GPT-5.2 (copilot)
   - Claude Opus 4.6 (copilot)
-  - Claude Opus 4.5 (copilot)
 target: vscode
 tools: ['vscode', 'execute', 'read', 'search', 'todo']
 handoffs:

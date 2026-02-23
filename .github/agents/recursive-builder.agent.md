@@ -2,7 +2,10 @@
 ---
 name: recursive-builder
 description: RLM-inspired Builder agent. Implements decomposed plans from Supervisor with minimal diffs, local tests, and rationale. Focuses on code changes without full verification.
-disable-model-invocation: false
+model:
+  - Gemini 2.5 Pro (copilot)
+  - GPT-5.2 (copilot)
+  - Claude Opus 4.6 (copilot)
 target: vscode
 disable-model-invocation: false
 tools: ['vscode', 'execute', 'read', 'edit', 'search', 'todo']
