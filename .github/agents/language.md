@@ -6,6 +6,16 @@
 
 ---
 
+## Agent-Model Assignments (as of 2026-02-23)
+
+| Agent | Model | Identifier | Rationale |
+|-------|-------|------------|-----------|
+| **recursive-builder** | GPT-5.2 | `GPT-5.2 (copilot)` | Best structured code generation, precise diffs, native JSON tool-calling |
+| **recursive-verifier** | Claude Opus 4.6 | `Claude Opus 4.6 (copilot)` | Meticulous analysis, edge-case detection, thorough verification |
+| **recursive-researcher** | Gemini 2.5 Pro | `Gemini 2.5 Pro (copilot)` | 1M+ context window, excellent cross-document synthesis |
+
+---
+
 ## Model Routing (Copilot Infrastructure)
 
 ### Verified Identifiers (2026-02-23)
@@ -30,34 +40,74 @@
 
 ## Prompt Format Preferences by Model Family
 
-### Claude (Anthropic) — XML-first
+### GPT-5.2 (OpenAI) — Flattened JSON instructions
 
-**Preferred format:** XML tags for structure, markdown for content within tags.
+**Preferred format:** Flattened JSON for structured instructions; markdown for prose context.
+
+```json
+{
+  "role": "Windows automation specialist",
+  "constraints": [
+    "Never modify files outside src/",
+    "Always verify with tests before reporting done"
+  ],
+  "task": [
+    "Read the target module",
+    "Implement the change"
+  ],
+  "output": "Markdown diffs + rationale"
+}
+```
+
+**Why (experience-grounded):** GPT-5.2 processes flattened JSON with near-zero ambiguity.
+Its function-calling and structured outputs are JSON-native. JSON keys map directly to
+how GPT internally represents tool definitions and instruction hierarchies.
+
+**Behavior notes:**
+- Flattened JSON (no deep nesting) is parsed as first-class instructions, not data.
+- `**bold**` and `# Headers` in markdown prose act as attention anchors.
+- Numbered lists are treated as sequential instructions with implicit ordering.
+- GPT-5.2 self-identifies its model name when asked directly.
+- System message vs user message distinction matters: system message has higher priority.
+- Handles function/tool schemas natively as JSON — no need to describe tools in prose.
+
+**Anti-patterns:**
+- XML tags — GPT treats them as literal text content, not structural boundaries.
+- Deeply nested JSON (>3 levels) — attention degrades; keep it flat.
+- Overly long unstructured prose without clear headers or JSON keys.
+
+---
+
+### Claude Opus 4.6 (Anthropic) — Flattened hierarchy XML
+
+**Preferred format:** Flattened hierarchy XML tags for structure, markdown for content within tags.
 
 ```xml
 <instructions>
-  <role>You are a Windows automation specialist.</role>
+  <role>Windows automation specialist</role>
   <constraints>
-    <constraint>Never modify files outside src/</constraint>
-    <constraint>Always verify with tests before reporting done</constraint>
+    <item>Never modify files outside src/</item>
+    <item>Always verify with tests before reporting done</item>
   </constraints>
   <task>
     <step number="1">Read the target module</step>
     <step number="2">Implement the change</step>
   </task>
+  <output>Markdown diffs + rationale</output>
 </instructions>
 ```
 
-**Why:** Claude's training heavily weights XML tag boundaries for instruction following.
-Nested XML creates clear hierarchical scopes that Claude respects for priority and override.
+**Why (experience-grounded):** Claude's training heavily weights XML tag boundaries for
+instruction following. Flattened XML (shallow nesting, explicit tags) creates clear
+hierarchical scopes that Claude respects for priority and override.
 
 **Behavior notes:**
 - XML tags act as **hard boundaries** — Claude rarely bleeds context across tags.
 - `<important>` and `<critical>` tags receive elevated attention.
 - Closing tags matter: unclosed tags degrade instruction adherence.
-- Markdown headers inside XML work well for sub-structure.
-- Claude will NOT self-identify its model name (policy restriction).
+- "Flattened hierarchy" means: keep nesting ≤2-3 levels, use descriptive tag names.
 - Claude handles very long system prompts well (200K context).
+- Claude will NOT self-identify its model name (policy restriction).
 
 **Anti-patterns:**
 - Deeply nested JSON in system prompts — Claude parses it but doesn't weight keys as instructions.
@@ -65,116 +115,129 @@ Nested XML creates clear hierarchical scopes that Claude respects for priority a
 
 ---
 
-### GPT (OpenAI) — Markdown-first
+### Gemini 2.5 Pro (Google) — Flattened hierarchy XML
 
-**Preferred format:** Markdown with headers, bullet lists, and bold emphasis.
+**Preferred format:** Flattened hierarchy XML for agent instructions; markdown for conversational content.
 
-```markdown
-# Role
-You are a Windows automation specialist.
-
-# Constraints
-- **Never** modify files outside `src/`
-- **Always** verify with tests before reporting done
-
-# Task
-1. Read the target module
-2. Implement the change
+```xml
+<instructions>
+  <role>Windows automation specialist</role>
+  <rules>
+    <rule>Never modify files outside src/</rule>
+    <rule>Always verify with tests before reporting done</rule>
+  </rules>
+  <steps>
+    <step>Read the target module</step>
+    <step>Implement the change</step>
+  </steps>
+</instructions>
 ```
 
-**Why:** GPT models are trained on massive markdown corpora (GitHub, docs, web).
-Markdown headers create natural section boundaries that GPT uses for retrieval within the prompt.
+**Why (experience-grounded):** Despite Google's documentation leaning markdown, practical
+experience shows Gemini handles flattened XML well for *agent-style instructions* —
+likely because its training data includes heavy XML/HTML web content. XML gives Gemini
+clearer instruction boundaries than bare markdown headers for structured multi-step tasks.
 
 **Behavior notes:**
-- `**bold**` and `# Headers` act as attention anchors — GPT weights them higher.
-- Numbered lists are treated as sequential instructions with implicit ordering.
-- GPT-5.2 self-identifies its model name when asked directly.
-- JSON in system prompts works well for structured data/schemas (GPT has strong JSON mode).
-- System message vs user message distinction matters: instructions in system message have higher priority.
-- GPT handles function/tool schemas natively as JSON — no need to describe tools in prose.
-
-**Anti-patterns:**
-- XML tags — GPT treats them as literal text rather than structural boundaries.
-- Overly long system prompts without clear headers — GPT's attention drifts in unstructured walls of text.
-
----
-
-### Gemini (Google) — Structured text / hybrid
-
-**Preferred format:** Markdown with clear sections. Also handles JSON schemas well.
-
-```markdown
-## Role
-You are a Windows automation specialist.
-
-## Rules
-* Never modify files outside src/
-* Always verify with tests before reporting done
-
-## Steps
-1. Read the target module
-2. Implement the change
-```
-
-**Why:** Gemini is trained on diverse web content and Google's internal structured formats.
-It has strong JSON understanding from Vertex AI tool-use training.
-
-**Behavior notes:**
-- Markdown headers and bullet points work reliably.
-- JSON schemas for tool definitions are handled natively and precisely.
-- Gemini has weaker XML boundary parsing than Claude — XML works but doesn't add the same structural benefit.
+- Flattened XML provides clearer boundaries than markdown for agent instructions.
+- JSON schemas for tool definitions are also handled natively and precisely.
 - Gemini excels at interleaved multimodal (text + image) prompts.
-- For code generation, Gemini prefers explicit language tags in fenced code blocks.
+- For code generation, prefers explicit language tags in fenced code blocks.
 - Gemini 2.5 Pro has a 1M+ token context window — can handle very large system prompts.
+- Keep XML nesting shallow (≤2 levels) — Gemini may flatten deeper hierarchies.
 
 **Anti-patterns:**
-- Relying on XML nesting for priority — Gemini may flatten the hierarchy.
-- Very long unstructured prose — same drift issue as GPT but more pronounced.
+- Relying on deep XML nesting for priority — Gemini flattens it internally.
+- Very long unstructured prose — attention drift is more pronounced than other models.
 
 ---
 
 ## Cross-Model Compatibility Format
 
-When writing agent instructions that must work across all three families (e.g., in `.agent.md` files
-where the model may vary), use this hybrid format:
+When the agent's model assignment may change, or when writing shared prompt templates,
+use this format that works across all three:
 
-```markdown
-# Section Title                          ← Markdown header (works everywhere)
+```xml
+<instructions>
+  <role>Your role description</role>
+  <constraints>
+    <item>**Constraint one** in bold for GPT attention</item>
+    <item>**Constraint two**</item>
+  </constraints>
+</instructions>
 
-<constraints>                            ← XML tag (Claude gets structure, others get visual boundary)
-- **Constraint one** in markdown         ← Bold emphasis (GPT/Gemini weight it, Claude respects it)
-- **Constraint two**
-</constraints>
-
-## Steps                                 ← Markdown header for sequencing
-1. First step with `code references`     ← Backtick code spans work universally
+## Steps
+1. First step with `code references`
 2. Second step
 ```
 
+**Why this works for all three:**
+- GPT-5.2: Reads `<instructions>` as visual boundary, `**bold**` as attention anchor, numbered steps as sequence.
+- Claude: Reads `<instructions>` as hard structural boundary with priority scoping.
+- Gemini: Reads `<instructions>` as XML boundary (trained on web HTML/XML), numbered steps as sequence.
+
 ### Priority escalation (cross-model)
-```markdown
+```xml
 <critical>
-**IMPORTANT**: This rule overrides all other instructions.
+  <item>**IMPORTANT**: This rule overrides all other instructions.</item>
 </critical>
 ```
-- Claude: XML `<critical>` tag elevates priority.
+- Claude: `<critical>` tag elevates priority.
 - GPT: `**IMPORTANT**` bold keyword elevates priority.
-- Gemini: Both signals are recognized but work additively.
+- Gemini: Both signals are recognized and work additively.
 
 ---
 
 ## Practical Implications for Copilot-Liku Agents
 
-### Current agent files use: Markdown
-This is acceptable since Copilot subagents currently inherit the parent model (Claude Opus 4.6),
-which handles markdown fine. If routing is fixed in the future:
+### Current assignment strategy (2026-02-23)
+Each agent is pinned to a single model. The `runSubagent` prompt should be formatted
+in the target model's preferred language:
 
-### Recommended migration
-1. **Wrap operating contracts in XML tags** — benefits Claude, neutral for others.
-2. **Keep workflow steps as numbered markdown** — universal.
-3. **Use bold for constraints** — universal attention signal.
-4. **Tool schemas stay as JSON** — all models handle this natively.
-5. **Use the hybrid format above** for any instruction that must survive model switching.
+| Agent | Model | Prompt Format |
+|-------|-------|---------------|
+| recursive-builder | GPT-5.2 | Flattened JSON for instructions, markdown for context |
+| recursive-verifier | Claude Opus 4.6 | Flattened hierarchy XML |
+| recursive-researcher | Gemini 2.5 Pro | Flattened hierarchy XML |
+
+### When orchestrating subagents
+The supervisor (or parent agent) should format the prompt payload according to the
+target agent's model preference before calling `runSubagent`. Example:
+
+**For builder (GPT-5.2):**
+```json
+{
+  "task": "Implement visual frame schema in src/shared/visual-frame.js",
+  "constraints": ["Do not modify existing exports", "Add JSDoc types"],
+  "files": ["src/shared/visual-frame.js", "src/main/ai-service.js"],
+  "output": "Diffs + rationale + local test proof"
+}
+```
+
+**For verifier (Claude Opus 4.6):**
+```xml
+<task>Verify the visual frame schema implementation</task>
+<scope>
+  <file>src/shared/visual-frame.js</file>
+  <file>src/main/ai-service.js</file>
+</scope>
+<checks>
+  <check>Schema matches advancingFeatures.md Phase 0 item 1</check>
+  <check>No existing exports broken</check>
+  <check>Types are consistent</check>
+</checks>
+```
+
+**For researcher (Gemini 2.5 Pro):**
+```xml
+<query>How does the current visual context buffer work in ai-service.js?</query>
+<scope>
+  <file>src/main/ai-service.js</file>
+  <file>src/main/visual-awareness.js</file>
+  <file>src/main/index.js</file>
+</scope>
+<deliverable>Structured findings with file citations</deliverable>
+```
 
 ### For multimodal prompts (advancingFeatures Phase 0)
 - All three models support interleaved text + base64 images.
