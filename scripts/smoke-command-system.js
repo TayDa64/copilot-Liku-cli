@@ -328,6 +328,57 @@ console.log('\n\x1b[1m[14] Phase 1 coordinate pipeline fixes\x1b[0m');
   assert('no capture paths use getPrimaryDisplay().bounds', badCaptures.length === 0);
 }
 
+// ── 15. Phase 2: Pick element at point + stable identity ─────────────────
+console.log('\n\x1b[1m[15] Phase 2: element-from-point + stable identity\x1b[0m');
+{
+  // .NET host binary exists
+  const uiaBin = path.join(ROOT, 'bin', 'WindowsUIA.exe');
+  assert('.NET UIA host binary exists', fs.existsSync(uiaBin));
+
+  // .NET host has JSONL command loop
+  const csContent = fs.readFileSync(path.join(ROOT, 'src', 'native', 'windows-uia-dotnet', 'Program.cs'), 'utf-8');
+  assert('Program.cs has stdin command loop', csContent.includes('Console.ReadLine()'));
+  assert('Program.cs has elementFromPoint handler', csContent.includes('HandleElementFromPoint'));
+  assert('Program.cs calls AutomationElement.FromPoint', csContent.includes('AutomationElement.FromPoint'));
+  assert('Program.cs calls GetRuntimeId', csContent.includes('GetRuntimeId()'));
+  assert('Program.cs calls TryGetClickablePoint', csContent.includes('TryGetClickablePoint'));
+  assert('Program.cs returns patterns list', csContent.includes('IsInvokePatternAvailableProperty'));
+  assert('Program.cs returns nativeWindowHandle', csContent.includes('NativeWindowHandle'));
+  assert('Program.cs legacy one-shot preserved', csContent.includes('GetForegroundWindow'));
+
+  // Node-side persistent host manager
+  const hostPath = path.join(ROOT, 'src', 'main', 'ui-automation', 'core', 'uia-host.js');
+  assert('uia-host.js exists', fs.existsSync(hostPath));
+  const hostContent = fs.readFileSync(hostPath, 'utf-8');
+  assert('UIAHost class exported', hostContent.includes('class UIAHost'));
+  assert('getSharedUIAHost singleton exported', hostContent.includes('function getSharedUIAHost'));
+  assert('UIAHost.elementFromPoint method', hostContent.includes('async elementFromPoint'));
+  assert('UIAHost.getTree method', hostContent.includes('async getTree'));
+  assert('JSONL protocol (newline-delimited)', hostContent.includes("JSON.stringify(cmd) + '\\n'"));
+  assert('UIAHost.stop graceful shutdown', hostContent.includes('async stop'));
+
+  // Barrel export
+  const indexContent = fs.readFileSync(path.join(ROOT, 'src', 'main', 'ui-automation', 'index.js'), 'utf-8');
+  assert('UIAHost in barrel exports', indexContent.includes('UIAHost'));
+  assert('getSharedUIAHost in barrel exports', indexContent.includes('getSharedUIAHost'));
+
+  // visual-awareness uses .NET host fast path
+  const vaContent = fs.readFileSync(path.join(ROOT, 'src', 'main', 'visual-awareness.js'), 'utf-8');
+  assert('findElementAtPoint imports getSharedUIAHost', vaContent.includes("require('./ui-automation/core/uia-host')"));
+  assert('findElementAtPoint tries .NET host first', vaContent.includes('host.elementFromPoint'));
+  assert('findElementAtPoint has PowerShell fallback', vaContent.includes('Fallback'));
+
+  // inspect-types has runtimeId field
+  const itContent = fs.readFileSync(path.join(ROOT, 'src', 'shared', 'inspect-types.js'), 'utf-8');
+  assert('InspectRegion has runtimeId field', itContent.includes('runtimeId'));
+  assert('createInspectRegion sets runtimeId', itContent.includes('runtimeId: params.runtimeId'));
+
+  // inspect-service passes runtimeId + clickPoint
+  const isContent = fs.readFileSync(path.join(ROOT, 'src', 'main', 'inspect-service.js'), 'utf-8');
+  assert('detectRegions maps runtimeId', isContent.includes('runtimeId: e.runtimeId'));
+  assert('detectRegions maps clickPoint from .NET or PS', isContent.includes('e.clickPoint'));
+}
+
 // ── Cleanup & Summary ────────────────────────────────────────────────────
 cleanup();
 // Also remove any screenshot artifacts from root

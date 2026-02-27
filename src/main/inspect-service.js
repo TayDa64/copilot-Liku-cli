@@ -305,7 +305,8 @@ async function detectRegions(options = {}) {
           role: e.ControlType?.replace('ControlType.', '') || 'element',
           bounds: e.Bounds,
           confidence: e.IsEnabled ? 0.9 : 0.6,
-          clickPoint: e.ClickablePoint || null
+          clickPoint: e.ClickablePoint || e.clickPoint || null,
+          runtimeId: e.runtimeId || null
         })),
         'accessibility'
       );

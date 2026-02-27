@@ -7,6 +7,7 @@ const { exec } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const { getSharedUIAHost } = require('./ui-automation/core/uia-host');
 
 // ===== STATE =====
 let previousScreenshot = null;
@@ -457,13 +458,29 @@ $elements | ConvertTo-Json -Depth 10
 }
 
 /**
- * Find UI element at specific coordinates
+ * Find UI element at specific coordinates.
+ * Fast path: persistent .NET UIA host (~5-20ms).
+ * Fallback: PowerShell one-shot (~200-500ms).
  */
 async function findElementAtPoint(x, y) {
   if (process.platform !== 'win32') {
     return { error: 'UI Automation only available on Windows' };
   }
 
+  // Fast path — .NET host (persistent process, JSONL protocol)
+  try {
+    const host = getSharedUIAHost();
+    const el = await host.elementFromPoint(x, y);
+    return {
+      ...el,
+      queryPoint: { x, y },
+      timestamp: Date.now()
+    };
+  } catch (hostErr) {
+    // Fall through to PowerShell path
+  }
+
+  // Fallback — PowerShell (spawns new process each call)
   const psScript = `
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes

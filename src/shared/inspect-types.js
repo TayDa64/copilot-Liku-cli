@@ -32,6 +32,7 @@
  * @property {string} source - Detection source (accessibility, ocr, heuristic)
  * @property {number} timestamp - When this region was detected
  * @property {Object} [clickPoint] - Preferred click point {x, y} from UIA TryGetClickablePoint
+ * @property {number[]|null} [runtimeId] - UIA RuntimeId for stable session-scoped element identity
  * @property {string} coordinateSpace - Coordinate space (default 'screen-physical')
  */
 
@@ -101,6 +102,7 @@ function createInspectRegion(params) {
     source: params.source || 'unknown',
     timestamp: params.timestamp || Date.now(),
     clickPoint: params.clickPoint || null,
+    runtimeId: params.runtimeId || null,
     coordinateSpace: params.coordinateSpace || 'screen-physical'
   };
 }

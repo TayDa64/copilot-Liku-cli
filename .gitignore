@@ -6,6 +6,9 @@ yarn.lock
 # Build artifacts
 dist/
 build/
+bin/
+src/native/windows-uia-dotnet/bin/
+src/native/windows-uia-dotnet/obj/
 *.log
 
 # OS files
