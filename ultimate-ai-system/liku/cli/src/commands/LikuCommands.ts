@@ -12,9 +12,15 @@
  */
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join, resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 import { AIStreamParser, type CheckpointState } from '@liku/core';
 import { CommandKind, type SlashCommand, type CommandContext, type CommandResult } from './types.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const require = createRequire(import.meta.url);
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -158,15 +164,15 @@ function automationCommand(
     argHint,
     action: async (ctx: CommandContext): Promise<CommandResult> => {
       // Resolve relative to the Electron project root, not the monorepo
-      const cliCommandsDir = resolve(__dirname, '../../../../src/cli/commands');
+      // __dirname at runtime = ultimate-ai-system/liku/cli/dist/commands (5 levels)
+      const cliCommandsDir = resolve(__dirname, '../../../../../src/cli/commands');
       const modPath = join(cliCommandsDir, `${name}.js`);
 
       if (!existsSync(modPath)) {
         return { success: false, message: `Automation module not found: ${modPath}` };
       }
 
-      // Dynamic require of CommonJS module
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      // Dynamic require of CJS module from ESM context
       const mod = require(modPath) as { run: (args: string[], opts: Record<string, unknown>) => Promise<CommandResult> };
       return mod.run(ctx.args, { ...ctx.flags, ...ctx.options });
     },
