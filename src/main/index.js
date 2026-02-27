@@ -887,6 +887,9 @@ function setupIPC() {
     }
     data.scaleFactor = sf;
 
+    // Store for next chat-message (threads coords into AI prompt)
+    lastDotSelection = data;
+
     // Forward to chat window
     if (chatWindow) {
       chatWindow.webContents.send('dot-selected', data);
@@ -916,6 +919,9 @@ function setupIPC() {
   // Agentic mode flag (when true, actions execute automatically)
   let agenticMode = false;
   let pendingActions = null;
+
+  // Last dot-selected data — threaded into the next chat-message as coordinate context
+  let lastDotSelection = null;
 
   // Handle chat messages
   ipcMain.on('chat-message', async (event, message) => {
@@ -1253,10 +1259,19 @@ function setupIPC() {
       chatWindow.webContents.send('agent-typing', { isTyping: true });
     }
 
+    // Thread dot-selected coordinates into the AI prompt (BUG1 fix)
+    const dotCoords = lastDotSelection;
+    lastDotSelection = null; // consume once
+
     try {
       // Call AI service
       const result = await aiService.sendMessage(message, {
-        includeVisualContext
+        includeVisualContext,
+        coordinates: dotCoords ? {
+          x: dotCoords.physicalX,
+          y: dotCoords.physicalY,
+          label: dotCoords.label || `${dotCoords.physicalX},${dotCoords.physicalY}`
+        } : null
       });
 
       if (chatWindow) {
@@ -1327,42 +1342,63 @@ function setupIPC() {
     if (action.type === 'click' || action.type === 'double_click' || action.type === 'right_click' || action.type === 'drag') {
        let x = action.x || action.fromX;
        let y = action.y || action.fromY;
-       
-       // Coordinate Scaling for Precision (Fix for Q4)
-       // If visual context exists, scale from Image Space -> Screen Space
-       const latestVisual = aiService.getLatestVisualContext();
-       if (latestVisual && latestVisual.width && latestVisual.height) {
-         const display = screen.getPrimaryDisplay();
-         const screenW = display.bounds.width; // e.g., 1920
-         const screenH = display.bounds.height; // e.g., 1080
-         // Calculate scale multiples
-         const scaleX = screenW / latestVisual.width; 
-         const scaleY = screenH / latestVisual.height;
-         
-         // Only apply if there's a significant difference (e.g. > 1% mismatch)
-         if (Math.abs(scaleX - 1) > 0.01 || Math.abs(scaleY - 1) > 0.01) {
-           console.log(`[EXECUTOR] Scaling coords from ${latestVisual.width}x${latestVisual.height} to ${screenW}x${screenH} (Target: ${x},${y})`);
-           x = Math.round(x * scaleX);
-           y = Math.round(y * scaleY);
-           // Update action object for system automation
-           if(action.x) action.x = x;
-           if(action.y) action.y = y;
-           if(action.fromX) action.fromX = x;
-           if(action.fromY) action.fromY = y;
-           if(action.toX) action.toX = Math.round(action.toX * scaleX);
-           if(action.toY) action.toY = Math.round(action.toY * scaleY);
-           console.log(`[EXECUTOR] Scaled target: ${x},${y}`);
+       const sf = screen.getPrimaryDisplay().scaleFactor || 1;
+
+       // BUG3 fix: Region-resolved coordinates are already in physical screen pixels.
+       // Skip image→screen scaling for them — only convert for AI-generated image coords.
+       if (action._resolvedFromRegion) {
+         // Already physical from resolveRegionTarget — use as-is
+         console.log(`[EXECUTOR] Region-resolved coords (physical): ${x},${y} from region ${action._resolvedFromRegion}`);
+       } else {
+         // Coordinate Scaling: Image Space → Physical Screen Space
+         // Step 1: image pixels → DIP (using display.bounds which returns DIP)
+         const latestVisual = aiService.getLatestVisualContext();
+         if (latestVisual && latestVisual.width && latestVisual.height) {
+           const display = screen.getPrimaryDisplay();
+           const screenW = display.bounds.width;   // DIP
+           const screenH = display.bounds.height;  // DIP
+           const scaleX = screenW / latestVisual.width;
+           const scaleY = screenH / latestVisual.height;
+
+           if (Math.abs(scaleX - 1) > 0.01 || Math.abs(scaleY - 1) > 0.01) {
+             console.log(`[EXECUTOR] Scaling image→DIP from ${latestVisual.width}x${latestVisual.height} to ${screenW}x${screenH} (Target: ${x},${y})`);
+             x = Math.round(x * scaleX);
+             y = Math.round(y * scaleY);
+             if (action.x) action.x = x;
+             if (action.y) action.y = y;
+             if (action.fromX) action.fromX = x;
+             if (action.fromY) action.fromY = y;
+             if (action.toX) action.toX = Math.round(action.toX * scaleX);
+             if (action.toY) action.toY = Math.round(action.toY * scaleY);
+           }
+         }
+
+         // Step 2: DIP → physical screen pixels (BUG2+4 fix)
+         // Win32 SetCursorPos / SendInput expect physical pixels.
+         if (sf !== 1) {
+           x = Math.round(x * sf);
+           y = Math.round(y * sf);
+           if (action.x) action.x = Math.round(action.x * sf);
+           if (action.y) action.y = Math.round(action.y * sf);
+           if (action.fromX) action.fromX = Math.round(action.fromX * sf);
+           if (action.fromY) action.fromY = Math.round(action.fromY * sf);
+           if (action.toX) action.toX = Math.round(action.toX * sf);
+           if (action.toY) action.toY = Math.round(action.toY * sf);
+           console.log(`[EXECUTOR] DIP→physical (sf=${sf}): ${x},${y}`);
          }
        }
        
-       console.log(`[EXECUTOR] Intercepting ${action.type} at (${x},${y})`);
+       console.log(`[EXECUTOR] Intercepting ${action.type} at (${x},${y}) [physical]`);
 
        // 1. Visual Feedback (Pulse - Doppler Effect)
+       // Overlay is in CSS/DIP space — convert physical back for visual feedback
+       const feedbackX = sf !== 1 ? Math.round(x / sf) : x;
+       const feedbackY = sf !== 1 ? Math.round(y / sf) : y;
        if (overlayWindow && !overlayWindow.isDestroyed() && overlayWindow.webContents) {
          overlayWindow.webContents.send('overlay-command', {
            action: 'pulse-click',
-           x: x, 
-           y: y,
+           x: feedbackX,
+           y: feedbackY,
            label: action.reason ? 'Action' : undefined
          });
        }
@@ -1477,10 +1513,7 @@ function setupIPC() {
 
           const sources = await require('electron').desktopCapturer.getSources({
             types: ['screen'],
-            thumbnailSize: { 
-              width: screen.getPrimaryDisplay().bounds.width,
-              height: screen.getPrimaryDisplay().bounds.height
-            }
+            thumbnailSize: getVirtualDesktopSize()
           });
 
           // Restore overlay after capture

@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("WindowsUIA")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+2c32a77389003baae38777987f4aa9428ce14b7e")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+9295009f9cd489b6a62673058119b0886f6d5b68")]
 [assembly: System.Reflection.AssemblyProductAttribute("WindowsUIA")]
 [assembly: System.Reflection.AssemblyTitleAttribute("WindowsUIA")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

@@ -291,6 +291,35 @@ console.log('\n\x1b[1m[13] inspect-types coordinate helpers\x1b[0m');
   assert('denormalizeCoordinates divides by scaleFactor', itContent.includes('x / scaleFactor'));
 }
 
+// ── 14. Phase 1 coordinate pipeline fixes (BUG1-4) ──────────────────────
+console.log('\n\x1b[1m[14] Phase 1 coordinate pipeline fixes\x1b[0m');
+{
+  const indexContent = fs.readFileSync(path.join(ROOT, 'src', 'main', 'index.js'), 'utf-8');
+
+  // BUG1: dot-selected coords threaded into AI prompt
+  assert('lastDotSelection declared', indexContent.includes('let lastDotSelection'));
+  assert('dot-selected stores lastDotSelection', indexContent.includes('lastDotSelection = data'));
+  assert('chat-message consumes dotCoords', indexContent.includes('const dotCoords = lastDotSelection'));
+  assert('coordinates passed to sendMessage', indexContent.includes('coordinates: dotCoords'));
+  assert('lastDotSelection consumed after use', indexContent.includes('lastDotSelection = null'));
+
+  // BUG2+4: DIP→physical conversion at Win32 boundary
+  assert('DIP→physical scaling present', indexContent.includes('DIP→physical'));
+  assert('multiplies by scaleFactor for Win32', /action\.x \* sf\)/.test(indexContent));
+
+  // BUG3: region-resolved actions skip image scaling
+  assert('region-resolved bypass present', indexContent.includes('action._resolvedFromRegion'));
+  assert('region flag set during resolution', indexContent.includes("action._resolvedFromRegion = resolved.region.id"));
+
+  // Visual feedback converts physical→CSS for overlay
+  assert('feedbackX converts physical→CSS/DIP', indexContent.includes('const feedbackX = sf'));
+  assert('pulse uses feedbackX not raw x', /x: feedbackX,\s*\n\s*y: feedbackY/.test(indexContent));
+
+  // Screenshot callback uses virtual desktop
+  assert('executeActionsAndRespond uses getVirtualDesktopSize',
+    /thumbnailSize:\s*getVirtualDesktopSize\(\)/.test(indexContent));
+}
+
 // ── Cleanup & Summary ────────────────────────────────────────────────────
 cleanup();
 // Also remove any screenshot artifacts from root

@@ -1,3 +1,32 @@
+## 0.0.9 - Liku Edition - 2026-02-28
+
+### Phase 1: Coordinate Pipeline Fixes (4 Critical Bugs)
+
+#### BUG1 — Dot-selected coordinates now reach AI prompt
+- `lastDotSelection` stored on `dot-selected`, consumed on next `chat-message`
+- `coordinates` option now passed to `aiService.sendMessage()`, activating the prompt-enhancement code that was previously dead
+
+#### BUG2+4 — DIP→physical conversion at Win32 boundary
+- `performSafeAgenticAction` now performs a two-step conversion:
+  1. Image pixels → CSS/DIP (via `display.bounds`)
+  2. CSS/DIP → physical screen pixels (multiply by `scaleFactor`)
+- Previously, DIP coords went directly to `Cursor::Position` / `SendInput` which expect physical pixels — clicks missed on any HiDPI display (sf ≠ 1)
+
+#### BUG3 — Region-resolved actions skip image scaling
+- Actions resolved via `resolveRegionTarget()` are already in physical screen pixels (from UIA)
+- Now tagged with `_resolvedFromRegion` flag and bypass the image→screen scaling entirely
+- Previously, physical coords were double-mangled through the image→DIP scaler
+
+#### Visual feedback fix
+- Pulse animation now converts physical coords back to CSS/DIP for the overlay, which operates in CSS space
+- Previously, HiDPI pulse targets drifted from actual click location
+
+#### Screenshot callback fix
+- `executeActionsAndRespond` screenshot callback now uses `getVirtualDesktopSize()` instead of `screen.getPrimaryDisplay().bounds`
+
+### Testing
+- 85 smoke assertions (12 new), 6 bug-fix tests, 16 feature tests — 107 total, 0 failures
+
 ## 0.0.8 - Liku Edition - 2026-02-19
 
 ### Testing & Reliability Improvements
