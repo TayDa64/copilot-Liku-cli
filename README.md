@@ -1,8 +1,9 @@
 # GitHub Copilot CLI: Liku Edition (Public Preview)
 
 [![npm version](https://img.shields.io/npm/v/copilot-liku-cli.svg)](https://www.npmjs.com/package/copilot-liku-cli)
-[![Node.js](https://img.shields.io/badge/node-%3E%3D22.0.0-brightgreen.svg)](https://nodejs.org/)
+[![Node.js](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen.svg)](https://nodejs.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE.md)
+[![Package Size](https://img.shields.io/badge/package-~196KB-blue.svg)](https://www.npmjs.com/package/copilot-liku-cli)
 
 The power of GitHub Copilot, now with visual-spatial awareness and advanced automation.
 
@@ -20,6 +21,7 @@ We're bringing the power of GitHub Copilot coding agent directly to your termina
 - **Ultra-Thin Overlay:** A transparent Electron layer for high-performance UI element detection and interaction.
 - **Multi-Agent Orchestration:** A sophisticated **Supervisor-Builder-Verifier** pattern for complex, multi-step task execution.
 - **Liku CLI Suite:** A comprehensive set of automation tools (`click`, `find`, `type`, `keys`, `screenshot`) available from any shell.
+- **Event-Driven UI Watcher:** Real-time UI state tracking via Windows UI Automation events with automatic polling fallback.
 - **Defensive AI Architecture:** Engineered for minimal footprint ($<300$MB memory) and zero-intrusion workflows.
 
 ## 🛠️ The Liku CLI (`liku`)
@@ -34,6 +36,8 @@ liku
 ```
 This launches the Electron-based visual agent including the chat interface and the transparent overlay.
 
+> **Note:** The visual overlay requires Electron (installed automatically as an optional dependency). All headless CLI commands (`click`, `find`, `type`, `keys`, `screenshot`, etc.) work without Electron.
+
 ### Automation Commands
 | Command | Usage | Description |
 | :--- | :--- | :--- |
@@ -43,12 +47,27 @@ This launches the Electron-based visual agent including the chat interface and t
 | `keys` | `liku keys ctrl+s` | Send complex keyboard combinations. |
 | `window` | `liku window "VS Code"` | Focus a specific application window. |
 | `screenshot`| `liku screenshot` | Capture the current screen state for analysis. |
+| `mouse` | `liku mouse 500 300` | Move the mouse to screen coordinates. |
+| `scroll` | `liku scroll down` | Scroll the active window or element. |
+| `drag` | `liku drag 100,200 400,500` | Drag from one point to another. |
+| `wait` | `liku wait "Loading..." --gone` | Wait for an element to appear or disappear. |
 | `repl` | `liku repl` | Launch an interactive automation shell. |
+| `agent` | `liku agent "Refactor login"` | Start a multi-agent task. |
 
 ### Power User Examples
-- **Chained Automation**: `liku window "Notepad" && liku type "Done!" && liku keys ctrl+s`
-- **Coordinate Precision**: `liku click 500,300 --right`
-- **JSON Processing**: `liku find "*" --json | jq '.[0].name'`
+```bash
+# Chained automation
+liku window "Notepad" && liku type "Done!" && liku keys ctrl+s
+
+# Coordinate precision
+liku click 500,300 --right
+
+# JSON processing
+liku find "*" --json | jq '.[0].name'
+
+# Wait for UI state
+liku wait "Submit" --timeout 5000 && liku click "Submit"
+```
 
 ## 👁️ Visual Awareness & Grid System
 
@@ -57,6 +76,7 @@ Liku perceives your workspace through a dual-mode interaction layer.
 - **Passive Mode:** Fully click-through, remaining dormant until needed.
 - **Dot-Grid Targeting:** When the agent needs to target a specific point, it generates a coordinate grid (Coarse ~100px or Fine ~25px) using alphanumeric labels (e.g., `A1`, `C3.21`).
 - **Live UI Inspection:** Uses native accessibility trees (Windows UI Automation) to highlight and "lock onto" buttons, menus, and text fields in real-time.
+- **Event-Driven Updates:** The UI watcher uses a 4-state machine (POLLING → EVENT_MODE → FALLBACK) to stream live focus, structure, and property changes with automatic health monitoring.
 
 ### Global Shortcuts (Overlay)
 - `Ctrl+Alt+Space`: Toggle the Chat Interface.
@@ -84,108 +104,115 @@ The Liku Edition moves beyond single-turn responses with a specialized team of a
 
 ### Prerequisites
 
-- **Node.js** v22 or higher
-- **npm** v10 or higher
-- (On Windows) **PowerShell** v6 or higher
-- An **active Copilot subscription**.
+- **Node.js** v18 or higher (v22 recommended)
+- **npm** v9 or higher
+
+#### Platform-Specific
+
+| Platform | UI Automation | Requirements |
+| :--- | :--- | :--- |
+| **Windows** | Full (UIA + events) | PowerShell v5.1+; [.NET 9 SDK](https://dotnet.microsoft.com/download) for building the UIA host |
+| **macOS** | Partial | Accessibility permissions required |
+| **Linux** | Partial | AT-SPI2 recommended |
+
+> **Windows UI Automation:** On `npm install`, a postinstall script automatically builds the .NET 9 UIA host binary if the .NET SDK is detected. If skipped, you can build it manually with `npm run build:uia`.
 
 ### Installation
 
-#### Global Installation (Recommended for Users)
+#### Global Install (Recommended)
 
-Install globally from npm:
 ```bash
 npm install -g copilot-liku-cli
 ```
 
-This will make the `liku` command available globally from any directory.
-
-To verify installation:
+Verify:
 ```bash
 liku --version
+liku --help
 ```
 
-To update to the latest version:
+Update:
 ```bash
 npm update -g copilot-liku-cli
 ```
 
-#### Local Development Installation
+#### From Source
 
-To install the Liku Edition for local development and contributing:
 ```bash
 git clone https://github.com/TayDa64/copilot-Liku-cli
 cd copilot-Liku-cli
 npm install
 npm link
-```
-This will make the `liku` command available globally, linked to your local development copy.
 
-**Note for contributors:** Use `npm link` during development so changes are immediately reflected without reinstalling.
+# Build the .NET UIA host (Windows only)
+npm run build:uia
+```
 
 ### Authenticate
 
-If you're not logged in, launch the agent and use the `/login` slash command, or set a personal access token (PAT):
+Set a GitHub personal access token with Copilot permissions:
 1. Visit [GitHub PAT Settings](https://github.com/settings/personal-access-tokens/new)
 2. Enable "Copilot Requests" permission.
 3. Export `GH_TOKEN` or `GITHUB_TOKEN` in your environment.
 
-## ✅ Quick Verify (Recommended)
+Or launch the agent and use the `/login` slash command.
 
-Shortcut source-of-truth is `src/main/index.js` (current mapping includes
-chat `Ctrl+Alt+Space` and overlay `Ctrl+Shift+O` on Windows).
-
-Run these checks in order after setup:
+## ✅ Quick Verify
 
 ```bash
-# 1) Deterministic runtime smoke test (recommended default)
-npm run smoke:shortcuts
+# Full smoke suite (233 assertions)
+npm run smoke
 
-# 2) Direct chat visibility smoke (no keyboard emulation)
-npm run smoke:chat-direct
-
-# 3) UI automation baseline checks
-npm run test:ui
+# Individual checks
+npm run smoke:shortcuts    # Runtime + shortcut diagnostics
+npm run smoke:chat-direct  # Chat visibility (no keyboard emulation)
+npm run test:ui            # UI automation baseline
 ```
-
-Why this order:
-- Confirms app/runtime health before shortcut diagnostics.
-- Avoids accidental key injection into non-target apps.
-- Produces reliable pass/fail exit codes for local automation.
-- Keeps chat validation deterministic (direct in-app toggle) while still
-  validating keyboard routing for overlay actions.
 
 ## 🛠️ Technical Architecture
 
-GitHub Copilot-Liku CLI is built on a "Defensive AI" architecture—a design philosophy focused on minimal footprint, secure execution, and zero-intrusion workflows. 
+GitHub Copilot-Liku CLI is built on a "Defensive AI" architecture — minimal footprint, secure execution, and zero-intrusion workflows.
+
+### Key Systems
+
+| Layer | Description |
+| :--- | :--- |
+| **CLI** | 13 headless commands via `src/cli/liku.js` (CJS, no Electron required) |
+| **.NET UIA Host** | Persistent JSONL process for Windows UI Automation (9 commands, thread-safe, event streaming) |
+| **UI Watcher** | 4-state machine: POLLING ↔ EVENT_MODE ↔ FALLBACK with 10s health check |
+| **Overlay** | Transparent Electron window with grid, inspect regions, and click-through passthrough |
+| **Agent System** | Supervisor → Builder / Researcher → Verifier pipeline |
 
 ### Performance Benchmarks
 
-Engineered for performance and stability, the system hits the following metrics:
 - **Memory Footprint**: $< 300$MB steady-state (~150MB baseline).
 - **CPU Usage**: $< 0.5\%$ idle; $< 2\%$ in selection mode.
 - **Startup Latency**: $< 3$ seconds from launch to functional state.
+- **Package Size**: ~196 KB (npm tarball).
 
 ### Security & Isolation
 
 - **Hardened Electron Environment**: Uses `contextIsolation` and `sandbox` modes to prevent prototype pollution.
 - **Content Security Policy (CSP)**: Strict headers to disable unauthorized external resources.
 - **Isolated Preload Bridges**: Secure IPC routing where renderers only have access to necessary system APIs.
-
-## 🚧 Overlay Development
-
-See `docs/inspect-overlay-plan.md` for the inspect overlay plan and acceptance criteria.
+- **No bundled secrets**: API keys read from environment variables only; tokens stored in `~/.liku-cli/`.
 
 ## 📚 Documentation
 
-- **[Installation Guide](INSTALLATION.md)** - Detailed installation instructions for all platforms
-- **[Quick Start Guide](QUICKSTART.md)** - Get up and running quickly
-- **[Contributing Guide](CONTRIBUTING.md)** - How to contribute to the project
-- **[Publishing Guide](PUBLISHING.md)** - How to publish the package to npm
-- **[Release Process](RELEASE_PROCESS.md)** - How to create and manage releases
-- **[Architecture](ARCHITECTURE.md)** - System design and architecture
-- **[Configuration](CONFIGURATION.md)** - Configuration options
-- **[Testing](TESTING.md)** - Testing guide and practices
+- **[Installation Guide](INSTALLATION.md)** — Detailed installation instructions for all platforms
+- **[Quick Start Guide](QUICKSTART.md)** — Get up and running quickly
+
+<details>
+<summary>Developer docs (available in the repo, not shipped with npm)</summary>
+
+- **[Contributing Guide](CONTRIBUTING.md)** — How to contribute to the project
+- **[Publishing Guide](PUBLISHING.md)** — How to publish the package to npm
+- **[Release Process](RELEASE_PROCESS.md)** — How to create and manage releases
+- **[Architecture](ARCHITECTURE.md)** — System design and architecture
+- **[Configuration](CONFIGURATION.md)** — Configuration options
+- **[Testing](TESTING.md)** — Testing guide and practices
+
+</details>
 
 ## 📢 Feedback and Participation
 
