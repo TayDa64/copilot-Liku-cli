@@ -136,7 +136,7 @@ async function clickElement(element, options = {}) {
   const centerY = bounds.y + bounds.height / 2;
   
   // Strategy 1: Try Invoke pattern for buttons
-  if (useInvoke && element.patterns?.includes('InvokePatternIdentifiers.Pattern')) {
+  if (useInvoke && (element.patterns?.includes('InvokePatternIdentifiers.Pattern') || element.patterns?.includes('Invoke'))) {
     log(`Attempting Invoke pattern for "${element.name}"`);
     const invokeResult = await invokeElement(element);
     if (invokeResult.success) {

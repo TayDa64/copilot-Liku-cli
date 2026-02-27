@@ -92,6 +92,15 @@ const {
   waitAndClick,
   clickAndWaitFor,
   selectFromDropdown,
+  // Pattern-based interactions (Phase 3)
+  normalizePatternName,
+  hasPattern,
+  setElementValue,
+  scrollElement,
+  expandElement,
+  collapseElement,
+  toggleExpandCollapse,
+  getElementText,
 } = require('./interactions');
 
 // Screenshot
@@ -167,6 +176,16 @@ module.exports = {
   waitAndClick,
   clickAndWaitFor,
   selectFromDropdown,
+  
+  // Pattern-based interactions (Phase 3)
+  normalizePatternName,
+  hasPattern,
+  setElementValue,
+  scrollElement,
+  expandElement,
+  collapseElement,
+  toggleExpandCollapse,
+  getElementText,
   
   // Screenshot
   screenshot,

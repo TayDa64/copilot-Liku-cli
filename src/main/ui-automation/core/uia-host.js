@@ -98,6 +98,34 @@ class UIAHost extends EventEmitter {
     return resp.tree;
   }
 
+  /** Set value on element at (x,y) using ValuePattern. */
+  async setValue(x, y, value) {
+    const resp = await this.send({ cmd: 'setValue', x, y, value });
+    if (!resp.ok) throw new Error(resp.error || 'setValue failed');
+    return resp;
+  }
+
+  /** Scroll element at (x,y) using ScrollPattern. direction: up|down|left|right. amount: percent (0-100) or -1 for small increment. */
+  async scroll(x, y, direction = 'down', amount = -1) {
+    const resp = await this.send({ cmd: 'scroll', x, y, direction, amount });
+    if (!resp.ok) throw new Error(resp.error || 'scroll failed');
+    return resp;
+  }
+
+  /** Expand/collapse element at (x,y). action: expand|collapse|toggle. */
+  async expandCollapse(x, y, action = 'toggle') {
+    const resp = await this.send({ cmd: 'expandCollapse', x, y, action });
+    if (!resp.ok) throw new Error(resp.error || 'expandCollapse failed');
+    return resp;
+  }
+
+  /** Get text from element at (x,y) using TextPattern → ValuePattern → Name fallback. */
+  async getText(x, y) {
+    const resp = await this.send({ cmd: 'getText', x, y });
+    if (!resp.ok) throw new Error(resp.error || 'getText failed');
+    return resp;
+  }
+
   /** Gracefully shut down the host process. */
   async stop() {
     if (!this._alive || !this._proc) return;

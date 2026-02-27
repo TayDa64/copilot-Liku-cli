@@ -379,6 +379,81 @@ console.log('\n\x1b[1m[15] Phase 2: element-from-point + stable identity\x1b[0m'
   assert('detectRegions maps clickPoint from .NET or PS', isContent.includes('e.clickPoint'));
 }
 
+// ── [16] Phase 3: Pattern-first interaction primitives ───────────────────
+{
+  console.log('\n\x1b[1m[16] Phase 3 \u2013 Pattern-first interaction primitives\x1b[0m');
+
+  // .NET host has all 4 new handlers
+  const dotnetPath = path.join(ROOT, 'src', 'native', 'windows-uia-dotnet', 'Program.cs');
+  const dotnet = fs.readFileSync(dotnetPath, 'utf-8');
+  assert('.NET host handles setValue command', dotnet.includes('case "setValue"'));
+  assert('.NET host handles scroll command', dotnet.includes('case "scroll"'));
+  assert('.NET host handles expandCollapse command', dotnet.includes('case "expandCollapse"'));
+  assert('.NET host handles getText command', dotnet.includes('case "getText"'));
+  assert('.NET HandleSetValue method', dotnet.includes('HandleSetValue'));
+  assert('.NET HandleScroll method', dotnet.includes('HandleScroll'));
+  assert('.NET HandleExpandCollapse method', dotnet.includes('HandleExpandCollapse'));
+  assert('.NET HandleGetText method', dotnet.includes('HandleGetText'));
+  assert('.NET ResolveElement helper', dotnet.includes('ResolveElement'));
+  assert('.NET GetPatternNames helper', dotnet.includes('GetPatternNames'));
+
+  // Node bridge convenience methods
+  const hostPath = path.join(ROOT, 'src', 'main', 'ui-automation', 'core', 'uia-host.js');
+  const host = fs.readFileSync(hostPath, 'utf-8');
+  assert('UIAHost.setValue bridge method', host.includes('async setValue'));
+  assert('UIAHost.scroll bridge method', host.includes('async scroll'));
+  assert('UIAHost.expandCollapse bridge method', host.includes('async expandCollapse'));
+  assert('UIAHost.getText bridge method', host.includes('async getText'));
+
+  // pattern-actions.js exists with all functions
+  const paPath = path.join(ROOT, 'src', 'main', 'ui-automation', 'interactions', 'pattern-actions.js');
+  assert('pattern-actions.js exists', fs.existsSync(paPath));
+  const pa = fs.readFileSync(paPath, 'utf-8');
+  assert('normalizePatternName helper', pa.includes('function normalizePatternName'));
+  assert('hasPattern helper', pa.includes('function hasPattern'));
+  assert('setElementValue function', pa.includes('async function setElementValue'));
+  assert('scrollElement function', pa.includes('async function scrollElement'));
+  assert('expandElement function', pa.includes('async function expandElement'));
+  assert('collapseElement function', pa.includes('async function collapseElement'));
+  assert('toggleExpandCollapse function', pa.includes('async function toggleExpandCollapse'));
+  assert('getElementText function', pa.includes('async function getElementText'));
+  assert('pattern-actions exports all public functions', 
+    pa.includes('setElementValue') && pa.includes('scrollElement') && 
+    pa.includes('expandElement') && pa.includes('collapseElement') && 
+    pa.includes('getElementText') && pa.includes('normalizePatternName'));
+  assert('pattern-actions returns patternUnsupported flag', pa.includes('patternUnsupported'));
+
+  // high-level.js upgraded with pattern-first strategies
+  const hlPath = path.join(ROOT, 'src', 'main', 'ui-automation', 'interactions', 'high-level.js');
+  const hl = fs.readFileSync(hlPath, 'utf-8');
+  assert('fillField imports setElementValue from pattern-actions', hl.includes("require('./pattern-actions')"));
+  assert('fillField tries ValuePattern first', hl.includes('setElementValue') && hl.includes('preferPattern'));
+  assert('selectDropdownItem tries ExpandCollapsePattern first', hl.includes('expandElement') && hl.includes('ExpandCollapsePattern'));
+
+  // Barrel re-exports from interactions/index.js
+  const intIdx = fs.readFileSync(path.join(ROOT, 'src', 'main', 'ui-automation', 'interactions', 'index.js'), 'utf-8');
+  assert('interactions/index re-exports setElementValue', intIdx.includes('setElementValue'));
+  assert('interactions/index re-exports scrollElement', intIdx.includes('scrollElement'));
+  assert('interactions/index re-exports expandElement', intIdx.includes('expandElement'));
+  assert('interactions/index re-exports collapseElement', intIdx.includes('collapseElement'));
+  assert('interactions/index re-exports toggleExpandCollapse', intIdx.includes('toggleExpandCollapse'));
+  assert('interactions/index re-exports getElementText', intIdx.includes('getElementText'));
+
+  // Main barrel exports
+  const mainIdx = fs.readFileSync(path.join(ROOT, 'src', 'main', 'ui-automation', 'index.js'), 'utf-8');
+  assert('main barrel exports setElementValue', mainIdx.includes('setElementValue'));
+  assert('main barrel exports scrollElement', mainIdx.includes('scrollElement'));
+  assert('main barrel exports expandElement', mainIdx.includes('expandElement'));
+  assert('main barrel exports getElementText', mainIdx.includes('getElementText'));
+  assert('main barrel exports normalizePatternName', mainIdx.includes('normalizePatternName'));
+  assert('main barrel exports hasPattern', mainIdx.includes('hasPattern'));
+
+  // element-click.js handles both pattern name formats
+  const ecPath = path.join(ROOT, 'src', 'main', 'ui-automation', 'interactions', 'element-click.js');
+  const ec = fs.readFileSync(ecPath, 'utf-8');
+  assert('clickElement handles short pattern name format', ec.includes("'Invoke'"));
+}
+
 // ── Cleanup & Summary ────────────────────────────────────────────────────
 cleanup();
 // Also remove any screenshot artifacts from root

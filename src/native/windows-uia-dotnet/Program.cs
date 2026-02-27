@@ -48,6 +48,18 @@ namespace UIAWrapper
                         case "elementFromPoint":
                             HandleElementFromPoint(root);
                             break;
+                        case "setValue":
+                            HandleSetValue(root);
+                            break;
+                        case "scroll":
+                            HandleScroll(root);
+                            break;
+                        case "expandCollapse":
+                            HandleExpandCollapse(root);
+                            break;
+                        case "getText":
+                            HandleGetText(root);
+                            break;
                         case "exit":
                             Reply(new { ok = true, cmd = "exit" });
                             return;
@@ -109,6 +121,199 @@ namespace UIAWrapper
             var payload = BuildRichElement(element);
             payload["queryPoint"] = new Dictionary<string, double> { ["x"] = x, ["y"] = y };
             Reply(new { ok = true, cmd = "elementFromPoint", element = payload });
+        }
+
+        // ── Helper: resolve element at x,y ───────────────────────────────────
+        static AutomationElement? ResolveElement(JsonElement root, out double x, out double y)
+        {
+            x = root.GetProperty("x").GetDouble();
+            y = root.GetProperty("y").GetDouble();
+            return AutomationElement.FromPoint(new Point(x, y));
+        }
+
+        // ── setValue (Phase 3) ───────────────────────────────────────────────
+        static void HandleSetValue(JsonElement root)
+        {
+            try
+            {
+                var el = ResolveElement(root, out double x, out double y);
+                if (el == null) { Reply(new { ok = false, cmd = "setValue", error = "No element at point" }); return; }
+
+                string value = root.GetProperty("value").GetString() ?? "";
+
+                if ((bool)el.GetCurrentPropertyValue(AutomationElement.IsValuePatternAvailableProperty))
+                {
+                    var vp = (ValuePattern)el.GetCurrentPattern(ValuePattern.Pattern);
+                    vp.SetValue(value);
+                    Reply(new { ok = true, cmd = "setValue", method = "ValuePattern", element = BuildRichElement(el) });
+                }
+                else
+                {
+                    Reply(new { ok = false, cmd = "setValue", error = "ValuePattern not supported", patterns = GetPatternNames(el) });
+                }
+            }
+            catch (Exception ex) { Reply(new { ok = false, cmd = "setValue", error = ex.Message }); }
+        }
+
+        // ── scroll (Phase 3) ─────────────────────────────────────────────────
+        static void HandleScroll(JsonElement root)
+        {
+            try
+            {
+                var el = ResolveElement(root, out double x, out double y);
+                if (el == null) { Reply(new { ok = false, cmd = "scroll", error = "No element at point" }); return; }
+
+                string direction = root.TryGetProperty("direction", out var dirProp) ? dirProp.GetString() ?? "down" : "down";
+                double amount = root.TryGetProperty("amount", out var amtProp) ? amtProp.GetDouble() : -1;
+
+                if (!(bool)el.GetCurrentPropertyValue(AutomationElement.IsScrollPatternAvailableProperty))
+                {
+                    Reply(new { ok = false, cmd = "scroll", error = "ScrollPattern not supported", patterns = GetPatternNames(el) });
+                    return;
+                }
+
+                var sp = (ScrollPattern)el.GetCurrentPattern(ScrollPattern.Pattern);
+
+                if (amount >= 0)
+                {
+                    // SetScrollPercent mode
+                    double hPct = sp.Current.HorizontalScrollPercent;
+                    double vPct = sp.Current.VerticalScrollPercent;
+                    switch (direction)
+                    {
+                        case "left": hPct = Math.Max(0, amount); break;
+                        case "right": hPct = Math.Min(100, amount); break;
+                        case "up": vPct = Math.Max(0, amount); break;
+                        default: vPct = Math.Min(100, amount); break; // down
+                    }
+                    sp.SetScrollPercent(hPct, vPct);
+                }
+                else
+                {
+                    // Scroll by amount (SmallIncrement)
+                    switch (direction)
+                    {
+                        case "up": sp.ScrollVertical(ScrollAmount.SmallDecrement); break;
+                        case "down": sp.ScrollVertical(ScrollAmount.SmallIncrement); break;
+                        case "left": sp.ScrollHorizontal(ScrollAmount.SmallDecrement); break;
+                        case "right": sp.ScrollHorizontal(ScrollAmount.SmallIncrement); break;
+                    }
+                }
+
+                Reply(new
+                {
+                    ok = true,
+                    cmd = "scroll",
+                    method = "ScrollPattern",
+                    direction,
+                    scrollInfo = new
+                    {
+                        horizontalPercent = sp.Current.HorizontalScrollPercent,
+                        verticalPercent = sp.Current.VerticalScrollPercent,
+                        horizontalViewSize = sp.Current.HorizontalViewSize,
+                        verticalViewSize = sp.Current.VerticalViewSize
+                    }
+                });
+            }
+            catch (Exception ex) { Reply(new { ok = false, cmd = "scroll", error = ex.Message }); }
+        }
+
+        // ── expandCollapse (Phase 3) ─────────────────────────────────────────
+        static void HandleExpandCollapse(JsonElement root)
+        {
+            try
+            {
+                var el = ResolveElement(root, out double x, out double y);
+                if (el == null) { Reply(new { ok = false, cmd = "expandCollapse", error = "No element at point" }); return; }
+
+                string action = root.TryGetProperty("action", out var actProp) ? actProp.GetString() ?? "toggle" : "toggle";
+
+                if (!(bool)el.GetCurrentPropertyValue(AutomationElement.IsExpandCollapsePatternAvailableProperty))
+                {
+                    Reply(new { ok = false, cmd = "expandCollapse", error = "ExpandCollapsePattern not supported", patterns = GetPatternNames(el) });
+                    return;
+                }
+
+                var ecp = (ExpandCollapsePattern)el.GetCurrentPattern(ExpandCollapsePattern.Pattern);
+                var stateBefore = ecp.Current.ExpandCollapseState.ToString();
+
+                switch (action)
+                {
+                    case "expand": ecp.Expand(); break;
+                    case "collapse": ecp.Collapse(); break;
+                    default: // toggle
+                        if (ecp.Current.ExpandCollapseState == ExpandCollapseState.Collapsed)
+                            ecp.Expand();
+                        else
+                            ecp.Collapse();
+                        break;
+                }
+
+                Reply(new
+                {
+                    ok = true,
+                    cmd = "expandCollapse",
+                    method = "ExpandCollapsePattern",
+                    action,
+                    stateBefore,
+                    stateAfter = ecp.Current.ExpandCollapseState.ToString()
+                });
+            }
+            catch (Exception ex) { Reply(new { ok = false, cmd = "expandCollapse", error = ex.Message }); }
+        }
+
+        // ── getText (Phase 3) ────────────────────────────────────────────────
+        static void HandleGetText(JsonElement root)
+        {
+            try
+            {
+                var el = ResolveElement(root, out double x, out double y);
+                if (el == null) { Reply(new { ok = false, cmd = "getText", error = "No element at point" }); return; }
+
+                // Try TextPattern first
+                if ((bool)el.GetCurrentPropertyValue(AutomationElement.IsTextPatternAvailableProperty))
+                {
+                    var tp = (TextPattern)el.GetCurrentPattern(TextPattern.Pattern);
+                    string text = tp.DocumentRange.GetText(-1);
+                    Reply(new { ok = true, cmd = "getText", method = "TextPattern", text, element = BuildRichElement(el) });
+                    return;
+                }
+
+                // Fallback: try ValuePattern
+                if ((bool)el.GetCurrentPropertyValue(AutomationElement.IsValuePatternAvailableProperty))
+                {
+                    var vp = (ValuePattern)el.GetCurrentPattern(ValuePattern.Pattern);
+                    string text = vp.Current.Value;
+                    Reply(new { ok = true, cmd = "getText", method = "ValuePattern", text, element = BuildRichElement(el) });
+                    return;
+                }
+
+                // Fallback: Name property
+                string name = el.Current.Name;
+                if (!string.IsNullOrEmpty(name))
+                {
+                    Reply(new { ok = true, cmd = "getText", method = "Name", text = name, element = BuildRichElement(el) });
+                    return;
+                }
+
+                Reply(new { ok = false, cmd = "getText", error = "No text source available", patterns = GetPatternNames(el) });
+            }
+            catch (Exception ex) { Reply(new { ok = false, cmd = "getText", error = ex.Message }); }
+        }
+
+        // ── Helper: get pattern short names ──────────────────────────────────
+        static List<string> GetPatternNames(AutomationElement el)
+        {
+            var patterns = new List<string>();
+            if ((bool)el.GetCurrentPropertyValue(AutomationElement.IsInvokePatternAvailableProperty)) patterns.Add("Invoke");
+            if ((bool)el.GetCurrentPropertyValue(AutomationElement.IsValuePatternAvailableProperty)) patterns.Add("Value");
+            if ((bool)el.GetCurrentPropertyValue(AutomationElement.IsTogglePatternAvailableProperty)) patterns.Add("Toggle");
+            if ((bool)el.GetCurrentPropertyValue(AutomationElement.IsSelectionItemPatternAvailableProperty)) patterns.Add("SelectionItem");
+            if ((bool)el.GetCurrentPropertyValue(AutomationElement.IsExpandCollapsePatternAvailableProperty)) patterns.Add("ExpandCollapse");
+            if ((bool)el.GetCurrentPropertyValue(AutomationElement.IsScrollPatternAvailableProperty)) patterns.Add("Scroll");
+            if ((bool)el.GetCurrentPropertyValue(AutomationElement.IsTextPatternAvailableProperty)) patterns.Add("Text");
+            if ((bool)el.GetCurrentPropertyValue(AutomationElement.IsWindowPatternAvailableProperty)) patterns.Add("Window");
+            return patterns;
         }
 
         // ── Rich element payload (Phase 2) ───────────────────────────────────

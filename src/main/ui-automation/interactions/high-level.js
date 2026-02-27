@@ -7,6 +7,7 @@
 
 const { findElement, findElements, waitForElement } = require('../elements');
 const { click, clickByText } = require('./element-click');
+const { setElementValue, expandElement } = require('./pattern-actions');
 const { typeText, sendKeys } = require('../keyboard');
 const { focusWindow, findWindows } = require('../window');
 const { log, sleep } = require('../core/helpers');
@@ -21,9 +22,18 @@ const { log, sleep } = require('../core/helpers');
  * @returns {Promise<{success: boolean}>}
  */
 async function fillField(criteria, text, options = {}) {
-  const { clear = true } = options;
+  const { clear = true, preferPattern = true } = options;
   
-  // Click the field
+  // Strategy 1: Try ValuePattern (fast, no focus/click needed)
+  if (preferPattern) {
+    const patternResult = await setElementValue(criteria, text);
+    if (patternResult.success) {
+      log(`fillField: ValuePattern succeeded for "${text.slice(0, 30)}"`);
+      return { success: true, method: 'ValuePattern' };
+    }
+  }
+  
+  // Strategy 2: Click + type (fallback)
   const clickResult = await click(criteria);
   if (!clickResult.success) {
     return { success: false };
@@ -39,7 +49,7 @@ async function fillField(criteria, text, options = {}) {
   
   // Type text
   const typeResult = await typeText(text);
-  return { success: typeResult.success };
+  return { success: typeResult.success, method: 'sendKeys' };
 }
 
 /**
@@ -52,9 +62,21 @@ async function fillField(criteria, text, options = {}) {
  * @returns {Promise<{success: boolean}>}
  */
 async function selectDropdownItem(dropdownCriteria, itemCriteria, options = {}) {
-  const { itemWait = 1000 } = options;
+  const { itemWait = 1000, preferPattern = true } = options;
   
-  // Click dropdown to open
+  // Strategy 1: Try ExpandCollapsePattern to open
+  if (preferPattern) {
+    const expandResult = await expandElement(dropdownCriteria);
+    if (expandResult.success) {
+      log(`selectDropdownItem: ExpandCollapsePattern expanded (${expandResult.stateBefore} → ${expandResult.stateAfter})`);
+      await sleep(itemWait);
+      const itemQuery = typeof itemCriteria === 'string' ? { text: itemCriteria } : itemCriteria;
+      const itemResult = await click(itemQuery);
+      return { success: itemResult.success, method: 'ExpandCollapsePattern' };
+    }
+  }
+  
+  // Strategy 2: Click to open (fallback)
   const openResult = await click(dropdownCriteria);
   if (!openResult.success) {
     log('selectDropdownItem: Failed to open dropdown', 'warn');
@@ -69,7 +91,7 @@ async function selectDropdownItem(dropdownCriteria, itemCriteria, options = {}) 
     : itemCriteria;
     
   const itemResult = await click(itemQuery);
-  return { success: itemResult.success };
+  return { success: itemResult.success, method: 'click' };
 }
 
 /**
