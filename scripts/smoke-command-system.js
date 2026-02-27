@@ -318,6 +318,14 @@ console.log('\n\x1b[1m[14] Phase 1 coordinate pipeline fixes\x1b[0m');
   // Screenshot callback uses virtual desktop
   assert('executeActionsAndRespond uses getVirtualDesktopSize',
     /thumbnailSize:\s*getVirtualDesktopSize\(\)/.test(indexContent));
+
+  // Ensure NO capture paths still use primary display bounds
+  const captureBlocks = indexContent.split('desktopCapturer.getSources');
+  const badCaptures = captureBlocks.slice(1).filter(b => {
+    const snippet = b.slice(0, 200);
+    return snippet.includes('getPrimaryDisplay().bounds');
+  });
+  assert('no capture paths use getPrimaryDisplay().bounds', badCaptures.length === 0);
 }
 
 // ── Cleanup & Summary ────────────────────────────────────────────────────

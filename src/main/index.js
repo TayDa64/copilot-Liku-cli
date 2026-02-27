@@ -1559,10 +1559,7 @@ function setupIPC() {
 
         const sources = await require('electron').desktopCapturer.getSources({
           types: ['screen'],
-          thumbnailSize: { 
-            width: screen.getPrimaryDisplay().bounds.width,
-            height: screen.getPrimaryDisplay().bounds.height
-          }
+          thumbnailSize: getVirtualDesktopSize()
         });
 
         // Restore overlay after capture
@@ -1664,10 +1661,7 @@ function setupIPC() {
           
           const sources = await desktopCapturer.getSources({
             types: ['screen'],
-            thumbnailSize: { 
-              width: screen.getPrimaryDisplay().bounds.width,
-              height: screen.getPrimaryDisplay().bounds.height
-            }
+            thumbnailSize: getVirtualDesktopSize()
           });
           
           if (overlayWindow && !overlayWindow.isDestroyed()) {
