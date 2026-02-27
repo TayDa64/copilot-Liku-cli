@@ -4,6 +4,8 @@ using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text.Json;
+using System.Threading;
+using System.Timers;
 using System.Windows;
 using System.Windows.Automation;
 
@@ -15,6 +17,31 @@ namespace UIAWrapper
         static extern IntPtr GetForegroundWindow();
 
         static readonly JsonSerializerOptions JsonOpts = new() { WriteIndented = false };
+
+        // ── Thread-safe output (Phase 4) ─────────────────────────────────────
+        static readonly object _writeLock = new object();
+
+        // ── Event subscription state (Phase 4) ──────────────────────────────
+        static bool _eventsSubscribed = false;
+        static AutomationElement? _subscribedWindow = null;
+        static int _subscribedWindowHandle = 0;
+        static readonly int MaxWalkElements = 300;
+
+        // Debounce timers
+        static System.Timers.Timer? _structureDebounce = null;
+        static System.Timers.Timer? _propertyDebounce = null;
+        static readonly List<Dictionary<string, object?>> _pendingPropertyChanges = new();
+        static readonly object _propLock = new object();
+
+        // Adaptive backoff: if >10 structure events in 1s, increase debounce
+        static int _structureEventBurst = 0;
+        static DateTime _structureBurstWindowStart = DateTime.UtcNow;
+        static int _structureDebounceMs = 100;
+
+        // Event handler references (for removal)
+        static AutomationFocusChangedEventHandler? _focusHandler = null;
+        static StructureChangedEventHandler? _structureHandler = null;
+        static AutomationPropertyChangedEventHandler? _propertyHandler = null;
 
         static void Main(string[] args)
         {
@@ -60,6 +87,12 @@ namespace UIAWrapper
                         case "getText":
                             HandleGetText(root);
                             break;
+                        case "subscribeEvents":
+                            HandleSubscribeEvents();
+                            break;
+                        case "unsubscribeEvents":
+                            HandleUnsubscribeEvents();
+                            break;
                         case "exit":
                             Reply(new { ok = true, cmd = "exit" });
                             return;
@@ -77,8 +110,11 @@ namespace UIAWrapper
 
         static void Reply(object obj)
         {
-            Console.WriteLine(JsonSerializer.Serialize(obj, JsonOpts));
-            Console.Out.Flush();
+            lock (_writeLock)
+            {
+                Console.WriteLine(JsonSerializer.Serialize(obj, JsonOpts));
+                Console.Out.Flush();
+            }
         }
 
         // ── getTree ──────────────────────────────────────────────────────────
@@ -302,6 +338,435 @@ namespace UIAWrapper
         }
 
         // ── Helper: get pattern short names ──────────────────────────────────
+
+        // ── Phase 4: Event streaming ─────────────────────────────────────────
+
+        static void HandleSubscribeEvents()
+        {
+            if (_eventsSubscribed)
+            {
+                Reply(new { ok = true, cmd = "subscribeEvents", note = "already subscribed" });
+                return;
+            }
+
+            _eventsSubscribed = true;
+
+            // Register system-wide focus changed handler
+            _focusHandler = new AutomationFocusChangedEventHandler(OnFocusChanged);
+            Automation.AddAutomationFocusChangedEventHandler(_focusHandler);
+
+            // Set up debounce timers
+            _structureDebounce = new System.Timers.Timer(_structureDebounceMs) { AutoReset = false };
+            _structureDebounce.Elapsed += OnStructureDebounceElapsed;
+
+            _propertyDebounce = new System.Timers.Timer(50) { AutoReset = false };
+            _propertyDebounce.Elapsed += OnPropertyDebounceElapsed;
+
+            // Immediately attach to current foreground window
+            try
+            {
+                IntPtr fgHwnd = GetForegroundWindow();
+                if (fgHwnd != IntPtr.Zero)
+                {
+                    var win = AutomationElement.FromHandle(fgHwnd);
+                    AttachToWindow(win);
+                }
+            }
+            catch { /* ignore — will pick up on next focus change */ }
+
+            // Return initial snapshot
+            var initialElements = WalkFocusedWindowElements();
+            var activeWindow = GetActiveWindowInfo();
+            Reply(new
+            {
+                ok = true,
+                cmd = "subscribeEvents",
+                initial = new { activeWindow, elements = initialElements }
+            });
+        }
+
+        static void HandleUnsubscribeEvents()
+        {
+            if (!_eventsSubscribed)
+            {
+                Reply(new { ok = true, cmd = "unsubscribeEvents", note = "not subscribed" });
+                return;
+            }
+
+            DetachFromWindow();
+
+            if (_focusHandler != null)
+            {
+                try { Automation.RemoveAutomationFocusChangedEventHandler(_focusHandler); } catch { }
+                _focusHandler = null;
+            }
+
+            _structureDebounce?.Stop();
+            _structureDebounce?.Dispose();
+            _structureDebounce = null;
+
+            _propertyDebounce?.Stop();
+            _propertyDebounce?.Dispose();
+            _propertyDebounce = null;
+
+            lock (_propLock) { _pendingPropertyChanges.Clear(); }
+
+            _eventsSubscribed = false;
+            _structureDebounceMs = 100;
+            _structureEventBurst = 0;
+
+            Reply(new { ok = true, cmd = "unsubscribeEvents" });
+        }
+
+        static void OnFocusChanged(object sender, AutomationFocusChangedEventArgs e)
+        {
+            if (!_eventsSubscribed) return;
+
+            try
+            {
+                var focused = sender as AutomationElement;
+                if (focused == null) return;
+
+                // Walk up to find the top-level window
+                var topWindow = FindTopLevelWindow(focused);
+                if (topWindow == null) return;
+
+                int hwnd = topWindow.Current.NativeWindowHandle;
+
+                // Skip if same window
+                if (hwnd == _subscribedWindowHandle && hwnd != 0) return;
+
+                // Switch windows
+                DetachFromWindow();
+                AttachToWindow(topWindow);
+
+                // Emit focus changed event with active window info
+                var winInfo = BuildWindowInfo(topWindow);
+                Reply(new
+                {
+                    type = "event",
+                    @event = "focusChanged",
+                    ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                    data = new { activeWindow = winInfo }
+                });
+
+                // Also trigger a structure snapshot for the new window
+                FireStructureDebounce();
+            }
+            catch (ElementNotAvailableException) { /* element vanished, ignore */ }
+            catch { /* defensive */ }
+        }
+
+        static void OnStructureChanged(object sender, StructureChangedEventArgs e)
+        {
+            if (!_eventsSubscribed) return;
+            FireStructureDebounce();
+        }
+
+        static void OnPropertyChanged(object sender, AutomationPropertyChangedEventArgs e)
+        {
+            if (!_eventsSubscribed) return;
+
+            try
+            {
+                var el = sender as AutomationElement;
+                if (el == null) return;
+
+                var light = BuildLightElement(el, _subscribedWindowHandle);
+                if (light == null) return;
+
+                lock (_propLock)
+                {
+                    _pendingPropertyChanges.Add(light);
+                }
+
+                // Reset the 50ms debounce timer
+                _propertyDebounce?.Stop();
+                _propertyDebounce?.Start();
+            }
+            catch (ElementNotAvailableException) { /* vanished */ }
+            catch { /* defensive */ }
+        }
+
+        static void FireStructureDebounce()
+        {
+            // Adaptive backoff: track burst rate
+            var now = DateTime.UtcNow;
+            if ((now - _structureBurstWindowStart).TotalMilliseconds > 1000)
+            {
+                // New 1-second window
+                if (_structureEventBurst > 10)
+                {
+                    // Too many events last second — increase debounce for 5 seconds
+                    _structureDebounceMs = 200;
+                }
+                else if (_structureDebounceMs > 100)
+                {
+                    // Cool down back to normal
+                    _structureDebounceMs = 100;
+                }
+                _structureEventBurst = 0;
+                _structureBurstWindowStart = now;
+            }
+            _structureEventBurst++;
+
+            if (_structureDebounce != null)
+            {
+                _structureDebounce.Interval = _structureDebounceMs;
+                _structureDebounce.Stop();
+                _structureDebounce.Start();
+            }
+        }
+
+        static void OnStructureDebounceElapsed(object? sender, ElapsedEventArgs e)
+        {
+            if (!_eventsSubscribed) return;
+
+            try
+            {
+                var elements = WalkFocusedWindowElements();
+                Reply(new
+                {
+                    type = "event",
+                    @event = "structureChanged",
+                    ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                    data = new { elements }
+                });
+            }
+            catch (Exception ex)
+            {
+                // Window may have vanished
+                Reply(new
+                {
+                    type = "event",
+                    @event = "error",
+                    ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                    data = new { error = ex.Message }
+                });
+            }
+        }
+
+        static void OnPropertyDebounceElapsed(object? sender, ElapsedEventArgs e)
+        {
+            if (!_eventsSubscribed) return;
+
+            List<Dictionary<string, object?>> batch;
+            lock (_propLock)
+            {
+                if (_pendingPropertyChanges.Count == 0) return;
+                batch = new List<Dictionary<string, object?>>(_pendingPropertyChanges);
+                _pendingPropertyChanges.Clear();
+            }
+
+            // Deduplicate by id (keep latest)
+            var deduped = new Dictionary<string, Dictionary<string, object?>>();
+            foreach (var el in batch)
+            {
+                var id = el["id"]?.ToString() ?? "";
+                deduped[id] = el; // last wins
+            }
+
+            Reply(new
+            {
+                type = "event",
+                @event = "propertyChanged",
+                ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                data = new { elements = deduped.Values.ToList() }
+            });
+        }
+
+        static void AttachToWindow(AutomationElement window)
+        {
+            _subscribedWindow = window;
+            try { _subscribedWindowHandle = window.Current.NativeWindowHandle; } catch { _subscribedWindowHandle = 0; }
+
+            _structureHandler = new StructureChangedEventHandler(OnStructureChanged);
+            _propertyHandler = new AutomationPropertyChangedEventHandler(OnPropertyChanged);
+
+            try
+            {
+                Automation.AddStructureChangedEventHandler(
+                    window, TreeScope.Subtree, _structureHandler);
+            }
+            catch { /* element may have vanished */ }
+
+            try
+            {
+                Automation.AddAutomationPropertyChangedEventHandler(
+                    window, TreeScope.Subtree, _propertyHandler,
+                    AutomationElement.BoundingRectangleProperty,
+                    AutomationElement.NameProperty,
+                    AutomationElement.IsEnabledProperty,
+                    AutomationElement.IsOffscreenProperty);
+            }
+            catch { /* element may have vanished */ }
+        }
+
+        static void DetachFromWindow()
+        {
+            if (_subscribedWindow == null) return;
+
+            if (_structureHandler != null)
+            {
+                try { Automation.RemoveStructureChangedEventHandler(_subscribedWindow, _structureHandler); } catch { }
+                _structureHandler = null;
+            }
+            if (_propertyHandler != null)
+            {
+                try { Automation.RemoveAutomationPropertyChangedEventHandler(_subscribedWindow, _propertyHandler); } catch { }
+                _propertyHandler = null;
+            }
+
+            _subscribedWindow = null;
+            _subscribedWindowHandle = 0;
+        }
+
+        static AutomationElement? FindTopLevelWindow(AutomationElement element)
+        {
+            try
+            {
+                var walker = TreeWalker.ControlViewWalker;
+                var current = element;
+                AutomationElement? lastWindow = null;
+
+                while (current != null && !Automation.Compare(current, AutomationElement.RootElement))
+                {
+                    try
+                    {
+                        if (current.Current.ControlType == ControlType.Window)
+                            lastWindow = current;
+                    }
+                    catch (ElementNotAvailableException) { break; }
+
+                    current = walker.GetParent(current);
+                }
+
+                return lastWindow;
+            }
+            catch { return null; }
+        }
+
+        static Dictionary<string, object?> BuildWindowInfo(AutomationElement window)
+        {
+            try
+            {
+                var rect = window.Current.BoundingRectangle;
+                return new Dictionary<string, object?>
+                {
+                    ["hwnd"] = window.Current.NativeWindowHandle,
+                    ["title"] = window.Current.Name,
+                    ["processId"] = window.Current.ProcessId,
+                    ["bounds"] = new Dictionary<string, double>
+                    {
+                        ["x"] = SafeNumber(rect.X),
+                        ["y"] = SafeNumber(rect.Y),
+                        ["width"] = SafeNumber(rect.Width),
+                        ["height"] = SafeNumber(rect.Height)
+                    }
+                };
+            }
+            catch
+            {
+                return new Dictionary<string, object?> { ["hwnd"] = 0, ["title"] = "", ["bounds"] = null };
+            }
+        }
+
+        /// <summary>
+        /// Walk the focused window tree, returning elements in the same shape
+        /// as the PowerShell UIWatcher (id, name, type, automationId, className,
+        /// windowHandle, bounds, center, isEnabled).
+        /// </summary>
+        static List<Dictionary<string, object?>> WalkFocusedWindowElements()
+        {
+            var results = new List<Dictionary<string, object?>>();
+
+            AutomationElement? win = _subscribedWindow;
+            if (win == null)
+            {
+                try
+                {
+                    IntPtr fgHwnd = GetForegroundWindow();
+                    if (fgHwnd != IntPtr.Zero)
+                        win = AutomationElement.FromHandle(fgHwnd);
+                }
+                catch { return results; }
+            }
+            if (win == null) return results;
+
+            int rootHwnd = 0;
+            try { rootHwnd = win.Current.NativeWindowHandle; } catch { }
+
+            try
+            {
+                var all = win.FindAll(TreeScope.Descendants, System.Windows.Automation.Condition.TrueCondition);
+                int count = 0;
+                foreach (AutomationElement el in all)
+                {
+                    if (count >= MaxWalkElements) break;
+                    var light = BuildLightElement(el, rootHwnd);
+                    if (light != null) { results.Add(light); count++; }
+                }
+            }
+            catch (ElementNotAvailableException) { /* window vanished */ }
+
+            return results;
+        }
+
+        /// <summary>
+        /// Build a lightweight element matching the PowerShell UIWatcher format exactly.
+        /// Returns null for elements with no useful info or zero-size bounds.
+        /// </summary>
+        static Dictionary<string, object?>? BuildLightElement(AutomationElement el, int rootHwnd)
+        {
+            try
+            {
+                var rect = el.Current.BoundingRectangle;
+                if (rect.Width <= 0 || rect.Height <= 0) return null;
+                if (rect.X < -10000 || rect.Y < -10000) return null;
+
+                string name = el.Current.Name ?? "";
+                name = name.Replace("\r", " ").Replace("\n", " ").Replace("\t", " ");
+
+                string ctrlType = el.Current.ControlType.ProgrammaticName.Replace("ControlType.", "");
+                string autoId = el.Current.AutomationId ?? "";
+                autoId = autoId.Replace("\r", " ").Replace("\n", " ").Replace("\t", " ");
+
+                // Skip elements with no useful identifying info (same filter as PS watcher)
+                if (string.IsNullOrWhiteSpace(name) && string.IsNullOrWhiteSpace(autoId)) return null;
+
+                int x = (int)rect.X, y = (int)rect.Y;
+                int w = (int)rect.Width, h = (int)rect.Height;
+
+                return new Dictionary<string, object?>
+                {
+                    ["id"] = $"{ctrlType}|{name}|{autoId}|{x}|{y}",
+                    ["name"] = name,
+                    ["type"] = ctrlType,
+                    ["automationId"] = autoId,
+                    ["className"] = el.Current.ClassName,
+                    ["windowHandle"] = rootHwnd,
+                    ["bounds"] = new Dictionary<string, int> { ["x"] = x, ["y"] = y, ["width"] = w, ["height"] = h },
+                    ["center"] = new Dictionary<string, int> { ["x"] = x + w / 2, ["y"] = y + h / 2 },
+                    ["isEnabled"] = el.Current.IsEnabled
+                };
+            }
+            catch (ElementNotAvailableException) { return null; }
+            catch { return null; }
+        }
+
+        static Dictionary<string, object?>? GetActiveWindowInfo()
+        {
+            try
+            {
+                IntPtr hwnd = GetForegroundWindow();
+                if (hwnd == IntPtr.Zero) return null;
+                var win = AutomationElement.FromHandle(hwnd);
+                return BuildWindowInfo(win);
+            }
+            catch { return null; }
+        }
+
+        // ── End Phase 4 ─────────────────────────────────────────────────────
         static List<string> GetPatternNames(AutomationElement el)
         {
             var patterns = new List<string>();

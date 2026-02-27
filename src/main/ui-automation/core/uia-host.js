@@ -126,6 +126,20 @@ class UIAHost extends EventEmitter {
     return resp;
   }
 
+  /** Subscribe to UIA events (focus, structure, property). Returns initial snapshot. */
+  async subscribeEvents() {
+    const resp = await this.send({ cmd: 'subscribeEvents' });
+    if (!resp.ok) throw new Error(resp.error || 'subscribeEvents failed');
+    return resp;
+  }
+
+  /** Unsubscribe from all UIA events. */
+  async unsubscribeEvents() {
+    const resp = await this.send({ cmd: 'unsubscribeEvents' });
+    if (!resp.ok) throw new Error(resp.error || 'unsubscribeEvents failed');
+    return resp;
+  }
+
   /** Gracefully shut down the host process. */
   async stop() {
     if (!this._alive || !this._proc) return;
@@ -154,6 +168,11 @@ class UIAHost extends EventEmitter {
       if (!line) continue;
       try {
         const json = JSON.parse(line);
+        // Phase 4: route unsolicited event messages before pending resolution
+        if (json.type === 'event') {
+          this.emit('uia-event', json);
+          continue;
+        }
         this._resolvePending(json);
       } catch (e) {
         this.emit('parseError', line, e);

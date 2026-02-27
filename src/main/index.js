@@ -2069,6 +2069,19 @@ function setupIPC() {
     // Adaptive polling: fast during inspect
     setUIPollingSpeed(newState || overlayMode === 'selection');
     
+    // Phase 4: switch watcher to event-driven mode during inspect
+    if (uiWatcher) {
+      if (newState) {
+        uiWatcher.startEventMode().catch(err => {
+          console.error('[INSPECT] Event mode start failed, polling continues:', err.message);
+        });
+      } else {
+        uiWatcher.stopEventMode().catch(err => {
+          console.error('[INSPECT] Event mode stop failed:', err.message);
+        });
+      }
+    }
+
     // Notify overlay
     if (overlayWindow && !overlayWindow.isDestroyed()) {
       overlayWindow.webContents.send('inspect-mode-changed', newState);

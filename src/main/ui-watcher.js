@@ -16,6 +16,15 @@ const os = require('os');
 const path = require('path');
 const fs = require('fs');
 const EventEmitter = require('events');
+const { getSharedUIAHost } = require('./ui-automation/core/uia-host');
+
+// Watcher mode state machine
+const MODE = {
+  POLLING: 'POLLING',
+  STARTING_EVENTS: 'STARTING_EVENTS',
+  EVENT_MODE: 'EVENT_MODE',
+  FALLBACK: 'FALLBACK'       // polling after event failure, auto-retry after 30s
+};
 
 class UIWatcher extends EventEmitter {
   constructor(options = {}) {
@@ -55,6 +64,13 @@ class UIWatcher extends EventEmitter {
     this.psProcess = null;
     this.psQueue = [];
     this.psReady = false;
+
+    // Phase 4: event-driven mode
+    this._mode = MODE.POLLING;
+    this._healthCheckTimer = null;
+    this._lastEventTs = 0;
+    this._fallbackRetryTimer = null;
+    this._uiaEventHandler = null;
   }
   
   /**
@@ -569,8 +585,248 @@ $results | ConvertTo-Json -Depth 4 -Compress
    * Destroy watcher
    */
   destroy() {
+    this.stopEventMode();
     this.stop();
     this.removeAllListeners();
+  }
+
+  // ── Phase 4: Event-driven mode ──────────────────────────────────────
+
+  /** Current watcher mode */
+  get mode() { return this._mode; }
+
+  /**
+   * Switch to event-driven mode — subscribes to .NET UIA events,
+   * stops PowerShell polling, sets up health check timer.
+   */
+  async startEventMode() {
+    if (this._mode === MODE.EVENT_MODE || this._mode === MODE.STARTING_EVENTS) return;
+
+    console.log('[UI-WATCHER] Switching to EVENT mode');
+    this._mode = MODE.STARTING_EVENTS;
+
+    // Stop polling — events will drive updates
+    if (this.pollTimer) {
+      clearInterval(this.pollTimer);
+      this.pollTimer = null;
+    }
+
+    try {
+      const host = getSharedUIAHost();
+
+      // Attach event handler (idempotent — remove first if exists)
+      this._detachEventHandler();
+      this._uiaEventHandler = (evt) => this._onUiaEvent(evt);
+      host.on('uia-event', this._uiaEventHandler);
+
+      const resp = await host.subscribeEvents();
+
+      // Seed cache with initial snapshot
+      if (resp.initial) {
+        const elements = resp.initial.elements || [];
+        const activeWindow = resp.initial.activeWindow || null;
+
+        const diff = this.calculateDiff(elements);
+        this.cache = {
+          elements,
+          activeWindow,
+          lastUpdate: Date.now(),
+          updateCount: this.cache.updateCount + 1
+        };
+
+        this.emit('poll-complete', {
+          elements,
+          activeWindow,
+          pollTime: 0,
+          hasChanges: diff.hasChanges,
+          source: 'event-initial'
+        });
+      }
+
+      this._mode = MODE.EVENT_MODE;
+      this._lastEventTs = Date.now();
+      this._startHealthCheck();
+
+      console.log('[UI-WATCHER] EVENT mode active');
+      this.emit('mode-changed', MODE.EVENT_MODE);
+    } catch (err) {
+      console.error('[UI-WATCHER] Failed to start event mode:', err.message);
+      this._mode = MODE.POLLING;
+      // Fall back to polling
+      this._restartPolling();
+    }
+  }
+
+  /**
+   * Switch back to polling mode — unsubscribes events, restarts poll timer.
+   */
+  async stopEventMode() {
+    if (this._mode !== MODE.EVENT_MODE && this._mode !== MODE.STARTING_EVENTS && this._mode !== MODE.FALLBACK) return;
+
+    console.log('[UI-WATCHER] Switching back to POLLING mode');
+
+    this._stopHealthCheck();
+    this._detachEventHandler();
+
+    if (this._fallbackRetryTimer) {
+      clearTimeout(this._fallbackRetryTimer);
+      this._fallbackRetryTimer = null;
+    }
+
+    try {
+      const host = getSharedUIAHost();
+      await host.unsubscribeEvents();
+    } catch { /* ignore — host may be dead */ }
+
+    this._mode = MODE.POLLING;
+
+    // Restart polling if watcher should be active
+    if (this.isPolling || this.options.enabled) {
+      this._restartPolling();
+    }
+
+    this.emit('mode-changed', MODE.POLLING);
+  }
+
+  /** Handle incoming UIA event from the .NET host */
+  _onUiaEvent(evt) {
+    this._lastEventTs = Date.now();
+
+    switch (evt.event) {
+      case 'focusChanged': {
+        // New window — update active window, await structureChanged for elements
+        if (evt.data?.activeWindow) {
+          this.cache.activeWindow = evt.data.activeWindow;
+        }
+        break;
+      }
+      case 'structureChanged': {
+        // Full element refresh
+        const elements = evt.data?.elements || [];
+        const diff = this.calculateDiff(elements);
+        this.cache = {
+          elements,
+          activeWindow: this.cache.activeWindow,
+          lastUpdate: Date.now(),
+          updateCount: this.cache.updateCount + 1
+        };
+
+        if (diff.hasChanges) {
+          this.emit('ui-changed', {
+            added: diff.added,
+            removed: diff.removed,
+            changed: diff.changed,
+            activeWindow: this.cache.activeWindow,
+            elementCount: elements.length
+          });
+        }
+
+        this.emit('poll-complete', {
+          elements,
+          activeWindow: this.cache.activeWindow,
+          pollTime: 0,
+          hasChanges: diff.hasChanges,
+          source: 'event-structure'
+        });
+        break;
+      }
+      case 'propertyChanged': {
+        // Incremental property patches — merge into cache
+        const changed = evt.data?.elements || [];
+        if (changed.length === 0) break;
+
+        const map = new Map(this.cache.elements.map(e => [e.id, e]));
+        let patchCount = 0;
+
+        for (const patch of changed) {
+          if (map.has(patch.id)) {
+            Object.assign(map.get(patch.id), patch);
+            patchCount++;
+          } else {
+            // New element appeared via property event — add it
+            map.set(patch.id, patch);
+            patchCount++;
+          }
+        }
+
+        if (patchCount > 0) {
+          const elements = Array.from(map.values());
+          this.cache.elements = elements;
+          this.cache.lastUpdate = Date.now();
+
+          this.emit('poll-complete', {
+            elements,
+            activeWindow: this.cache.activeWindow,
+            pollTime: 0,
+            hasChanges: true,
+            source: 'event-property'
+          });
+        }
+        break;
+      }
+      case 'error':
+        console.error('[UI-WATCHER] .NET event error:', evt.data?.error);
+        break;
+    }
+  }
+
+  /** Health check: if no events for 10s while in event mode, fall back to polling */
+  _startHealthCheck() {
+    this._stopHealthCheck();
+    this._healthCheckTimer = setInterval(() => {
+      if (this._mode !== MODE.EVENT_MODE) return;
+      const elapsed = Date.now() - this._lastEventTs;
+      if (elapsed > 10000) {
+        console.warn('[UI-WATCHER] No events for 10s — falling back to polling');
+        this._fallbackToPolling();
+      }
+    }, 5000);
+  }
+
+  _stopHealthCheck() {
+    if (this._healthCheckTimer) {
+      clearInterval(this._healthCheckTimer);
+      this._healthCheckTimer = null;
+    }
+  }
+
+  /** Fall back to polling and schedule a retry */
+  _fallbackToPolling() {
+    this._stopHealthCheck();
+    this._mode = MODE.FALLBACK;
+    this._restartPolling();
+    this.emit('mode-changed', MODE.FALLBACK);
+
+    // Auto-retry event mode after 30s
+    this._fallbackRetryTimer = setTimeout(async () => {
+      this._fallbackRetryTimer = null;
+      if (this._mode === MODE.FALLBACK) {
+        console.log('[UI-WATCHER] Retrying event mode after fallback');
+        await this.startEventMode();
+      }
+    }, 30000);
+  }
+
+  _restartPolling() {
+    if (this.pollTimer) {
+      clearInterval(this.pollTimer);
+      this.pollTimer = null;
+    }
+    this.isPolling = true;
+    this.options.enabled = true;
+    this.pollTimer = setInterval(() => {
+      if (!this.pollInProgress) this.poll();
+    }, this.options.pollInterval);
+  }
+
+  _detachEventHandler() {
+    if (this._uiaEventHandler) {
+      try {
+        const host = getSharedUIAHost();
+        host.removeListener('uia-event', this._uiaEventHandler);
+      } catch { /* ignore */ }
+      this._uiaEventHandler = null;
+    }
   }
 }
 

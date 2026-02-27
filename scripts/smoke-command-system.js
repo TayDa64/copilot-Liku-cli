@@ -474,6 +474,99 @@ console.log('\n\x1b[1m[15] Phase 2: element-from-point + stable identity\x1b[0m'
   assert('scrollElement falls back to mouseWheel', pa.includes("method: 'mouseWheel'"));
 }
 
+// ── [17] Phase 4: Event-driven UI watcher ────────────────────────────────
+{
+  console.log('\n\x1b[1m[17] Phase 4 \u2013 Event-driven UI watcher\x1b[0m');
+
+  // ── Layer 1: .NET host event streaming ──
+  const dotnetPath = path.join(ROOT, 'src', 'native', 'windows-uia-dotnet', 'Program.cs');
+  const dotnet = fs.readFileSync(dotnetPath, 'utf-8');
+
+  // Thread-safe Reply
+  assert('.NET Reply uses lock(_writeLock)', dotnet.includes('lock (_writeLock)'));
+  assert('.NET _writeLock is static readonly', dotnet.includes('static readonly object _writeLock'));
+
+  // subscribeEvents / unsubscribeEvents commands
+  assert('.NET host handles subscribeEvents', dotnet.includes('case "subscribeEvents"'));
+  assert('.NET host handles unsubscribeEvents', dotnet.includes('case "unsubscribeEvents"'));
+  assert('.NET HandleSubscribeEvents method', dotnet.includes('HandleSubscribeEvents'));
+  assert('.NET HandleUnsubscribeEvents method', dotnet.includes('HandleUnsubscribeEvents'));
+
+  // Event handlers
+  assert('.NET OnFocusChanged handler', dotnet.includes('OnFocusChanged'));
+  assert('.NET OnStructureChanged handler', dotnet.includes('OnStructureChanged'));
+  assert('.NET OnPropertyChanged handler', dotnet.includes('OnPropertyChanged'));
+  assert('.NET AddAutomationFocusChangedEventHandler', dotnet.includes('AddAutomationFocusChangedEventHandler'));
+  assert('.NET AddStructureChangedEventHandler', dotnet.includes('AddStructureChangedEventHandler'));
+  assert('.NET AddAutomationPropertyChangedEventHandler', dotnet.includes('AddAutomationPropertyChangedEventHandler'));
+
+  // Event payloads
+  assert('.NET emits type="event" for focus', dotnet.includes('"focusChanged"'));
+  assert('.NET emits type="event" for structure', dotnet.includes('"structureChanged"'));
+  assert('.NET emits type="event" for property', dotnet.includes('"propertyChanged"'));
+
+  // BuildLightElement (format-compatible with PS watcher)
+  assert('.NET BuildLightElement method', dotnet.includes('BuildLightElement'));
+  assert('.NET WalkFocusedWindowElements method', dotnet.includes('WalkFocusedWindowElements'));
+  assert('.NET BuildWindowInfo method', dotnet.includes('BuildWindowInfo'));
+
+  // Debounce & adaptive backoff
+  assert('.NET structure debounce timer', dotnet.includes('_structureDebounce'));
+  assert('.NET property debounce timer', dotnet.includes('_propertyDebounce'));
+  assert('.NET adaptive backoff (burst detection)', dotnet.includes('_structureEventBurst'));
+  assert('.NET debounce 200ms backoff', dotnet.includes('_structureDebounceMs = 200'));
+
+  // Window tracking & cleanup
+  assert('.NET AttachToWindow method', dotnet.includes('AttachToWindow'));
+  assert('.NET DetachFromWindow method', dotnet.includes('DetachFromWindow'));
+  assert('.NET FindTopLevelWindow method', dotnet.includes('FindTopLevelWindow'));
+  assert('.NET RemoveFocusChangedEventHandler on unsubscribe', dotnet.includes('RemoveAutomationFocusChangedEventHandler'));
+  assert('.NET RemoveStructureChangedEventHandler on unsubscribe', dotnet.includes('RemoveStructureChangedEventHandler'));
+  assert('.NET RemovePropertyChangedEventHandler on unsubscribe', dotnet.includes('RemoveAutomationPropertyChangedEventHandler'));
+
+  // ── Layer 2: UIAHost event routing ──
+  const hostPath = path.join(ROOT, 'src', 'main', 'ui-automation', 'core', 'uia-host.js');
+  const host = fs.readFileSync(hostPath, 'utf-8');
+
+  assert('UIAHost routes events before _resolvePending', host.includes("json.type === 'event'"));
+  assert('UIAHost emits uia-event', host.includes("this.emit('uia-event', json)"));
+  assert('UIAHost.subscribeEvents method', host.includes('async subscribeEvents'));
+  assert('UIAHost.unsubscribeEvents method', host.includes('async unsubscribeEvents'));
+  assert('UIAHost event routing uses continue to skip pending', host.includes('continue;'));
+
+  // ── Layer 3: UIWatcher event mode ──
+  const watcherPath = path.join(ROOT, 'src', 'main', 'ui-watcher.js');
+  const watcher = fs.readFileSync(watcherPath, 'utf-8');
+
+  assert('UIWatcher imports getSharedUIAHost', watcher.includes("require('./ui-automation/core/uia-host')"));
+  assert('UIWatcher MODE state enum', watcher.includes("POLLING: 'POLLING'"));
+  assert('UIWatcher MODE.EVENT_MODE', watcher.includes("EVENT_MODE: 'EVENT_MODE'"));
+  assert('UIWatcher MODE.FALLBACK', watcher.includes("FALLBACK: 'FALLBACK'"));
+  assert('UIWatcher MODE.STARTING_EVENTS', watcher.includes("STARTING_EVENTS: 'STARTING_EVENTS'"));
+  assert('UIWatcher startEventMode method', watcher.includes('async startEventMode'));
+  assert('UIWatcher stopEventMode method', watcher.includes('async stopEventMode'));
+  assert('UIWatcher _onUiaEvent handler', watcher.includes('_onUiaEvent'));
+  assert('UIWatcher handles focusChanged event', watcher.includes("case 'focusChanged'"));
+  assert('UIWatcher handles structureChanged event', watcher.includes("case 'structureChanged'"));
+  assert('UIWatcher handles propertyChanged event', watcher.includes("case 'propertyChanged'"));
+  assert('UIWatcher health check timer (10s)', watcher.includes('10000'));
+  assert('UIWatcher fallback auto-retry (30s)', watcher.includes('30000'));
+  assert('UIWatcher emits mode-changed event', watcher.includes("emit('mode-changed'"));
+  assert('UIWatcher emits poll-complete from events', watcher.includes("source: 'event-structure'"));
+  assert('UIWatcher emits poll-complete for property patches', watcher.includes("source: 'event-property'"));
+  assert('UIWatcher propertyChanged merges into cache', watcher.includes('Object.assign(map.get(patch.id), patch)'));
+  assert('UIWatcher _fallbackToPolling method', watcher.includes('_fallbackToPolling'));
+  assert('UIWatcher _restartPolling method', watcher.includes('_restartPolling'));
+  assert('UIWatcher destroy calls stopEventMode', watcher.includes('this.stopEventMode'));
+
+  // ── Layer 4: index.js integration ──
+  const mainJsPath = path.join(ROOT, 'src', 'main', 'index.js');
+  const mainJs = fs.readFileSync(mainJsPath, 'utf-8');
+
+  assert('index.js calls startEventMode on inspect enable', mainJs.includes('startEventMode'));
+  assert('index.js calls stopEventMode on inspect disable', mainJs.includes('stopEventMode'));
+}
+
 // ── Cleanup & Summary ────────────────────────────────────────────────────
 cleanup();
 // Also remove any screenshot artifacts from root
