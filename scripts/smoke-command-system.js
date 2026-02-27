@@ -201,6 +201,27 @@ console.log('\n\x1b[1m[8] Session persistence\x1b[0m');
   assert('legacy token migration exists', aiContent.includes('Migrated token from legacy path'));
 }
 
+// ── 9. Adaptive UIA polling ──────────────────────────────────────────────
+console.log('\n\x1b[1m[9] Adaptive UIA polling\x1b[0m');
+{
+  const mainContent = fs.readFileSync(path.join(ROOT, 'src', 'main', 'index.js'), 'utf-8');
+
+  // Two polling speeds defined
+  assert('fast polling constant (500ms)', mainContent.includes('UI_POLL_FAST_MS = 500'));
+  assert('slow polling constant (1500ms)', mainContent.includes('UI_POLL_SLOW_MS = 1500'));
+
+  // Re-entry guard prevents overlapping tree walks
+  assert('re-entry guard exists', mainContent.includes('uiSnapshotInProgress'));
+  assert('guard checked before walk', mainContent.includes('if (uiSnapshotInProgress) return'));
+
+  // Mode-aware speed switching
+  assert('setOverlayMode triggers speed switch', mainContent.includes("setUIPollingSpeed(mode === 'selection')"));
+  assert('inspect toggle triggers speed switch', mainContent.includes('setUIPollingSpeed(newState || overlayMode'));
+
+  // Walk time logging for diagnostics
+  assert('walk time warning logged', mainContent.includes('Tree walk took'));
+}
+
 // ── Cleanup & Summary ────────────────────────────────────────────────────
 cleanup();
 // Also remove any screenshot artifacts from root

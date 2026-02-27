@@ -69,15 +69,37 @@ let tray = null;
 // Live UI watcher instance
 let uiWatcher = null;
 const uiProvider = new UIProvider();
-const UI_PROVIDER_REFRESH_MS = 1500;
+
+// Adaptive polling: fast when user is actively targeting, slow when passive.
+const UI_POLL_FAST_MS = 500;   // selection / inspect mode
+const UI_POLL_SLOW_MS = 1500;  // passive mode
 const UI_PROVIDER_CACHE_TTL_MS = 3000;
+let uiPollIntervalMs = UI_POLL_SLOW_MS;
 let uiProviderCache = {
   ts: 0,
   tree: null,
   regions: []
 };
 let semanticDOMInterval = null;
+let uiSnapshotInProgress = false;   // re-entry guard
 let lastUIProviderErrorAt = 0;
+
+/** Restart the semantic DOM polling loop at the current interval. */
+function restartSemanticDOMPolling() {
+  if (semanticDOMInterval) clearInterval(semanticDOMInterval);
+  semanticDOMInterval = setInterval(() => {
+    refreshUIProviderSnapshot().catch(() => {});
+  }, uiPollIntervalMs);
+}
+
+/** Switch polling cadence based on whether the user is actively targeting. */
+function setUIPollingSpeed(fast) {
+  const target = fast ? UI_POLL_FAST_MS : UI_POLL_SLOW_MS;
+  if (target === uiPollIntervalMs) return;
+  uiPollIntervalMs = target;
+  console.log(`[UIProvider] Polling interval → ${uiPollIntervalMs}ms`);
+  if (semanticDOMInterval) restartSemanticDOMPolling();
+}
 
 function normalizeBounds(bounds) {
   if (!bounds) return null;
@@ -146,6 +168,9 @@ function getCachedUIProviderRegions() {
 }
 
 async function refreshUIProviderSnapshot() {
+  if (uiSnapshotInProgress) return;  // skip if previous walk hasn't returned
+  uiSnapshotInProgress = true;
+  const t0 = Date.now();
   try {
     const tree = await uiProvider.getUITree();
     const nodes = flattenUITree(tree)
@@ -159,12 +184,19 @@ async function refreshUIProviderSnapshot() {
     };
 
     aiService.setSemanticDOMSnapshot(tree);
+
+    const walkMs = Date.now() - t0;
+    if (walkMs > uiPollIntervalMs * 0.8) {
+      console.warn(`[UIProvider] Tree walk took ${walkMs}ms (interval=${uiPollIntervalMs}ms) — consider raising interval`);
+    }
   } catch (error) {
     const now = Date.now();
     if ((now - lastUIProviderErrorAt) > 10000) {
       console.warn('[UIProvider] Snapshot refresh failed:', error.message);
       lastUIProviderErrorAt = now;
     }
+  } finally {
+    uiSnapshotInProgress = false;
   }
 }
 
@@ -630,6 +662,9 @@ function setOverlayMode(mode) {
   overlayMode = mode;
   
   if (!overlayWindow) return;
+
+  // Adaptive polling: fast in selection/inspect, slow in passive
+  setUIPollingSpeed(mode === 'selection');
 
   // ALWAYS forward mouse events to apps beneath the overlay.
   // Dots with pointer-events: auto in CSS will still receive clicks.
@@ -1929,6 +1964,9 @@ function setupIPC() {
     const newState = !inspectService.isInspectModeActive();
     inspectService.setInspectMode(newState);
     console.log(`[INSPECT] Mode toggled: ${newState}`);
+
+    // Adaptive polling: fast during inspect
+    setUIPollingSpeed(newState || overlayMode === 'selection');
     
     // Notify overlay
     if (overlayWindow && !overlayWindow.isDestroyed()) {
@@ -2539,11 +2577,9 @@ app.whenReady().then(() => {
     // Share the started watcher with AI service for live UI context
     aiService.setUIWatcher(uiWatcher);
     refreshUIProviderSnapshot().catch(() => {});
-    semanticDOMInterval = setInterval(() => {
-      refreshUIProviderSnapshot().catch(() => {});
-    }, UI_PROVIDER_REFRESH_MS);
+    restartSemanticDOMPolling();
     
-    console.log('[Main] UI Watcher started for live UI monitoring');
+    console.log(`[Main] UI Watcher started (UIA poll=${uiPollIntervalMs}ms, watcher=${uiWatcher.options.pollInterval}ms)`);
   } catch (e) {
     console.warn('[Main] Could not start UI watcher:', e.message);
   }
