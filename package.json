@@ -1,6 +1,6 @@
 {
   "name": "copilot-liku-cli",
-  "version": "0.0.7",
+  "version": "0.0.8",
   "description": "GitHub Copilot CLI with headless agent + ultra-thin overlay architecture",
   "main": "src/main/index.js",
   "bin": {
@@ -12,7 +12,10 @@
     "test:ui": "node scripts/test-ui-automation-baseline.js",
     "smoke:shortcuts": "node scripts/smoke-shortcuts.js",
     "smoke:chat-direct": "node scripts/smoke-chat-direct.js",
-    "liku": "node src/cli/liku.js"
+    "smoke": "node scripts/smoke-command-system.js",
+    "liku": "node src/cli/liku.js",
+    "build:uia": "powershell -ExecutionPolicy Bypass -File src/native/windows-uia-dotnet/build.ps1",
+    "postinstall": "node scripts/postinstall.js"
   },
   "keywords": [
     "copilot",
@@ -24,7 +27,7 @@
     "ui-automation",
     "ai"
   ],
-  "author": "GitHub",
+  "author": "TayDa64",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -35,8 +38,8 @@
   },
   "homepage": "https://github.com/TayDa64/copilot-Liku-cli#readme",
   "engines": {
-    "node": ">=22.0.0",
-    "npm": ">=10.0.0"
+    "node": ">=18.0.0",
+    "npm": ">=9.0.0"
   },
   "os": [
     "darwin",
@@ -44,20 +47,24 @@
     "linux"
   ],
   "files": [
-    "src/",
+    "src/cli/",
+    "src/main/",
+    "src/shared/",
+    "src/renderer/",
+    "src/assets/",
+    "src/native/windows-uia/Program.cs",
+    "src/native/windows-uia/build.ps1",
+    "src/native/windows-uia-dotnet/Program.cs",
+    "src/native/windows-uia-dotnet/WindowsUIA.csproj",
+    "src/native/windows-uia-dotnet/build.ps1",
     "scripts/start.js",
+    "scripts/postinstall.js",
     "README.md",
     "LICENSE.md",
     "QUICKSTART.md",
-    "INSTALLATION.md",
-    "CONTRIBUTING.md",
-    "ARCHITECTURE.md",
-    "CONFIGURATION.md",
-    "TESTING.md",
-    "ELECTRON_README.md",
-    "PROJECT_STATUS.md"
+    "INSTALLATION.md"
   ],
-  "dependencies": {
+  "optionalDependencies": {
     "electron": "^35.7.5"
   }
 }

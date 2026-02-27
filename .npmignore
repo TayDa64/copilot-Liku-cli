@@ -1,18 +1,28 @@
 # Test files
 scripts/test-*.js
 scripts/*.ps1
+scripts/smoke-*.js
+scripts/click-model-picker.ps1
 
-# Documentation (most can be included, but some might be too large)
+# Documentation (dev-only)
 FINAL_SUMMARY.txt
 GPT-reports.md
 IMPLEMENTATION_SUMMARY.md
 baseline-app.md
 changelog.md
 OVERLAY_PROOF.png
+CONTRIBUTING.md
+ARCHITECTURE.md
+CONFIGURATION.md
+TESTING.md
+ELECTRON_README.md
+PROJECT_STATUS.md
+PUBLISHING.md
+RELEASE_PROCESS.md
+TEST_REPORT.md
+advancingFeatures.md
 
 # Project management
-# Note: .github/ is excluded to reduce package size. 
-# Workflow files are still visible in the GitHub repository for transparency.
 .github/
 .git/
 .gitignore
@@ -24,23 +34,23 @@ OVERLAY_PROOF.png
 Thumbs.db
 .vscode/
 .idea/
+*.log
 
-# Build artifacts
+# Build artifacts & .NET output (CRITICAL — prevents 150MB bloat)
 out/
 build/
 dist/
-*.log
+bin/
+src/native/windows-uia-dotnet/bin/
+src/native/windows-uia-dotnet/obj/
 
-# Specific directories
+# Monorepo subproject (not part of npm package)
 ultimate-ai-system/
 docs/
 
-# Keep these important files for npm users
-# README.md
-# LICENSE.md
-# QUICKSTART.md
-# INSTALLATION.md
-# CONTRIBUTING.md
-# ARCHITECTURE.md
-# CONFIGURATION.md
-# TESTING.md
+# Other dev files
+copilot-Liku-cli.sln
+ui-automation-state.json
+update-state.js
+push-readme.ps1
+*.tgz

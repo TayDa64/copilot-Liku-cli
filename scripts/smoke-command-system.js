@@ -69,7 +69,8 @@ console.log('\n\x1b[1m[2] CJS CLI (src/cli/liku.js)\x1b[0m');
 }
 {
   const r = run(`node "${CJS}" --version`);
-  assert('--version prints version', r.ok && r.out.includes('0.0.7'));
+  const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf-8'));
+  assert('--version prints version', r.ok && r.out.includes(pkg.version));
 }
 
 // ── 3. ESM Processor help / version / flags ──────────────────────────────
