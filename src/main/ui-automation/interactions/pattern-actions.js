@@ -11,6 +11,7 @@
 const { findElement, waitForElement } = require('../elements');
 const { getSharedUIAHost } = require('../core/uia-host');
 const { log } = require('../core/helpers');
+const { moveMouse, scroll: mouseWheelScroll } = require('../mouse');
 
 /**
  * Normalize pattern name to short form.
@@ -105,7 +106,19 @@ async function scrollElement(criteria, options = {}) {
     log(`scrollElement: ScrollPattern.Scroll ${direction} on "${element.name || element.Name || ''}"`);
     return { success: true, method: 'ScrollPattern', direction, scrollInfo: resp.scrollInfo };
   } catch (err) {
-    return { success: false, error: err.message, patternUnsupported: err.message.includes('not supported') };
+    // Fallback: mouse wheel simulation at element center
+    if (err.message.includes('not supported')) {
+      try {
+        await moveMouse(center.x, center.y);
+        const wheelAmount = amount > 0 ? Math.ceil(amount / 33) : 3; // ~3 notches for small increment
+        await mouseWheelScroll(direction, wheelAmount);
+        log(`scrollElement: ScrollPattern unsupported, fell back to mouse wheel at (${center.x}, ${center.y})`);
+        return { success: true, method: 'mouseWheel', direction, fallback: true };
+      } catch (fallbackErr) {
+        return { success: false, error: fallbackErr.message, patternUnsupported: true };
+      }
+    }
+    return { success: false, error: err.message };
   }
 }
 

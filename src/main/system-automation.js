@@ -26,6 +26,12 @@ const ACTION_TYPES = {
   // Semantic element-based actions (preferred - more reliable)
   CLICK_ELEMENT: 'click_element',   // Click element found by text/name
   FIND_ELEMENT: 'find_element',     // Find element and return its info
+  // Pattern-first UIA actions (Phase 3 — no mouse injection needed)
+  SET_VALUE: 'set_value',           // Set value via ValuePattern
+  SCROLL_ELEMENT: 'scroll_element', // Scroll via ScrollPattern + mouse wheel fallback
+  EXPAND_ELEMENT: 'expand_element', // Expand via ExpandCollapsePattern
+  COLLAPSE_ELEMENT: 'collapse_element', // Collapse via ExpandCollapsePattern
+  GET_TEXT: 'get_text',             // Read text via TextPattern/ValuePattern/Name
   // Direct command execution (most reliable for terminal operations)
   RUN_COMMAND: 'run_command',       // Run shell command directly
   FOCUS_WINDOW: 'focus_window',     // Focus a specific window
@@ -1833,6 +1839,69 @@ async function executeAction(action) {
         }
         await restoreWindow(hwnd);
         result.message = `Restored window ${hwnd}`;
+        break;
+      }
+
+      // ── Phase 3: Pattern-first UIA actions ──────────────────
+      case ACTION_TYPES.SET_VALUE: {
+        const uia = require('./ui-automation');
+        const svResult = await uia.setElementValue(
+          action.criteria || { text: action.text, automationId: action.automationId, controlType: action.controlType },
+          action.value
+        );
+        result = { ...result, ...svResult };
+        result.message = svResult.success
+          ? `Set value via ${svResult.method} on element`
+          : `Set value failed: ${svResult.error}`;
+        break;
+      }
+
+      case ACTION_TYPES.SCROLL_ELEMENT: {
+        const uia = require('./ui-automation');
+        const seResult = await uia.scrollElement(
+          action.criteria || { text: action.text, automationId: action.automationId, controlType: action.controlType },
+          { direction: action.direction || 'down', amount: action.amount ?? -1 }
+        );
+        result = { ...result, ...seResult };
+        result.message = seResult.success
+          ? `Scrolled ${action.direction || 'down'} via ${seResult.method}`
+          : `Scroll failed: ${seResult.error}`;
+        break;
+      }
+
+      case ACTION_TYPES.EXPAND_ELEMENT: {
+        const uia = require('./ui-automation');
+        const exResult = await uia.expandElement(
+          action.criteria || { text: action.text, automationId: action.automationId, controlType: action.controlType }
+        );
+        result = { ...result, ...exResult };
+        result.message = exResult.success
+          ? `Expanded element (${exResult.stateBefore} → ${exResult.stateAfter})`
+          : `Expand failed: ${exResult.error}`;
+        break;
+      }
+
+      case ACTION_TYPES.COLLAPSE_ELEMENT: {
+        const uia = require('./ui-automation');
+        const clResult = await uia.collapseElement(
+          action.criteria || { text: action.text, automationId: action.automationId, controlType: action.controlType }
+        );
+        result = { ...result, ...clResult };
+        result.message = clResult.success
+          ? `Collapsed element (${clResult.stateBefore} → ${clResult.stateAfter})`
+          : `Collapse failed: ${clResult.error}`;
+        break;
+      }
+
+      case ACTION_TYPES.GET_TEXT: {
+        const uia = require('./ui-automation');
+        const gtResult = await uia.getElementText(
+          action.criteria || { text: action.text, automationId: action.automationId, controlType: action.controlType }
+        );
+        result = { ...result, ...gtResult };
+        result.message = gtResult.success
+          ? `Got text via ${gtResult.method}: "${(gtResult.text || '').slice(0, 50)}"`
+          : `Get text failed: ${gtResult.error}`;
         break;
       }
         

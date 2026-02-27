@@ -452,6 +452,26 @@ console.log('\n\x1b[1m[15] Phase 2: element-from-point + stable identity\x1b[0m'
   const ecPath = path.join(ROOT, 'src', 'main', 'ui-automation', 'interactions', 'element-click.js');
   const ec = fs.readFileSync(ecPath, 'utf-8');
   assert('clickElement handles short pattern name format', ec.includes("'Invoke'"));
+
+  // system-automation.js integrates pattern-first ACTION_TYPES
+  const saContent = fs.readFileSync(path.join(ROOT, 'src', 'main', 'system-automation.js'), 'utf-8');
+  assert('ACTION_TYPES.SET_VALUE defined', saContent.includes("SET_VALUE: 'set_value'"));
+  assert('ACTION_TYPES.SCROLL_ELEMENT defined', saContent.includes("SCROLL_ELEMENT: 'scroll_element'"));
+  assert('ACTION_TYPES.EXPAND_ELEMENT defined', saContent.includes("EXPAND_ELEMENT: 'expand_element'"));
+  assert('ACTION_TYPES.COLLAPSE_ELEMENT defined', saContent.includes("COLLAPSE_ELEMENT: 'collapse_element'"));
+  assert('ACTION_TYPES.GET_TEXT defined', saContent.includes("GET_TEXT: 'get_text'"));
+  assert('executeAction handles SET_VALUE', saContent.includes('case ACTION_TYPES.SET_VALUE'));
+  assert('executeAction handles SCROLL_ELEMENT', saContent.includes('case ACTION_TYPES.SCROLL_ELEMENT'));
+  assert('executeAction handles EXPAND_ELEMENT', saContent.includes('case ACTION_TYPES.EXPAND_ELEMENT'));
+  assert('executeAction handles COLLAPSE_ELEMENT', saContent.includes('case ACTION_TYPES.COLLAPSE_ELEMENT'));
+  assert('executeAction handles GET_TEXT', saContent.includes('case ACTION_TYPES.GET_TEXT'));
+  assert('SET_VALUE delegates to uia.setElementValue', saContent.includes('uia.setElementValue'));
+  assert('SCROLL_ELEMENT delegates to uia.scrollElement', saContent.includes('uia.scrollElement'));
+
+  // scrollElement has mouse-wheel fallback
+  assert('scrollElement imports mouse moveMouse', pa.includes("moveMouse"));
+  assert('scrollElement imports mouse scroll', pa.includes("mouseWheelScroll"));
+  assert('scrollElement falls back to mouseWheel', pa.includes("method: 'mouseWheel'"));
 }
 
 // ── Cleanup & Summary ────────────────────────────────────────────────────
