@@ -161,6 +161,46 @@ console.log('\n\x1b[1m[6] Error handling\x1b[0m');
   assert('parse missing file → fails', !r.ok || r.out.includes('not found'));
 }
 
+// ── 7. Environment sanitization (ELECTRON_RUN_AS_NODE triple-layer) ──────
+console.log('\n\x1b[1m[7] Environment sanitization\x1b[0m');
+{
+  // Verify start.js spawner sanitizes ELECTRON_RUN_AS_NODE
+  const startContent = fs.readFileSync(path.join(ROOT, 'src', 'cli', 'commands', 'start.js'), 'utf-8');
+  assert('start.js deletes ELECTRON_RUN_AS_NODE', startContent.includes('delete env.ELECTRON_RUN_AS_NODE'));
+
+  // Verify scripts/start.js also sanitizes
+  const devStartContent = fs.readFileSync(path.join(ROOT, 'scripts', 'start.js'), 'utf-8');
+  assert('scripts/start.js deletes ELECTRON_RUN_AS_NODE', devStartContent.includes('delete env.ELECTRON_RUN_AS_NODE'));
+
+  // Verify main process self-cleans at boot
+  const mainContent = fs.readFileSync(path.join(ROOT, 'src', 'main', 'index.js'), 'utf-8');
+  assert('index.js self-cleans ELECTRON_RUN_AS_NODE', mainContent.includes('delete process.env.ELECTRON_RUN_AS_NODE'));
+
+  // Verify CLI start command clones env (not mutating process.env)
+  assert('start.js clones env before mutating', startContent.includes('{ ...process.env }'));
+}
+
+// ── 8. Session persistence paths ─────────────────────────────────────────
+console.log('\n\x1b[1m[8] Session persistence\x1b[0m');
+{
+  const mainContent = fs.readFileSync(path.join(ROOT, 'src', 'main', 'index.js'), 'utf-8');
+  const aiContent = fs.readFileSync(path.join(ROOT, 'src', 'main', 'ai-service.js'), 'utf-8');
+
+  // Both files use the same LIKU_HOME base
+  assert('index.js uses ~/.liku-cli', mainContent.includes("path.join(os.homedir(), '.liku-cli')"));
+  assert('ai-service.js uses ~/.liku-cli', aiContent.includes("path.join(os.homedir(), '.liku-cli')"));
+
+  // userData is persistent (not tmpdir)
+  assert('userData is under LIKU_HOME', mainContent.includes("path.join(LIKU_HOME, 'session')"));
+  assert('no tmpdir for userData', !mainContent.includes("os.tmpdir(), 'copilot-liku-electron-cache', 'user-data'"));
+
+  // Token lives in LIKU_HOME
+  assert('token file in LIKU_HOME', aiContent.includes("path.join(LIKU_HOME, 'copilot-token.json')"));
+
+  // Legacy token migration exists
+  assert('legacy token migration exists', aiContent.includes('Migrated token from legacy path'));
+}
+
 // ── Cleanup & Summary ────────────────────────────────────────────────────
 cleanup();
 // Also remove any screenshot artifacts from root
