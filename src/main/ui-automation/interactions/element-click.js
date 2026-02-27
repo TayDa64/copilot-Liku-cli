@@ -50,10 +50,10 @@ async function click(criteria, options = {}) {
     return { success: false, element: null, error: findResult?.error || 'Element not found' };
   }
   
-  // Calculate center point
+  // Calculate click point — prefer UIA clickPoint over bounds-center
   const bounds = element.bounds;
-  const x = bounds.x + bounds.width / 2;
-  const y = bounds.y + bounds.height / 2;
+  const x = element.clickPoint?.x ?? (bounds.x + bounds.width / 2);
+  const y = element.clickPoint?.y ?? (bounds.y + bounds.height / 2);
   
   // Focus window if needed
   if (focusWindow && element.windowHwnd) {
@@ -132,8 +132,8 @@ async function clickElement(element, options = {}) {
   }
   
   const bounds = element.bounds;
-  const centerX = bounds.x + bounds.width / 2;
-  const centerY = bounds.y + bounds.height / 2;
+  const centerX = element.clickPoint?.x ?? (bounds.x + bounds.width / 2);
+  const centerY = element.clickPoint?.y ?? (bounds.y + bounds.height / 2);
   
   // Strategy 1: Try Invoke pattern for buttons
   if (useInvoke && (element.patterns?.includes('InvokePatternIdentifiers.Pattern') || element.patterns?.includes('Invoke'))) {

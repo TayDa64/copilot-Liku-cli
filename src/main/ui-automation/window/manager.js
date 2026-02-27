@@ -311,6 +311,13 @@ async function minimizeWindow(target) {
     return { success: false };
   }
 
+  // WindowPattern capability check
+  const caps = await getWindowCapabilities(hwnd);
+  if (caps && !caps.canMinimize) {
+    log('minimizeWindow: WindowPattern reports CanMinimize=false', 'warn');
+    return { success: false, error: 'Window does not support minimize (WindowPattern.CanMinimize=false)' };
+  }
+
   const psScript = `
 Add-Type @'
 using System;
@@ -338,6 +345,13 @@ async function maximizeWindow(target) {
   const hwnd = resolved.hwnd;
   if (!hwnd) {
     return { success: false };
+  }
+
+  // WindowPattern capability check
+  const caps = await getWindowCapabilities(hwnd);
+  if (caps && !caps.canMaximize) {
+    log('maximizeWindow: WindowPattern reports CanMaximize=false', 'warn');
+    return { success: false, error: 'Window does not support maximize (WindowPattern.CanMaximize=false)' };
   }
 
   const psScript = `
@@ -385,6 +399,45 @@ public class RestoreHelper {
   return { success: result.stdout.includes('restored') };
 }
 
+/**
+ * Query WindowPattern capabilities (CanMinimize, CanMaximize) for a window.
+ * Returns { canMinimize, canMaximize } or null if WindowPattern unavailable.
+ *
+ * @param {number} hwnd - Native window handle
+ * @returns {Promise<{canMinimize: boolean, canMaximize: boolean} | null>}
+ */
+async function getWindowCapabilities(hwnd) {
+  if (!hwnd) return null;
+  const psScript = `
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
+try {
+  $el = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]::new(${hwnd}))
+  $hasWP = [bool]$el.GetCurrentPropertyValue([System.Windows.Automation.AutomationElement]::IsWindowPatternAvailableProperty)
+  if (-not $hasWP) { Write-Output '{"available":false}'; exit }
+  $wp = $el.GetCurrentPattern([System.Windows.Automation.WindowPattern]::Pattern)
+  $info = $wp.Current
+  @{
+    available = $true
+    canMinimize = $info.CanMinimize
+    canMaximize = $info.CanMaximize
+    isModal = $info.IsModal
+    windowState = $info.WindowVisualState.ToString()
+  } | ConvertTo-Json -Compress
+} catch {
+  Write-Output '{"available":false}'
+}
+`;
+  try {
+    const result = await executePowerShellScript(psScript);
+    const parsed = JSON.parse(result.stdout.trim());
+    if (!parsed.available) return null;
+    return { canMinimize: parsed.canMinimize, canMaximize: parsed.canMaximize };
+  } catch {
+    return null;
+  }
+}
+
 module.exports = {
   getActiveWindow,
   findWindows,
@@ -395,4 +448,5 @@ module.exports = {
   minimizeWindow,
   maximizeWindow,
   restoreWindow,
+  getWindowCapabilities,
 };

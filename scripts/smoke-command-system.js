@@ -567,6 +567,31 @@ console.log('\n\x1b[1m[15] Phase 2: element-from-point + stable identity\x1b[0m'
   assert('index.js calls stopEventMode on inspect disable', mainJs.includes('stopEventMode'));
 }
 
+// ── [18] Gap Fixes ───────────────────────────────────────────────────────
+{
+  console.log('\n\x1b[1m[18] Gap Fixes (G1, G2, G3)\x1b[0m');
+
+  // G1 — clickPoint preferred over bounds-center in element-click.js
+  const elemClick = fs.readFileSync(path.join(ROOT, 'src', 'main', 'ui-automation', 'interactions', 'element-click.js'), 'utf-8');
+  assert('click() prefers element.clickPoint.x', elemClick.includes('element.clickPoint?.x ?? (bounds.x'));
+  assert('click() prefers element.clickPoint.y', elemClick.includes('element.clickPoint?.y ?? (bounds.y'));
+  assert('clickElement() prefers element.clickPoint.x', (elemClick.match(/element\.clickPoint\?\.\s*x/g) || []).length >= 2);
+  assert('clickElement() prefers element.clickPoint.y', (elemClick.match(/element\.clickPoint\?\.\s*y/g) || []).length >= 2);
+
+  // G2 — capture → detectRegions pipeline wired in index.js
+  const mainJs2 = fs.readFileSync(path.join(ROOT, 'src', 'main', 'index.js'), 'utf-8');
+  assert('captureRegionInternal calls detectRegions after storeVisualContext', mainJs2.includes('inspectService.detectRegions({ screenshot: imageData })'));
+  assert('Detected regions pushed to overlay via update-inspect-regions', mainJs2.includes("action: 'update-inspect-regions'"));
+
+  // G3 — WindowPattern CanMinimize/CanMaximize checks
+  const winMgr = fs.readFileSync(path.join(ROOT, 'src', 'main', 'ui-automation', 'window', 'manager.js'), 'utf-8');
+  assert('getWindowCapabilities function exists', winMgr.includes('async function getWindowCapabilities'));
+  assert('minimizeWindow checks CanMinimize', winMgr.includes('caps.canMinimize'));
+  assert('maximizeWindow checks CanMaximize', winMgr.includes('caps.canMaximize'));
+  assert('WindowPattern queried via UIA', winMgr.includes('WindowPattern'));
+  assert('getWindowCapabilities exported', winMgr.includes('getWindowCapabilities'));
+}
+
 // ── Cleanup & Summary ────────────────────────────────────────────────────
 cleanup();
 // Also remove any screenshot artifacts from root

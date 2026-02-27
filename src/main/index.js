@@ -1997,6 +1997,26 @@ function setupIPC() {
         }
 
         storeVisualContext(imageData);
+
+        // Phase 0 G2: auto-detect regions from the captured frame and push to overlay
+        inspectService.detectRegions({ screenshot: imageData }).then(results => {
+          if (results.regions?.length > 0 && overlayWindow && !overlayWindow.isDestroyed()) {
+            const sf = screen.getPrimaryDisplay().scaleFactor || 1;
+            const regions = denormalizeRegionsForOverlay(results.regions.map(r => ({
+              bounds: r.bounds,
+              label: r.label || r.role || 'Region',
+              type: r.role,
+              id: r.id
+            })), sf);
+            overlayWindow.webContents.send('overlay-command', {
+              action: 'update-inspect-regions',
+              regions
+            });
+          }
+        }).catch(err => {
+          console.warn('[CAPTURE] Post-capture region detection failed:', err.message);
+        });
+
         return imageData;
       }
     } finally {
