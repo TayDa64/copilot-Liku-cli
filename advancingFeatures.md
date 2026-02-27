@@ -1,5 +1,22 @@
 # Advancing Features (PDF-grounded Implementation Plan)
 
+## Coordinate Contract (Phase 1 — enforced)
+
+All coordinates crossing an IPC boundary follow this contract:
+
+| Direction | Source Space | Conversion | Target Space |
+|-----------|-------------|-----------|-------------|
+| Overlay → Main (`dot-selected`) | CSS/DIP | `× scaleFactor` | physical screen pixels |
+| Main → Overlay (regions) | physical screen pixels | `÷ scaleFactor` | CSS/DIP |
+| Main → Click injection | physical screen pixels | (none — native) | physical screen pixels |
+| UIA bounds (from .NET host) | physical screen pixels | (none — native) | physical screen pixels |
+
+- `scaleFactor` is `screen.getPrimaryDisplay().scaleFactor` (e.g. 1.25 at 125% DPI).
+- `denormalizeRegionsForOverlay(regions, sf)` in `index.js` handles all Main → Overlay conversions.
+- `dot-selected` handler in `index.js` adds `physicalX`/`physicalY` to every selection event.
+- Region bounds stored in `inspectService` are always in **physical screen pixels**.
+- The overlay renderer operates entirely in CSS/DIP; it never needs to know about physical pixels.
+
 ## Goal
 Deliver a DevTools-like overlay + automation loop where:
 - The overlay stays up while you keep interacting with background apps.

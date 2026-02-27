@@ -119,6 +119,56 @@ function normalizeBounds(bounds) {
   return { x, y, width, height };
 }
 
+// ===== COORDINATE CONTRACT (Phase 1) =====
+// UIA + click injection use physical screen pixels.
+// Overlay renderer uses CSS/DIP pixels.
+// scaleFactor converts between them: physical = CSS * sf, CSS = physical / sf.
+
+/**
+ * Compute the virtual-desktop bounding box (union of all displays).
+ * Returns { width, height } suitable for desktopCapturer thumbnailSize,
+ * and { x, y } for the top-left origin (can be negative on multi-monitor setups).
+ */
+function getVirtualDesktopBounds() {
+  const displays = screen.getAllDisplays();
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const d of displays) {
+    const { x, y, width, height } = d.bounds;
+    if (x < minX) minX = x;
+    if (y < minY) minY = y;
+    if (x + width > maxX) maxX = x + width;
+    if (y + height > maxY) maxY = y + height;
+  }
+  return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+}
+
+/** Convenience: just the size (for desktopCapturer thumbnailSize). */
+function getVirtualDesktopSize() {
+  const { width, height } = getVirtualDesktopBounds();
+  return { width, height };
+}
+
+/**
+ * Convert UIA physical-pixel regions to CSS/DIP for the overlay renderer.
+ * This is the single denormalization point — all regions going to the overlay
+ * pass through here.
+ */
+function denormalizeRegionsForOverlay(regions, scaleFactor) {
+  if (!scaleFactor || scaleFactor === 1) return regions;
+  return regions.map(r => {
+    const out = { ...r };
+    if (r.bounds) {
+      out.bounds = {
+        x: Math.round(r.bounds.x / scaleFactor),
+        y: Math.round(r.bounds.y / scaleFactor),
+        width: Math.round(r.bounds.width / scaleFactor),
+        height: Math.round(r.bounds.height / scaleFactor)
+      };
+    }
+    return out;
+  });
+}
+
 function flattenUITree(node, output = [], depth = 0) {
   if (!node || depth > 6 || output.length >= 300) {
     return output;
@@ -226,12 +276,14 @@ function initUIWatcher() {
 
       // 2. Transform elements for the overlay renderer
       // Expected format: { bounds: {x,y,width,height}, label: "Name" }
-      const regions = elements.map(el => ({
+      // Denormalize physical→CSS so overlay hit-testing works correctly at any DPI
+      const sf = screen.getPrimaryDisplay().scaleFactor || 1;
+      const regions = denormalizeRegionsForOverlay(elements.map(el => ({
         bounds: el.bounds,
         label: el.name || el.type || 'Element',
         type: el.type,
         id: el.id
-      }));
+      })), sf);
 
       overlayWindow.webContents.send('overlay-command', { 
         action: 'update-inspect-regions', 
@@ -271,11 +323,13 @@ function getWindowDebugState() {
  * Create the transparent overlay window that floats above all other windows
  */
 function createOverlayWindow() {
-  const { width, height } = screen.getPrimaryDisplay().bounds;
+  const vd = getVirtualDesktopBounds();
   
   overlayWindow = new BrowserWindow({
-    width,
-    height,
+    x: vd.x,
+    y: vd.y,
+    width: vd.width,
+    height: vd.height,
     frame: false,
     transparent: true,
     alwaysOnTop: true,
@@ -299,10 +353,9 @@ function createOverlayWindow() {
     overlayWindow.setAlwaysOnTop(true, 'screen-saver');
     overlayWindow.setFullScreen(true);
   } else {
-    // On Windows: Use maximize instead of fullscreen to avoid interfering with other windows
+    // On Windows: span the full virtual desktop (all monitors)
     overlayWindow.setAlwaysOnTop(true, 'screen-saver');
-    overlayWindow.maximize();
-    overlayWindow.setPosition(0, 0);
+    overlayWindow.setBounds({ x: vd.x, y: vd.y, width: vd.width, height: vd.height });
   }
 
   // Start in click-through mode
@@ -821,10 +874,32 @@ function setupIPC() {
   // Handle dot selection from overlay
   ipcMain.on('dot-selected', (event, data) => {
     console.log('Dot selected:', data);
-    
+
+    // Phase 1 - Coordinate conversion: overlay sends CSS/DIP coords,
+    // but actions need physical screen pixels.
+    const sf = screen.getPrimaryDisplay().scaleFactor || 1;
+    if (sf !== 1 && data.x != null && data.y != null) {
+      data.physicalX = Math.round(data.x * sf);
+      data.physicalY = Math.round(data.y * sf);
+    } else {
+      data.physicalX = data.x;
+      data.physicalY = data.y;
+    }
+    data.scaleFactor = sf;
+
     // Forward to chat window
     if (chatWindow) {
       chatWindow.webContents.send('dot-selected', data);
+    }
+
+    // Phase 0 - ROI capture: auto-capture a tight region around the selected point
+    if (!data.cancelled && data.physicalX != null && data.physicalY != null) {
+      const roiSize = 300; // px in physical space
+      const rx = Math.max(0, data.physicalX - roiSize / 2);
+      const ry = Math.max(0, data.physicalY - roiSize / 2);
+      captureRegionInternal(rx, ry, roiSize, roiSize).catch(err =>
+        console.warn('[ROI] Auto-capture on dot-selected failed:', err.message)
+      );
     }
 
     // Switch back to passive mode after selection (unless cancelled)
@@ -1804,10 +1879,7 @@ function setupIPC() {
 
       const sources = await desktopCapturer.getSources({
         types: ['screen'],
-        thumbnailSize: { 
-          width: screen.getPrimaryDisplay().bounds.width,
-          height: screen.getPrimaryDisplay().bounds.height
-        }
+        thumbnailSize: getVirtualDesktopSize()
       });
 
       // Restore overlay after capture
@@ -1855,11 +1927,13 @@ function setupIPC() {
     }
   });
 
-  // Capture a specific region
-  ipcMain.on('capture-region', async (event, { x, y, width, height }) => {
+  /**
+   * Internal helper: capture a screen region (physical coords) and store as visual context.
+   * Reused by the IPC handler and auto-ROI on dot-selected.
+   */
+  async function captureRegionInternal(x, y, width, height) {
+    const wasOverlayVisible = overlayWindow && !overlayWindow.isDestroyed() && overlayWindow.isVisible();
     try {
-      // Hide overlay BEFORE capturing
-      const wasOverlayVisible = overlayWindow && !overlayWindow.isDestroyed() && overlayWindow.isVisible();
       if (wasOverlayVisible) {
         overlayWindow.hide();
         await new Promise(resolve => setTimeout(resolve, 50));
@@ -1867,22 +1941,13 @@ function setupIPC() {
 
       const sources = await desktopCapturer.getSources({
         types: ['screen'],
-        thumbnailSize: { 
-          width: screen.getPrimaryDisplay().bounds.width,
-          height: screen.getPrimaryDisplay().bounds.height
-        }
+        thumbnailSize: getVirtualDesktopSize()
       });
-
-      // Restore overlay after capture
-      if (wasOverlayVisible && overlayWindow) {
-        overlayWindow.show();
-      }
 
       if (sources.length > 0) {
         const primarySource = sources[0];
         const thumbnail = primarySource.thumbnail;
-        
-        // Crop to region
+
         const cropped = thumbnail.crop({
           x: Math.max(0, x),
           y: Math.max(0, y),
@@ -1905,13 +1970,22 @@ function setupIPC() {
         }
 
         storeVisualContext(imageData);
+        return imageData;
       }
-    } catch (error) {
-      console.error('Region capture failed:', error);
-      // Ensure overlay is restored on error
-      if (overlayWindow && !overlayWindow.isVisible()) {
+    } finally {
+      if (wasOverlayVisible && overlayWindow && !overlayWindow.isDestroyed()) {
         overlayWindow.show();
       }
+    }
+    return null;
+  }
+
+  // Capture a specific region (IPC entry point)
+  ipcMain.on('capture-region', async (event, { x, y, width, height }) => {
+    try {
+      await captureRegionInternal(x, y, width, height);
+    } catch (error) {
+      console.error('Region capture failed:', error);
     }
   });
 
@@ -2279,6 +2353,42 @@ function setupIPC() {
     }
     const analysis = await visualAwareness.analyzeScreen(latestContext, options);
     
+    // Phase 0 item 4: pipe analysis results into inspect regions → overlay
+    try {
+      if (analysis.uiElements && analysis.uiElements.elements) {
+        inspectService.updateRegions(
+          analysis.uiElements.elements.map(e => ({
+            label: e.Name || e.ClassName || '',
+            role: e.ControlType ? e.ControlType.replace('ControlType.', '') : 'element',
+            bounds: e.Bounds || { x: 0, y: 0, width: 0, height: 0 },
+            confidence: e.IsEnabled ? 0.9 : 0.6,
+            clickPoint: e.ClickablePoint || null
+          })),
+          'accessibility'
+        );
+      }
+      if (analysis.ocr && analysis.ocr.text && !analysis.ocr.error) {
+        inspectService.updateRegions([{
+          label: 'OCR text content',
+          role: 'text',
+          bounds: { x: 0, y: 0, width: latestContext.width || 0, height: latestContext.height || 0 },
+          text: analysis.ocr.text,
+          confidence: 0.7
+        }], 'ocr');
+      }
+      // Push merged regions to overlay
+      const mergedRegions = inspectService.getRegions();
+      if (overlayWindow && !overlayWindow.isDestroyed()) {
+        const sf = screen.getPrimaryDisplay().scaleFactor || 1;
+        overlayWindow.webContents.send('overlay-command', {
+          action: 'update-inspect-regions',
+          regions: denormalizeRegionsForOverlay(mergedRegions, sf)
+        });
+      }
+    } catch (regionErr) {
+      console.warn('[analyze-screen] Failed to pipe regions:', regionErr.message);
+    }
+
     // Send analysis to chat window
     if (chatWindow) {
       chatWindow.webContents.send('screen-analysis', analysis);
@@ -2552,7 +2662,11 @@ app.whenReady().then(() => {
     uiWatcher.on('poll-complete', (data) => {
       if (overlayWindow && !overlayWindow.isDestroyed()) {
         const cachedRegions = getCachedUIProviderRegions();
-        const regions = cachedRegions || data.elements.map(mapWatcherElementToRegion);
+        const rawRegions = cachedRegions || data.elements.map(mapWatcherElementToRegion);
+        
+        // Denormalize physical→CSS for overlay rendering/hit-testing
+        const sf = screen.getPrimaryDisplay().scaleFactor || 1;
+        const regions = denormalizeRegionsForOverlay(rawRegions, sf);
         
         // Update overlay
         overlayWindow.webContents.send('overlay-command', { 

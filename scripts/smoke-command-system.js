@@ -222,6 +222,75 @@ console.log('\n\x1b[1m[9] Adaptive UIA polling\x1b[0m');
   assert('walk time warning logged', mainContent.includes('Tree walk took'));
 }
 
+// ── 10. Phase 0 completion: ROI capture + analyzeScreen → regions ────────
+console.log('\n\x1b[1m[10] Phase 0 completion (ROI + analyze→regions)\x1b[0m');
+{
+  const mainContent = fs.readFileSync(path.join(ROOT, 'src', 'main', 'index.js'), 'utf-8');
+
+  // ROI auto-capture on dot-selected
+  assert('captureRegionInternal helper exists', mainContent.includes('async function captureRegionInternal'));
+  assert('dot-selected triggers ROI capture', mainContent.includes('captureRegionInternal(rx, ry, roiSize, roiSize)'));
+  assert('capture-region IPC delegates to helper', mainContent.includes('await captureRegionInternal(x, y, width, height)'));
+
+  // analyzeScreen pipes into inspectService
+  assert('analyze-screen feeds accessibility regions', mainContent.includes("inspectService.updateRegions(") && mainContent.includes("'accessibility'"));
+  assert('analyze-screen feeds OCR regions', mainContent.includes("'ocr'") && mainContent.includes('OCR text content'));
+  assert('analyze-screen pushes merged regions to overlay', mainContent.includes('denormalizeRegionsForOverlay(mergedRegions'));
+}
+
+// ── 11. Coordinate contract (Phase 1) ────────────────────────────────────
+console.log('\n\x1b[1m[11] Coordinate contract (Phase 1)\x1b[0m');
+{
+  const mainContent = fs.readFileSync(path.join(ROOT, 'src', 'main', 'index.js'), 'utf-8');
+
+  // dot-selected adds physicalX/physicalY
+  assert('dot-selected converts CSS→physical', mainContent.includes('data.physicalX = Math.round(data.x * sf)'));
+  assert('dot-selected stores scaleFactor', mainContent.includes('data.scaleFactor = sf'));
+
+  // denormalizeRegionsForOverlay helper
+  assert('denormalizeRegionsForOverlay defined', mainContent.includes('function denormalizeRegionsForOverlay'));
+  assert('denormalize divides by scaleFactor', mainContent.includes('r.bounds.x / scaleFactor'));
+
+  // getVirtualDesktopBounds helper
+  assert('getVirtualDesktopBounds defined', mainContent.includes('function getVirtualDesktopBounds'));
+  assert('uses getAllDisplays()', mainContent.includes('screen.getAllDisplays()'));
+
+  // All region push paths denormalize
+  assert('initUIWatcher denormalizes regions', mainContent.includes('denormalizeRegionsForOverlay(elements.map'));
+  assert('poll-complete denormalizes regions', mainContent.includes('denormalizeRegionsForOverlay(rawRegions, sf)'));
+
+  // Capture uses virtual desktop size
+  assert('capture-screen uses virtual desktop size', mainContent.includes('thumbnailSize: getVirtualDesktopSize()'));
+}
+
+// ── 12. Multi-monitor overlay (Phase 1) ──────────────────────────────────
+console.log('\n\x1b[1m[12] Multi-monitor overlay (Phase 1)\x1b[0m');
+{
+  const mainContent = fs.readFileSync(path.join(ROOT, 'src', 'main', 'index.js'), 'utf-8');
+
+  // Overlay spans virtual desktop
+  assert('overlay uses getVirtualDesktopBounds()', mainContent.includes('const vd = getVirtualDesktopBounds()'));
+  assert('overlay x/y set from virtual desktop', mainContent.includes('x: vd.x') && mainContent.includes('y: vd.y'));
+  assert('Windows uses setBounds for multi-monitor', mainContent.includes('overlayWindow.setBounds({ x: vd.x'));
+
+  // Contract documented in advancingFeatures.md
+  const afContent = fs.readFileSync(path.join(ROOT, 'advancingFeatures.md'), 'utf-8');
+  assert('coordinate contract documented', afContent.includes('## Coordinate Contract (Phase 1'));
+  assert('contract documents scaleFactor', afContent.includes('scaleFactor'));
+  assert('contract documents denormalizeRegionsForOverlay', afContent.includes('denormalizeRegionsForOverlay'));
+}
+
+// ── 13. inspect-types coordinate helpers ─────────────────────────────────
+console.log('\n\x1b[1m[13] inspect-types coordinate helpers\x1b[0m');
+{
+  const itContent = fs.readFileSync(path.join(ROOT, 'src', 'shared', 'inspect-types.js'), 'utf-8');
+
+  assert('normalizeCoordinates exists', itContent.includes('function normalizeCoordinates'));
+  assert('denormalizeCoordinates exists', itContent.includes('function denormalizeCoordinates'));
+  assert('normalizeCoordinates multiplies by scaleFactor', itContent.includes('x * scaleFactor'));
+  assert('denormalizeCoordinates divides by scaleFactor', itContent.includes('x / scaleFactor'));
+}
+
 // ── Cleanup & Summary ────────────────────────────────────────────────────
 cleanup();
 // Also remove any screenshot artifacts from root
