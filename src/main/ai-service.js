@@ -207,8 +207,9 @@ let currentModelMetadata = {
   lastUpdated: new Date().toISOString()
 };
 
-// Token persistence path
-const TOKEN_FILE = path.join(process.env.APPDATA || process.env.HOME || '.', 'copilot-agent', 'copilot-token.json');
+// Token persistence path — lives inside ~/.liku-cli/ alongside Electron userData
+const LIKU_HOME = path.join(os.homedir(), '.liku-cli');
+const TOKEN_FILE = path.join(LIKU_HOME, 'copilot-token.json');
 
 // OAuth state
 let oauthInProgress = false;
@@ -626,10 +627,26 @@ ${inspectContext.regions.slice(0, 20).map((r, i) =>
 // ===== GITHUB COPILOT OAUTH =====
 
 /**
- * Load saved Copilot token from disk
+ * Load saved Copilot token from disk.
+ * On first run after the path migration, copies the token from the
+ * legacy location (%APPDATA%/copilot-agent/) to ~/.liku-cli/.
  */
 function loadCopilotToken() {
   try {
+    // Migrate from legacy path if new location is empty
+    if (!fs.existsSync(TOKEN_FILE)) {
+      const legacyPath = path.join(
+        process.env.APPDATA || process.env.HOME || '.',
+        'copilot-agent', 'copilot-token.json'
+      );
+      if (fs.existsSync(legacyPath)) {
+        const dir = path.dirname(TOKEN_FILE);
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        fs.copyFileSync(legacyPath, TOKEN_FILE);
+        console.log('[COPILOT] Migrated token from legacy path');
+      }
+    }
+
     if (fs.existsSync(TOKEN_FILE)) {
       const data = JSON.parse(fs.readFileSync(TOKEN_FILE, 'utf8'));
       if (data.access_token) {

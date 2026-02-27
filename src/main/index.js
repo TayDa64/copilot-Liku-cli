@@ -37,25 +37,28 @@ const inspectService = require('./inspect-service.js');
 const { UIProvider } = require('./ui-automation/core/ui-provider.js');
 
 
-// Ensure caches land in a writable location to avoid Windows permission issues
-const cacheRoot = path.join(os.tmpdir(), 'copilot-liku-electron-cache');
+// Persistent app data lives in ~/.liku-cli/ so sessions, tokens, and
+// preferences survive across reboots.  Ephemeral caches stay in tempdir.
+const LIKU_HOME = path.join(os.homedir(), '.liku-cli');
+const userDataPath = path.join(LIKU_HOME, 'session');
+const cacheRoot = path.join(os.tmpdir(), 'copilot-liku-cache');
 const mediaCache = path.join(cacheRoot, 'media');
-const userDataPath = path.join(cacheRoot, 'user-data');
 
 try {
+  fs.mkdirSync(userDataPath, { recursive: true });
   fs.mkdirSync(cacheRoot, { recursive: true });
   fs.mkdirSync(mediaCache, { recursive: true });
-  fs.mkdirSync(userDataPath, { recursive: true });
 
-  // Force Electron to use temp-backed storage to avoid permission issues on locked-down drives
+  // Persistent storage — Electron session, localStorage, cookies, prefs
   app.setPath('userData', userDataPath);
+  // Ephemeral cache — OK to be temp-backed
   app.setPath('cache', cacheRoot);
 
   app.commandLine.appendSwitch('disk-cache-dir', cacheRoot);
   app.commandLine.appendSwitch('media-cache-dir', mediaCache);
   app.commandLine.appendSwitch('disable-gpu-shader-disk-cache');
 } catch (error) {
-  console.warn('Unable to create cache directories; continuing with defaults.', error);
+  console.warn('Unable to create data directories; continuing with defaults.', error);
 }
 
 // Keep references to windows to prevent garbage collection
@@ -2180,9 +2183,9 @@ function setupIPC() {
     
     if (currentProvider === 'copilot') {
       // Check if Copilot token exists
-      const tokenPath = require('path').join(app.getPath('appData'), 'copilot-agent', 'copilot-token.json');
+      const tokenPath = path.join(LIKU_HOME, 'copilot-token.json');
       try {
-        if (require('fs').existsSync(tokenPath)) {
+        if (fs.existsSync(tokenPath)) {
           authStatus = 'connected';
         }
       } catch (e) {
@@ -2569,8 +2572,8 @@ app.whenReady().then(() => {
   setTimeout(() => {
     if (chatWindow && !chatWindow.isDestroyed()) {
       const status = aiService.getStatus();
-      const tokenPath = require('path').join(app.getPath('appData'), 'copilot-agent', 'copilot-token.json');
-      const hasCopilotToken = require('fs').existsSync(tokenPath);
+      const tokenPath = path.join(LIKU_HOME, 'copilot-token.json');
+      const hasCopilotToken = fs.existsSync(tokenPath);
       
       chatWindow.webContents.send('auth-status', {
         provider: status.provider,
