@@ -88,6 +88,7 @@ const contextCount = document.getElementById('context-count');
 const providerSelect = document.getElementById('provider-select');
 const modelSelect = document.getElementById('model-select');
 const authStatus = document.getElementById('auth-status');
+const loginBtn = document.getElementById('login-btn');
 const tokenCount = document.getElementById('token-count');
 
 function applyElectronAppRegions() {
@@ -126,6 +127,11 @@ function updateAuthStatus(status, provider) {
   if (!authStatus) return;
   
   authStatus.className = 'status-badge';
+  
+  // Show login button when disconnected, hide when connected
+  if (loginBtn) {
+    loginBtn.classList.toggle('hidden', status === 'connected');
+  }
   
   switch (status) {
     case 'connected':
@@ -226,7 +232,7 @@ const AGENT_TRIGGERS = {
   research: /\b(research\s+agent|spawn.*research|investigate\s+this|gather\s+info(?:rmation)?)\b/i,
   verify: /\b(verify\s+agent|spawn.*verif|validate\s+this|verification\s+agent)\b/i,
   build: /\b(build\s+agent|spawn.*build|builder\s+agent|code\s+agent)\b/i,
-  produce: /(^\\s*\\/produce\\b)|\\b(agentic\\s+producer|producer\\s+agent)\\b/i,
+  produce: /(^\s*\/produce\b)|\b(agentic\s+producer|producer\s+agent)\b/i,
   orchestrate: /\b(spawn\s+(?:a\s+)?(?:sub)?agent|orchestrat|multi-?agent|agent\s+system|coordinate\s+agents?)\b/i
 };
 
@@ -274,7 +280,7 @@ async function routeToAgent(text, agentType) {
     let result;
     switch (agentType) {
       case 'produce': {
-        const cleaned = text.replace(/^\\s*\\/produce\\b\\s*/i, '');
+        const cleaned = text.replace(/^\s*\/produce\b\s*/i, '');
         const parsed = parseProduceOptions(cleaned || text);
         const finalPrompt = parsed.prompt || (cleaned || text);
         const referenceUrl = extractFirstUrl(finalPrompt);
@@ -431,6 +437,28 @@ contextHeader.addEventListener('click', toggleContextPanel);
 if (providerSelect) {
   providerSelect.addEventListener('change', (e) => {
     setProvider(e.target.value);
+  });
+}
+
+// Login button
+if (loginBtn) {
+  loginBtn.addEventListener('click', () => {
+    window.electronAPI.sendMessage('/login');
+    addMessage('/login', 'user');
+  });
+}
+
+// Auth status badge click - also triggers login when disconnected
+if (authStatus) {
+  authStatus.style.cursor = 'pointer';
+  authStatus.addEventListener('click', () => {
+    if (authStatus.classList.contains('disconnected')) {
+      window.electronAPI.sendMessage('/login');
+      addMessage('/login', 'user');
+    } else {
+      window.electronAPI.sendMessage('/status');
+      addMessage('/status', 'user');
+    }
   });
 }
 

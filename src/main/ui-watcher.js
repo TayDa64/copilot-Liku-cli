@@ -26,6 +26,15 @@ const MODE = {
   FALLBACK: 'FALLBACK'       // polling after event failure, auto-retry after 30s
 };
 
+// Sensitive process denylist — when the active window belongs to one of these,
+// omit element names/text from AI context to prevent prompt leakage.
+const REDACTED_PROCESSES = new Set([
+  'keepassxc', 'keepass', '1password', 'bitwarden', 'lastpass', 'dashlane',
+  'enpass', 'roboform', 'nordpass',                    // password managers
+  'mstsc', 'vmconnect', 'putty', 'winscp',             // remote/admin tools
+  'powershell_ise',                                     // admin consoles
+]);
+
 class UIWatcher extends EventEmitter {
   constructor(options = {}) {
     super();
@@ -438,12 +447,24 @@ $results | ConvertTo-Json -Depth 4 -Compress
     const { elements, activeWindow, lastUpdate } = this.cache;
     const age = Date.now() - lastUpdate;
     
+    // Redaction: if the focused window belongs to a sensitive process,
+    // suppress element names to avoid leaking passwords/secrets to the LLM.
+    const processLower = (activeWindow?.processName || '').toLowerCase();
+    const redacted = REDACTED_PROCESSES.has(processLower);
+    
     // Build context string with window hierarchy
     let context = `\n## Live UI State (${age}ms ago)\n`;
     
     if (activeWindow) {
-      context += `**Focused Window**: ${activeWindow.title || 'Unknown'} (${activeWindow.processName})\n`;
+      const title = redacted ? '[REDACTED — sensitive application]' : (activeWindow.title || 'Unknown');
+      context += `**Focused Window**: ${title} (${activeWindow.processName})\n`;
       context += `**Cursor**: (${activeWindow.bounds.x}, ${activeWindow.bounds.y}) ${activeWindow.bounds.width}x${activeWindow.bounds.height}\n\n`;
+    }
+    
+    if (redacted) {
+      context += `**⚠ Privacy mode active** — element names hidden because the focused application handles sensitive data.\n`;
+      context += `You can still take screenshots or wait for the user to switch windows.\n`;
+      return context;
     }
     
     context += `**Visible Context** (${elements.length} elements detected):\n`;

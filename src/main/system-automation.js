@@ -1974,10 +1974,10 @@ function parseAIActions(aiResponse) {
   try {
     return JSON.parse(aiResponse);
   } catch (e) {
-    // Not JSON - return null
+    // Not JSON - continue
   }
   
-  // Try to find inline JSON object
+  // Try to find inline JSON object with actions array
   const inlineMatch = aiResponse.match(/\{[\s\S]*"actions"[\s\S]*\}/);
   if (inlineMatch) {
     try {
@@ -1987,7 +1987,90 @@ function parseAIActions(aiResponse) {
     }
   }
   
+  // Fallback: extract actions from natural language descriptions
+  // This handles cases where AI says "I'll click X at (500, 300)" without JSON
+  const nlActions = parseNaturalLanguageActions(aiResponse);
+  if (nlActions && nlActions.actions.length > 0) {
+    console.log('[AUTOMATION] Extracted', nlActions.actions.length, 'action(s) from natural language');
+    return nlActions;
+  }
+  
   return null;
+}
+
+/**
+ * Parse actions from natural language AI responses as a fallback.
+ * Handles patterns like "click at (500, 300)" or "type 'hello'" in prose.
+ */
+function parseNaturalLanguageActions(text) {
+  const actions = [];
+  const lines = text.split('\n');
+  
+  for (const line of lines) {
+    const lower = line.toLowerCase();
+    
+    // Match "click at (x, y)" or "click (x, y)" or "click at coordinates (x, y)"
+    const clickMatch = lower.match(/\b(?:click|tap|press)\b.*?\(\s*(\d+)\s*,\s*(\d+)\s*\)/);
+    if (clickMatch) {
+      actions.push({ type: 'click', x: parseInt(clickMatch[1]), y: parseInt(clickMatch[2]), reason: line.trim() });
+      continue;
+    }
+    
+    // Match "double-click at (x, y)"
+    const dblClickMatch = lower.match(/\bdouble[- ]?click\b.*?\(\s*(\d+)\s*,\s*(\d+)\s*\)/);
+    if (dblClickMatch) {
+      actions.push({ type: 'double_click', x: parseInt(dblClickMatch[1]), y: parseInt(dblClickMatch[2]), reason: line.trim() });
+      continue;
+    }
+    
+    // Match "right-click at (x, y)"
+    const rightClickMatch = lower.match(/\bright[- ]?click\b.*?\(\s*(\d+)\s*,\s*(\d+)\s*\)/);
+    if (rightClickMatch) {
+      actions.push({ type: 'right_click', x: parseInt(rightClickMatch[1]), y: parseInt(rightClickMatch[2]), reason: line.trim() });
+      continue;
+    }
+    
+    // Match 'type "text"' or "type 'text'" 
+    const typeMatch = line.match(/\btype\b.*?["']([^"']+)["']/i);
+    if (typeMatch && !lower.includes('action type')) {
+      actions.push({ type: 'type', text: typeMatch[1], reason: line.trim() });
+      continue;
+    }
+    
+    // Match "press Enter" or "press Ctrl+C"
+    const keyMatch = lower.match(/\bpress\b\s+([\w+]+(?:\+[\w+]+)*)/);
+    if (keyMatch && !clickMatch) {
+      const key = keyMatch[1].toLowerCase();
+      // Only match plausible key combos
+      if (/^(enter|escape|tab|space|backspace|delete|home|end|up|down|left|right|f\d+|ctrl|alt|shift|win|cmd|super)/.test(key)) {
+        actions.push({ type: 'key', key: key, reason: line.trim() });
+        continue;
+      }
+    }
+    
+    // Match "scroll down" or "scroll up 5 lines"
+    const scrollMatch = lower.match(/\bscroll\s+(up|down)(?:\s+(\d+))?\b/);
+    if (scrollMatch) {
+      actions.push({ type: 'scroll', direction: scrollMatch[1], amount: parseInt(scrollMatch[2]) || 3, reason: line.trim() });
+      continue;
+    }
+
+    // Match "click_element" / "click on the X button" pattern
+    const clickElementMatch = line.match(/\bclick\s+(?:on\s+)?(?:the\s+)?["']([^"']+)["']\s*button/i) ||
+                               line.match(/\bclick\s+(?:on\s+)?(?:the\s+)?["']([^"']+)["']/i);
+    if (clickElementMatch && !clickMatch) {
+      actions.push({ type: 'click_element', text: clickElementMatch[1], reason: line.trim() });
+      continue;
+    }
+  }
+  
+  if (actions.length === 0) return null;
+  
+  return {
+    thought: 'Actions extracted from AI natural language response',
+    actions,
+    verification: 'Check that the intended actions completed successfully'
+  };
 }
 
 /**

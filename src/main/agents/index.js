@@ -18,6 +18,7 @@ const { VerifierAgent } = require('./verifier');
 const { ProducerAgent } = require('./producer');
 const { ResearcherAgent } = require('./researcher');
 const { AgentStateManager } = require('./state-manager');
+const { TraceWriter } = require('./trace-writer');
 
 module.exports = {
   AgentOrchestrator,
@@ -27,6 +28,7 @@ module.exports = {
   ProducerAgent,
   ResearcherAgent,
   AgentStateManager,
+  TraceWriter,
   
   // Factory function for creating configured orchestrator
   createAgentSystem: (aiService, options = {}) => {
@@ -47,8 +49,11 @@ module.exports = {
       modelMetadata
     });
     
+    // Attach persistent flight recorder
+    const traceWriter = new TraceWriter(orchestrator);
+    
     // Return object with both orchestrator and stateManager
-    return { orchestrator, stateManager };
+    return { orchestrator, stateManager, traceWriter };
   },
   
   // Recovery function for checkpoint restoration

@@ -189,6 +189,214 @@ const AI_PROVIDERS = {
 // GitHub Copilot OAuth Configuration
 const COPILOT_CLIENT_ID = 'Iv1.b507a08c87ecfe98';
 
+// ===== TOOL DEFINITIONS FOR NATIVE FUNCTION CALLING =====
+// These map directly to the action types the system already executes.
+const LIKU_TOOLS = [
+  {
+    type: 'function',
+    function: {
+      name: 'click_element',
+      description: 'Click a UI element by its visible text or name (uses Windows UI Automation). Preferred over coordinate clicks.',
+      parameters: {
+        type: 'object',
+        properties: {
+          text: { type: 'string', description: 'The visible text/name of the element to click' },
+          reason: { type: 'string', description: 'Why this click is needed' }
+        },
+        required: ['text']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'click',
+      description: 'Left click at pixel coordinates on screen. Use as fallback when click_element cannot find the target.',
+      parameters: {
+        type: 'object',
+        properties: {
+          x: { type: 'number', description: 'X pixel coordinate' },
+          y: { type: 'number', description: 'Y pixel coordinate' },
+          reason: { type: 'string', description: 'Why clicking here' }
+        },
+        required: ['x', 'y']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'double_click',
+      description: 'Double click at pixel coordinates.',
+      parameters: {
+        type: 'object',
+        properties: {
+          x: { type: 'number', description: 'X pixel coordinate' },
+          y: { type: 'number', description: 'Y pixel coordinate' }
+        },
+        required: ['x', 'y']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'right_click',
+      description: 'Right click at pixel coordinates to open context menu.',
+      parameters: {
+        type: 'object',
+        properties: {
+          x: { type: 'number', description: 'X pixel coordinate' },
+          y: { type: 'number', description: 'Y pixel coordinate' }
+        },
+        required: ['x', 'y']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'type_text',
+      description: 'Type text into the currently focused input field.',
+      parameters: {
+        type: 'object',
+        properties: {
+          text: { type: 'string', description: 'The text to type' }
+        },
+        required: ['text']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'press_key',
+      description: 'Press a key or keyboard shortcut (e.g., "enter", "ctrl+c", "win+r", "alt+tab").',
+      parameters: {
+        type: 'object',
+        properties: {
+          key: { type: 'string', description: 'Key combo string (e.g., "ctrl+s", "enter", "win+d")' },
+          reason: { type: 'string', description: 'Why pressing this key' }
+        },
+        required: ['key']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'scroll',
+      description: 'Scroll up or down.',
+      parameters: {
+        type: 'object',
+        properties: {
+          direction: { type: 'string', enum: ['up', 'down'], description: 'Scroll direction' },
+          amount: { type: 'number', description: 'Scroll amount (default 3)' }
+        },
+        required: ['direction']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'drag',
+      description: 'Drag from one point to another.',
+      parameters: {
+        type: 'object',
+        properties: {
+          fromX: { type: 'number' }, fromY: { type: 'number' },
+          toX: { type: 'number' }, toY: { type: 'number' }
+        },
+        required: ['fromX', 'fromY', 'toX', 'toY']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'wait',
+      description: 'Wait for a specified number of milliseconds before the next action.',
+      parameters: {
+        type: 'object',
+        properties: {
+          ms: { type: 'number', description: 'Milliseconds to wait' }
+        },
+        required: ['ms']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'screenshot',
+      description: 'Take a screenshot to see the current screen state. Use for verification or when elements are not in the UI tree.',
+      parameters: { type: 'object', properties: {} }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'run_command',
+      description: 'Execute a shell command and return output. Preferred for any file/system operations.',
+      parameters: {
+        type: 'object',
+        properties: {
+          command: { type: 'string', description: 'Shell command to execute' },
+          cwd: { type: 'string', description: 'Working directory (optional)' },
+          shell: { type: 'string', enum: ['powershell', 'cmd', 'bash'], description: 'Shell to use (default: powershell on Windows)' }
+        },
+        required: ['command']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'focus_window',
+      description: 'Bring a window to the foreground by its handle or title.',
+      parameters: {
+        type: 'object',
+        properties: {
+          title: { type: 'string', description: 'Partial window title to match' },
+          windowHandle: { type: 'number', description: 'Window handle (hwnd)' }
+        }
+      }
+    }
+  }
+];
+
+/**
+ * Convert tool_calls from API response into the action block format
+ * that the existing executeActions pipeline expects.
+ */
+function toolCallsToActions(toolCalls) {
+  return toolCalls.map(tc => {
+    let args;
+    try { args = JSON.parse(tc.function.arguments); } catch { args = {}; }
+    const name = tc.function.name;
+
+    // Map tool names back to existing action types
+    switch (name) {
+      case 'click_element':  return { type: 'click_element', ...args };
+      case 'click':          return { type: 'click', ...args };
+      case 'double_click':   return { type: 'double_click', ...args };
+      case 'right_click':    return { type: 'right_click', ...args };
+      case 'type_text':      return { type: 'type', ...args };
+      case 'press_key':      return { type: 'key', key: args.key, reason: args.reason };
+      case 'scroll':         return { type: 'scroll', ...args };
+      case 'drag':           return { type: 'drag', ...args };
+      case 'wait':           return { type: 'wait', ...args };
+      case 'screenshot':     return { type: 'screenshot' };
+      case 'run_command':    return { type: 'run_command', ...args };
+      case 'focus_window':
+        if (args.title) return { type: 'bring_window_to_front', title: args.title };
+        return { type: 'focus_window', windowHandle: args.windowHandle };
+      default:               return { type: name, ...args };
+    }
+  });
+}
+
 // Current configuration
 let currentProvider = 'copilot'; // Default to GitHub Copilot
 let apiKeys = {
@@ -218,6 +426,41 @@ let oauthCallback = null;
 // Conversation history for context
 let conversationHistory = [];
 const MAX_HISTORY = 20;
+const HISTORY_FILE = path.join(LIKU_HOME, 'conversation-history.json');
+
+/**
+ * Load conversation history from disk (survives process restarts)
+ */
+function loadConversationHistory() {
+  try {
+    if (fs.existsSync(HISTORY_FILE)) {
+      const data = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf-8'));
+      if (Array.isArray(data)) {
+        conversationHistory = data.slice(-MAX_HISTORY * 2);
+        console.log(`[AI] Restored ${conversationHistory.length} history entries from disk`);
+      }
+    }
+  } catch (e) {
+    console.warn('[AI] Could not load conversation history:', e.message);
+  }
+}
+
+/**
+ * Persist conversation history to disk
+ */
+function saveConversationHistory() {
+  try {
+    if (!fs.existsSync(LIKU_HOME)) {
+      fs.mkdirSync(LIKU_HOME, { recursive: true, mode: 0o700 });
+    }
+    fs.writeFileSync(HISTORY_FILE, JSON.stringify(conversationHistory.slice(-MAX_HISTORY * 2)), { mode: 0o600 });
+  } catch (e) {
+    console.warn('[AI] Could not save conversation history:', e.message);
+  }
+}
+
+// Restore history on module load
+loadConversationHistory();
 
 // Visual context for AI awareness
 let visualContextBuffer = [];
@@ -366,11 +609,15 @@ When the user asks you to DO something, respond with a JSON action block:
 - Be specific about UI elements, text, buttons
 
 **For ACTION requests** (click here, type this, open that):
-- ALWAYS respond with the JSON action block
+- **YOU MUST respond with the JSON action block — NEVER respond with only a plan or description**
+- **NEVER say "Let me proceed" or "I will click" without including the actual \`\`\`json action block**
+- **If the user says "proceed" or "do it", output the JSON actions immediately — do not ask again**
 - Use PLATFORM-SPECIFIC shortcuts (see above!)
 - Prefer \`click_element\` over coordinate clicks when targeting named UI elements
 - Add \`wait\` actions between steps that need UI to update
 - Add verification step to confirm success
+- **If an element is NOT in the Live UI State**: Use \`{"type": "screenshot"}\` first, then use coordinates from the screenshot to click. Do NOT give up or say "I can't find the element."
+- **If you need to interact with web content inside an app** (like VS Code panels, browser tabs): Use keyboard shortcuts or coordinate-based clicks since web UI may not appear in UIA tree
 
 **Common Task Patterns**:
 ${PLATFORM === 'win32' ? `
@@ -391,7 +638,14 @@ ${PLATFORM === 'win32' ? `
 - **Save file**: \`ctrl+s\`
 - **Copy/Paste**: \`ctrl+c\` / \`ctrl+v\``}
 
-Be precise, use platform-correct shortcuts, and execute actions confidently!`;
+Be precise, use platform-correct shortcuts, and execute actions confidently!
+
+## CRITICAL RULES
+1. **NEVER describe actions without executing them.** If the user asks you to click/type/open something, output the JSON action block.
+2. **NEVER say "Let me proceed" or "I'll do this now" without the JSON block.** Words without actions are useless.
+3. **If user says "proceed" or "go ahead", output the JSON actions IMMEDIATELY.**
+4. **When you can't find an element in Live UI State, take a screenshot and use pixel coordinates.** Don't give up.
+5. **One response = one action block.** Don't split actions across multiple messages unless the user asks you to wait.`;
 
 /**
  * Set the AI provider
@@ -668,12 +922,12 @@ function saveCopilotToken(token) {
   try {
     const dir = path.dirname(TOKEN_FILE);
     if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
+      fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     }
     fs.writeFileSync(TOKEN_FILE, JSON.stringify({ 
       access_token: token, 
       saved_at: new Date().toISOString() 
-    }));
+    }), { mode: 0o600 });
     console.log('[COPILOT] Token saved');
   } catch (e) {
     console.error('[COPILOT] Failed to save token:', e.message);
@@ -920,7 +1174,9 @@ async function callCopilot(messages, modelOverride = null) {
       messages: messages,
       max_tokens: 4096,
       temperature: 0.7,
-      stream: false
+      stream: false,
+      tools: LIKU_TOOLS,
+      tool_choice: 'auto'
     });
 
     // Try multiple endpoint formats
@@ -979,7 +1235,22 @@ async function callCopilot(messages, modelOverride = null) {
             try {
               const result = JSON.parse(body);
               if (result.choices && result.choices[0]) {
-                resolveReq(result.choices[0].message.content);
+                const choice = result.choices[0];
+                const msg = choice.message;
+                
+                // Handle native tool calls — convert to action JSON block
+                if (msg.tool_calls && msg.tool_calls.length > 0) {
+                  const actions = toolCallsToActions(msg.tool_calls);
+                  const actionBlock = JSON.stringify({
+                    thought: msg.content || 'Executing requested actions',
+                    actions,
+                    verification: 'Verify the actions completed successfully'
+                  }, null, 2);
+                  console.log(`[Copilot] Received ${msg.tool_calls.length} tool_calls, converted to action block`);
+                  resolveReq('```json\n' + actionBlock + '\n```');
+                } else {
+                  resolveReq(msg.content);
+                }
               } else if (result.error) {
                 rejectReq(new Error(result.error.message || 'Copilot API error'));
               } else {
@@ -1237,6 +1508,9 @@ function detectTruncation(response) {
 /**
  * Send a message and get AI response with auto-continuation
  */
+// Provider fallback priority order
+const PROVIDER_FALLBACK_ORDER = ['copilot', 'openai', 'anthropic', 'ollama'];
+
 async function sendMessage(userMessage, options = {}) {
   const { includeVisualContext = false, coordinates = null, maxContinuations = 2, model = null } = options;
 
@@ -1253,43 +1527,55 @@ async function sendMessage(userMessage, options = {}) {
     let response;
     let effectiveModel = currentCopilotModel;
     
-    switch (currentProvider) {
-      case 'copilot':
-        // GitHub Copilot - uses OAuth token or env var
-        if (!apiKeys.copilot) {
-          // Try loading saved token
-          if (!loadCopilotToken()) {
-            throw new Error('Not authenticated with GitHub Copilot.\n\nTo authenticate:\n1. Type /login and authorize in browser\n2. Or set GH_TOKEN or GITHUB_TOKEN environment variable');
-          }
+    // Build fallback chain: current provider first, then remaining in priority order
+    const fallbackChain = [currentProvider, ...PROVIDER_FALLBACK_ORDER.filter(p => p !== currentProvider)];
+    let lastError = null;
+    let usedProvider = currentProvider;
+
+    for (const provider of fallbackChain) {
+      try {
+        switch (provider) {
+          case 'copilot':
+            if (!apiKeys.copilot) {
+              if (!loadCopilotToken()) {
+                throw new Error('Not authenticated with GitHub Copilot.');
+              }
+            }
+            effectiveModel = resolveCopilotModelKey(model);
+            if (includeVisualContext && COPILOT_MODELS[effectiveModel] && !COPILOT_MODELS[effectiveModel].vision) {
+              const visionFallback = AI_PROVIDERS.copilot.visionModel || 'gpt-4o';
+              console.log(`[AI] Model ${effectiveModel} lacks vision, upgrading to ${visionFallback} for visual context`);
+              effectiveModel = visionFallback;
+            }
+            response = await callCopilot(messages, effectiveModel);
+            break;
+          case 'openai':
+            if (!apiKeys.openai) throw new Error('OpenAI API key not set.');
+            response = await callOpenAI(messages);
+            break;
+          case 'anthropic':
+            if (!apiKeys.anthropic) throw new Error('Anthropic API key not set.');
+            response = await callAnthropic(messages);
+            break;
+          case 'ollama':
+          default:
+            response = await callOllama(messages);
+            break;
         }
-        effectiveModel = resolveCopilotModelKey(model);
-        // Enforce vision-capable model when visual context is included
-        if (includeVisualContext && COPILOT_MODELS[effectiveModel] && !COPILOT_MODELS[effectiveModel].vision) {
-          const visionFallback = AI_PROVIDERS.copilot.visionModel || 'gpt-4o';
-          console.log(`[AI] Model ${effectiveModel} lacks vision, upgrading to ${visionFallback} for visual context`);
-          effectiveModel = visionFallback;
+        usedProvider = provider;
+        if (usedProvider !== currentProvider) {
+          console.log(`[AI] Fallback: ${currentProvider} failed, succeeded with ${usedProvider}`);
         }
-        response = await callCopilot(messages, effectiveModel);
-        break;
-        
-      case 'openai':
-        if (!apiKeys.openai) {
-          throw new Error('OpenAI API key not set. Use /setkey openai <key> or set OPENAI_API_KEY environment variable.');
-        }
-        response = await callOpenAI(messages);
-        break;
-        
-      case 'anthropic':
-        if (!apiKeys.anthropic) {
-          throw new Error('Anthropic API key not set. Use /setkey anthropic <key> or set ANTHROPIC_API_KEY environment variable.');
-        }
-        response = await callAnthropic(messages);
-        break;
-        
-      case 'ollama':
-      default:
-        response = await callOllama(messages);
-        break;
+        break; // success — exit fallback loop
+      } catch (providerErr) {
+        lastError = providerErr;
+        console.warn(`[AI] Provider ${provider} failed: ${providerErr.message}`);
+        continue; // try next provider
+      }
+    }
+
+    if (!response) {
+      throw lastError || new Error('All AI providers failed.');
     }
 
     // Auto-continuation for truncated responses
@@ -1345,10 +1631,13 @@ async function sendMessage(userMessage, options = {}) {
       conversationHistory.shift();
     }
 
+    // Persist to disk for session continuity
+    saveConversationHistory();
+
     return {
       success: true,
       message: response,
-      provider: currentProvider,
+      provider: usedProvider,
       model: effectiveModel,
       modelVersion: COPILOT_MODELS[effectiveModel]?.id || null,
       hasVisualContext: includeVisualContext && visualContextBuffer.length > 0
@@ -1393,6 +1682,7 @@ function handleCommand(command) {
     case '/clear':
       conversationHistory = [];
       clearVisualContext();
+      saveConversationHistory();
       return { type: 'system', message: 'Conversation and visual context cleared.' };
 
     case '/vision':
@@ -2038,5 +2328,8 @@ module.exports = {
   setUIWatcher,
   getUIWatcher,
   setSemanticDOMSnapshot,
-  clearSemanticDOMSnapshot
+  clearSemanticDOMSnapshot,
+  // Tool-calling
+  LIKU_TOOLS,
+  toolCallsToActions
 };

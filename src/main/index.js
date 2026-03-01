@@ -344,6 +344,7 @@ function createOverlayWindow() {
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
+      sandbox: true,
       preload: path.join(__dirname, '../renderer/overlay/preload.js')
     }
   });
@@ -460,6 +461,7 @@ function createChatWindow() {
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
+      sandbox: true,
       preload: path.join(__dirname, '../renderer/chat/preload.js')
     }
   });

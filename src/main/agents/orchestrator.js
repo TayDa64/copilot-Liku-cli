@@ -181,6 +181,33 @@ class AgentOrchestrator extends EventEmitter {
 
   // ===== Handoff Management =====
 
+  /**
+   * Execute multiple agents in parallel (e.g., Builder + Researcher)
+   * Returns array of results in the same order as the roles array.
+   */
+  async executeParallel(roles, context, message) {
+    const agents = roles.map(role => {
+      const agent = this.agents.get(role);
+      if (!agent) throw new Error(`Agent not found for parallel execution: ${role}`);
+      return { role, agent };
+    });
+
+    this.emit('parallel:start', { roles, message });
+
+    const task = { description: message, context };
+    const results = await Promise.all(
+      agents.map(({ role, agent }) => {
+        this.stateManager.updateAgentActivity(agent.id);
+        return agent.process(task, context).catch(err => ({
+          success: false, error: err.message, role
+        }));
+      })
+    );
+
+    this.emit('parallel:complete', { roles, results: results.map((r, i) => ({ role: roles[i], success: r.success })) });
+    return results;
+  }
+
   async executeHandoff(fromAgent, targetRole, context, message) {
     const targetAgent = this.agents.get(targetRole);
     

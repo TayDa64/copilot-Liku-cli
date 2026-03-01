@@ -282,6 +282,26 @@
       color: var(--text-secondary);
     }
 
+    .login-button {
+      padding: 3px 10px;
+      border-radius: 10px;
+      font-size: 10px;
+      font-weight: 600;
+      background: var(--accent-blue);
+      color: white;
+      border: none;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+
+    .login-button:hover {
+      background: var(--accent-blue-hover);
+    }
+
+    .login-button.hidden {
+      display: none;
+    }
+
     /* ===== CHAT HISTORY ===== */
     #chat-history {
       flex: 1;
@@ -544,6 +564,21 @@
       justify-content: center;
     }
 
+    .auth-hint {
+      font-size: 12px;
+      margin-top: 10px;
+      color: var(--text-secondary);
+      line-height: 1.6;
+    }
+
+    .auth-hint kbd {
+      background: var(--bg-secondary);
+      padding: 2px 5px;
+      border-radius: 3px;
+      border: 1px solid var(--border-color);
+      font-family: inherit;
+    }
+
     .empty-state .logo svg {
       width: 32px;
       height: 32px;
@@ -671,6 +706,7 @@
     </div>
     <div id="provider-status">
       <span id="auth-status" class="status-badge">Not Connected</span>
+      <button id="login-btn" class="login-button" title="Login to AI provider">Login</button>
       <span id="token-count" class="token-badge" title="Estimated tokens">0 tokens</span>
     </div>
   </div>
@@ -683,6 +719,7 @@
       </div>
       <h2>Copilot Agent</h2>
       <p>Click "Selection" to interact with screen elements, or type a command below.</p>
+      <p id="empty-auth-hint" class="auth-hint">Click <strong>Login</strong> above or type <kbd>/login</kbd> to connect to GitHub Copilot.<br>You can also use <kbd>/help</kbd> to see all commands.</p>
       <div class="shortcuts">
         <div class="shortcut"><kbd>Ctrl+Alt+Space</kbd> Toggle chat</div>
         <div class="shortcut"><kbd>Ctrl+Shift+O</kbd> Toggle overlay</div>
