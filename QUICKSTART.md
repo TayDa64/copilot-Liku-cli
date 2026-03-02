@@ -42,6 +42,37 @@ liku start
 npm start
 ```
 
+#### Option 3: Use the local repo version in another project (recommended for dev)
+
+If you want a different project (e.g., `C:\dev\Whatup`) to use your *local working copy* of this repo (instead of the npm-published version), use `npm link`.
+
+From the repo root:
+
+```bash
+npm link
+```
+
+From the other project:
+
+```bash
+npm link copilot-liku-cli
+```
+
+Verify you’re running the repo copy (recommended):
+
+```bash
+npx --no-install liku doctor --json
+```
+
+Look for `env.projectRoot` being the repo path (e.g., `C:\dev\copilot-Liku-cli`).
+
+To switch back to the published npm version:
+
+```bash
+npm unlink copilot-liku-cli
+npm i copilot-liku-cli
+```
+
 ## Quick Verify (Recommended)
 
 After install, run these checks in order:

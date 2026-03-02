@@ -155,6 +155,29 @@ npm link
 
 This creates a symbolic link from your global `node_modules` to your local development directory. Any changes you make will be immediately available when you run `liku`.
 
+### 3b. Use the local repo version in another project (same machine)
+
+If you want another project (e.g., `C:\dev\Whatup`) to use this local working copy instead of the npm-published version:
+
+From the other project folder:
+
+```bash
+npm link copilot-liku-cli
+```
+
+Recommended verification (ensures you are using the local linked binary):
+
+```bash
+npx --no-install liku doctor --json
+```
+
+To switch the other project back to the published npm package:
+
+```bash
+npm unlink copilot-liku-cli
+npm install copilot-liku-cli
+```
+
 ### 4. Verify Setup
 
 ```bash
