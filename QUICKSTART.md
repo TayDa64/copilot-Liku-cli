@@ -213,6 +213,23 @@ When automating browsers, be explicit about **targeting**:
 
 If you skip steps 1–2 and the overlay/chat has focus, keyboard shortcuts may close the overlay instead of affecting the browser.
 
+#### Robust recipe (recommended)
+
+If your intent is to **continue in an existing Edge/Chrome window/tab**, prefer **in-window control** (focus + keyboard) over launching the browser again.
+
+- Prefer: **focus window → new tab / address bar → type → enter → verify**
+- Avoid for “existing tab control”: PowerShell COM \`SendKeys\`, \`Start-Process msedge ...\`, and \`microsoft-edge:...\` (these often open new windows/tabs and can be flaky).
+
+**Canonical flow (what to ask the agent to do):**
+1) Bring **Microsoft Edge Beta** to the foreground
+2) \`ctrl+t\` (new tab) then \`ctrl+l\` (address bar)
+3) Type a full URL (prefer \`https://...\`) and press Enter
+4) Wait for load, then perform page-level action (e.g., YouTube search)
+5) Validate after major steps; if typing drops characters, re-focus the address bar and retry
+
+**Self-heal typing retry (when URL is wrong):**
+\`ctrl+l\` → \`ctrl+a\` → type URL again → \`enter\`
+
 ### Selecting a Screen Element
 ```
 1. Press Ctrl+Alt+Space to open chat
