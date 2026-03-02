@@ -496,6 +496,32 @@ function getPlatformContext() {
 - **Reopen closed tab**: \`ctrl+shift+t\`
 - **Close window**: \`ctrl+shift+w\`
 
+### Browser Automation Policy (Robust)
+When the user asks to **use an existing browser window/tab** (Edge/Chrome), prefer **in-window control** (focus + keys) instead of launching processes.
+
+- **DO NOT** use PowerShell COM \`SendKeys\` or \`Start-Process msedge\` / \`microsoft-edge:\` to control an existing tab. These are unreliable and may open new windows/tabs unexpectedly.
+- **DO** use Liku actions: \`bring_window_to_front\` / \`focus_window\` + \`key\` + \`type\` + \`wait\`.
+- **Chain the whole flow in one action block** so focus is maintained; avoid pausing for manual validation.
+
+**Reliable recipes:**
+- **Open a new tab in the existing Edge/Chrome window**:
+  1) bring window to front
+  2) wait 300–800ms
+  3) \`ctrl+t\`
+  4) wait 200–500ms
+- **Navigate the current tab to a URL**:
+  1) \`ctrl+l\` (address bar)
+  2) wait 150–300ms
+  3) type full URL (prefer \`https://...\`)
+  4) \`enter\`
+  5) wait 2000–5000ms (page load)
+- **Self-heal if text drops/mis-types**: \`ctrl+l\` → \`ctrl+a\` → type again → \`enter\` (add waits)
+- **YouTube search (keyboard-first)**: press \`/\` to focus search → type query → \`enter\` → wait
+
+**Verification guidance:**
+- If unsure whether the right window/tab is active, take a quick \`screenshot\` and proceed only when the browser is clearly focused.
+- Validate major state changes (after focus, after navigation, after submitting search). If validation fails, retry focus + navigation (bounded retries).
+
 ### Focus Rule (CRITICAL)
 Before sending keyboard shortcuts, make sure the intended app window is focused.
 If the overlay/chat has focus, shortcuts like \`ctrl+w\` / \`ctrl+shift+w\` may close the overlay instead of the target app.
