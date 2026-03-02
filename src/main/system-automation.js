@@ -2149,6 +2149,7 @@ module.exports = {
   drag,
   sleep,
   getActiveWindowTitle,
+  getForegroundWindowHandle,
   resolveWindowHandle,
   minimizeWindow,
   restoreWindow,

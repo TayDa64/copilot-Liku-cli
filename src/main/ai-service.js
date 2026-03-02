@@ -2279,6 +2279,23 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
     result.safety = safety;
     results.push(result);
 
+    // If we just performed a step that likely changed focus, snapshot the actual foreground HWND.
+    // This is especially important when uiWatcher isn't polling (can't infer windowHandle).
+    if (typeof systemAutomation.getForegroundWindowHandle === 'function') {
+      if (
+        action.type === 'click' ||
+        action.type === 'double_click' ||
+        action.type === 'right_click' ||
+        action.type === 'focus_window' ||
+        action.type === 'bring_window_to_front'
+      ) {
+        const fg = await systemAutomation.getForegroundWindowHandle();
+        if (fg) {
+          lastTargetWindowHandle = fg;
+        }
+      }
+    }
+
     // Callback for UI updates
     if (onAction) {
       onAction(result, i, actionData.actions.length);
@@ -2367,6 +2384,21 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
     result.reason = action.reason || '';
     result.userConfirmed = i === 0; // First one was confirmed
     results.push(result);
+
+    if (typeof systemAutomation.getForegroundWindowHandle === 'function') {
+      if (
+        action.type === 'click' ||
+        action.type === 'double_click' ||
+        action.type === 'right_click' ||
+        action.type === 'focus_window' ||
+        action.type === 'bring_window_to_front'
+      ) {
+        const fg = await systemAutomation.getForegroundWindowHandle();
+        if (fg) {
+          lastTargetWindowHandle = fg;
+        }
+      }
+    }
     
     if (onAction) {
       onAction(result, pending.actionIndex + i, pending.actionIndex + pending.remainingActions.length);
