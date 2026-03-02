@@ -47,6 +47,19 @@ function patchConsoleForBrokenPipes() {
 
 patchConsoleForBrokenPipes();
 
+process.on('uncaughtException', (err) => {
+  if (isBrokenPipeLikeError(err)) {
+    return;
+  }
+  throw err;
+});
+
+process.on('unhandledRejection', (reason) => {
+  if (isBrokenPipeLikeError(reason)) {
+    return;
+  }
+});
+
 // Ensure Electron runs in app mode even if a dev shell has ELECTRON_RUN_AS_NODE set
 if (process.env.ELECTRON_RUN_AS_NODE) {
   console.warn('ELECTRON_RUN_AS_NODE was set; clearing so the app can start normally.');
