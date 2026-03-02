@@ -1935,7 +1935,7 @@ function analyzeActionSafety(action, targetInfo = {}) {
         'cmd+q',
       ];
       if (closeCombos.includes(keyNorm)) {
-        result.riskLevel = ActionRiskLevel.HIGH;
+        result.riskLevel = ActionRiskLevel.CRITICAL;
         result.warnings.push(`Close shortcut detected: ${action.key}`);
         result.requiresConfirmation = true;
         break;
@@ -2200,9 +2200,14 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
     // Analyze safety
     const safety = analyzeActionSafety(action, targetInfo);
     console.log(`[AI-SERVICE] Action ${i} safety: ${safety.riskLevel}`, safety.warnings);
+
+    // CRITICAL actions require an explicit confirmation step, even if the user clicked
+    // the general "Execute" button for a batch. This prevents accidental destructive
+    // shortcuts (e.g., alt+f4) from immediately closing the active app due to focus issues.
+    const canBypassConfirmation = skipSafetyConfirmation && safety.riskLevel !== ActionRiskLevel.CRITICAL;
     
     // If HIGH or CRITICAL risk, require confirmation (unless user already confirmed via Execute button)
-    if (safety.requiresConfirmation && !skipSafetyConfirmation) {
+    if (safety.requiresConfirmation && !canBypassConfirmation) {
       console.log(`[AI-SERVICE] Action ${i} requires user confirmation`);
       
       // Store as pending action
@@ -2225,7 +2230,11 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
     }
     
     if (skipSafetyConfirmation && safety.requiresConfirmation) {
-      console.log(`[AI-SERVICE] Action ${i} safety bypassed (user pre-confirmed via Execute button)`);
+      if (canBypassConfirmation) {
+        console.log(`[AI-SERVICE] Action ${i} safety bypassed (user pre-confirmed via Execute button)`);
+      } else {
+        console.log(`[AI-SERVICE] Action ${i} requires explicit confirmation (CRITICAL)`);
+      }
     }
 
     // Execute the action (SAFE/LOW/MEDIUM risk)
