@@ -79,6 +79,55 @@ function extractQuotedStrings(text) {
   return out;
 }
 
+function escapeDoubleQuotes(text) {
+  return String(text || '').replace(/"/g, '\\"');
+}
+
+function extractUrlCandidate(text) {
+  const str = normalizeText(text);
+
+  // Full URL
+  const fullUrl = /(https?:\/\/[^\s"']+)/i.exec(str);
+  if (fullUrl?.[1]) return fullUrl[1];
+
+  // Common bare domains (keep conservative)
+  const bare = /\b([a-z0-9-]+\.)+(com|net|org|io|ai|dev|edu|gov)(\/[^\s"']*)?\b/i.exec(str);
+  if (bare?.[0]) return bare[0];
+
+  return null;
+}
+
+function extractSearchQuery(text) {
+  const str = normalizeText(text);
+  const quoted = extractQuotedStrings(str);
+
+  // Prefer quoted strings if user said search ... for "..."
+  const searchFor = /\bsearch\b/i.test(str) && /\bfor\b/i.test(str);
+  if (searchFor && quoted.length) return quoted[0];
+
+  // Unquoted: search (on/in)? (youtube/google)? for <rest>
+  const m = /\bsearch(?:\s+(?:on|in))?(?:\s+(?:youtube|google))?\s+for\s+([^\n\r.;]+)$/i.exec(str);
+  if (m?.[1]) return normalizeText(m[1]);
+
+  return null;
+}
+
+function toHttpsUrl(urlish) {
+  const u = normalizeText(urlish);
+  if (!u) return null;
+  if (/^https?:\/\//i.test(u)) return u;
+  return `https://${u}`;
+}
+
+function buildSearchUrl({ query, preferYouTube = false }) {
+  const q = normalizeText(query);
+  if (!q) return null;
+  if (preferYouTube) {
+    return `https://www.youtube.com/results?search_query=${encodeURIComponent(q)}`;
+  }
+  return `https://www.google.com/search?q=${encodeURIComponent(q)}`;
+}
+
 function parseRequestHints(requestText) {
   const text = normalizeText(requestText);
   const lower = normalizeForMatch(text);
@@ -90,18 +139,42 @@ function parseRequestHints(requestText) {
   const inWindowMatch = /\b(?:in|within)\s+([^\n\r]+?)\s+window\b/i.exec(text);
   const windowHint = inWindowMatch ? normalizeText(inWindowMatch[1]) : null;
 
+  const wantsNewTab = /\bnew\s+tab\b/i.test(text) || /\bopen\s+a\s+new\s+tab\b/i.test(text);
+  const urlCandidate = extractUrlCandidate(text);
+  const searchQuery = extractSearchQuery(text);
+
+  const wantsIntegratedBrowser = /\b(integrated\s+browser|simple\s+browser|inside\s+vs\s*code|in\s+vs\s*code|vscode\s+insiders|workbench\.browser\.openlocalhostlinks|live\s+preview)\b/i.test(text);
+
+  const browserSignals = Boolean(urlCandidate)
+    || Boolean(searchQuery)
+    || /\b(go\s+to|navigate|visit|open\s+youtube|youtube\.com|search)\b/i.test(text);
+
   // Heuristic: infer app family
   const appHints = {
-    isBrowser: /\b(edge|chrome|browser|msedge)\b/i.test(text),
+    isBrowser: /\b(edge|chrome|chromium|firefox|brave|opera|vivaldi|browser|msedge)\b/i.test(text) || browserSignals,
     isEditor: /\b(vs\s*code|visual\s*studio\s*code|code\s*-\s*insiders|editor)\b/i.test(text),
     isTerminal: /\b(terminal|powershell|cmd\.exe|command\s+prompt|windows\s+terminal)\b/i.test(text),
     isExplorer: /\b(file\s+explorer|explorer\.exe)\b/i.test(text),
   };
 
+  const requestedBrowser = (() => {
+    // Ordered from most-specific to least-specific
+    if (/\bedge\s+beta\b/i.test(text)) return { name: 'edge', keywords: ['edge', 'msedge', 'beta'] };
+    if (/\bmsedge\b/i.test(text) || /\bmicrosoft\s+edge\b/i.test(text) || /\bedge\b/i.test(text)) return { name: 'edge', keywords: ['edge', 'msedge'] };
+    if (/\bgoogle\s+chrome\b/i.test(text) || /\bchrome\b/i.test(text) || /\bchromium\b/i.test(text)) return { name: 'chrome', keywords: ['chrome', 'chromium'] };
+    if (/\bmozilla\s+firefox\b/i.test(text) || /\bfirefox\b/i.test(text)) return { name: 'firefox', keywords: ['firefox'] };
+    if (/\bbrave\b/i.test(text)) return { name: 'brave', keywords: ['brave'] };
+    if (/\bvivaldi\b/i.test(text)) return { name: 'vivaldi', keywords: ['vivaldi'] };
+    if (/\bopera\b/i.test(text)) return { name: 'opera', keywords: ['opera'] };
+    return null;
+  })();
+
   // Infer intent
   const intent = (() => {
     if (/\bclose\b/.test(lower) && /\btab\b/.test(lower)) return 'close_tab';
     if (/\bclose\b/.test(lower) && /\bwindow\b/.test(lower)) return 'close_window';
+    if (appHints.isBrowser && (urlCandidate || searchQuery)) return 'browser_navigate';
+    if (appHints.isBrowser && /\b(new\s+tab|open\s+tab|ctrl\+t|ctrl\+l|navigate|go\s+to|visit|open\s+youtube|youtube\.com|search\s+for|search)\b/i.test(text)) return 'browser_navigate';
     if (/\bclick\b/.test(lower)) return 'click';
     if (/\btype\b/.test(lower) || /\benter\b/.test(lower)) return 'type';
     if (/\bscroll\b/.test(lower)) return 'scroll';
@@ -123,7 +196,40 @@ function parseRequestHints(requestText) {
     tabTitle,
     appHints,
     elementTextCandidates,
+    wantsNewTab,
+    urlCandidate,
+    searchQuery,
+    requestedBrowser,
+    wantsIntegratedBrowser,
   };
+}
+
+function isLikelyBrowserWindow(win) {
+  const title = win?.title || '';
+  const proc = win?.processName || '';
+  return (
+    includesCI(proc, 'msedge') || includesCI(title, 'edge') ||
+    includesCI(proc, 'chrome') || includesCI(title, 'chrome') ||
+    includesCI(proc, 'firefox') || includesCI(title, 'firefox') ||
+    includesCI(proc, 'brave') || includesCI(title, 'brave') ||
+    includesCI(proc, 'opera') || includesCI(title, 'opera') ||
+    includesCI(proc, 'vivaldi') || includesCI(title, 'vivaldi')
+  );
+}
+
+function isLikelyVSCodeWindow(win) {
+  const title = win?.title || '';
+  const proc = win?.processName || '';
+  return (
+    includesCI(proc, 'Code') || includesCI(proc, 'Code - Insiders') ||
+    includesCI(title, 'Visual Studio Code')
+  );
+}
+
+function isLocalhostUrl(urlish) {
+  const u = normalizeText(urlish);
+  if (!u) return false;
+  return /^(https?:\/\/)?(localhost|127\.0\.0\.1)(:\d+)?(\/|$)/i.test(u);
 }
 
 function scoreWindowCandidate(win, hints) {
@@ -138,9 +244,19 @@ function scoreWindowCandidate(win, hints) {
     reasons.push('title matches windowHint');
   }
 
-  if (hints.appHints?.isBrowser && (includesCI(proc, 'msedge') || includesCI(title, 'edge') || includesCI(proc, 'chrome') || includesCI(title, 'chrome'))) {
+  const looksLikeBrowser = isLikelyBrowserWindow(win);
+
+  if (hints.appHints?.isBrowser && looksLikeBrowser) {
     score += 35;
     reasons.push('looks like browser');
+  }
+
+  if (hints.requestedBrowser?.keywords?.length) {
+    const matchesPreferred = hints.requestedBrowser.keywords.some(k => includesCI(proc, k) || includesCI(title, k));
+    if (matchesPreferred) {
+      score += 25;
+      reasons.push(`matches requested browser (${hints.requestedBrowser.name})`);
+    }
   }
   if (hints.appHints?.isEditor && (includesCI(title, 'visual studio code') || includesCI(title, 'code - insiders') || includesCI(proc, 'Code') || includesCI(proc, 'Code - Insiders'))) {
     score += 35;
@@ -164,8 +280,34 @@ function scoreWindowCandidate(win, hints) {
 }
 
 function buildSuggestedPlan(hints, activeWindow, rankedCandidates) {
-  const top = rankedCandidates?.[0]?.window || null;
-  const target = top || activeWindow || null;
+  const windowsRanked = Array.isArray(rankedCandidates) ? rankedCandidates.map(c => c.window).filter(Boolean) : [];
+  const browserWindowsRanked = windowsRanked.filter(isLikelyBrowserWindow);
+  const vsCodeWindowsRanked = windowsRanked.filter(isLikelyVSCodeWindow);
+
+  const target = (() => {
+    // If the user explicitly wants the VS Code integrated browser, target VS Code.
+    if (hints.wantsIntegratedBrowser) {
+      if (vsCodeWindowsRanked[0]) return vsCodeWindowsRanked[0];
+      if (activeWindow && isLikelyVSCodeWindow(activeWindow)) return activeWindow;
+      return windowsRanked[0] || activeWindow || null;
+    }
+
+    // For browser actions, never target an arbitrary non-browser window.
+    if (hints.intent === 'browser_navigate' && hints.appHints?.isBrowser) {
+      if (hints.requestedBrowser?.keywords?.length) {
+        const preferred = browserWindowsRanked.find(w => hints.requestedBrowser.keywords.some(k => includesCI(w?.processName || '', k) || includesCI(w?.title || '', k)));
+        if (preferred) return preferred;
+      }
+
+      // Fallback to any detected browser window, else the active window if it is a browser.
+      if (browserWindowsRanked[0]) return browserWindowsRanked[0];
+      if (activeWindow && isLikelyBrowserWindow(activeWindow)) return activeWindow;
+      return null;
+    }
+
+    // Non-browser intents: use ranking, then active window.
+    return windowsRanked[0] || activeWindow || null;
+  })();
   const plan = [];
 
   const targetTitleForFilter = target?.title ? String(target.title) : null;
@@ -218,6 +360,171 @@ function buildSuggestedPlan(hints, activeWindow, rankedCandidates) {
       command: 'liku keys ctrl+w',
       verification: 'Tab disappears; previous tab becomes active',
     });
+    return { target, plan };
+  }
+
+  if (hints.intent === 'browser_navigate' && hints.appHints?.isBrowser) {
+    // If running inside VS Code and the user wants it, prefer using the Integrated Browser.
+    if (hints.wantsIntegratedBrowser) {
+      const url = toHttpsUrl(hints.urlCandidate) || buildSearchUrl({ query: hints.searchQuery, preferYouTube: false });
+      const localhostish = isLocalhostUrl(hints.urlCandidate);
+
+      plan.push({
+        state: 'OPEN_INTEGRATED_BROWSER',
+        goal: 'Open VS Code Integrated Browser',
+        command: 'liku keys ctrl+shift+p',
+        verification: 'Command Palette opens',
+        notes: 'Run the VS Code command: "Browser: Open Integrated Browser"',
+      });
+      plan.push({
+        state: 'COMMAND_INTEGRATED_BROWSER',
+        goal: 'Run the Integrated Browser command',
+        command: 'liku type "Browser: Open Integrated Browser"',
+        verification: 'The command appears in the palette',
+      });
+      plan.push({
+        state: 'CONFIRM_COMMAND',
+        goal: 'Execute the command',
+        command: 'liku keys enter',
+        verification: 'An Integrated Browser editor tab opens',
+        notes: localhostish
+          ? 'Tip: enable the VS Code setting workbench.browser.openLocalhostLinks to automatically open localhost links in the integrated browser.'
+          : 'Integrated Browser supports http(s) and file URLs.',
+      });
+
+      if (localhostish) {
+        plan.push({
+          state: 'OPEN_SETTINGS',
+          goal: 'Open VS Code Settings (optional)',
+          command: 'liku keys ctrl+,',
+          verification: 'Settings UI opens',
+        });
+        plan.push({
+          state: 'FIND_SETTING',
+          goal: 'Locate the localhost-integrated-browser setting',
+          command: 'liku type "workbench.browser.openLocalhostLinks"',
+          verification: 'The setting appears in search results',
+          notes: 'Enable it to route localhost links to the Integrated Browser.',
+        });
+        plan.push({
+          state: 'VERIFY_SETTING',
+          goal: 'Capture evidence of the setting state',
+          command: 'liku screenshot',
+          verification: 'Screenshot shows the setting and whether it is enabled',
+        });
+      }
+
+      if (url) {
+        plan.push({
+          state: 'FOCUS_ADDRESS_BAR',
+          goal: 'Focus the integrated browser address bar',
+          command: 'liku keys ctrl+l',
+          verification: 'Address bar is focused (URL text highlighted)',
+        });
+        plan.push({
+          state: 'TYPE_URL',
+          goal: 'Type the destination URL',
+          command: `liku type "${escapeDoubleQuotes(url)}"`,
+          verification: 'The full URL appears correctly in the address bar',
+        });
+        plan.push({
+          state: 'NAVIGATE',
+          goal: 'Navigate to the URL in the integrated browser',
+          command: 'liku keys enter',
+          verification: 'Page begins loading; content changes',
+        });
+      } else {
+        plan.push({
+          state: 'MISSING_URL',
+          goal: 'No URL could be inferred from the request',
+          command: 'liku screenshot',
+          verification: 'Use the screenshot to decide the next navigation step',
+        });
+      }
+
+      plan.push({
+        state: 'VERIFY_RESULT',
+        goal: 'Capture evidence of the resulting page state',
+        command: 'liku screenshot',
+        verification: 'Screenshot shows expected page state in the integrated browser',
+      });
+
+      return { target, plan };
+    }
+
+    if (!target) {
+      plan.push({
+        state: 'NO_BROWSER_WINDOW',
+        goal: 'No browser window was detected; open a browser window first',
+        command: 'liku window',
+        verification: 'A browser window (Edge/Chrome/Firefox/Brave/etc) appears in the list',
+      });
+      return { target: null, plan };
+    }
+
+    // Prefer deterministic in-window navigation over process launch.
+    const preferYouTube = /\byoutube\b/i.test(hints.raw || '') || /youtube\.com/i.test(hints.raw || '');
+    const url = (
+      toHttpsUrl(hints.urlCandidate) ||
+      buildSearchUrl({ query: hints.searchQuery, preferYouTube })
+    );
+
+    if (hints.wantsNewTab) {
+      plan.push({
+        state: 'OPEN_NEW_TAB',
+        goal: 'Open a new tab in the focused browser window',
+        command: 'liku keys ctrl+t',
+        verification: 'A new tab opens (tab count increases or blank tab appears)',
+      });
+    }
+
+    plan.push({
+      state: 'FOCUS_ADDRESS_BAR',
+      goal: 'Focus the address bar',
+      command: 'liku keys ctrl+l',
+      verification: 'Address bar is focused (URL text highlighted)',
+      notes: 'If focus is flaky, re-run `liku window --active` and re-focus the browser window before sending keys.',
+    });
+
+    if (url) {
+      plan.push({
+        state: 'TYPE_URL',
+        goal: `Type the destination URL${hints.searchQuery ? ' (search encoded into URL for reliability)' : ''}`,
+        command: `liku type "${escapeDoubleQuotes(url)}"`,
+        verification: 'The full URL appears correctly in the address bar',
+        notes: 'If characters drop: ctrl+l → ctrl+a → type URL again → enter (with short pauses).',
+      });
+      plan.push({
+        state: 'NAVIGATE',
+        goal: 'Navigate to the URL in the current tab',
+        command: 'liku keys enter',
+        verification: 'Page begins loading; title/content changes',
+      });
+    } else {
+      plan.push({
+        state: 'MISSING_URL',
+        goal: 'No URL could be inferred from the request',
+        command: 'liku screenshot',
+        verification: 'Use the screenshot to decide the next navigation step',
+      });
+    }
+
+    plan.push({
+      state: 'VERIFY_FOCUS',
+      goal: 'Verify keyboard focus stayed on the browser window',
+      command: 'liku window --active',
+      verification: hints.requestedBrowser?.name
+        ? `Active window process/title matches the requested browser (${hints.requestedBrowser.name})`
+        : 'Active window process/title matches a browser window',
+    });
+
+    plan.push({
+      state: 'VERIFY_RESULT',
+      goal: 'Capture evidence of the resulting page state',
+      command: 'liku screenshot',
+      verification: 'Screenshot shows expected page (e.g., YouTube results for query)',
+    });
+
     return { target, plan };
   }
 

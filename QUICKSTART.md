@@ -221,7 +221,7 @@ If your intent is to **continue in an existing Edge/Chrome window/tab**, prefer 
 - Avoid for “existing tab control”: PowerShell COM \`SendKeys\`, \`Start-Process msedge ...\`, and \`microsoft-edge:...\` (these often open new windows/tabs and can be flaky).
 
 **Canonical flow (what to ask the agent to do):**
-1) Bring **Microsoft Edge Beta** to the foreground
+1) Bring the **target browser window** (Edge/Chrome/Firefox/Brave/etc) to the foreground
 2) \`ctrl+t\` (new tab) then \`ctrl+l\` (address bar)
 3) Type a full URL (prefer \`https://...\`) and press Enter
 4) Wait for load, then perform page-level action (e.g., YouTube search)
