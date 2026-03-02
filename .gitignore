@@ -27,3 +27,6 @@ out/
 # Extracted PDF text (keep index files only)
 docs/pdf/*.txt
 !docs/pdf/*.index.txt
+
+# Hook logs (runtime artifacts)
+.github/hooks/logs/*.jsonl
