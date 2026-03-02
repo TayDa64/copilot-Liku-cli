@@ -1920,6 +1920,27 @@ function analyzeActionSafety(action, targetInfo = {}) {
     case 'key':
       // Analyze key combinations
       const key = (action.key || '').toLowerCase();
+      const keyNorm = key.replace(/\s+/g, '');
+
+      // Treat window/tab/app-close shortcuts as HIGH risk: they can instantly close the overlay,
+      // the active terminal tab/window, a browser window, or dismiss important dialogs.
+      // Require explicit confirmation so smaller models can't accidentally "self-close" the UI.
+      const closeCombos = [
+        'alt+f4',
+        'ctrl+w',
+        'ctrl+shift+w',
+        'ctrl+q',
+        'ctrl+shift+q',
+        'cmd+w',
+        'cmd+q',
+      ];
+      if (closeCombos.includes(keyNorm)) {
+        result.riskLevel = ActionRiskLevel.HIGH;
+        result.warnings.push(`Close shortcut detected: ${action.key}`);
+        result.requiresConfirmation = true;
+        break;
+      }
+
       if (key.includes('delete') || key.includes('backspace')) {
         result.riskLevel = ActionRiskLevel.HIGH;
         result.warnings.push('Delete/Backspace key may remove content');
