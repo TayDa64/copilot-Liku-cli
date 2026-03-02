@@ -1,3 +1,52 @@
+function isBrokenPipeLikeError(err) {
+  const code = err && err.code;
+  return (
+    code === 'EPIPE' ||
+    code === 'ERR_STREAM_DESTROYED' ||
+    code === 'ERR_STREAM_WRITE_AFTER_END'
+  );
+}
+
+function patchConsoleForBrokenPipes() {
+  const methods = ['log', 'info', 'warn', 'error'];
+  const originals = {};
+  let stdioDisabled = false;
+
+  for (const method of methods) {
+    originals[method] = typeof console[method] === 'function'
+      ? console[method].bind(console)
+      : () => {};
+
+    console[method] = (...args) => {
+      if (stdioDisabled) return;
+      try {
+        originals[method](...args);
+      } catch (e) {
+        if (isBrokenPipeLikeError(e)) {
+          stdioDisabled = true;
+          return;
+        }
+        throw e;
+      }
+    };
+  }
+
+  const swallowStreamError = (stream) => {
+    if (!stream || typeof stream.on !== 'function') return;
+    stream.on('error', (e) => {
+      if (isBrokenPipeLikeError(e)) {
+        stdioDisabled = true;
+        return;
+      }
+    });
+  };
+
+  swallowStreamError(process.stdout);
+  swallowStreamError(process.stderr);
+}
+
+patchConsoleForBrokenPipes();
+
 // Ensure Electron runs in app mode even if a dev shell has ELECTRON_RUN_AS_NODE set
 if (process.env.ELECTRON_RUN_AS_NODE) {
   console.warn('ELECTRON_RUN_AS_NODE was set; clearing so the app can start normally.');
