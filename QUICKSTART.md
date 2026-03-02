@@ -60,6 +60,22 @@ npm run test:ui
 This order gives clearer pass/fail signals by validating runtime health first,
 then shortcut routing, then module-level UI automation.
 
+### Targeting sanity check
+
+Before running keyboard-driven automation (especially browser tab operations), verify what Liku considers the active window:
+
+```bash
+liku doctor
+```
+
+This prints the resolved package root/version (to confirm local vs global) and the current active window (title/process).
+
+For deterministic, machine-readable output (recommended for smaller models / automation), use:
+
+```bash
+liku doctor --json
+```
+
 `smoke:shortcuts` intentionally validates chat visibility via direct in-app
 toggle and validates keyboard routing on overlay with target gating.
 
@@ -137,6 +153,15 @@ Right-click the tray icon to see:
 - Persists while window is open
 
 ## Common Tasks
+
+### Browser actions (Edge/Chrome)
+
+When automating browsers, be explicit about **targeting**:
+1. Ensure the correct browser window is active (bring it to front / focus it)
+2. Ensure the correct tab is active (click the tab title, or use \`ctrl+1..9\`)
+3. Then perform the action (e.g., close tab with \`ctrl+w\`)
+
+If you skip steps 1–2 and the overlay/chat has focus, keyboard shortcuts may close the overlay instead of affecting the browser.
 
 ### Selecting a Screen Element
 ```

@@ -36,6 +36,7 @@ const pkg = require(path.join(PROJECT_ROOT, 'package.json'));
 // Command registry
 const COMMANDS = {
   start: { desc: 'Start the Electron agent with overlay', file: 'start' },
+  doctor: { desc: 'Diagnostics: version, environment, active window', file: 'doctor' },
   click: { desc: 'Click element by text or coordinates', file: 'click', args: '<text|x,y>' },
   find: { desc: 'Find UI elements matching criteria', file: 'find', args: '<text>' },
   type: { desc: 'Type text at current cursor position', file: 'type', args: '<text>' },

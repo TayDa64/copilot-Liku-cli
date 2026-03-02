@@ -1,3 +1,9 @@
+## 0.0.10 - Liku Edition - 2026-03-02
+
+### Diagnostics: `liku doctor` (Stricter Schema)
+- `doctor --json` now emits a versioned, deterministic schema (`schemaVersion: doctor.v1`) with explicit `checks`, `uiState`, `targeting`, `plan.steps`, and `next.commands`.
+- Improved request hint parsing and window matching for tab operations (e.g., correctly captures `tabTitle: "New tab"` and tolerates punctuation differences in window titles).
+
 ## 0.0.9 - Liku Edition - 2026-02-28
 
 ### Phase 1: Coordinate Pipeline Fixes (4 Critical Bugs)

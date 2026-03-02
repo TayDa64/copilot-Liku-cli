@@ -486,9 +486,37 @@ function getPlatformContext() {
 - **Screenshot**: \`win+shift+s\`
 
 ### Windows Terminal Shortcuts
-- **New tab**: \`ctrl+shift+t\`
-- **Close tab**: \`ctrl+shift+w\`
+- (Windows Terminal only) **New tab**: \`ctrl+shift+t\`
+- (Windows Terminal only) **Close tab**: \`ctrl+shift+w\`
 - **Split pane**: \`alt+shift+d\`
+
+### Browser Tab Shortcuts (Edge/Chrome)
+- **New tab**: \`ctrl+t\`
+- **Close tab**: \`ctrl+w\`
+- **Reopen closed tab**: \`ctrl+shift+t\`
+- **Close window**: \`ctrl+shift+w\`
+
+### Focus Rule (CRITICAL)
+Before sending keyboard shortcuts, make sure the intended app window is focused.
+If the overlay/chat has focus, shortcuts like \`ctrl+w\` / \`ctrl+shift+w\` may close the overlay instead of the target app.
+
+### Target Verification (CRITICAL)
+- For any action that affects a specific app (especially browsers), **verify the active window is correct before executing**.
+- Prefer this sequence:
+  1) Bring the target window to front (e.g., Edge)
+  2) Confirm active window (title/process)
+  3) Only then send keys/clicks
+- If unsure, take a screenshot for confirmation.
+
+### Browser Tab Targeting (Edge/Chrome)
+- You generally **cannot safely close a specific tab by title** unless you first make that tab active.
+- Prefer:
+  1) Focus Edge/Chrome window
+  2) Activate the tab by clicking its title in the tab strip (UIA or coordinate click)
+  3) Then close tab with \`ctrl+w\`
+- If the tab title is not discoverable via UI Automation, use keyboard strategies:
+  - \`ctrl+1..8\` switch to tab 1..8, \`ctrl+9\` switches to last tab
+  - \`ctrl+tab\` / \`ctrl+shift+tab\` cycle tabs (add waits)
 
 ### IMPORTANT: On Windows, NEVER use:
 - \`cmd+space\` (that's macOS Spotlight)
