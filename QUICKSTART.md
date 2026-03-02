@@ -76,6 +76,25 @@ For deterministic, machine-readable output (recommended for smaller models / aut
 liku doctor --json
 ```
 
+#### `doctor.v1` schema contract (for smaller models)
+
+When you consume `liku doctor --json`, treat it as the source-of-truth for targeting and planning. The output is a single JSON object with:
+
+- `schemaVersion` (string): currently `doctor.v1`.
+- `ok` (boolean): `false` means at least one `checks[].status === "fail"`.
+- `checks[]` (array): structured checks with `{ id, status: "pass"|"warn"|"fail", message, details? }`.
+- `uiState` (object): UI Automation snapshot
+   - `uiState.activeWindow`: where input will go *right now*
+   - `uiState.windows[]`: discovered top-level windows (bounded unless `--all`)
+- `targeting` (object | null): present when `doctor` is given a request text
+   - `targeting.selectedWindow`: the best-matched window candidate
+   - `targeting.candidates[]`: scored alternatives (for disambiguation)
+- `plan` (object | null): present when a request is provided and a plan can be generated
+   - `plan.steps[]`: ordered steps, each with `{ state, goal, command, verification, notes? }`
+- `next.commands[]` (array of strings): copy/paste-ready commands extracted from `plan.steps[].command`.
+
+**Deterministic execution rule:** run `plan.steps[]` in order, and re-check `liku window --active` after any focus change before sending keys.
+
 `smoke:shortcuts` intentionally validates chat visibility via direct in-app
 toggle and validates keyboard routing on overlay with target gating.
 
