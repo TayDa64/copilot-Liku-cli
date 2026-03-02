@@ -488,7 +488,24 @@ public class WindowFocus {
 [WindowFocus]::Focus([IntPtr]::new(${hwnd}))
 `;
     await executePowerShell(script);
-    console.log(`[AUTOMATION] Focused window handle: ${hwnd}`);
+
+    // Poll to verify focus actually stuck (SetForegroundWindow can be racy / blocked)
+    let verified = false;
+    for (let attempt = 0; attempt < 10; attempt++) {
+      const fg = await getForegroundWindowHandle();
+      if (fg === hwnd) {
+        verified = true;
+        break;
+      }
+      await sleep(50);
+    }
+
+    if (verified) {
+      console.log(`[AUTOMATION] Focused window handle (verified): ${hwnd}`);
+    } else {
+      const fg = await getForegroundWindowHandle();
+      console.warn(`[AUTOMATION] Focus requested for ${hwnd} but foreground is ${fg}`);
+    }
 }
 
 /**
@@ -1696,6 +1713,29 @@ public class WindowInfo {
 [WindowInfo]::GetActiveWindowTitle()
 `;
   return await executePowerShell(script);
+}
+
+/**
+ * Get current foreground window handle (HWND)
+ */
+async function getForegroundWindowHandle() {
+  const script = `
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public class ForegroundHandle {
+  [DllImport("user32.dll")]
+  public static extern IntPtr GetForegroundWindow();
+  public static long GetHandle() {
+    return GetForegroundWindow().ToInt64();
+  }
+}
+"@
+[ForegroundHandle]::GetHandle()
+`;
+  const out = await executePowerShell(script);
+  const num = Number(String(out).trim());
+  return Number.isFinite(num) ? num : null;
 }
 
 /**

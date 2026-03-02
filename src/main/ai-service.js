@@ -2175,9 +2175,21 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
   const results = [];
   let screenshotRequested = false;
   let pendingConfirmation = false;
+  let lastTargetWindowHandle = null;
 
   for (let i = 0; i < actionData.actions.length; i++) {
     const action = actionData.actions[i];
+
+    // Track the intended target window across steps so later key/type actions can
+    // re-focus it. Without this, focus can drift back to the overlay/terminal.
+    if (action.type === 'focus_window' || action.type === 'bring_window_to_front') {
+      try {
+        const hwnd = await systemAutomation.resolveWindowHandle(action);
+        if (hwnd) {
+          lastTargetWindowHandle = hwnd;
+        }
+      } catch {}
+    }
     
     // Handle screenshot requests specially
     if (action.type === 'screenshot') {
@@ -2244,6 +2256,7 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
       if (uiWatcher && uiWatcher.isPolling) {
         const elementAtPoint = uiWatcher.getElementAtPoint(action.x, action.y);
         if (elementAtPoint && elementAtPoint.windowHandle) {
+          lastTargetWindowHandle = elementAtPoint.windowHandle;
           // Found an element with a known window handle
           // Focus it first to ensure click goes to the right window (not trapped by overlay or obscuring window)
           // We can call systemAutomation.focusWindow directly
@@ -2252,6 +2265,13 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
           await new Promise(r => setTimeout(r, 450)); // Wait for window animation/focus settling
         }
       }
+    }
+
+    // Ensure keyboard input goes to the last known target window.
+    if ((action.type === 'key' || action.type === 'type') && lastTargetWindowHandle) {
+      console.log(`[AI-SERVICE] Re-focusing last target window ${lastTargetWindowHandle} before ${action.type}`);
+      await systemAutomation.focusWindow(lastTargetWindowHandle);
+      await new Promise(r => setTimeout(r, 125));
     }
 
     const result = await (actionExecutor ? actionExecutor(action) : systemAutomation.executeAction(action));
@@ -2300,10 +2320,20 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
   
   const results = [...pending.completedResults];
   let screenshotRequested = false;
+  let lastTargetWindowHandle = null;
   
   // Execute the confirmed action and remaining actions
   for (let i = 0; i < pending.remainingActions.length; i++) {
     const action = pending.remainingActions[i];
+
+    if (action.type === 'focus_window' || action.type === 'bring_window_to_front') {
+      try {
+        const hwnd = await systemAutomation.resolveWindowHandle(action);
+        if (hwnd) {
+          lastTargetWindowHandle = hwnd;
+        }
+      } catch {}
+    }
     
     if (action.type === 'screenshot') {
       screenshotRequested = true;
@@ -2312,6 +2342,24 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
       }
       results.push({ success: true, action: 'screenshot', message: 'Screenshot captured' });
       continue;
+    }
+
+    if ((action.type === 'click' || action.type === 'double_click' || action.type === 'right_click') && action.x !== undefined) {
+      if (uiWatcher && uiWatcher.isPolling) {
+        const elementAtPoint = uiWatcher.getElementAtPoint(action.x, action.y);
+        if (elementAtPoint && elementAtPoint.windowHandle) {
+          lastTargetWindowHandle = elementAtPoint.windowHandle;
+          console.log(`[AI-SERVICE] (resume) Auto-focusing window handle ${elementAtPoint.windowHandle} for click at (${action.x}, ${action.y})`);
+          await systemAutomation.focusWindow(elementAtPoint.windowHandle);
+          await new Promise(r => setTimeout(r, 450));
+        }
+      }
+    }
+
+    if ((action.type === 'key' || action.type === 'type') && lastTargetWindowHandle) {
+      console.log(`[AI-SERVICE] (resume) Re-focusing last target window ${lastTargetWindowHandle} before ${action.type}`);
+      await systemAutomation.focusWindow(lastTargetWindowHandle);
+      await new Promise(r => setTimeout(r, 125));
     }
     
     // Execute action (user confirmed, skip safety for first action)
