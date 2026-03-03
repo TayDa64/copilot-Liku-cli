@@ -2022,8 +2022,9 @@ function setupIPC() {
    * Internal helper: capture a screen region (physical coords) and store as visual context.
    * Reused by the IPC handler and auto-ROI on dot-selected.
    */
-  async function captureRegionInternal(x, y, width, height) {
-    const wasOverlayVisible = overlayWindow && !overlayWindow.isDestroyed() && overlayWindow.isVisible();
+  async function captureRegionInternal(x, y, width, height, meta = {}) {
+    const shouldHideOverlay = meta.hideOverlay !== false;
+    const wasOverlayVisible = shouldHideOverlay && overlayWindow && !overlayWindow.isDestroyed() && overlayWindow.isVisible();
     try {
       if (wasOverlayVisible) {
         overlayWindow.hide();
@@ -2039,11 +2040,29 @@ function setupIPC() {
         const primarySource = sources[0];
         const thumbnail = primarySource.thumbnail;
 
+        // desktopCapturer thumbnails are sized to the *virtual desktop*.
+        // UIA coordinates can be negative on multi-monitor setups, so we must offset by the virtual origin.
+        const vd = getVirtualDesktopBounds();
+        const sx = x - vd.x;
+        const sy = y - vd.y;
+
+        const safeX = Math.max(0, Math.floor(sx));
+        const safeY = Math.max(0, Math.floor(sy));
+        const maxW = Math.max(0, thumbnail.getSize().width - safeX);
+        const maxH = Math.max(0, thumbnail.getSize().height - safeY);
+
+        if (maxW <= 0 || maxH <= 0) {
+          return null;
+        }
+
+        const safeW = Math.min(Math.max(1, Math.floor(width)), maxW);
+        const safeH = Math.min(Math.max(1, Math.floor(height)), maxH);
+
         const cropped = thumbnail.crop({
-          x: Math.max(0, x),
-          y: Math.max(0, y),
-          width: Math.min(width, thumbnail.getSize().width - x),
-          height: Math.min(height, thumbnail.getSize().height - y)
+          x: safeX,
+          y: safeY,
+          width: safeW,
+          height: safeH
         });
 
         const imageData = {
@@ -2053,33 +2072,39 @@ function setupIPC() {
           x,
           y,
           timestamp: Date.now(),
-          scope: 'region'
+          scope: meta.scope || 'region',
+          sourceId: meta.sourceId || undefined,
+          sourceName: meta.sourceName || undefined,
         };
 
-        if (chatWindow) {
+        if (meta.emitScreenCaptured !== false && chatWindow) {
           chatWindow.webContents.send('screen-captured', imageData);
         }
 
-        storeVisualContext(imageData);
+        if (meta.storeVisualContext !== false) {
+          storeVisualContext(imageData, meta.dedupeKey ? { dedupeKey: meta.dedupeKey } : undefined);
+        }
 
-        // Phase 0 G2: auto-detect regions from the captured frame and push to overlay
-        inspectService.detectRegions({ screenshot: imageData }).then(results => {
-          if (results.regions?.length > 0 && overlayWindow && !overlayWindow.isDestroyed()) {
-            const sf = screen.getPrimaryDisplay().scaleFactor || 1;
-            const regions = denormalizeRegionsForOverlay(results.regions.map(r => ({
-              bounds: r.bounds,
-              label: r.label || r.role || 'Region',
-              type: r.role,
-              id: r.id
-            })), sf);
-            overlayWindow.webContents.send('overlay-command', {
-              action: 'update-inspect-regions',
-              regions
-            });
-          }
-        }).catch(err => {
-          console.warn('[CAPTURE] Post-capture region detection failed:', err.message);
-        });
+        if (meta.runRegionDetection !== false) {
+          // Phase 0 G2: auto-detect regions from the captured frame and push to overlay
+          inspectService.detectRegions({ screenshot: imageData }).then(results => {
+            if (results.regions?.length > 0 && overlayWindow && !overlayWindow.isDestroyed()) {
+              const sf = screen.getPrimaryDisplay().scaleFactor || 1;
+              const regions = denormalizeRegionsForOverlay(results.regions.map(r => ({
+                bounds: r.bounds,
+                label: r.label || r.role || 'Region',
+                type: r.role,
+                id: r.id
+              })), sf);
+              overlayWindow.webContents.send('overlay-command', {
+                action: 'update-inspect-regions',
+                regions
+              });
+            }
+          }).catch(err => {
+            console.warn('[CAPTURE] Post-capture region detection failed:', err.message);
+          });
+        }
 
         return imageData;
       }
@@ -2099,6 +2124,141 @@ function setupIPC() {
       console.error('Region capture failed:', error);
     }
   });
+
+  // Capture the currently active window as a visual frame (on-demand, no disk write)
+  // This is intended for verification gates (FOCUS/ASSERT/VERIFY) without bloating storage.
+  ipcMain.on('capture-active-window', async () => {
+    try {
+      const win = await visualAwareness.getActiveWindow();
+      if (!win || win.error) {
+        if (chatWindow) {
+          chatWindow.webContents.send('screen-captured', { error: win?.error || 'Failed to read active window' });
+        }
+        return;
+      }
+
+      const b = win.Bounds || win.bounds || win.boundsPx || null;
+      const x = b?.X ?? b?.x;
+      const y = b?.Y ?? b?.y;
+      const width = b?.Width ?? b?.width;
+      const height = b?.Height ?? b?.height;
+
+      if (![x, y, width, height].every(v => typeof v === 'number' && Number.isFinite(v)) || width <= 0 || height <= 0) {
+        if (chatWindow) {
+          chatWindow.webContents.send('screen-captured', { error: 'Active window bounds missing/invalid', window: win });
+        }
+        return;
+      }
+
+      const sourceName = `${win.ProcessName || win.processName || 'App'}: ${win.Title || win.title || ''}`.trim();
+      const sourceId = `active-window:${win.ProcessId || win.processId || ''}`;
+
+      await captureRegionInternal(x, y, width, height, { scope: 'window', sourceId, sourceName });
+    } catch (error) {
+      console.error('Active window capture failed:', error);
+      if (chatWindow) {
+        chatWindow.webContents.send('screen-captured', { error: error.message });
+      }
+    }
+  });
+
+  // Always-on active window streaming (opt-in)
+  // This is intentionally silent (no chat spam) and deduped per active-window key.
+  let activeWindowStreamTimer = null;
+  let activeWindowStreamInFlight = false;
+  let activeWindowStreamOptions = { intervalMs: 1500 };
+
+  function clearActiveWindowStream() {
+    if (activeWindowStreamTimer) {
+      clearInterval(activeWindowStreamTimer);
+      activeWindowStreamTimer = null;
+    }
+    activeWindowStreamInFlight = false;
+  }
+
+  async function activeWindowStreamTick() {
+    if (activeWindowStreamInFlight) return;
+    activeWindowStreamInFlight = true;
+    try {
+      const win = await visualAwareness.getActiveWindow();
+      if (!win || win.error) return;
+
+      const b = win.Bounds || win.bounds || win.boundsPx || null;
+      const x = b?.X ?? b?.x;
+      const y = b?.Y ?? b?.y;
+      const width = b?.Width ?? b?.width;
+      const height = b?.Height ?? b?.height;
+      if (![x, y, width, height].every(v => typeof v === 'number' && Number.isFinite(v)) || width <= 0 || height <= 0) return;
+
+      const procId = win.ProcessId || win.processId || '';
+      const hwnd = win.Hwnd || win.hwnd || '';
+      const title = win.Title || win.title || '';
+
+      const sourceName = `${win.ProcessName || win.processName || 'App'}: ${title}`.trim();
+      const sourceId = `active-window:${procId}`;
+      const dedupeKey = `aw:${procId}:${hwnd}`;
+
+      await captureRegionInternal(x, y, width, height, {
+        scope: 'window',
+        sourceId,
+        sourceName,
+        dedupeKey,
+        emitScreenCaptured: false,
+        runRegionDetection: false,
+        hideOverlay: false,
+      });
+    } catch (e) {
+      console.warn('[STREAM] Active window tick failed:', e.message);
+    } finally {
+      activeWindowStreamInFlight = false;
+    }
+  }
+
+  ipcMain.handle('start-active-window-stream', async (event, options = {}) => {
+    const intervalMsRaw = Number(options.intervalMs);
+    const intervalMs = Number.isFinite(intervalMsRaw) ? Math.max(250, Math.min(10000, intervalMsRaw)) : 1500;
+
+    activeWindowStreamOptions = { intervalMs };
+    clearActiveWindowStream();
+
+    activeWindowStreamTimer = setInterval(activeWindowStreamTick, intervalMs);
+    // Capture immediately once
+    activeWindowStreamTick().catch(() => {});
+
+    return { success: true, running: true, options: activeWindowStreamOptions };
+  });
+
+  ipcMain.handle('stop-active-window-stream', async () => {
+    clearActiveWindowStream();
+    return { success: true, running: false };
+  });
+
+  ipcMain.handle('status-active-window-stream', async () => {
+    return { success: true, running: Boolean(activeWindowStreamTimer), options: activeWindowStreamOptions };
+  });
+
+  // Optional: enable stream automatically for long-running tests
+  if (process.env.LIKU_ACTIVE_WINDOW_STREAM === '1') {
+    const envInterval = Number(process.env.LIKU_ACTIVE_WINDOW_STREAM_INTERVAL_MS);
+    const intervalMs = Number.isFinite(envInterval) ? envInterval : activeWindowStreamOptions.intervalMs;
+    const envDelay = Number(process.env.LIKU_ACTIVE_WINDOW_STREAM_START_DELAY_MS);
+    const delayMs = Number.isFinite(envDelay) ? Math.max(0, Math.min(30000, envDelay)) : 2000;
+
+    console.log(`[STREAM] Scheduled auto-start active window stream (delay=${delayMs}ms interval=${intervalMs}ms)`);
+
+    setTimeout(() => {
+      try {
+        const clamped = Math.max(250, Math.min(10000, Number(intervalMs)));
+        activeWindowStreamOptions = { intervalMs: clamped };
+        clearActiveWindowStream();
+        activeWindowStreamTimer = setInterval(activeWindowStreamTick, clamped);
+        activeWindowStreamTick().catch(() => {});
+        console.log(`[STREAM] Auto-started active window stream (interval=${clamped}ms)`);
+      } catch (e) {
+        console.warn('[STREAM] Auto-start failed:', e.message);
+      }
+    }, delayMs);
+  }
 
   // Get current state
   ipcMain.handle('get-state', () => {
@@ -2729,10 +2889,34 @@ function setupIPC() {
 let visualContextHistory = [];
 const MAX_VISUAL_CONTEXT_ITEMS = 10;
 
+// Optional per-source dedupe to avoid spamming identical frames in always-on modes.
+const visualContextLastFingerprintByKey = new Map();
+
+function computeDataUrlFingerprint(dataURL) {
+  if (!dataURL) return null;
+  const s = String(dataURL);
+  const len = s.length;
+  const head = s.slice(0, 96);
+  const tail = s.slice(-96);
+  return `${len}:${head}:${tail}`;
+}
+
 /**
  * Store visual context for AI processing
  */
-function storeVisualContext(imageData) {
+function storeVisualContext(imageData, options = undefined) {
+  const dedupeKey = options?.dedupeKey || null;
+  if (dedupeKey) {
+    const fp = computeDataUrlFingerprint(imageData?.dataURL);
+    if (fp) {
+      const last = visualContextLastFingerprintByKey.get(dedupeKey);
+      if (last === fp) {
+        return false;
+      }
+      visualContextLastFingerprintByKey.set(dedupeKey, fp);
+    }
+  }
+
   const { createVisualFrame } = require('../shared/inspect-types');
   const frame = createVisualFrame(imageData);
   frame.id = `vc-${Date.now()}`;
@@ -2754,6 +2938,8 @@ function storeVisualContext(imageData) {
       latest: frame.timestamp
     });
   }
+
+  return true;
 }
 
 /**

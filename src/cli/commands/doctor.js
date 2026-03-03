@@ -90,6 +90,10 @@ function extractUrlCandidate(text) {
   const fullUrl = /(https?:\/\/[^\s"']+)/i.exec(str);
   if (fullUrl?.[1]) return fullUrl[1];
 
+  // Localhost URLs are common in dev workflows and are often written without scheme.
+  const localhostish = /\b((?:https?:\/\/)?(?:localhost|127\.0\.0\.1)(?::\d+)?(?:\/[^\s"']*)?)/i.exec(str);
+  if (localhostish?.[1]) return localhostish[1];
+
   // Common bare domains (keep conservative)
   const bare = /\b([a-z0-9-]+\.)+(com|net|org|io|ai|dev|edu|gov)(\/[^\s"']*)?\b/i.exec(str);
   if (bare?.[0]) return bare[0];
@@ -310,6 +314,51 @@ function buildSuggestedPlan(hints, activeWindow, rankedCandidates) {
   })();
   const plan = [];
 
+  const ALLOWED_PLAN_STATES = new Set([
+    'FOCUS',
+    'NAVIGATE',
+    'ASSERT',
+    'ENUMERATE',
+    'SCORE',
+    'INVOKE',
+    'VERIFY',
+    'RECOVER',
+  ]);
+
+  const addStep = (state, step) => {
+    if (!ALLOWED_PLAN_STATES.has(state)) {
+      // Keep output stable even if a caller passes a bad state.
+      state = 'NAVIGATE';
+    }
+    plan.push({
+      state,
+      goal: step.goal,
+      command: step.command || null,
+      verification: step.verification || null,
+      notes: step.notes || null,
+      inputs: step.inputs || null,
+      outputs: step.outputs || null,
+      recovery: step.recovery || null,
+    });
+  };
+
+  const extractScrollSpec = (raw) => {
+    const text = normalizeText(raw);
+    const dir = /\bup\b/i.test(text) ? 'up' : (/\bdown\b/i.test(text) ? 'down' : null);
+    const m = /\b(\d+)\b/.exec(text);
+    const amount = m?.[1] ? parseInt(m[1], 10) : null;
+    return { dir, amount };
+  };
+
+  const extractDragSpec = (raw) => {
+    const text = normalizeText(raw);
+    const m = /\bfrom\s+(\d+)\s*,\s*(\d+)\s+to\s+(\d+)\s*,\s*(\d+)\b/i.exec(text);
+    if (!m) return null;
+    const nums = m.slice(1).map(n => parseInt(n, 10));
+    if (nums.some(n => !Number.isFinite(n))) return null;
+    return { x1: nums[0], y1: nums[1], x2: nums[2], y2: nums[3] };
+  };
+
   const targetTitleForFilter = target?.title ? String(target.title) : null;
 
   const targetSelector = (() => {
@@ -323,141 +372,156 @@ function buildSuggestedPlan(hints, activeWindow, rankedCandidates) {
     return null;
   })();
 
-  // State machine-ish scaffold. Keep it deterministic and CLI-driven.
-  plan.push({
-    state: 'VERIFY_ACTIVE_WINDOW',
-    goal: 'Confirm which window will receive input',
-    command: 'liku window --active',
-    verification: 'Active window title/process match the intended target',
-  });
-
-  if (targetSelector && hints.intent !== 'unknown') {
+  // Deterministic scaffold.
+  const didInitialFocus = Boolean(targetSelector && hints.intent !== 'unknown');
+  if (didInitialFocus) {
     const frontCmd = targetSelector.by === 'hwnd'
       ? `liku window --front --hwnd ${targetSelector.value}`
       : `liku window --front "${String(targetSelector.value).replace(/"/g, '\\"')}"`;
 
-    plan.unshift({
-      state: 'FOCUS_TARGET_WINDOW',
+    addStep('FOCUS', {
       goal: 'Bring the intended target window to the foreground',
       command: frontCmd,
-      verification: 'Window is foreground and becomes active',
+      verification: 'The target window becomes the active foreground window',
+      notes: 'If focus is flaky, repeat this step before sending keys/clicks.',
     });
   }
+
+  addStep('ASSERT', {
+    goal: 'Confirm which window will receive input',
+    command: 'liku window --active',
+    verification: 'Active window title/process match the intended target',
+    notes: 'This is a pollable verification gate; do not proceed if the wrong window is active.',
+  });
 
   // Tab targeting for browsers is always a separate step.
   if (hints.intent === 'close_tab' && hints.tabTitle) {
     const windowFilter = targetTitleForFilter ? ` --window "${targetTitleForFilter.replace(/"/g, '\\"')}"` : '';
-    plan.push({
-      state: 'ACTIVATE_TARGET_TAB',
+    addStep('NAVIGATE', {
       goal: `Make the tab active: "${hints.tabTitle}"`,
       command: `liku click "${String(hints.tabTitle).replace(/"/g, '\\"')}" --type TabItem${windowFilter}`,
       verification: 'The tab becomes active (visually highlighted)',
       notes: 'If UIA cannot see browser tabs, fall back to ctrl+1..9 or ctrl+tab cycling with waits.',
     });
-    plan.push({
-      state: 'EXECUTE_ACTION',
+    addStep('INVOKE', {
       goal: 'Close the active tab',
       command: 'liku keys ctrl+w',
-      verification: 'Tab disappears; previous tab becomes active',
+      verification: 'Tab closes',
+    });
+    addStep('VERIFY', {
+      goal: 'Verify the tab was closed',
+      command: 'liku window --active',
+      verification: 'Active browser window remains focused and the target tab is no longer present',
+      notes: 'Prefer verification via UI state/title change; avoid file screenshots.',
     });
     return { target, plan };
   }
 
   if (hints.intent === 'browser_navigate' && hints.appHints?.isBrowser) {
+    addStep('NAVIGATE', {
+      goal: '(Optional) Enable ephemeral visual verification (bounded buffer)',
+      command: 'liku start --background',
+      verification: 'The Liku visual agent is running (overlay available)',
+      notes: [
+        'This replaces “files everywhere” screenshots with ephemeral frames stored in a bounded in-memory buffer.',
+        'Enable always-on active-window streaming via env vars before starting:',
+        '  LIKU_ACTIVE_WINDOW_STREAM=1',
+        '  LIKU_ACTIVE_WINDOW_STREAM_INTERVAL_MS=750   (tune as needed)',
+        '  LIKU_ACTIVE_WINDOW_STREAM_START_DELAY_MS=2500',
+        'Verification can then rely on: active window polling + frame diff/hash + OCR/vision-derived signals.',
+        'If you need a purely CLI pollable frame hash (no file output):',
+        '  liku screenshot --memory --hash --json',
+        'If you need to wait until the frame changes (polling):',
+        '  liku verify-hash --timeout 8000 --interval 250 --json',
+        'If you need to wait until rendering settles (stable-for window):',
+        '  liku verify-stable --metric dhash --epsilon 4 --stable-ms 800 --timeout 15000 --interval 250 --json',
+      ].join('\n'),
+    });
+
     // If running inside VS Code and the user wants it, prefer using the Integrated Browser.
     if (hints.wantsIntegratedBrowser) {
       const url = toHttpsUrl(hints.urlCandidate) || buildSearchUrl({ query: hints.searchQuery, preferYouTube: false });
       const localhostish = isLocalhostUrl(hints.urlCandidate);
 
-      plan.push({
-        state: 'OPEN_INTEGRATED_BROWSER',
-        goal: 'Open VS Code Integrated Browser',
+      addStep('NAVIGATE', {
+        goal: 'Open VS Code command palette',
         command: 'liku keys ctrl+shift+p',
         verification: 'Command Palette opens',
-        notes: 'Run the VS Code command: "Browser: Open Integrated Browser"',
       });
-      plan.push({
-        state: 'COMMAND_INTEGRATED_BROWSER',
+      addStep('NAVIGATE', {
         goal: 'Run the Integrated Browser command',
         command: 'liku type "Browser: Open Integrated Browser"',
         verification: 'The command appears in the palette',
       });
-      plan.push({
-        state: 'CONFIRM_COMMAND',
+      addStep('INVOKE', {
         goal: 'Execute the command',
         command: 'liku keys enter',
         verification: 'An Integrated Browser editor tab opens',
         notes: localhostish
-          ? 'Tip: enable the VS Code setting workbench.browser.openLocalhostLinks to automatically open localhost links in the integrated browser.'
+          ? 'If this is localhost, consider enabling workbench.browser.openLocalhostLinks so localhost links route to the Integrated Browser.'
           : 'Integrated Browser supports http(s) and file URLs.',
       });
 
       if (localhostish) {
-        plan.push({
-          state: 'OPEN_SETTINGS',
+        addStep('NAVIGATE', {
           goal: 'Open VS Code Settings (optional)',
           command: 'liku keys ctrl+,',
           verification: 'Settings UI opens',
         });
-        plan.push({
-          state: 'FIND_SETTING',
+        addStep('ASSERT', {
           goal: 'Locate the localhost-integrated-browser setting',
           command: 'liku type "workbench.browser.openLocalhostLinks"',
           verification: 'The setting appears in search results',
           notes: 'Enable it to route localhost links to the Integrated Browser.',
         });
-        plan.push({
-          state: 'VERIFY_SETTING',
-          goal: 'Capture evidence of the setting state',
-          command: 'liku screenshot',
-          verification: 'Screenshot shows the setting and whether it is enabled',
+        addStep('VERIFY', {
+          goal: 'Verify the setting is enabled',
+          command: null,
+          verification: 'Setting toggle shows enabled',
+          notes: 'Verification should rely on visible UI state (ephemeral frames), not saved screenshots.',
         });
       }
 
       if (url) {
-        plan.push({
-          state: 'FOCUS_ADDRESS_BAR',
+        addStep('NAVIGATE', {
           goal: 'Focus the integrated browser address bar',
           command: 'liku keys ctrl+l',
           verification: 'Address bar is focused (URL text highlighted)',
         });
-        plan.push({
-          state: 'TYPE_URL',
+        addStep('NAVIGATE', {
           goal: 'Type the destination URL',
           command: `liku type "${escapeDoubleQuotes(url)}"`,
           verification: 'The full URL appears correctly in the address bar',
         });
-        plan.push({
-          state: 'NAVIGATE',
+        addStep('INVOKE', {
           goal: 'Navigate to the URL in the integrated browser',
           command: 'liku keys enter',
           verification: 'Page begins loading; content changes',
         });
       } else {
-        plan.push({
-          state: 'MISSING_URL',
+        addStep('ASSERT', {
           goal: 'No URL could be inferred from the request',
-          command: 'liku screenshot',
-          verification: 'Use the screenshot to decide the next navigation step',
+          command: null,
+          verification: 'Decide the next navigation step from current UI state',
+          notes: 'Prefer using ephemeral active-window frames (bounded buffer) for inspection rather than writing screenshot files.',
         });
       }
 
-      plan.push({
-        state: 'VERIFY_RESULT',
-        goal: 'Capture evidence of the resulting page state',
-        command: 'liku screenshot',
-        verification: 'Screenshot shows expected page state in the integrated browser',
+      addStep('VERIFY', {
+        goal: 'Verify the resulting page state',
+        command: 'liku window --active',
+        verification: 'VS Code remains active and the Integrated Browser shows expected content',
+        notes: 'Verification should be pollable (active window) plus ephemeral frames/vision-derived signals, not saved screenshots.',
       });
 
       return { target, plan };
     }
 
     if (!target) {
-      plan.push({
-        state: 'NO_BROWSER_WINDOW',
+      addStep('ASSERT', {
         goal: 'No browser window was detected; open a browser window first',
         command: 'liku window',
-        verification: 'A browser window (Edge/Chrome/Firefox/Brave/etc) appears in the list',
+        verification: 'A browser window appears in the list',
       });
       return { target: null, plan };
     }
@@ -470,47 +534,42 @@ function buildSuggestedPlan(hints, activeWindow, rankedCandidates) {
     );
 
     if (hints.wantsNewTab) {
-      plan.push({
-        state: 'OPEN_NEW_TAB',
+      addStep('NAVIGATE', {
         goal: 'Open a new tab in the focused browser window',
         command: 'liku keys ctrl+t',
-        verification: 'A new tab opens (tab count increases or blank tab appears)',
+        verification: 'A new tab opens (blank tab appears)',
       });
     }
 
-    plan.push({
-      state: 'FOCUS_ADDRESS_BAR',
+    addStep('NAVIGATE', {
       goal: 'Focus the address bar',
       command: 'liku keys ctrl+l',
       verification: 'Address bar is focused (URL text highlighted)',
-      notes: 'If focus is flaky, re-run `liku window --active` and re-focus the browser window before sending keys.',
+      notes: 'If focus is flaky: re-run `liku window --active`, re-focus the browser window, then try again.',
     });
 
     if (url) {
-      plan.push({
-        state: 'TYPE_URL',
+      addStep('NAVIGATE', {
         goal: `Type the destination URL${hints.searchQuery ? ' (search encoded into URL for reliability)' : ''}`,
         command: `liku type "${escapeDoubleQuotes(url)}"`,
         verification: 'The full URL appears correctly in the address bar',
         notes: 'If characters drop: ctrl+l → ctrl+a → type URL again → enter (with short pauses).',
       });
-      plan.push({
-        state: 'NAVIGATE',
+      addStep('INVOKE', {
         goal: 'Navigate to the URL in the current tab',
         command: 'liku keys enter',
         verification: 'Page begins loading; title/content changes',
       });
     } else {
-      plan.push({
-        state: 'MISSING_URL',
+      addStep('ASSERT', {
         goal: 'No URL could be inferred from the request',
-        command: 'liku screenshot',
-        verification: 'Use the screenshot to decide the next navigation step',
+        command: null,
+        verification: 'Decide the next navigation step from current UI state',
+        notes: 'Prefer ephemeral active-window frames (bounded buffer) over saved screenshot files.',
       });
     }
 
-    plan.push({
-      state: 'VERIFY_FOCUS',
+    addStep('VERIFY', {
       goal: 'Verify keyboard focus stayed on the browser window',
       command: 'liku window --active',
       verification: hints.requestedBrowser?.name
@@ -518,23 +577,198 @@ function buildSuggestedPlan(hints, activeWindow, rankedCandidates) {
         : 'Active window process/title matches a browser window',
     });
 
-    plan.push({
-      state: 'VERIFY_RESULT',
-      goal: 'Capture evidence of the resulting page state',
-      command: 'liku screenshot',
-      verification: 'Screenshot shows expected page (e.g., YouTube results for query)',
-    });
+    // Multi-option selection becomes a first-class subroutine when searching/navigating to results pages.
+    if (hints.searchQuery || /youtube\.com\/results\?/i.test(url || '')) {
+      const query = hints.searchQuery || null;
+      const windowFilter = targetTitleForFilter ? ` --window "${targetTitleForFilter.replace(/"/g, '\\"')}"` : '';
+
+      addStep('ENUMERATE', {
+        goal: 'Enumerate candidate results/targets on the page',
+        command: query
+          ? `liku find "${escapeDoubleQuotes(query)}"${windowFilter}`
+          : `liku find "*"${windowFilter}`,
+        verification: 'A non-empty list of candidate elements is returned (or UIA reports none)',
+        notes: 'If UIA cannot see web content (common), switch to vision-based enumeration via the agent’s bounded active-window frame buffer.',
+        outputs: { candidates: 'array of UIA elements (name/type/bounds)' },
+      });
+
+      addStep('SCORE', {
+        goal: 'Score and select the best candidate deterministically',
+        command: null,
+        verification: 'A single top candidate is selected (and at least one runner-up is retained)',
+        notes: [
+          'Scoring rules (deterministic, in order):',
+          '1) Exact/near-exact text match to the request/search query',
+          '2) Prefer results with expected type (Hyperlink/Button) and non-empty bounds',
+          '3) Prefer items near the top of the results list',
+          'Keep the top 3 as fallbacks for RECOVER.',
+        ].join('\n'),
+        outputs: { selected: 'best candidate', fallback: 'runner-up candidates' },
+      });
+
+      addStep('INVOKE', {
+        goal: 'Invoke the selected candidate (click)',
+        command: query
+          ? `liku click "${escapeDoubleQuotes(query)}"${windowFilter}`
+          : null,
+        verification: 'The page navigates or the expected UI response occurs',
+        notes: query
+          ? 'This click uses the query text as the selector. If multiple matches exist, refine enumeration/type/window filters.'
+          : 'Invoke by clicking the chosen element from ENUMERATE (requires a concrete selector).',
+      });
+
+      addStep('VERIFY', {
+        goal: 'Verify the invocation succeeded',
+        command: 'liku window --active',
+        verification: 'Browser remains active and visible content/title changes as expected',
+        notes: 'Verification should be a pollable gate (active window + visible change via ephemeral frames / OCR signals), not saved screenshots.',
+      });
+
+      addStep('RECOVER', {
+        goal: 'Recover if the chosen candidate was wrong',
+        command: 'liku keys alt+left',
+        verification: 'Returns to the results/list view',
+        recovery: 'Re-run ENUMERATE → SCORE selecting the next runner-up, then INVOKE → VERIFY.',
+      });
+    }
 
     return { target, plan };
   }
 
   if (hints.intent === 'close_window') {
-    plan.push({
-      state: 'EXECUTE_ACTION',
+    addStep('INVOKE', {
       goal: 'Close the active window',
       command: 'liku keys alt+f4',
       verification: 'Window closes and focus changes',
       notes: 'Prefer alt+f4 for closing windows; ctrl+shift+w is app-specific and can close the wrong thing.',
+    });
+    addStep('VERIFY', {
+      goal: 'Verify the window closed',
+      command: 'liku window --active',
+      verification: 'A different window becomes active',
+    });
+    return { target, plan };
+  }
+
+  if (hints.intent === 'focus') {
+    if (!didInitialFocus) {
+      addStep('FOCUS', {
+        goal: 'Bring the intended window to the foreground',
+        command: targetSelector
+          ? (targetSelector.by === 'hwnd'
+            ? `liku window --front --hwnd ${targetSelector.value}`
+            : `liku window --front "${String(targetSelector.value).replace(/"/g, '\\"')}"`)
+          : 'liku window  # list windows',
+        verification: 'The intended window becomes active',
+      });
+    }
+    addStep('VERIFY', {
+      goal: 'Verify focus is correct',
+      command: 'liku window --active',
+      verification: 'Active window title/process match the intended target',
+      notes: 'Treat this as a pollable gate before any input.',
+    });
+    return { target, plan };
+  }
+
+  if (hints.intent === 'find') {
+    const query = hints.elementTextCandidates?.[0] || hints.searchQuery || null;
+    const windowFilter = targetTitleForFilter ? ` --window "${targetTitleForFilter.replace(/"/g, '\\"')}"` : '';
+    addStep('ENUMERATE', {
+      goal: query ? `Enumerate elements matching: "${query}"` : 'Enumerate candidate elements (missing query)',
+      command: query ? `liku find "${escapeDoubleQuotes(query)}"${windowFilter}` : null,
+      verification: query ? 'A list of matching elements is returned (or UIA reports none)' : 'Provide a specific query string to enumerate',
+      notes: query
+        ? 'If UIA cannot see the content (common in browsers), use ephemeral active-window frames + OCR/vision to enumerate.'
+        : 'Example: `liku doctor "find \"Save\""`',
+      outputs: { candidates: 'array of UIA elements (name/type/bounds)' },
+    });
+    addStep('SCORE', {
+      goal: 'Select the best matching element deterministically',
+      command: null,
+      verification: 'A single best match is identified (with runner-ups retained)',
+      notes: 'Prefer exact text match; then prefer visible/clickable controls with stable bounds.',
+    });
+    addStep('VERIFY', {
+      goal: 'Verify the match is correct',
+      command: 'liku window --active',
+      verification: 'Target window remains active and the chosen match is plausible in context',
+      notes: 'Use pollable state + ephemeral frames/OCR signals rather than screenshot files.',
+    });
+    return { target, plan };
+  }
+
+  if (hints.intent === 'type') {
+    const quoted = extractQuotedStrings(hints.raw || '');
+    const textToType = quoted[0] || null;
+    addStep('ASSERT', {
+      goal: 'Confirm the caret/input focus is in the intended field',
+      command: 'liku window --active',
+      verification: 'Active window is correct and the intended input is focused',
+      notes: 'If input focus is wrong, click the field first (use an explicit ENUMERATE→SCORE→INVOKE step for the field).',
+    });
+    if (textToType) {
+      addStep('INVOKE', {
+        goal: `Type text: "${textToType}"`,
+        command: `liku type "${escapeDoubleQuotes(textToType)}"`,
+        verification: 'Text is entered',
+      });
+      addStep('VERIFY', {
+        goal: 'Verify the text appears in the intended field',
+        command: null,
+        verification: 'Visible field value matches the typed text',
+        notes: 'Prefer ephemeral frames/OCR-derived signals + active-window polling; avoid saving screenshot files.',
+      });
+    } else {
+      addStep('ASSERT', {
+        goal: 'No quoted text found to type',
+        command: null,
+        verification: 'Provide the text to type in quotes',
+        notes: 'Example: `liku doctor "type \"hello\""`',
+      });
+    }
+    return { target, plan };
+  }
+
+  if (hints.intent === 'scroll') {
+    const { dir, amount } = extractScrollSpec(hints.raw || '');
+    const direction = dir || 'down';
+    const amt = Number.isFinite(amount) && amount > 0 ? amount : 5;
+    addStep('INVOKE', {
+      goal: `Scroll ${direction} by ${amt}`,
+      command: `liku scroll ${direction} ${amt}`,
+      verification: 'Content moves in the intended direction',
+      notes: 'Verify via visible change using ephemeral frames/diff if needed.',
+    });
+    addStep('VERIFY', {
+      goal: 'Verify scroll result',
+      command: 'liku window --active',
+      verification: 'Target window stays active and content moved',
+    });
+    return { target, plan };
+  }
+
+  if (hints.intent === 'drag') {
+    const spec = extractDragSpec(hints.raw || '');
+    if (!spec) {
+      addStep('ASSERT', {
+        goal: 'Drag requested but coordinates were not provided',
+        command: null,
+        verification: 'Provide coordinates as: from x,y to x,y',
+        notes: 'Example: `liku doctor "drag from 100,200 to 400,200"` (then run `liku drag 100 200 400 200`).',
+      });
+      return { target, plan };
+    }
+    addStep('INVOKE', {
+      goal: `Drag from (${spec.x1},${spec.y1}) to (${spec.x2},${spec.y2})`,
+      command: `liku drag ${spec.x1} ${spec.y1} ${spec.x2} ${spec.y2}`,
+      verification: 'The intended UI element is moved/selection changes',
+    });
+    addStep('VERIFY', {
+      goal: 'Verify drag result',
+      command: 'liku window --active',
+      verification: 'Target window remains active and the UI reflects the drag',
+      notes: 'If verification is visual-only, use ephemeral frames/diff rather than screenshot files.',
     });
     return { target, plan };
   }
@@ -543,22 +777,38 @@ function buildSuggestedPlan(hints, activeWindow, rankedCandidates) {
     const elementText = hints.elementTextCandidates?.[0] || null;
     if (elementText) {
       const windowFilter = targetTitleForFilter ? ` --window "${targetTitleForFilter.replace(/"/g, '\\"')}"` : '';
-      plan.push({
-        state: 'EXECUTE_ACTION',
+      addStep('ENUMERATE', {
+        goal: `Enumerate matches for element text: "${elementText}"`,
+        command: `liku find "${String(elementText).replace(/"/g, '\\"')}"${windowFilter}`,
+        verification: 'At least one matching element is returned',
+      });
+      addStep('SCORE', {
+        goal: 'Select the best match deterministically',
+        command: null,
+        verification: 'A single best match is identified',
+        notes: 'Prefer exact text match; then prefer elements with a clickable control type (Button/Hyperlink) and visible bounds.',
+      });
+      addStep('INVOKE', {
         goal: `Click element: "${elementText}"`,
         command: `liku click "${String(elementText).replace(/"/g, '\\"')}"${windowFilter}`,
         verification: 'Expected UI response occurs (button press, navigation, etc.)',
+      });
+      addStep('VERIFY', {
+        goal: 'Verify the click had the intended effect',
+        command: 'liku window --active',
+        verification: 'Target window remains active and the UI state changes as expected',
+        notes: 'If verification is ambiguous, use ephemeral active-window frames/OCR signals rather than saving screenshots.',
       });
     }
     return { target, plan };
   }
 
   // Generic fallback: ensure focus + suggest next step.
-  plan.push({
-    state: 'NEXT',
+  addStep('RECOVER', {
     goal: 'If the target is not correct, refine the window hint and retry',
     command: 'liku window  # list windows',
     verification: 'You can identify the intended window title/process',
+    recovery: 'Repeat FOCUS → ASSERT with a more specific window title/process hint.',
   });
 
   return { target, plan };

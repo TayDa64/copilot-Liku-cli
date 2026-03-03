@@ -15,6 +15,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // ===== SCREEN CAPTURE =====
   captureScreen: (options) => ipcRenderer.send('capture-screen', options),
   captureRegion: (x, y, width, height) => ipcRenderer.send('capture-region', { x, y, width, height }),
+  captureActiveWindow: () => ipcRenderer.send('capture-active-window'),
+
+  startActiveWindowStream: (options) => ipcRenderer.invoke('start-active-window-stream', options),
+  stopActiveWindowStream: () => ipcRenderer.invoke('stop-active-window-stream'),
+  statusActiveWindowStream: () => ipcRenderer.invoke('status-active-window-stream'),
   
   // ===== AI SERVICE CONTROL =====
   setAIProvider: (provider) => ipcRenderer.send('set-ai-provider', provider),

@@ -42,6 +42,8 @@ const COMMANDS = {
   type: { desc: 'Type text at current cursor position', file: 'type', args: '<text>' },
   keys: { desc: 'Send keyboard shortcut', file: 'keys', args: '<combo>' },
   screenshot: { desc: 'Capture screenshot', file: 'screenshot', args: '[path]' },
+  'verify-hash': { desc: 'Poll until screenshot hash changes', file: 'verify-hash' },
+  'verify-stable': { desc: 'Wait until visual output is stable', file: 'verify-stable' },
   window: { desc: 'Focus or list windows', file: 'window', args: '[title]' },
   mouse: { desc: 'Move mouse to coordinates', file: 'mouse', args: '<x> <y>' },
   drag: { desc: 'Drag from one point to another', file: 'drag', args: '<x1> <y1> <x2> <y2>' },
@@ -98,6 +100,15 @@ ${highlight('EXAMPLES:')}
 
   ${dim('# Take a screenshot')}
   liku screenshot ./capture.png
+
+    ${dim('# Take an in-memory screenshot (no file)')}
+    liku screenshot --memory --hash --json
+
+  ${dim('# Poll until the frame changes (hash)')}
+  liku verify-hash --timeout 8000 --interval 250 --json
+
+  ${dim('# Wait until the frame is settled/stable')}
+  liku verify-stable --metric dhash --epsilon 4 --stable-ms 800 --timeout 15000 --interval 250 --json
 
   ${dim('# Focus VS Code window')}
   liku window "Visual Studio Code"
