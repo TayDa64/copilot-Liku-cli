@@ -20,6 +20,9 @@ Then run from any directory:
 ```bash
 liku          # Start the application
 liku --help   # See available commands
+
+# Headless terminal chat (no Electron UI required)
+liku chat
 ```
 
 #### Option 2: Local Development
@@ -130,6 +133,20 @@ When you consume `liku doctor --json`, treat it as the source-of-truth for targe
 toggle and validates keyboard routing on overlay with target gating.
 
 ## First Use
+
+## Headless Terminal Chat (Optional)
+
+If you prefer to stay in the terminal and still use the action-execution pipeline:
+
+```bash
+liku chat
+```
+
+Inside chat, you can:
+- Authenticate with `/login`
+- Switch models with `/model`
+- Capture visual context with `/capture` (then enable one-shot vision via `/vision on`)
+- When prompted to run actions, press `c` to **Teach** a preference for the active app (saved to `~/.liku-cli/preferences.json`)
 
 ### 1. Application Launch
 When you start the application:

@@ -33,6 +33,12 @@ Start using Liku:
 liku start
 ```
 
+Or run terminal-first chat (no Electron UI required):
+
+```bash
+liku chat
+```
+
 ---
 
 ## Platform-Specific Installation

@@ -3,7 +3,7 @@
 [![npm version](https://img.shields.io/npm/v/copilot-liku-cli.svg)](https://www.npmjs.com/package/copilot-liku-cli)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen.svg)](https://nodejs.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE.md)
-[![Package Size](https://img.shields.io/badge/package-~196KB-blue.svg)](https://www.npmjs.com/package/copilot-liku-cli)
+[![Package Size](https://img.shields.io/badge/package-~245KB-blue.svg)](https://www.npmjs.com/package/copilot-liku-cli)
 
 The power of GitHub Copilot, now with visual-spatial awareness and advanced automation.
 
@@ -38,9 +38,20 @@ This launches the Electron-based visual agent including the chat interface and t
 
 > **Note:** The visual overlay requires Electron (installed automatically as an optional dependency). All headless CLI commands (`click`, `find`, `type`, `keys`, `screenshot`, etc.) work without Electron.
 
+### Terminal Chat (Headless)
+If you want an interactive **terminal-first** workflow (no Electron UI required), use:
+
+```bash
+liku chat
+```
+
+This runs an AI chat loop that can emit and execute the same JSON actions as the overlay.
+It also supports a **Teach** flow that persists app-scoped preferences (execution mode + action/negative policies) under `~/.liku-cli/preferences.json`.
+
 ### Automation Commands
 | Command | Usage | Description |
 | :--- | :--- | :--- |
+| `chat` | `liku chat` | Interactive AI chat in the terminal (headless). |
 | `click` | `liku click "Submit" --double` | Click UI element by text or coordinates. |
 | `find` | `liku find "Save" --type Button` | Locate elements using native UI Automation / OCR. |
 | `type` | `liku type "Hello World"` | Input string at the current cursor position. |
@@ -156,6 +167,8 @@ Set a GitHub personal access token with Copilot permissions:
 3. Export `GH_TOKEN` or `GITHUB_TOKEN` in your environment.
 
 Or launch the agent and use the `/login` slash command.
+
+> **Tip:** `liku chat` also supports `/login` and `/model`.
 
 ## ✅ Quick Verify
 

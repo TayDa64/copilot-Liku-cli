@@ -1,3 +1,17 @@
+## 0.0.12 - Liku Edition - 2026-03-04
+
+### Terminal Chat: `liku chat`
+- Added an interactive terminal chat mode that can emit and execute JSON actions without requiring the Electron overlay.
+- Supports `/login`, `/model`, `/capture`, and one-shot vision via `/vision on`.
+
+### Teach UX + Preferences (Hardened)
+- Added a preferences store at `~/.liku-cli/preferences.json` for app-scoped execution mode and policy steering.
+- Hardened the Preference Parser to emit a strict typed rules array (`type: "negative" | "action"`) using structured output validation.
+- New rules merged into preferences are initialized with metrics placeholders (`metrics: { successes: 0, failures: 0 }`).
+
+### Policy Enforcement (Rails)
+- Action plans are now validated against both `negativePolicies` (brakes) and `actionPolicies` (positive enforcement rails) and will be regenerated on violation (bounded retries).
+
 ## 0.0.10 - Liku Edition - 2026-03-02
 
 ### Diagnostics: `liku doctor` (Stricter Schema)
