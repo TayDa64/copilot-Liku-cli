@@ -103,19 +103,48 @@ const SPECIAL_KEYS = {
  */
 function executePowerShell(command) {
   return new Promise((resolve, reject) => {
-    // Escape for PowerShell
-    const psCommand = command.replace(/"/g, '`"');
-    
-    exec(`powershell -NoProfile -Command "${psCommand}"`, {
+    // IMPORTANT: Do NOT attempt to escape quotes in-line.
+    // Many commands embed C# code via Add-Type using PowerShell here-strings.
+    // Naively escaping `"` corrupts the C# source, causing non-terminating
+    // compilation errors (stderr) and empty stdout that our callers may parse
+    // as 0/falsey values.
+    //
+    // -EncodedCommand avoids quoting issues, but large scripts (notably Add-Type
+    // blocks for Win32 interop) can exceed the Windows command-line limit.
+    // Writing to a temporary .ps1 file avoids both issues.
+    const prologue = `$ProgressPreference = 'SilentlyContinue'\n$ErrorActionPreference = 'Stop'\n`;
+    const fullCommand = `${prologue}${String(command)}`;
+
+    const tmpDir = os.tmpdir();
+    const tmpName = `liku-ps-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.ps1`;
+    const tmpPath = path.join(tmpDir, tmpName);
+
+    try {
+      fs.writeFileSync(tmpPath, fullCommand, 'utf8');
+    } catch (e) {
+      reject(e);
+      return;
+    }
+
+    const quotedPath = `\"${tmpPath.replace(/"/g, '""')}\"`;
+    exec(`powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ${quotedPath}`, {
       encoding: 'utf8',
       maxBuffer: 10 * 1024 * 1024
     }, (error, stdout, stderr) => {
-      if (error) {
-        console.error('[AUTOMATION] PowerShell error:', stderr);
-        reject(new Error(stderr || error.message));
-      } else {
-        resolve(stdout.trim());
+      try {
+        fs.unlinkSync(tmpPath);
+      } catch {
+        // best-effort cleanup
       }
+
+      if (error) {
+        const stderrText = String(stderr || '').trim();
+        if (stderrText) console.error('[AUTOMATION] PowerShell error:', stderrText);
+        reject(new Error(stderrText || error.message || 'PowerShell execution failed'));
+        return;
+      }
+
+      resolve(String(stdout || '').trim());
     });
   });
 }
@@ -517,15 +546,22 @@ async function resolveWindowHandle(action = {}) {
     return Number(directHandle);
   }
 
-  const title = (action.title || '').replace(/'/g, "''");
-  const processName = (action.processName || '').replace(/'/g, "''");
-  const className = (action.className || '').replace(/'/g, "''");
+  const escapePsString = (s) => String(s || '').replace(/'/g, "''");
+  const rawTitle = String(action.title || '').trim();
+  const titleMode = rawTitle.toLowerCase().startsWith('re:') ? 'regex' : 'contains';
+  const titleValue = titleMode === 'regex' ? rawTitle.slice(3).trim() : rawTitle;
+  const title = escapePsString(titleValue);
+  const processName = escapePsString(String(action.processName || '').trim());
+  const className = escapePsString(String(action.className || '').trim());
 
   if (!title && !processName && !className) {
     return null;
   }
 
   const script = `
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+
 Add-Type @'
 using System;
 using System.Collections.Generic;
@@ -547,8 +583,9 @@ public class WindowResolver {
 }
 '@
 
-$title = '${title}'.ToLower()
-$proc = '${processName}'
+$titleMode = '${titleMode}'
+$title = '${title}'
+$proc = '${processName}'.ToLower()
 $class = '${className}'.ToLower()
 
 [WindowResolver]::Find()
@@ -562,14 +599,23 @@ foreach ($hwnd in [WindowResolver]::windows) {
     if ([string]::IsNullOrWhiteSpace($t)) { continue }
     $c = $classSB.ToString()
 
-    if ($title -and -not $t.ToLower().Contains($title)) { continue }
+    if ($title) {
+        if ($titleMode -eq 'regex') {
+            if ($t -notmatch $title) { continue }
+        } else {
+            if (-not $t.ToLower().Contains($title.ToLower())) { continue }
+        }
+    }
     if ($class -and -not $c.ToLower().Contains($class)) { continue }
 
     if ($proc) {
-        $pid = 0
-        [void][WindowResolver]::GetWindowThreadProcessId($hwnd, [ref]$pid)
-        $p = Get-Process -Id $pid -ErrorAction SilentlyContinue
-        if (-not $p -or $p.ProcessName -ne $proc) { continue }
+      $procId = 0
+      [void][WindowResolver]::GetWindowThreadProcessId($hwnd, [ref]$procId)
+      $p = Get-Process -Id $procId -ErrorAction SilentlyContinue
+        if (-not $p) { continue }
+        $pn = ($p.ProcessName | ForEach-Object { $_.ToString().ToLower() })
+        $procNorm = ($proc -replace '\\s+$','' -replace '\\.exe$','')
+        if ($pn -ne $procNorm -and -not $pn.Contains($procNorm)) { continue }
     }
 
     $hwnd.ToInt64()
@@ -578,8 +624,9 @@ foreach ($hwnd in [WindowResolver]::windows) {
 `;
 
   try {
-    const output = await executePowerShell(script);
-    const parsed = Number(output);
+    const result = await executePowerShellScript(script, 8000);
+    if (!result || result.failed) return null;
+    const parsed = Number(String(result.stdout || '').trim());
     return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
   } catch {
     return null;
@@ -1739,15 +1786,140 @@ public class ForegroundHandle {
 }
 
 /**
+ * Get current foreground window info (HWND, title, pid, process name).
+ * Best-effort: returns { success: false, error } on failure.
+ */
+async function getForegroundWindowInfo() {
+  const script = `
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public class ForegroundInfo {
+  [DllImport("user32.dll")]
+  public static extern IntPtr GetForegroundWindow();
+
+  [DllImport("user32.dll", SetLastError = true)]
+  public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
+  [DllImport("user32.dll", CharSet = CharSet.Auto)]
+  public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
+
+  public static string GetTitle(IntPtr handle) {
+    StringBuilder sb = new StringBuilder(512);
+    GetWindowText(handle, sb, sb.Capacity);
+    return sb.ToString();
+  }
+}
+"@
+
+$hwnd = [ForegroundInfo]::GetForegroundWindow()
+if ($hwnd -eq [IntPtr]::Zero) {
+  Write-Output '{"success":false,"error":"No foreground window"}'
+  exit 0
+}
+
+$targetPid = 0
+[void][ForegroundInfo]::GetWindowThreadProcessId($hwnd, [ref]$targetPid)
+$title = [ForegroundInfo]::GetTitle($hwnd)
+
+$procName = ''
+try {
+  $p = Get-Process -Id $targetPid -ErrorAction Stop
+  $procName = $p.ProcessName
+} catch {
+  $procName = ''
+}
+
+$obj = [PSCustomObject]@{
+  success = $true
+  hwnd = $hwnd.ToInt64()
+  pid = [int]$targetPid
+  processName = $procName
+  title = $title
+}
+$obj | ConvertTo-Json -Compress
+`;
+
+  try {
+    const result = await executePowerShellScript(script, 8000);
+    const text = String(result?.stdout || '').trim();
+    if (!text) {
+      return { success: false, error: result?.stderr?.trim() || result?.error || 'No output' };
+    }
+    return JSON.parse(text);
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+}
+
+/**
  * Execute an action from AI
  * @param {Object} action - Action object from AI
  * @returns {Object} Result of the action
  */
 async function executeAction(action) {
+  // Normalize common schema variants from different models.
+  // This keeps execution resilient when the model uses alternate action names.
+  const normalizeAction = (a) => {
+    if (!a || typeof a !== 'object') return a;
+    const rawType = (a.type ?? a.action ?? '').toString().trim();
+    const t = rawType.toLowerCase();
+    const out = { ...a };
+
+    if (!out.type && out.action) out.type = out.action;
+
+    if (t === 'press_key' || t === 'presskey' || t === 'key_press' || t === 'keypress' || t === 'send_key') {
+      out.type = ACTION_TYPES.KEY;
+    } else if (t === 'type_text' || t === 'typetext' || t === 'enter_text' || t === 'input_text') {
+      out.type = ACTION_TYPES.TYPE;
+    } else if (t === 'type_text' || t === 'type') {
+      out.type = ACTION_TYPES.TYPE;
+    } else if (t === 'take_screenshot' || t === 'screencap') {
+      out.type = ACTION_TYPES.SCREENSHOT;
+    } else if (t === 'sleep' || t === 'delay' || t === 'wait_ms') {
+      out.type = ACTION_TYPES.WAIT;
+    }
+
+    // Normalize common property names
+    if (out.type === ACTION_TYPES.TYPE && (out.text === undefined || out.text === null)) {
+      if (typeof out.value === 'string') out.text = out.value;
+      else if (typeof out.input === 'string') out.text = out.input;
+    }
+    if (out.type === ACTION_TYPES.KEY && (out.key === undefined || out.key === null)) {
+      if (typeof out.combo === 'string') out.key = out.combo;
+      else if (typeof out.keys === 'string') out.key = out.keys;
+    }
+    if (out.type === ACTION_TYPES.WAIT && (out.ms === undefined || out.ms === null)) {
+      const ms = out.milliseconds ?? out.duration_ms ?? out.durationMs;
+      if (Number.isFinite(Number(ms))) out.ms = Number(ms);
+    }
+
+    return out;
+  };
+
+  action = normalizeAction(action);
   console.log(`[AUTOMATION] Executing action:`, JSON.stringify(action));
   
   const startTime = Date.now();
   let result = { success: true, action: action.type };
+
+  const withInferredProcessName = (a) => {
+    if (!a || typeof a !== 'object') return a;
+    if (typeof a.processName === 'string' && a.processName.trim()) return a;
+    const title = typeof a.title === 'string' ? a.title.toLowerCase() : '';
+    if (!title) return a;
+
+    let processName = null;
+    if (title.includes('edge')) processName = 'msedge';
+    else if (title.includes('visual studio code') || title.includes('vs code')) processName = 'code';
+    else if (title.includes('chrome')) processName = 'chrome';
+    else if (title.includes('firefox')) processName = 'firefox';
+    else if (title.includes('explorer')) processName = 'explorer';
+
+    if (!processName) return a;
+    return { ...a, processName };
+  };
   
   try {
     switch (action.type) {
@@ -1843,7 +2015,7 @@ async function executeAction(action) {
 
       case ACTION_TYPES.FOCUS_WINDOW:
       case ACTION_TYPES.BRING_WINDOW_TO_FRONT: {
-        const hwnd = await resolveWindowHandle(action);
+        const hwnd = await resolveWindowHandle(withInferredProcessName(action));
         if (!hwnd) {
           throw new Error('Window not found. Provide hwnd/windowHandle or title/processName/className.');
         }
@@ -1853,7 +2025,7 @@ async function executeAction(action) {
       }
 
       case ACTION_TYPES.SEND_WINDOW_TO_BACK: {
-        const hwnd = await resolveWindowHandle(action);
+        const hwnd = await resolveWindowHandle(withInferredProcessName(action));
         if (!hwnd) {
           throw new Error('Window not found. Provide hwnd/windowHandle or title/processName/className.');
         }
@@ -1863,7 +2035,7 @@ async function executeAction(action) {
       }
 
       case ACTION_TYPES.MINIMIZE_WINDOW: {
-        const hwnd = await resolveWindowHandle(action);
+        const hwnd = await resolveWindowHandle(withInferredProcessName(action));
         if (!hwnd) {
           throw new Error('Window not found. Provide hwnd/windowHandle or title/processName/className.');
         }
@@ -1873,7 +2045,7 @@ async function executeAction(action) {
       }
 
       case ACTION_TYPES.RESTORE_WINDOW: {
-        const hwnd = await resolveWindowHandle(action);
+        const hwnd = await resolveWindowHandle(withInferredProcessName(action));
         if (!hwnd) {
           throw new Error('Window not found. Provide hwnd/windowHandle or title/processName/className.');
         }
@@ -2002,9 +2174,48 @@ async function executeActionSequence(actions, onAction = null) {
 function parseAIActions(aiResponse) {
   // Try to find JSON in the response
   const jsonMatch = aiResponse.match(/```json\s*([\s\S]*?)\s*```/);
+  const normalizeActionBlock = (parsed) => {
+    if (!parsed || typeof parsed !== 'object') return parsed;
+    if (!Array.isArray(parsed.actions)) return parsed;
+
+    const normalizeType = (type) => {
+      const raw = (type ?? '').toString().trim();
+      const t = raw.toLowerCase();
+      if (!t) return raw;
+      if (t === 'press_key' || t === 'presskey' || t === 'key_press' || t === 'keypress' || t === 'send_key') return ACTION_TYPES.KEY;
+      if (t === 'type_text' || t === 'typetext' || t === 'enter_text' || t === 'input_text') return ACTION_TYPES.TYPE;
+      if (t === 'take_screenshot' || t === 'screencap') return ACTION_TYPES.SCREENSHOT;
+      if (t === 'sleep' || t === 'delay' || t === 'wait_ms') return ACTION_TYPES.WAIT;
+      return raw;
+    };
+
+    const normalizedActions = parsed.actions.map((a) => {
+      if (!a || typeof a !== 'object') return a;
+      const out = { ...a };
+      if (!out.type && out.action) out.type = out.action;
+      out.type = normalizeType(out.type);
+
+      if (out.type === ACTION_TYPES.TYPE && (out.text === undefined || out.text === null)) {
+        if (typeof out.value === 'string') out.text = out.value;
+        else if (typeof out.input === 'string') out.text = out.input;
+      }
+      if (out.type === ACTION_TYPES.KEY && (out.key === undefined || out.key === null)) {
+        if (typeof out.combo === 'string') out.key = out.combo;
+        else if (typeof out.keys === 'string') out.key = out.keys;
+      }
+      if (out.type === ACTION_TYPES.WAIT && (out.ms === undefined || out.ms === null)) {
+        const ms = out.milliseconds ?? out.duration_ms ?? out.durationMs;
+        if (Number.isFinite(Number(ms))) out.ms = Number(ms);
+      }
+      return out;
+    });
+
+    return { ...parsed, actions: normalizedActions };
+  };
+
   if (jsonMatch) {
     try {
-      return JSON.parse(jsonMatch[1]);
+      return normalizeActionBlock(JSON.parse(jsonMatch[1]));
     } catch (e) {
       console.error('[AUTOMATION] Failed to parse JSON from code block:', e);
     }
@@ -2012,7 +2223,7 @@ function parseAIActions(aiResponse) {
   
   // Try parsing the whole response as JSON
   try {
-    return JSON.parse(aiResponse);
+    return normalizeActionBlock(JSON.parse(aiResponse));
   } catch (e) {
     // Not JSON - continue
   }
@@ -2021,7 +2232,7 @@ function parseAIActions(aiResponse) {
   const inlineMatch = aiResponse.match(/\{[\s\S]*"actions"[\s\S]*\}/);
   if (inlineMatch) {
     try {
-      return JSON.parse(inlineMatch[0]);
+      return normalizeActionBlock(JSON.parse(inlineMatch[0]));
     } catch (e) {
       console.error('[AUTOMATION] Failed to parse inline JSON:', e);
     }
@@ -2032,7 +2243,7 @@ function parseAIActions(aiResponse) {
   const nlActions = parseNaturalLanguageActions(aiResponse);
   if (nlActions && nlActions.actions.length > 0) {
     console.log('[AUTOMATION] Extracted', nlActions.actions.length, 'action(s) from natural language');
-    return nlActions;
+    return normalizeActionBlock(nlActions);
   }
   
   return null;
@@ -2150,6 +2361,7 @@ module.exports = {
   sleep,
   getActiveWindowTitle,
   getForegroundWindowHandle,
+  getForegroundWindowInfo,
   resolveWindowHandle,
   minimizeWindow,
   restoreWindow,

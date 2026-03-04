@@ -11,8 +11,22 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { shell } = require('electron');
+// `ai-service` is used by the Electron app *and* by the CLI.
+// When running in CLI-only mode, Electron may not be available.
+let shell;
+try {
+  ({ shell } = require('electron'));
+} catch {
+  shell = {
+    openExternal: async (url) => {
+      console.log('[AI] Open this URL in your browser:', url);
+      return true;
+    }
+  };
+}
+
 const systemAutomation = require('./system-automation');
+const preferences = require('./preferences');
 
 // ===== ENVIRONMENT DETECTION =====
 const PLATFORM = process.platform; // 'win32', 'darwin', 'linux'
@@ -522,6 +536,25 @@ When the user asks to **use an existing browser window/tab** (Edge/Chrome), pref
 - If unsure whether the right window/tab is active, take a quick \`screenshot\` and proceed only when the browser is clearly focused.
 - Validate major state changes (after focus, after navigation, after submitting search). If validation fails, retry focus + navigation (bounded retries).
 
+### Opening a URL (Deterministic)
+When the user asks to **open a website** and they do **NOT** require using an existing browser tab/window, prefer a direct OS open. This is more reliable than focus + typing.
+
+- Use \`run_command\` (PowerShell): \`Start-Process "https://example.com"\`
+- Then take a \`screenshot\` to verify the page opened.
+
+### VS Code Integrated Browser (Simple Browser)
+If the user explicitly asks for a **Microsoft integrated browser** / **VS Code integrated browser** / **Simple Browser**:
+1) \`bring_window_to_front\` with \`processName: "code"\`
+2) wait 300–800ms
+3) \`ctrl+shift+p\` (Command Palette)
+4) wait 200–400ms
+5) type \`Simple Browser: Show\`
+6) \`enter\`
+7) wait 500–1000ms
+8) type the full URL (\`https://...\`)
+9) \`enter\`
+10) wait 2000–5000ms, then \`screenshot\`
+
 ### Focus Rule (CRITICAL)
 Before sending keyboard shortcuts, make sure the intended app window is focused.
 If the overlay/chat has focus, shortcuts like \`ctrl+w\` / \`ctrl+shift+w\` may close the overlay instead of the target app.
@@ -593,6 +626,10 @@ Format: \`- [Index] Type: "Name" at (x, y)\`
 
 ⚠️ **DO NOT REQUEST SCREENSHOTS** to find standard UI elements - check the Live UI State first.
 
+### Visual Honesty Rule (CRITICAL)
+- If you do NOT have a screenshot AND the user did NOT provide a Live UI State list, you MUST NOT claim you can see any windows/panels/elements.
+- In that situation, either use keyboard-only deterministic steps (e.g., Command Palette workflows) or ask the user to run \`/capture\`.
+
 **TO LIST ELEMENTS**: Read the Live UI State section and list what's there (e.g., "I see a 'Save' button at index [15]").
 
 ## Your Core Capabilities
@@ -644,10 +681,10 @@ When the user asks you to DO something, respond with a JSON action block:
 - \`{"type": "wait", "ms": <number>}\` - Wait milliseconds (IMPORTANT: add waits between multi-step actions!)
 - \`{"type": "screenshot"}\` - Take screenshot to verify result
 - \`{"type": "focus_window", "windowHandle": <number>}\` - Bring a window to the foreground (use if target is in background)
-- \`{"type": "bring_window_to_front", "title": "<partial title>"}\` - Bring matching background app to foreground
-- \`{"type": "send_window_to_back", "title": "<partial title>"}\` - Push matching window behind others without activating
-- \`{"type": "minimize_window", "title": "<partial title>"}\` - Minimize a specific window
-- \`{"type": "restore_window", "title": "<partial title>"}\` - Restore a minimized window
+- \`{"type": "bring_window_to_front", "title": "<partial title>", "processName": "<required when known>"}\` - Bring matching app to foreground. **MUST include processName when you know it** (e.g., \"msedge\", \"code\", \"explorer\"); use title only as a fallback. For regex title use \`title: "re:<pattern>"\`.
+- \`{"type": "send_window_to_back", "title": "<partial title>", "processName": "<optional>"}\` - Push matching window behind others without activating
+- \`{"type": "minimize_window", "title": "<partial title>", "processName": "<optional>"}\` - Minimize a specific window
+- \`{"type": "restore_window", "title": "<partial title>", "processName": "<optional>"}\` - Restore a minimized window
 - \`{"type": "run_command", "command": "<shell command>", "cwd": "<optional path>", "shell": "powershell|cmd|bash"}\` - **PREFERRED FOR SHELL TASKS**: Execute shell command directly and return output (timeout: 30s)
 
 ### Grid to Pixel Conversion:
@@ -698,8 +735,10 @@ Be precise, use platform-correct shortcuts, and execute actions confidently!
 1. **NEVER describe actions without executing them.** If the user asks you to click/type/open something, output the JSON action block.
 2. **NEVER say "Let me proceed" or "I'll do this now" without the JSON block.** Words without actions are useless.
 3. **If user says "proceed" or "go ahead", output the JSON actions IMMEDIATELY.**
-4. **When you can't find an element in Live UI State, take a screenshot and use pixel coordinates.** Don't give up.
-5. **One response = one action block.** Don't split actions across multiple messages unless the user asks you to wait.`;
+4. **For window switching**: when using 
+  \`bring_window_to_front\` / \`send_window_to_back\` / \`minimize_window\` / \`restore_window\`, you **MUST include \`processName\` when you know it** (e.g., \"msedge\", \"code\"). Title-only matching is a fallback.
+5. **When you can't find an element in Live UI State, take a screenshot and use pixel coordinates.** Don't give up.
+6. **One response = one action block.** Don't split actions across multiple messages unless the user asks you to wait.`;
 
 /**
  * Set the AI provider
@@ -817,10 +856,38 @@ function clearVisualContext() {
 /**
  * Build messages array for API call
  */
-function buildMessages(userMessage, includeVisual = false) {
-  const messages = [
-    { role: 'system', content: SYSTEM_PROMPT }
-  ];
+async function buildMessages(userMessage, includeVisual = false, options = {}) {
+  const messages = [{ role: 'system', content: SYSTEM_PROMPT }];
+  const { extraSystemMessages = [] } = options || {};
+
+  // Preference injection (Gemini-aligned): inject only the rules that apply to the
+  // active app/window, falling back to a small global summary.
+  try {
+    let prefText = '';
+    if (typeof systemAutomation.getForegroundWindowInfo === 'function') {
+      const fg = await systemAutomation.getForegroundWindowInfo();
+      if (fg && fg.success && fg.processName) {
+        prefText = preferences.getPreferencesSystemContextForApp(fg.processName);
+      }
+    }
+    if (!prefText) {
+      prefText = preferences.getPreferencesSystemContext();
+    }
+    if (prefText && prefText.trim()) {
+      messages.push({ role: 'system', content: prefText.trim() });
+    }
+  } catch {}
+
+  // Extra system steering (e.g., policy violations / regeneration instructions)
+  try {
+    if (Array.isArray(extraSystemMessages)) {
+      for (const msg of extraSystemMessages) {
+        if (typeof msg === 'string' && msg.trim()) {
+          messages.push({ role: 'system', content: msg.trim() });
+        }
+      }
+    }
+  } catch {}
 
   // Add conversation history
   conversationHistory.slice(-MAX_HISTORY).forEach(msg => {
@@ -930,6 +997,209 @@ ${inspectContext.regions.slice(0, 20).map((r, i) =>
   }
 
   return messages;
+}
+
+function isCoordinateInteractionAction(action) {
+  if (!action || typeof action !== 'object') return false;
+  const raw = String(action.type || '').toLowerCase();
+  const t = raw === 'press_key' || raw === 'presskey'
+    ? 'key'
+    : raw === 'type_text' || raw === 'typetext'
+      ? 'type'
+      : raw;
+  const coordinateTypes = new Set(['click', 'double_click', 'right_click', 'drag', 'move_mouse']);
+  if (!coordinateTypes.has(t)) return false;
+  const hasXY = Number.isFinite(Number(action.x)) && Number.isFinite(Number(action.y));
+  const hasFromTo = Number.isFinite(Number(action.fromX)) && Number.isFinite(Number(action.fromY))
+    && Number.isFinite(Number(action.toX)) && Number.isFinite(Number(action.toY));
+  return hasXY || hasFromTo;
+}
+
+function checkNegativePolicies(actionData, negativePolicies = []) {
+  const actions = actionData?.actions;
+  if (!Array.isArray(actions) || !Array.isArray(negativePolicies) || negativePolicies.length === 0) {
+    return { ok: true, violations: [] };
+  }
+
+  const violations = [];
+
+  for (let i = 0; i < actions.length; i++) {
+    const action = actions[i];
+    const raw = String(action?.type || '').toLowerCase();
+    const actionType = raw === 'press_key' || raw === 'presskey'
+      ? 'key'
+      : raw === 'type_text' || raw === 'typetext'
+        ? 'type'
+        : raw;
+
+    for (const policy of negativePolicies) {
+      if (!policy || typeof policy !== 'object') continue;
+
+      const intent = policy.intent ? String(policy.intent).trim().toLowerCase() : '';
+      if (intent && intent !== actionType) {
+        continue;
+      }
+
+      const forbiddenTypes = Array.isArray(policy.forbiddenActionTypes)
+        ? policy.forbiddenActionTypes.map(x => String(x).trim().toLowerCase()).filter(Boolean)
+        : [];
+      if (forbiddenTypes.length && forbiddenTypes.includes(actionType)) {
+        violations.push({
+          policy,
+          actionIndex: i,
+          action,
+          reason: policy.reason || `Action type "${actionType}" is forbidden by user policy`
+        });
+        continue;
+      }
+
+      const forbiddenMethod = policy.forbiddenMethod ? String(policy.forbiddenMethod).trim().toLowerCase() : '';
+      if (!forbiddenMethod) continue;
+
+      if (['click_coordinates', 'coordinate_click', 'coordinates', 'coord_click'].includes(forbiddenMethod)) {
+        if (isCoordinateInteractionAction(action)) {
+          violations.push({
+            policy,
+            actionIndex: i,
+            action,
+            reason: policy.reason || 'Coordinate-based interactions are forbidden by user policy'
+          });
+        }
+      }
+
+      if (['simulated_keystrokes', 'type_simulated_keystrokes'].includes(forbiddenMethod)) {
+        if (actionType === 'type') {
+          violations.push({
+            policy,
+            actionIndex: i,
+            action,
+            reason: policy.reason || 'Simulated typing is forbidden by user policy'
+          });
+        }
+      }
+    }
+  }
+
+  return { ok: violations.length === 0, violations };
+}
+
+function isClickLikeActionType(actionType) {
+  const t = String(actionType || '').toLowerCase();
+  return ['click', 'double_click', 'right_click', 'click_element'].includes(t);
+}
+
+function checkActionPolicies(actionData, actionPolicies = []) {
+  const actions = actionData?.actions;
+  if (!Array.isArray(actions) || !Array.isArray(actionPolicies) || actionPolicies.length === 0) {
+    return { ok: true, violations: [] };
+  }
+
+  const violations = [];
+
+  for (let i = 0; i < actions.length; i++) {
+    const action = actions[i];
+    const raw = String(action?.type || '').toLowerCase();
+    const actionType = raw === 'press_key' || raw === 'presskey'
+      ? 'key'
+      : raw === 'type_text' || raw === 'typetext'
+        ? 'type'
+        : raw;
+
+    for (const policy of actionPolicies) {
+      if (!policy || typeof policy !== 'object') continue;
+      const intent = String(policy.intent || '').trim().toLowerCase();
+      if (!intent) continue;
+
+      const applies =
+        (intent === 'click_element' && isClickLikeActionType(actionType)) ||
+        (intent === 'click' && isClickLikeActionType(actionType)) ||
+        (intent === actionType);
+      if (!applies) continue;
+
+      const matchPref = String(policy.matchPreference || '').trim().toLowerCase();
+      const preferredMethod = String(policy.preferredMethod || '').trim().toLowerCase();
+
+      if (intent === 'click_element' && isClickLikeActionType(actionType)) {
+        if (actionType !== 'click_element') {
+          violations.push({
+            policy,
+            actionIndex: i,
+            action,
+            reason:
+              policy.reason ||
+              'User prefers click_element for click intents in this app (no coordinate clicks or generic click types)'
+          });
+          continue;
+        }
+
+        if (matchPref === 'exact_text' || matchPref === 'exact') {
+          const exact = action?.exact === true;
+          const text = typeof action?.text === 'string' ? action.text.trim() : '';
+          if (!text || !exact) {
+            violations.push({
+              policy,
+              actionIndex: i,
+              action,
+              reason:
+                policy.reason ||
+                'User prefers exact_text matching for click_element in this app (set exact=true and provide text)'
+            });
+            continue;
+          }
+        }
+
+        if (preferredMethod && preferredMethod !== 'click_element') {
+          violations.push({
+            policy,
+            actionIndex: i,
+            action,
+            reason: policy.reason || `User prefers method=${preferredMethod} for click_element in this app`
+          });
+          continue;
+        }
+      }
+    }
+  }
+
+  return { ok: violations.length === 0, violations };
+}
+
+function formatActionPolicyViolationSystemMessage(processName, violations) {
+  const app = processName ? String(processName) : 'unknown-app';
+  const lines = [];
+  lines.push('POLICY ENFORCEMENT: The previous action plan is REJECTED.');
+  lines.push(`Active app: ${app}`);
+  lines.push('Reason(s):');
+  for (const v of violations.slice(0, 6)) {
+    const idx = typeof v.actionIndex === 'number' ? v.actionIndex : -1;
+    const t = v.action?.type ? String(v.action.type) : 'unknown';
+    lines.push(`- Action[${idx}] type=${t}: ${v.reason}`);
+  }
+  lines.push('You MUST regenerate a compliant plan.');
+  lines.push('Hard requirements:');
+  lines.push('- If the user prefers exact_text clicks: use click_element with exact=true and a concrete text label.');
+  lines.push('- Do not replace click_element with coordinate clicks for this app.');
+  lines.push('- Respond ONLY with a JSON code block (```json ... ```): { thought, actions, verification }.');
+  return lines.join('\n');
+}
+
+function formatNegativePolicyViolationSystemMessage(processName, violations) {
+  const app = processName ? String(processName) : 'unknown-app';
+  const lines = [];
+  lines.push(`POLICY ENFORCEMENT: The previous action plan is REJECTED.`);
+  lines.push(`Active app: ${app}`);
+  lines.push('Reason(s):');
+  for (const v of violations.slice(0, 6)) {
+    const idx = typeof v.actionIndex === 'number' ? v.actionIndex : -1;
+    const t = v.action?.type ? String(v.action.type) : 'unknown';
+    lines.push(`- Action[${idx}] type=${t}: ${v.reason}`);
+  }
+  lines.push('You MUST regenerate a compliant plan.');
+  lines.push('Hard requirements:');
+  lines.push('- Do not use forbidden methods for this app.');
+  lines.push('- Prefer UIA/semantic actions (e.g., click_element) over coordinate clicks.');
+  lines.push('- Respond ONLY with a JSON code block (```json ... ```): { thought, actions, verification }.');
+  return lines.join('\n');
 }
 
 // ===== GITHUB COPILOT OAUTH =====
@@ -1198,7 +1468,7 @@ function exchangeForCopilotSession() {
  * Call GitHub Copilot API
  * Uses session token (not OAuth token) - exchanges if needed
  */
-async function callCopilot(messages, modelOverride = null) {
+async function callCopilot(messages, modelOverride = null, requestOptions = {}) {
   // Ensure we have OAuth token
   if (!apiKeys.copilot) {
     if (!loadCopilotToken()) {
@@ -1223,15 +1493,28 @@ async function callCopilot(messages, modelOverride = null) {
     
     console.log(`[Copilot] Vision request: ${hasVision}, Model: ${modelId} (key=${modelKey})`);
     
-    const data = JSON.stringify({
+    const enableTools = requestOptions?.enableTools !== false;
+    const payload = {
       model: modelId,
       messages: messages,
-      max_tokens: 4096,
-      temperature: 0.7,
-      stream: false,
-      tools: LIKU_TOOLS,
-      tool_choice: 'auto'
-    });
+      max_tokens: Number.isFinite(Number(requestOptions?.max_tokens)) ? Number(requestOptions.max_tokens) : 4096,
+      temperature: typeof requestOptions?.temperature === 'number' ? requestOptions.temperature : 0.7,
+      stream: false
+    };
+
+    // Structured outputs (OpenAI-compatible) for strict JSON schema.
+    if (requestOptions?.response_format) {
+      payload.response_format = requestOptions.response_format;
+    }
+
+    if (enableTools) {
+      payload.tools = LIKU_TOOLS;
+      payload.tool_choice = requestOptions?.tool_choice || 'auto';
+    } else {
+      payload.tool_choice = 'none';
+    }
+
+    const data = JSON.stringify(payload);
 
     // Try multiple endpoint formats
     const tryEndpoint = (hostname, pathPrefix = '') => {
@@ -1559,6 +1842,25 @@ function detectTruncation(response) {
   return truncationSignals.some(Boolean);
 }
 
+function looksLikeAutomationRequest(text) {
+  if (!text) return false;
+  const t = String(text).toLowerCase();
+
+  // Very lightweight heuristic: these are the common verbs we expect to map into actions.
+  const verbSignals = [
+    'click', 'double click', 'right click', 'type', 'press', 'scroll', 'drag',
+    'open', 'close', 'select', 'focus', 'bring to front', 'minimize', 'restore',
+    'find', 'search for', 'screenshot', 'capture'
+  ];
+
+  if (verbSignals.some(v => t.includes(v))) return true;
+
+  // Coordinate-style requests
+  if (/\(\s*\d+\s*,\s*\d+\s*\)/.test(t) || /\b\d+\s*,\s*\d+\b/.test(t)) return true;
+
+  return false;
+}
+
 /**
  * Send a message and get AI response with auto-continuation
  */
@@ -1566,7 +1868,14 @@ function detectTruncation(response) {
 const PROVIDER_FALLBACK_ORDER = ['copilot', 'openai', 'anthropic', 'ollama'];
 
 async function sendMessage(userMessage, options = {}) {
-  const { includeVisualContext = false, coordinates = null, maxContinuations = 2, model = null } = options;
+  const {
+    includeVisualContext = false,
+    coordinates = null,
+    maxContinuations = 2,
+    model = null,
+    enforceActions = true,
+    extraSystemMessages = []
+  } = options;
 
   // Enhance message with coordinate context if provided
   let enhancedMessage = userMessage;
@@ -1574,8 +1883,12 @@ async function sendMessage(userMessage, options = {}) {
     enhancedMessage = `[User selected coordinates: (${coordinates.x}, ${coordinates.y}) with label "${coordinates.label}"]\n\n${userMessage}`;
   }
 
+  const baseExtraSystemMessages = Array.isArray(extraSystemMessages) ? extraSystemMessages : [];
+
   // Build messages with optional visual context
-  const messages = buildMessages(enhancedMessage, includeVisualContext);
+  const messages = await buildMessages(enhancedMessage, includeVisualContext, {
+    extraSystemMessages: baseExtraSystemMessages
+  });
 
   try {
     let response;
@@ -1644,7 +1957,7 @@ async function sendMessage(userMessage, options = {}) {
       conversationHistory.push({ role: 'assistant', content: fullResponse });
       
       // Build continuation request
-      const continueMessages = buildMessages('Continue from where you left off. Do not repeat what you already said.', false);
+      const continueMessages = await buildMessages('Continue from where you left off. Do not repeat what you already said.', false);
       
       try {
         let continuation;
@@ -1675,6 +1988,116 @@ async function sendMessage(userMessage, options = {}) {
     }
     
     response = fullResponse;
+
+    // If the user likely wanted automation, but the model returned only intent text,
+    // re-prompt once to emit a JSON action block.
+    if (
+      enforceActions &&
+      usedProvider === 'copilot' &&
+      looksLikeAutomationRequest(enhancedMessage) &&
+      !hasActions(response)
+    ) {
+      console.log('[AI] No actions detected for an automation-like request; retrying once with stricter formatting...');
+      const enforcementPrompt =
+        'You must respond ONLY with a JSON code block (```json ... ```).\n' +
+        'Return an object with keys: thought, actions, verification.\n' +
+        'If you truly cannot take actions, return {"thought":"...","actions":[],"verification":"..."}.\n\n' +
+        `User request:\n${enhancedMessage}`;
+      try {
+        const forcedMessages = await buildMessages(enforcementPrompt, includeVisualContext, {
+          extraSystemMessages: baseExtraSystemMessages
+        });
+        const forced = await callCopilot(forcedMessages, effectiveModel);
+        if (forced && hasActions(forced)) {
+          response = forced;
+        }
+      } catch (e) {
+        console.warn('[AI] Action enforcement retry failed:', e.message);
+      }
+    }
+
+    // ===== POLICY ENFORCEMENT ("Brakes before gas" + "Rails") =====
+    // If the model emitted actions, validate them against the active app's negativePolicies
+    // and actionPolicies.
+    // If violated, silently regenerate (bounded attempts) BEFORE returning to CLI/Electron.
+    try {
+      const parsed = parseActions(response);
+      if (parsed && Array.isArray(parsed.actions) && parsed.actions.length > 0) {
+        let fg = null;
+        try {
+          if (typeof systemAutomation.getForegroundWindowInfo === 'function') {
+            fg = await systemAutomation.getForegroundWindowInfo();
+          }
+        } catch {}
+
+        const fgProcess = fg && fg.success ? (fg.processName || '') : '';
+        const appPolicy = fgProcess ? preferences.getAppPolicy(fgProcess) : null;
+        const negativePolicies = Array.isArray(appPolicy?.negativePolicies) ? appPolicy.negativePolicies : [];
+        const actionPolicies = Array.isArray(appPolicy?.actionPolicies) ? appPolicy.actionPolicies : [];
+
+        if (negativePolicies.length || actionPolicies.length) {
+          const maxPolicyRetries = 2;
+          let attempt = 0;
+          let currentResponse = response;
+          let currentParsed = parsed;
+
+          while (attempt <= maxPolicyRetries) {
+            const negCheck = checkNegativePolicies(currentParsed, negativePolicies);
+            const actCheck = checkActionPolicies(currentParsed, actionPolicies);
+            if (negCheck.ok && actCheck.ok) {
+              response = currentResponse;
+              break;
+            }
+
+            if (attempt === maxPolicyRetries) {
+              // Give up safely: return no actions so we don't prompt/exe a forbidden plan.
+              response =
+                '```json\n' +
+                JSON.stringify({
+                  thought: 'Unable to produce a compliant action plan under the current app policies.',
+                  actions: [],
+                  verification: 'Please run interactively and/or adjust actionPolicies/negativePolicies.'
+                }, null, 2) +
+                '\n```';
+              break;
+            }
+
+            const rejectionSystemParts = [];
+            if (!negCheck.ok) rejectionSystemParts.push(formatNegativePolicyViolationSystemMessage(fgProcess, negCheck.violations));
+            if (!actCheck.ok) rejectionSystemParts.push(formatActionPolicyViolationSystemMessage(fgProcess, actCheck.violations));
+            const rejectionSystem = rejectionSystemParts.join('\n\n');
+
+            const regenMessages = await buildMessages(enhancedMessage, includeVisualContext, {
+              extraSystemMessages: [...baseExtraSystemMessages, rejectionSystem]
+            });
+
+            // Call the same provider/model we already used for the first response.
+            let regenerated;
+            switch (usedProvider) {
+              case 'copilot':
+                regenerated = await callCopilot(regenMessages, effectiveModel);
+                break;
+              case 'openai':
+                regenerated = await callOpenAI(regenMessages);
+                break;
+              case 'anthropic':
+                regenerated = await callAnthropic(regenMessages);
+                break;
+              case 'ollama':
+              default:
+                regenerated = await callOllama(regenMessages);
+                break;
+            }
+
+            currentResponse = regenerated || currentResponse;
+            currentParsed = parseActions(currentResponse) || { actions: [] };
+            attempt++;
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('[AI] Policy enforcement failed (non-fatal):', e.message);
+    }
 
     // Add to conversation history
     conversationHistory.push({ role: 'user', content: enhancedMessage });
@@ -1707,12 +2130,354 @@ async function sendMessage(userMessage, options = {}) {
   }
 }
 
+function extractJsonObjectFromText(text) {
+  if (typeof text !== 'string' || !text.trim()) return null;
+  const s = text.trim();
+  const fence = s.match(/```json\s*([\s\S]*?)\s*```/i);
+  const candidate = fence ? fence[1] : s;
+  const start = candidate.indexOf('{');
+  const end = candidate.lastIndexOf('}');
+  if (start === -1 || end === -1 || end <= start) return null;
+  const slice = candidate.slice(start, end + 1);
+  try {
+    return JSON.parse(slice);
+  } catch {
+    return null;
+  }
+}
+
+function sanitizePreferencePatch(patch) {
+  const safe = {};
+  if (!patch || typeof patch !== 'object') return safe;
+
+  // Accept either:
+  // - new format: { newRules: [ { type: 'negative'|'action', ... } ] }
+  // - legacy wrapper: { newRules: { negativePolicies, actionPolicies } }
+  // - direct patch: { negativePolicies, actionPolicies }
+  const source = patch && patch.newRules !== undefined ? patch.newRules : patch;
+
+  if (Array.isArray(source)) {
+    const negativePolicies = [];
+    const actionPolicies = [];
+
+    for (const rule of source) {
+      if (!rule || typeof rule !== 'object') continue;
+      const type = String(rule.type || '').trim().toLowerCase();
+
+      if (type === 'negative') {
+        const out = {};
+        if (rule.intent) out.intent = String(rule.intent);
+        if (rule.forbiddenActionType) out.forbiddenActionTypes = [String(rule.forbiddenActionType)];
+        if (Array.isArray(rule.forbiddenActionTypes)) out.forbiddenActionTypes = rule.forbiddenActionTypes.map(x => String(x));
+        if (rule.forbiddenMethod) out.forbiddenMethod = String(rule.forbiddenMethod);
+        if (rule.reason) out.reason = String(rule.reason);
+        if (Object.keys(out).length) negativePolicies.push(out);
+      }
+
+      if (type === 'action') {
+        const out = {};
+        if (rule.intent) out.intent = String(rule.intent);
+        if (rule.preferredMethod) out.preferredMethod = String(rule.preferredMethod);
+        if (rule.matchPreference) out.matchPreference = String(rule.matchPreference);
+        if (rule.reason) out.reason = String(rule.reason);
+        if (Object.keys(out).length) actionPolicies.push(out);
+      }
+    }
+
+    if (negativePolicies.length) safe.negativePolicies = negativePolicies;
+    if (actionPolicies.length) safe.actionPolicies = actionPolicies;
+    return safe;
+  }
+
+  const unwrapped = source && typeof source === 'object' ? source : patch;
+
+  if (Array.isArray(unwrapped.negativePolicies)) {
+    safe.negativePolicies = unwrapped.negativePolicies
+      .filter(p => p && typeof p === 'object')
+      .map(p => {
+        const out = {};
+        if (p.intent) out.intent = String(p.intent);
+        if (p.forbiddenActionType) out.forbiddenActionTypes = [String(p.forbiddenActionType)];
+        if (Array.isArray(p.forbiddenActionTypes)) out.forbiddenActionTypes = p.forbiddenActionTypes.map(x => String(x));
+        if (p.forbiddenMethod) out.forbiddenMethod = String(p.forbiddenMethod);
+        if (p.reason) out.reason = String(p.reason);
+        return out;
+      })
+      .filter(p => Object.keys(p).length > 0);
+  }
+
+  if (Array.isArray(unwrapped.actionPolicies)) {
+    safe.actionPolicies = unwrapped.actionPolicies
+      .filter(p => p && typeof p === 'object')
+      .map(p => {
+        const out = {};
+        if (p.intent) out.intent = String(p.intent);
+        if (Array.isArray(p.preferredActionTypes)) out.preferredActionTypes = p.preferredActionTypes.map(x => String(x));
+        if (p.preferredMethod) out.preferredMethod = String(p.preferredMethod);
+        if (p.matchPreference) out.matchPreference = String(p.matchPreference);
+        if (p.reason) out.reason = String(p.reason);
+        return out;
+      })
+      .filter(p => Object.keys(p).length > 0);
+  }
+
+  return safe;
+}
+
+function validatePreferenceParserPayload(payload) {
+  if (!payload || typeof payload !== 'object') return 'Output must be an object';
+  const rules = payload.newRules;
+  if (!Array.isArray(rules) || rules.length === 0) return 'newRules must be a non-empty array';
+
+  let sawAny = false;
+  for (const rule of rules) {
+    if (!rule || typeof rule !== 'object') return 'newRules entries must be objects';
+    const type = String(rule.type || '').trim().toLowerCase();
+    if (type !== 'negative' && type !== 'action') return 'newRules.type must be "negative" or "action"';
+    sawAny = true;
+
+    if (type === 'negative') {
+      const hasForbiddenMethod = typeof rule.forbiddenMethod === 'string' && rule.forbiddenMethod.trim();
+      const hasForbiddenActionType = typeof rule.forbiddenActionType === 'string' && rule.forbiddenActionType.trim();
+      const hasForbiddenActionTypes = Array.isArray(rule.forbiddenActionTypes) && rule.forbiddenActionTypes.length > 0;
+      if (!hasForbiddenMethod && !hasForbiddenActionType && !hasForbiddenActionTypes) {
+        return 'negative rules must include forbiddenMethod or forbiddenActionType(s)';
+      }
+    }
+
+    if (type === 'action') {
+      const hasIntent = typeof rule.intent === 'string' && rule.intent.trim();
+      if (!hasIntent) return 'action rules must include intent';
+      const hasPreferredMethod = typeof rule.preferredMethod === 'string' && rule.preferredMethod.trim();
+      const hasMatchPreference = typeof rule.matchPreference === 'string' && rule.matchPreference.trim();
+      if (!hasPreferredMethod || !hasMatchPreference) {
+        return 'action rules must include preferredMethod and matchPreference';
+      }
+    }
+  }
+
+  if (!sawAny) return 'Must include at least one rule';
+  return null;
+}
+
+async function parsePreferenceCorrection(naturalLanguage, context = {}) {
+  const correction = String(naturalLanguage || '').trim();
+  if (!correction) return { success: false, error: 'Missing correction text' };
+
+  const processName = context.processName ? String(context.processName) : '';
+  const title = context.title ? String(context.title) : '';
+
+  const parserSystem = [
+    'You are Preference Parser for a UI automation agent.',
+    'Convert the user\'s natural-language correction into a JSON patch for the app-specific preferences store.',
+    '',
+    'Return STRICT JSON only (no markdown, no commentary).',
+    'You MUST return an object with a top-level key "newRules" that is an ARRAY of rule objects.',
+    'Each rule MUST include: type = "negative" OR "action".',
+    '',
+    'For type="negative" rules:',
+    '- forbiddenMethod: string (e.g., click_coordinates, simulated_keystrokes)',
+    '- forbiddenActionType: string (single) OR forbiddenActionTypes: string[] (e.g., ["click","drag","type"])',
+    '- intent: optional string to scope by action type',
+    '- reason: string',
+    '',
+    'For type="action" rules:',
+    '- intent: REQUIRED string (e.g., "click_element", "type")',
+    '- preferredMethod: REQUIRED string (e.g., "click_element")',
+    '- matchPreference: REQUIRED string (e.g., "exact_text")',
+    '- reason: string',
+    '',
+    'If the correction is about forbidding coordinate clicks, emit a type="negative" rule with forbiddenMethod="click_coordinates".',
+    'If the correction is about avoiding simulated typing, emit a type="negative" rule with forbiddenMethod="simulated_keystrokes" and/or forbiddenActionTypes including "type".',
+    'If the correction is about exact element matching for clicks, emit a type="action" rule with intent="click_element", preferredMethod="click_element", matchPreference="exact_text".'
+  ].join('\n');
+
+  const user = [
+    `app.processName=${processName || 'unknown'}`,
+    title ? `app.title=${title}` : null,
+    `correction=${correction}`
+  ].filter(Boolean).join('\n');
+
+  const messages = [
+    { role: 'system', content: parserSystem },
+    { role: 'user', content: user }
+  ];
+
+  const structuredResponseFormat = {
+    type: 'json_schema',
+    json_schema: {
+      name: 'preference_parser_patch',
+      strict: true,
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['newRules'],
+        properties: {
+          newRules: {
+            type: 'array',
+            minItems: 1,
+            items: {
+              oneOf: [
+                {
+                  type: 'object',
+                  additionalProperties: false,
+                  required: ['type'],
+                  properties: {
+                    type: { const: 'negative' },
+                    intent: { type: 'string' },
+                    forbiddenMethod: { type: 'string' },
+                    forbiddenActionType: { type: 'string' },
+                    forbiddenActionTypes: { type: 'array', items: { type: 'string' }, minItems: 1 },
+                    reason: { type: 'string' }
+                  },
+                  anyOf: [
+                    { required: ['forbiddenMethod'] },
+                    { required: ['forbiddenActionType'] },
+                    { required: ['forbiddenActionTypes'] }
+                  ]
+                },
+                {
+                  type: 'object',
+                  additionalProperties: false,
+                  required: ['type', 'intent', 'preferredMethod', 'matchPreference'],
+                  properties: {
+                    type: { const: 'action' },
+                    intent: { type: 'string' },
+                    preferredMethod: { type: 'string' },
+                    matchPreference: { type: 'string' },
+                    reason: { type: 'string' }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  };
+
+  let raw;
+  let parsed = null;
+  let lastError = null;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      switch (currentProvider) {
+        case 'copilot':
+          if (!apiKeys.copilot) {
+            if (!loadCopilotToken()) throw new Error('Not authenticated with GitHub Copilot.');
+          }
+          raw = await callCopilot(messages, 'gpt-4o-mini', {
+            enableTools: false,
+            response_format: structuredResponseFormat,
+            temperature: 0.2,
+            max_tokens: 1200
+          });
+          break;
+        case 'openai':
+          // OpenAI call path currently does not support structured outputs here; fall back to text+extract.
+          if (!apiKeys.openai) throw new Error('OpenAI API key not set.');
+          raw = await callOpenAI(messages);
+          break;
+        case 'anthropic':
+          if (!apiKeys.anthropic) throw new Error('Anthropic API key not set.');
+          raw = await callAnthropic(messages);
+          break;
+        case 'ollama':
+        default:
+          raw = await callOllama(messages);
+          break;
+      }
+    } catch (e) {
+      lastError = e.message;
+      // If structured output fields are rejected by the endpoint, retry once without them.
+      if (currentProvider === 'copilot' && attempt === 1 && /API_ERROR_400|Invalid|unknown|response_format/i.test(lastError || '')) {
+        try {
+          raw = await callCopilot(messages, 'gpt-4o-mini', { enableTools: false, temperature: 0.2, max_tokens: 1200 });
+        } catch (e2) {
+          lastError = e2.message;
+          continue;
+        }
+      } else {
+        continue;
+      }
+    }
+
+    parsed = extractJsonObjectFromText(raw);
+    if (!parsed) {
+      lastError = 'Preference Parser returned non-JSON output';
+      messages[0] = { role: 'system', content: parserSystem + `\n\nYour last output was invalid: ${lastError}. Return valid JSON ONLY.` };
+      continue;
+    }
+
+    const schemaError = validatePreferenceParserPayload(parsed);
+    if (schemaError) {
+      lastError = schemaError;
+      messages[0] = { role: 'system', content: parserSystem + `\n\nYour last output failed validation: ${schemaError}. Return valid JSON ONLY.` };
+      continue;
+    }
+
+    break;
+  }
+
+  if (!parsed) {
+    return { success: false, error: lastError || 'Preference Parser failed', raw: raw || null };
+  }
+
+  const patch = sanitizePreferencePatch(parsed);
+  const hasNegative = Array.isArray(patch.negativePolicies) && patch.negativePolicies.length > 0;
+  const hasAction = Array.isArray(patch.actionPolicies) && patch.actionPolicies.length > 0;
+  if (!hasNegative && !hasAction) {
+    return { success: false, error: 'Preference Parser produced no usable policies', raw, parsed };
+  }
+
+  return { success: true, patch, raw, parsed };
+}
+
 /**
  * Handle slash commands
  */
 function handleCommand(command) {
-  const parts = command.split(' ');
-  const cmd = parts[0].toLowerCase();
+  function tokenize(input) {
+    const out = [];
+    let cur = '';
+    let inQuotes = false;
+    let quoteChar = null;
+    for (let i = 0; i < input.length; i++) {
+      const ch = input[i];
+      if ((ch === '"' || ch === "'") && (!inQuotes || ch === quoteChar)) {
+        if (!inQuotes) {
+          inQuotes = true;
+          quoteChar = ch;
+        } else {
+          inQuotes = false;
+          quoteChar = null;
+        }
+        continue;
+      }
+      if (!inQuotes && /\s/.test(ch)) {
+        if (cur) out.push(cur);
+        cur = '';
+        continue;
+      }
+      cur += ch;
+    }
+    if (cur) out.push(cur);
+    return out;
+  }
+
+  function normalizeModelKey(raw) {
+    if (!raw) return '';
+    let s = String(raw).trim();
+    // Allow "id - Display Name" by stripping the display portion.
+    const dashIdx = s.indexOf(' - ');
+    if (dashIdx > 0) s = s.slice(0, dashIdx);
+    // Common copy-paste variants
+    s = s.replace(/^→\s*/, '').trim();
+    return s.toLowerCase();
+  }
+
+  const parts = tokenize(String(command || '').trim());
+  const cmd = (parts[0] || '').toLowerCase();
 
   switch (cmd) {
     case '/provider':
@@ -1748,6 +2513,31 @@ function handleCommand(command) {
       }
       return { type: 'info', message: `Visual context buffer: ${visualContextBuffer.length} image(s)` };
 
+    case '/capture': {
+      // Capture a full-screen frame into the visual context buffer.
+      // Works in both Electron and CLI modes.
+      try {
+        const { screenshot } = require('./ui-automation/screenshot');
+        return screenshot({ memory: true, base64: true, metric: 'sha256' })
+          .then(result => {
+            if (!result || !result.success || !result.base64) {
+              return { type: 'error', message: 'Capture failed.' };
+            }
+            addVisualContext({
+              dataURL: `data:image/png;base64,${result.base64}`,
+              width: 0,
+              height: 0,
+              scope: 'screen',
+              timestamp: Date.now()
+            });
+            return { type: 'system', message: `Captured visual context (buffer: ${visualContextBuffer.length})` };
+          })
+          .catch(err => ({ type: 'error', message: `Capture failed: ${err.message}` }));
+      } catch (e) {
+        return { type: 'error', message: `Capture failed: ${e.message}` };
+      }
+    }
+
     case '/login':
       // Start GitHub Copilot OAuth device code flow
       return startCopilotOAuth()
@@ -1770,7 +2560,20 @@ function handleCommand(command) {
 
     case '/model':
       if (parts.length > 1) {
-        const model = parts[1].toLowerCase();
+        let requested = null;
+        if (parts[1] === '--set') {
+          requested = parts.slice(2).join(' ');
+        } else if (parts[1] === '--current' || parts[1] === 'current') {
+          const cur = COPILOT_MODELS[currentCopilotModel];
+          return {
+            type: 'info',
+            message: `Current model: ${cur?.name || currentCopilotModel} (${currentCopilotModel})`
+          };
+        } else {
+          requested = parts.slice(1).join(' ');
+        }
+
+        const model = normalizeModelKey(requested);
         if (setCopilotModel(model)) {
           const modelInfo = COPILOT_MODELS[model];
           return { 
@@ -1793,7 +2596,7 @@ function handleCommand(command) {
         ).join('\n');
         return {
           type: 'info',
-          message: `Current model: ${COPILOT_MODELS[currentCopilotModel].name}\n\nAvailable models:\n${list}\n\nUse /model <name> to switch`
+          message: `Current model: ${COPILOT_MODELS[currentCopilotModel].name}\n\nAvailable models:\n${list}\n\nUse /model <id> to switch (you can also paste "id - display name")`
         };
       }
 
@@ -2178,6 +2981,337 @@ function hasActions(aiResponse) {
   return parsed && parsed.actions && parsed.actions.length > 0;
 }
 
+function preflightActions(actionData, options = {}) {
+  if (!actionData || !Array.isArray(actionData.actions)) return actionData;
+  const userMessage = typeof options.userMessage === 'string' ? options.userMessage : '';
+  const normalized = actionData.actions.map(normalizeActionForReliability);
+  const rewritten = rewriteActionsForReliability(normalized, { userMessage });
+  if (rewritten === actionData.actions) return actionData;
+  return { ...actionData, actions: rewritten, _rewrittenForReliability: true };
+}
+
+function normalizeActionForReliability(action) {
+  if (!action || typeof action !== 'object') return action;
+  const out = { ...action };
+  const rawType = (out.type ?? out.action ?? '').toString().trim();
+  const t = rawType.toLowerCase();
+
+  if (!out.type && out.action) out.type = out.action;
+
+  if (t === 'press_key' || t === 'presskey' || t === 'key_press' || t === 'keypress' || t === 'send_key') {
+    out.type = 'key';
+  } else if (t === 'type_text' || t === 'typetext' || t === 'enter_text' || t === 'input_text') {
+    out.type = 'type';
+  } else if (t === 'take_screenshot' || t === 'screencap') {
+    out.type = 'screenshot';
+  } else if (t === 'sleep' || t === 'delay' || t === 'wait_ms') {
+    out.type = 'wait';
+  }
+
+  if (out.type === 'type' && (out.text === undefined || out.text === null)) {
+    if (typeof out.value === 'string') out.text = out.value;
+    else if (typeof out.input === 'string') out.text = out.input;
+  }
+  if (out.type === 'key' && (out.key === undefined || out.key === null)) {
+    if (typeof out.combo === 'string') out.key = out.combo;
+    else if (typeof out.keys === 'string') out.key = out.keys;
+  }
+  if (out.type === 'wait' && (out.ms === undefined || out.ms === null)) {
+    const ms = out.milliseconds ?? out.duration_ms ?? out.durationMs;
+    if (Number.isFinite(Number(ms))) out.ms = Number(ms);
+  }
+
+  return out;
+}
+
+function normalizeUrlCandidate(text) {
+  if (!text || typeof text !== 'string') return null;
+  const t = text.trim();
+  if (!t) return null;
+  if (/^https?:\/\//i.test(t)) return t;
+  if (/^[a-z0-9.-]+\.[a-z]{2,}(\/.*)?$/i.test(t)) return `https://${t}`;
+  return null;
+}
+
+function extractFirstUrlFromText(text) {
+  if (!text || typeof text !== 'string') return null;
+  const t = text.trim();
+  if (!t) return null;
+  const httpMatch = t.match(/\bhttps?:\/\/[^\s"'<>]+/i);
+  if (httpMatch) return normalizeUrlCandidate(httpMatch[0]);
+
+  // Basic domain/path match (e.g., google.com, google.com/search?q=x)
+  const domainMatch = t.match(/\b([a-z0-9-]+(?:\.[a-z0-9-]+)+(?::\d+)?(?:\/[\w\-._~%!$&'()*+,;=:@/?#\[\]]*)?)\b/i);
+  if (domainMatch) return normalizeUrlCandidate(domainMatch[1]);
+  return null;
+}
+
+function extractExplicitBrowserTarget(text) {
+  if (!text || typeof text !== 'string') return null;
+  const t = text.toLowerCase();
+
+  // Prefer explicit "open/use ... in <browser>" style instructions, taking the LAST match.
+  const matches = Array.from(
+    t.matchAll(
+      /\b(open|launch|use)\b[^.!?\n]{0,120}\b(in|with|using)\b[^.!?\n]{0,60}\b(microsoft\s+edge\s+beta|microsoft\s+edge\s+dev|microsoft\s+edge\s+canary|microsoft\s+edge|edge\s+beta|edge\s+dev|edge\s+canary|edge|google\s+chrome\s+canary|google\s+chrome\s+beta|google\s+chrome\s+dev|google\s+chrome|chrome\s+canary|chrome\s+beta|chrome\s+dev|chrome|firefox)\b/gi
+    )
+  );
+  const last = matches.length ? matches[matches.length - 1] : null;
+  const candidate = last?.[3] || (t.match(/\bin\s+(edge\s+beta|edge\s+dev|edge\s+canary|edge|chrome\s+canary|chrome\s+beta|chrome\s+dev|chrome|firefox)\b[^.!?\n]*$/i)?.[1]);
+  if (!candidate) return null;
+
+  const c = candidate.replace(/\s+/g, ' ').trim();
+
+  if (c.includes('edge')) {
+    const channel = c.includes('beta') ? 'beta' : c.includes('dev') ? 'dev' : c.includes('canary') ? 'canary' : 'stable';
+    return { browser: 'edge', channel };
+  }
+  if (c.includes('chrome')) {
+    const channel = c.includes('beta') ? 'beta' : c.includes('dev') ? 'dev' : c.includes('canary') ? 'canary' : 'stable';
+    return { browser: 'chrome', channel };
+  }
+  if (c.includes('firefox')) return { browser: 'firefox', channel: 'stable' };
+
+  return null;
+}
+
+function buildBrowserWindowTitleTarget(target) {
+  if (!target || !target.browser) return null;
+  const channel = target.channel || 'stable';
+
+  if (target.browser === 'edge') {
+    if (channel === 'beta') return 're:.*\\bMicrosoft Edge Beta$';
+    if (channel === 'dev') return 're:.*\\bMicrosoft Edge Dev$';
+    if (channel === 'canary') return 're:.*\\bMicrosoft Edge Canary$';
+    return 're:.*\\bMicrosoft Edge$';
+  }
+
+  if (target.browser === 'chrome') {
+    if (channel === 'beta') return 're:.*\\bGoogle Chrome Beta$';
+    if (channel === 'dev') return 're:.*\\bGoogle Chrome Dev$';
+    if (channel === 'canary') return 're:.*\\bGoogle Chrome Canary$';
+    return 're:.*\\bGoogle Chrome$';
+  }
+
+  if (target.browser === 'firefox') {
+    // Common suffix. If it differs, processName will still help.
+    return 're:.*\\bMozilla Firefox$';
+  }
+
+  return null;
+}
+
+function isVsCodeIntegratedBrowserRequest(text) {
+  if (!text || typeof text !== 'string') return false;
+  // If the user explicitly targets a different browser, do not treat this as
+  // a VS Code integrated-browser request (common phrasing: "instead of ..., open in Edge").
+  const explicitBrowser = extractExplicitBrowserTarget(text);
+  if (explicitBrowser && explicitBrowser.browser !== 'vscode') return false;
+
+  const t = text.toLowerCase();
+  const mentionsVsCode = t.includes('vs code') || t.includes('visual studio code') || t.includes('vscode');
+  const mentionsIntegrated =
+    t.includes('integrated browser') ||
+    t.includes('simple browser') ||
+    t.includes('live preview') ||
+    t.includes('browser preview');
+
+  const mentionsMicrosoftIntegrated = t.includes('microsoft integrated browser');
+  const hasVsCodeContext = mentionsVsCode || mentionsMicrosoftIntegrated || t.includes('simple browser');
+  return hasVsCodeContext && mentionsIntegrated;
+}
+
+function buildBrowserOpenUrlActions(target, url) {
+  const title = buildBrowserWindowTitleTarget(target);
+  const browser = target?.browser;
+  const processName = browser === 'edge' ? 'msedge' : browser === 'chrome' ? 'chrome' : browser === 'firefox' ? 'firefox' : '';
+  const human = browser === 'edge' ? 'Microsoft Edge' : browser === 'chrome' ? 'Google Chrome' : browser === 'firefox' ? 'Mozilla Firefox' : 'Browser';
+  const channelLabel = target?.channel && target.channel !== 'stable' ? ` ${target.channel}` : '';
+
+  return [
+    {
+      type: 'bring_window_to_front',
+      title: title || human,
+      processName,
+      reason: `Focus ${human}${channelLabel}`
+    },
+    { type: 'wait', ms: 650 },
+    { type: 'key', key: 'ctrl+l', reason: 'Focus address bar' },
+    { type: 'wait', ms: 150 },
+    { type: 'type', text: url, reason: 'Enter URL' },
+    { type: 'key', key: 'enter', reason: 'Navigate' },
+    { type: 'wait', ms: 3000 }
+  ];
+}
+
+function prependVsCodeFocusIfMissing(actions) {
+  if (!Array.isArray(actions) || actions.length === 0) return actions;
+  const hasVsCodeFocus = actions.some((a) => {
+    if (!a) return false;
+    if (a.type !== 'bring_window_to_front' && a.type !== 'focus_window') return false;
+    const pn = String(a.processName || '').toLowerCase();
+    const title = String(a.title || '').toLowerCase();
+    return pn.includes('code') || title.includes('visual studio code') || title.includes('vs code') || title.includes('vscode');
+  });
+  if (hasVsCodeFocus) return actions;
+
+  return [
+    {
+      type: 'bring_window_to_front',
+      title: 'Visual Studio Code',
+      processName: 'code',
+      reason: 'Focus VS Code (required before Command Palette / Simple Browser)'
+    },
+    { type: 'wait', ms: 650 },
+    ...actions
+  ];
+}
+
+function prependBrowserFocusIfMissing(actions, target) {
+  if (!Array.isArray(actions) || actions.length === 0) return actions;
+  if (!target || !target.browser) return actions;
+
+  const needsKeyboard = actions.some((a) => a?.type === 'key' || a?.type === 'type');
+  if (!needsKeyboard) return actions;
+
+  const processName = target.browser === 'edge' ? 'msedge' : target.browser === 'chrome' ? 'chrome' : target.browser === 'firefox' ? 'firefox' : '';
+  const title = buildBrowserWindowTitleTarget(target);
+
+  const hasBrowserFocus = actions.some((a) => {
+    if (!a) return false;
+    if (a.type !== 'bring_window_to_front' && a.type !== 'focus_window') return false;
+    const pn = String(a.processName || '').toLowerCase();
+    if (processName && pn && pn.includes(processName)) return true;
+    const tt = String(a.title || '').toLowerCase();
+    if (target.browser === 'edge' && tt.includes('edge')) return true;
+    if (target.browser === 'chrome' && tt.includes('chrome')) return true;
+    if (target.browser === 'firefox' && tt.includes('firefox')) return true;
+    return false;
+  });
+  if (hasBrowserFocus) return actions;
+
+  return [
+    {
+      type: 'bring_window_to_front',
+      title: title || (target.browser === 'edge' ? 'Microsoft Edge' : target.browser === 'chrome' ? 'Google Chrome' : 'Mozilla Firefox'),
+      processName,
+      reason: 'Focus target browser before keyboard input'
+    },
+    { type: 'wait', ms: 650 },
+    ...actions
+  ];
+}
+
+function buildVsCodeSimpleBrowserOpenUrlActions(url) {
+  return [
+    {
+      type: 'bring_window_to_front',
+      title: 'Visual Studio Code',
+      processName: 'code',
+      reason: 'Focus VS Code (required for integrated browser actions)'
+    },
+    { type: 'wait', ms: 650 },
+    { type: 'key', key: 'ctrl+shift+p', reason: 'Open Command Palette' },
+    { type: 'wait', ms: 350 },
+    { type: 'type', text: 'Simple Browser: Show', reason: 'Open VS Code integrated Simple Browser' },
+    { type: 'wait', ms: 150 },
+    { type: 'key', key: 'enter', reason: 'Run Simple Browser: Show' },
+    { type: 'wait', ms: 950 },
+    { type: 'type', text: url, reason: 'Enter URL' },
+    { type: 'key', key: 'enter', reason: 'Navigate' },
+    { type: 'wait', ms: 3000 }
+  ];
+}
+
+function rewriteActionsForReliability(actions, context = {}) {
+  if (!Array.isArray(actions) || actions.length === 0) return actions;
+
+  // If the AI is already using the Simple Browser command palette flow, keep it,
+  // but ensure we focus VS Code first (models often forget this).
+  const alreadySimpleBrowser = actions.some(
+    (a) => typeof a?.text === 'string' && /simple\s+browser\s*:\s*show/i.test(a.text)
+  );
+  if (alreadySimpleBrowser) {
+    return prependVsCodeFocusIfMissing(actions);
+  }
+
+  // Intent-aware rewrite: if the USER asked to open a URL in VS Code integrated browser,
+  // run the full deterministic Simple Browser flow even if the model tries incremental steps.
+  const userMessage = typeof context.userMessage === 'string' ? context.userMessage : '';
+  const requestedUrl = extractFirstUrlFromText(userMessage);
+
+  const explicitBrowser = extractExplicitBrowserTarget(userMessage);
+  if (explicitBrowser?.browser && explicitBrowser.browser !== 'vscode') {
+    // If the model is going to use keyboard input for a specific browser, ensure focus.
+    actions = prependBrowserFocusIfMissing(actions, explicitBrowser);
+  }
+
+  // If the user explicitly asked for a browser + URL, prefer a deterministic
+  // keyboard-only browser flow for low-signal plans.
+  if (requestedUrl && explicitBrowser?.browser && explicitBrowser.browser !== 'vscode') {
+    const onlyLowSignal = actions.every((a) => ['bring_window_to_front', 'focus_window', 'key', 'wait', 'screenshot'].includes(a?.type));
+    const tinyPlan = actions.length <= 2;
+    if (tinyPlan || onlyLowSignal) {
+      return buildBrowserOpenUrlActions(explicitBrowser, requestedUrl);
+    }
+  }
+
+  if (requestedUrl && isVsCodeIntegratedBrowserRequest(userMessage)) {
+    const onlyLowSignal = actions.every((a) => ['bring_window_to_front', 'focus_window', 'key', 'wait', 'screenshot'].includes(a?.type));
+    const tinyPlan = actions.length <= 2;
+    const isDetourScreenshotOnly = actions.length === 1 && actions[0]?.type === 'screenshot';
+    const isDetourCommandPaletteOnly = actions.length === 1 && actions[0]?.type === 'key' && /^ctrl\+shift\+p$/i.test(String(actions[0]?.key || '').trim());
+    const isDetourBringVsCodeOnly =
+      actions.length === 1 &&
+      actions[0]?.type === 'bring_window_to_front' &&
+      typeof actions[0]?.title === 'string' &&
+      /visual\s+studio\s+code/i.test(actions[0]?.title);
+
+    if (tinyPlan || onlyLowSignal || isDetourScreenshotOnly || isDetourCommandPaletteOnly || isDetourBringVsCodeOnly) {
+      return buildVsCodeSimpleBrowserOpenUrlActions(requestedUrl);
+    }
+  }
+
+  // Heuristic: VS Code integrated browser attempts often look like:
+  // click_element("Browser Preview") + ctrl+l + type URL.
+  const clickPreview = actions.find(
+    (a) =>
+      a?.type === 'click_element' &&
+      typeof a.text === 'string' &&
+      /(browser\s*preview|live\s*preview|preview)/i.test(a.text)
+  );
+  const hasCtrlL = actions.some((a) => a?.type === 'key' && typeof a.key === 'string' && /^ctrl\+l$/i.test(a.key.trim()));
+  const typedUrl = actions
+    .filter((a) => a?.type === 'type' && typeof a.text === 'string')
+    .map((a) => normalizeUrlCandidate(a.text))
+    .find(Boolean);
+
+  if (clickPreview && hasCtrlL && typedUrl) {
+    // Rewrite to a keyboard-only VS Code Simple Browser flow.
+    // This avoids UIA element discovery (webviews are often not exposed) and avoids screenshots.
+    return [
+      {
+        type: 'bring_window_to_front',
+        title: 'Visual Studio Code',
+        processName: 'code',
+        reason: 'Focus VS Code (required for integrated browser actions)'
+      },
+      { type: 'wait', ms: 600 },
+      { type: 'key', key: 'ctrl+shift+p', reason: 'Open Command Palette' },
+      { type: 'wait', ms: 300 },
+      { type: 'type', text: 'Simple Browser: Show', reason: 'Open VS Code integrated Simple Browser' },
+      { type: 'wait', ms: 150 },
+      { type: 'key', key: 'enter', reason: 'Run Simple Browser: Show' },
+      { type: 'wait', ms: 900 },
+      { type: 'type', text: typedUrl, reason: 'Enter URL' },
+      { type: 'key', key: 'enter', reason: 'Navigate' },
+      { type: 'wait', ms: 3000 }
+    ];
+  }
+
+  return actions;
+}
+
 /**
  * Execute actions from AI response with safety checks
  * @param {Object} actionData - Parsed action data with actions array
@@ -2193,9 +3327,14 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
     return { success: false, error: 'No valid actions provided' };
   }
 
-  const { onRequireConfirmation, targetAnalysis = {}, actionExecutor, skipSafetyConfirmation = false } = options;
+  const { onRequireConfirmation, targetAnalysis = {}, actionExecutor, skipSafetyConfirmation = false, userMessage } = options;
 
   console.log('[AI-SERVICE] Executing actions:', actionData.thought || 'No thought provided');
+  const preflighted = preflightActions(actionData, { userMessage });
+  if (preflighted !== actionData) {
+    actionData = preflighted;
+    console.log('[AI-SERVICE] Actions rewritten for reliability');
+  }
   console.log('[AI-SERVICE] Actions:', JSON.stringify(actionData.actions, null, 2));
 
   const results = [];
@@ -2357,9 +3496,19 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
     return { success: false, error: 'No pending action to resume' };
   }
   
-  const { actionExecutor } = options;
+  const { actionExecutor, userMessage } = options;
   
   console.log('[AI-SERVICE] Resuming after user confirmation');
+
+  // Apply the same reliability rewrites on resume, so we don't get stuck
+  // if the remaining actions include brittle UIA clicks or screenshot detours.
+  if (Array.isArray(pending.remainingActions) && pending.remainingActions.length > 0) {
+    const original = pending.remainingActions;
+    pending.remainingActions = rewriteActionsForReliability(pending.remainingActions, { userMessage });
+    if (pending.remainingActions !== original) {
+      console.log('[AI-SERVICE] (resume) Actions rewritten for reliability');
+    }
+  }
   
   const results = [...pending.completedResults];
   let screenshotRequested = false;
@@ -2475,6 +3624,9 @@ module.exports = {
   // Agentic capabilities
   parseActions,
   hasActions,
+  preflightActions,
+  // Teach UX
+  parsePreferenceCorrection,
   executeActions,
   gridToPixels,
   systemAutomation,

@@ -1523,6 +1523,12 @@ function setupIPC() {
   async function executeActionsAndRespond(actionData, { skipSafetyConfirmation = false } = {}) {
     if (!chatWindow) return;
     
+    try {
+      if (aiService && typeof aiService.preflightActions === 'function') {
+        actionData = aiService.preflightActions(actionData);
+      }
+    } catch {}
+
     chatWindow.webContents.send('action-executing', { 
       thought: actionData.thought,
       total: actionData.actions.length 
