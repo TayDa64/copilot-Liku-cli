@@ -3522,6 +3522,24 @@ function extractSearchQueryFromText(text) {
   return query;
 }
 
+function inferYouTubeSearchIntent(text) {
+  if (!text || typeof text !== 'string') return null;
+  const t = text.toLowerCase();
+  const wantsYouTube = t.includes('youtube');
+  const wantsSearch = /\bsearch\b/.test(t);
+  if (!wantsYouTube || !wantsSearch) return null;
+
+  const query = extractSearchQueryFromText(text);
+  if (!query) return null;
+
+  const browser = extractExplicitBrowserTarget(text) || { browser: 'edge', channel: 'stable' };
+  return {
+    browser,
+    query,
+    url: 'https://www.youtube.com'
+  };
+}
+
 function hasRankingIntent(text) {
   if (!text || typeof text !== 'string') return false;
   const t = text.toLowerCase();
@@ -3871,6 +3889,25 @@ function rewriteActionsForReliability(actions, context = {}) {
   // run the full deterministic Simple Browser flow even if the model tries incremental steps.
   const requestedAppName = extractRequestedAppName(userMessage);
   const requestedUrl = extractFirstUrlFromText(userMessage);
+  const youtubeSearchIntent = inferYouTubeSearchIntent(userMessage);
+
+  if (youtubeSearchIntent?.browser?.browser && !requestedUrl) {
+    const lowSignal = actions.every((a) => ['bring_window_to_front', 'focus_window', 'key', 'type', 'wait', 'screenshot'].includes(a?.type));
+    const tinyOrFragmented = actions.length <= 4;
+    if (lowSignal || tinyOrFragmented) {
+      updateBrowserSessionState({
+        url: youtubeSearchIntent.url,
+        goalStatus: 'in_progress',
+        lastStrategy: 'deterministic-youtube-search-no-url',
+        lastUserIntent: userMessage.trim().slice(0, 300)
+      });
+      return buildBrowserOpenUrlActions(
+        youtubeSearchIntent.browser,
+        youtubeSearchIntent.url,
+        { searchQuery: youtubeSearchIntent.query }
+      );
+    }
+  }
 
   if (requestedAppName && !requestedUrl) {
     const lowSignalTypes = new Set(['bring_window_to_front', 'focus_window', 'key', 'type', 'wait', 'screenshot']);

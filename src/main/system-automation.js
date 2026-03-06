@@ -2253,7 +2253,7 @@ async function executeActionSequence(actions, onAction = null) {
  */
 function parseAIActions(aiResponse) {
   // Try to find JSON in the response
-  const jsonMatch = aiResponse.match(/```json\s*([\s\S]*?)\s*```/);
+  const jsonBlocks = Array.from(String(aiResponse || '').matchAll(/```json\s*([\s\S]*?)\s*```/gi));
   const normalizeActionBlock = (parsed) => {
     if (!parsed || typeof parsed !== 'object') return parsed;
     if (!Array.isArray(parsed.actions)) return parsed;
@@ -2293,11 +2293,62 @@ function parseAIActions(aiResponse) {
     return { ...parsed, actions: normalizedActions };
   };
 
-  if (jsonMatch) {
-    try {
-      return normalizeActionBlock(JSON.parse(jsonMatch[1]));
-    } catch (e) {
-      console.error('[AUTOMATION] Failed to parse JSON from code block:', e);
+  const scoreActionBlock = (parsed) => {
+    if (!parsed || !Array.isArray(parsed.actions) || parsed.actions.length === 0) return Number.NEGATIVE_INFINITY;
+    let score = 0;
+    for (const a of parsed.actions) {
+      const t = String(a?.type || '').toLowerCase();
+      if (!t) continue;
+      // Reward concrete execution steps.
+      if (t === ACTION_TYPES.KEY || t === ACTION_TYPES.TYPE || t === ACTION_TYPES.CLICK || t === ACTION_TYPES.CLICK_ELEMENT || t === ACTION_TYPES.RUN_COMMAND) {
+        score += 3;
+      } else if (t === ACTION_TYPES.BRING_WINDOW_TO_FRONT || t === ACTION_TYPES.FOCUS_WINDOW || t === ACTION_TYPES.WAIT) {
+        score += 1;
+      } else if (t === ACTION_TYPES.SCREENSHOT) {
+        score -= 2;
+      } else {
+        score += 1;
+      }
+    }
+
+    // Penalize trivial focus-only plans.
+    const nonTrivial = parsed.actions.some((a) => {
+      const t = String(a?.type || '').toLowerCase();
+      return t !== ACTION_TYPES.WAIT && t !== ACTION_TYPES.FOCUS_WINDOW && t !== ACTION_TYPES.BRING_WINDOW_TO_FRONT;
+    });
+    if (!nonTrivial) score -= 6;
+
+    // Slightly reward longer coherent plans.
+    score += Math.min(parsed.actions.length, 8);
+    return score;
+  };
+
+  const pickBestParsedBlock = (blocks) => {
+    let best = null;
+    let bestScore = Number.NEGATIVE_INFINITY;
+    for (const block of blocks) {
+      if (!block) continue;
+      const score = scoreActionBlock(block);
+      if (score >= bestScore) {
+        best = block;
+        bestScore = score;
+      }
+    }
+    return best;
+  };
+
+  if (jsonBlocks.length > 0) {
+    const parsedBlocks = [];
+    for (const m of jsonBlocks) {
+      try {
+        parsedBlocks.push(normalizeActionBlock(JSON.parse(m[1])));
+      } catch (e) {
+        console.error('[AUTOMATION] Failed to parse JSON from code block:', e);
+      }
+    }
+    const best = pickBestParsedBlock(parsedBlocks);
+    if (best) {
+      return best;
     }
   }
   
