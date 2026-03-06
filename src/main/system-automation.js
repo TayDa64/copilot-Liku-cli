@@ -558,7 +558,7 @@ async function resolveWindowHandle(action = {}) {
     return null;
   }
 
-  const script = `
+  const buildResolverScript = ({ includeTitle = true } = {}) => `
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
@@ -584,7 +584,7 @@ public class WindowResolver {
 '@
 
 $titleMode = '${titleMode}'
-$title = '${title}'
+$title = '${includeTitle ? title : ''}'
 $proc = '${processName}'.ToLower()
 $class = '${className}'.ToLower()
 
@@ -624,10 +624,24 @@ foreach ($hwnd in [WindowResolver]::windows) {
 `;
 
   try {
-    const result = await executePowerShellScript(script, 8000);
-    if (!result || result.failed) return null;
-    const parsed = Number(String(result.stdout || '').trim());
-    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+    const tryParseHandle = async (scriptText) => {
+      const result = await executePowerShellScript(scriptText, 8000);
+      if (!result || result.failed) return null;
+      const parsed = Number(String(result.stdout || '').trim());
+      return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+    };
+
+    // First pass: honor title/class/process filters.
+    let hwnd = await tryParseHandle(buildResolverScript({ includeTitle: true }));
+    if (hwnd) return hwnd;
+
+    // Fallback pass: if process is known, tolerate title drift/channels and match process-only.
+    if (processName) {
+      hwnd = await tryParseHandle(buildResolverScript({ includeTitle: false }));
+      if (hwnd) return hwnd;
+    }
+
+    return null;
   } catch {
     return null;
   }
@@ -1854,6 +1868,72 @@ $obj | ConvertTo-Json -Compress
 }
 
 /**
+ * Get running processes filtered by candidate names.
+ * Returns lightweight awareness data for launch verification.
+ *
+ * @param {string[]} processNames
+ * @returns {Promise<Array<{pid:number, processName:string, mainWindowTitle:string, startTime:string}>>}
+ */
+async function getRunningProcessesByNames(processNames = []) {
+  const normalized = Array.from(
+    new Set(
+      (Array.isArray(processNames) ? processNames : [])
+        .map((n) => String(n || '').trim().toLowerCase())
+        .filter(Boolean)
+    )
+  );
+
+  if (!normalized.length) {
+    return [];
+  }
+
+  const jsonNames = JSON.stringify(normalized);
+  const script = `
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+
+$targets = '${jsonNames}' | ConvertFrom-Json
+
+$procs = Get-Process -ErrorAction SilentlyContinue |
+  Where-Object {
+    $name = ($_.ProcessName | Out-String).Trim().ToLowerInvariant()
+    foreach ($t in $targets) {
+      if ($name -eq $t -or $name -like ("*$t*")) {
+        return $true
+      }
+    }
+    return $false
+  } |
+  Sort-Object StartTime -Descending |
+  Select-Object -First 15 -Property @{
+      Name='pid'; Expression={ [int]$_.Id }
+    }, @{
+      Name='processName'; Expression={ [string]$_.ProcessName }
+    }, @{
+      Name='mainWindowTitle'; Expression={ [string]$_.MainWindowTitle }
+    }, @{
+      Name='startTime'; Expression={ try { $_.StartTime.ToString('o') } catch { '' } }
+    }
+
+if (-not $procs) {
+  '[]'
+} else {
+  $procs | ConvertTo-Json -Compress
+}
+`;
+
+  try {
+    const result = await executePowerShellScript(script, 10000);
+    const text = String(result?.stdout || '').trim();
+    if (!text) return [];
+    const parsed = JSON.parse(text);
+    return Array.isArray(parsed) ? parsed : [parsed];
+  } catch {
+    return [];
+  }
+}
+
+/**
  * Execute an action from AI
  * @param {Object} action - Action object from AI
  * @returns {Object} Result of the action
@@ -2362,6 +2442,7 @@ module.exports = {
   getActiveWindowTitle,
   getForegroundWindowHandle,
   getForegroundWindowInfo,
+  getRunningProcessesByNames,
   resolveWindowHandle,
   minimizeWindow,
   restoreWindow,

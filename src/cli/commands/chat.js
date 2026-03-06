@@ -126,6 +126,19 @@ function parseBool(val, defaultValue = false) {
   return defaultValue;
 }
 
+function isLikelyAutomationInput(text) {
+  const t = String(text || '').trim().toLowerCase();
+  if (!t) return false;
+
+  // Explicit acknowledgements/chit-chat should never execute actions.
+  if (/^(thanks|thank you|awesome|great|nice|outstanding work|good job|perfect|cool|ok|okay|got it|sounds good|that works)[!.\s]*$/i.test(t)) {
+    return false;
+  }
+
+  // Lightweight intent signals for actual executable tasks.
+  return /(open|launch|search|play|click|type|press|scroll|drag|close|minimize|restore|focus|bring|navigate|go to|run|execute|find|select|choose|pick)/i.test(t);
+}
+
 function askQuestion(rl, prompt) {
   return new Promise(resolve => rl.question(prompt, resolve));
 }
@@ -253,6 +266,8 @@ ${highlight('In-chat commands:')}
   /status     Show auth/provider/model status
   /login      Authenticate with GitHub Copilot
   /model      Interactive model picker (↑/↓ + Enter) or set directly (e.g. /model gpt-4o)
+  /sequence   Toggle guided step-by-step execution (on by default)
+  /recipes    Toggle bounded popup follow-up recipes (off by default)
   /provider   Show/set provider
   /capture    Capture a screenshot into visual context
   /vision on  Include latest capture in NEXT message
@@ -267,6 +282,75 @@ ${highlight('Notes:')}
 `);
 }
 
+async function executeActionBatchWithSafeguards(ai, actionData, rl, userMessage, options = {}) {
+  const enablePopupRecipes = !!options.enablePopupRecipes;
+  let pendingSafety = null;
+  const execResult = await ai.executeActions(
+    actionData,
+    (result, idx, total) => {
+      const prefix = dim(`[${idx + 1}/${total}]`);
+      if (result.success) {
+        console.log(`${prefix} ${result.action || result.type || 'action'}: ${dim(result.message || 'ok')}`);
+      } else {
+        console.log(`${prefix} ${result.action || result.type || 'action'}: ${dim('failed')} ${result.error || ''}`);
+      }
+    },
+    async () => {
+      warn('AI requested a screenshot. Use /capture to add visual context, then ask again.');
+    },
+    {
+      onRequireConfirmation: (safety) => {
+        pendingSafety = safety;
+      },
+      userMessage,
+      enablePopupRecipes
+    }
+  );
+
+  if (!execResult.pendingConfirmation) {
+    return execResult;
+  }
+
+  const safety = pendingSafety;
+  if (safety) {
+    warn(`Confirmation required (${safety.riskLevel}): ${safety.description}`);
+    if (safety.warnings && safety.warnings.length) {
+      safety.warnings.forEach(w => warn(`- ${w}`));
+    }
+  } else {
+    warn('Confirmation required for a pending action.');
+  }
+
+  const ans = (await askQuestion(rl, highlight('Execute anyway? (y/N) '))).trim().toLowerCase();
+  if (ans === 'y' || ans === 'yes') {
+    const actionId = execResult.pendingActionId;
+    if (actionId) ai.confirmPendingAction(actionId);
+    const resumed = await ai.resumeAfterConfirmation(
+      (result, idx, total) => {
+        const prefix = dim(`[${idx + 1}/${total}]`);
+        if (result.success) {
+          console.log(`${prefix} ${result.action || result.type || 'action'}: ${dim(result.message || 'ok')}`);
+        } else {
+          console.log(`${prefix} ${result.action || result.type || 'action'}: ${dim('failed')} ${result.error || ''}`);
+        }
+      },
+      async () => {
+        warn('AI requested a screenshot. Use /capture to add visual context, then ask again.');
+      },
+      {
+        userMessage,
+        enablePopupRecipes
+      }
+    );
+    return resumed;
+  }
+
+  if (execResult.pendingActionId) {
+    ai.rejectPendingAction(execResult.pendingActionId);
+  }
+  return { success: false, cancelled: true, error: 'Execution cancelled by user' };
+}
+
 async function runChatLoop(ai, options) {
   let executeMode = 'prompt';
   const executeModeExplicit = options.execute !== undefined;
@@ -277,6 +361,8 @@ async function runChatLoop(ai, options) {
   }
   const model = typeof options.model === 'string' ? options.model : null;
   let includeVisualNext = false;
+  let sequenceMode = false;
+  let popupRecipesEnabled = false;
 
   let lastNonTrivialUserMessage = '';
 
@@ -316,9 +402,42 @@ async function runChatLoop(ai, options) {
       if (lower === '/vision on') includeVisualNext = true;
       if (lower === '/vision off') includeVisualNext = false;
 
+      if (lower === '/sequence' || lower.startsWith('/sequence ')) {
+        const parts = lower.split(/\s+/).filter(Boolean);
+        const arg = parts[1] || 'status';
+        if (arg === 'on') {
+          sequenceMode = true;
+          success('Guided sequence mode enabled. Sequence runs continuously; only risky actions require extra confirmation.');
+        } else if (arg === 'off') {
+          sequenceMode = false;
+          warn('Guided sequence mode disabled.');
+        } else {
+          info(`Guided sequence mode: ${sequenceMode ? 'on' : 'off'}`);
+        }
+        continue;
+      }
+
+      if (lower === '/recipes' || lower.startsWith('/recipes ')) {
+        const parts = lower.split(/\s+/).filter(Boolean);
+        const arg = parts[1] || 'status';
+        if (arg === 'on') {
+          popupRecipesEnabled = true;
+          success('Popup follow-up recipes enabled (opt-in, bounded).');
+        } else if (arg === 'off') {
+          popupRecipesEnabled = false;
+          warn('Popup follow-up recipes disabled.');
+        } else {
+          info(`Popup follow-up recipes: ${popupRecipesEnabled ? 'on' : 'off'}`);
+        }
+        continue;
+      }
+
       // Interactive model picker
       if (lower === '/model') {
         try {
+          if (typeof ai.discoverCopilotModels === 'function') {
+            await Promise.resolve(ai.discoverCopilotModels());
+          }
           const models = await Promise.resolve(ai.getCopilotModels());
           if (!Array.isArray(models) || models.length === 0) {
             warn('No models available.');
@@ -426,6 +545,11 @@ async function runChatLoop(ai, options) {
 
     if (!hasActions) continue;
 
+    if (!isLikelyAutomationInput(executionIntent)) {
+      info('Non-action message detected; skipping action execution.');
+      continue;
+    }
+
     if (typeof ai.preflightActions === 'function') {
       const rewritten = ai.preflightActions(actionData, { userMessage: executionIntent });
       if (rewritten && rewritten !== actionData) {
@@ -463,6 +587,29 @@ async function runChatLoop(ai, options) {
     let shouldExecute = effectiveExecuteMode === 'auto';
 
     if (effectiveExecuteMode === 'prompt') {
+      let hasRiskyAction = false;
+      if (typeof ai.analyzeActionSafety === 'function') {
+        for (const action of actionData.actions) {
+          try {
+            const safety = ai.analyzeActionSafety(action, {
+              text: action?.reason || '',
+              buttonText: action?.targetText || '',
+              nearbyText: []
+            });
+            if (safety?.requiresConfirmation) {
+              hasRiskyAction = true;
+              break;
+            }
+          } catch {}
+        }
+      }
+
+      if (!hasRiskyAction) {
+        info(`Low-risk sequence (${actionData.actions.length} step${actionData.actions.length === 1 ? '' : 's'}) detected. Running without pre-approval.`);
+        shouldExecute = true;
+      }
+
+      if (!shouldExecute) {
       while (true) {
         const ans = (await askQuestion(rl, highlight(`Run ${actionData.actions.length} action(s)? (y/N/a/d/c) `)))
           .trim()
@@ -574,34 +721,25 @@ async function runChatLoop(ai, options) {
         shouldExecute = true;
         break;
       }
+      }
     }
 
     if (!shouldExecute) {
       continue;
     }
 
-    // Execute actions with safety confirmations
-    let pendingSafety = null;
-    const execResult = await ai.executeActions(
+    let execResult = null;
+    const effectiveUserMessage = isContinueLike ? lastNonTrivialUserMessage : line;
+
+    if (sequenceMode) {
+      info(`Guided sequence: executing ${actionData.actions.length} step(s) continuously.`);
+    }
+    execResult = await executeActionBatchWithSafeguards(
+      ai,
       actionData,
-      (result, idx, total) => {
-        const prefix = dim(`[${idx + 1}/${total}]`);
-        if (result.success) {
-          console.log(`${prefix} ${result.action || result.type || 'action'}: ${dim(result.message || 'ok')}`);
-        } else {
-          console.log(`${prefix} ${result.action || result.type || 'action'}: ${dim('failed')} ${result.error || ''}`);
-        }
-      },
-      async () => {
-        // Screenshot hook (best-effort): prompt user to /capture if they want visual context.
-        warn('AI requested a screenshot. Use /capture to add visual context, then ask again.');
-      },
-      {
-        onRequireConfirmation: (safety) => {
-          pendingSafety = safety;
-        },
-        userMessage: isContinueLike ? lastNonTrivialUserMessage : line
-      }
+      rl,
+      effectiveUserMessage,
+      { enablePopupRecipes: popupRecipesEnabled }
     );
 
     // Record auto-run outcomes and demote on repeated failures (UI drift).
@@ -614,56 +752,34 @@ async function runChatLoop(ai, options) {
       }
     } catch {}
 
-    if (execResult.pendingConfirmation) {
-      const safety = pendingSafety;
-      if (safety) {
-        warn(`Confirmation required (${safety.riskLevel}): ${safety.description}`);
-        if (safety.warnings && safety.warnings.length) {
-          safety.warnings.forEach(w => warn(`- ${w}`));
-        }
-      } else {
-        warn('Confirmation required for a pending action.');
-      }
-
-      const ans = (await askQuestion(rl, highlight('Execute anyway? (y/N) '))).trim().toLowerCase();
-      if (ans === 'y' || ans === 'yes') {
-        const actionId = execResult.pendingActionId;
-        if (actionId) ai.confirmPendingAction(actionId);
-        const resumed = await ai.resumeAfterConfirmation(
-          (result, idx, total) => {
-            const prefix = dim(`[${idx + 1}/${total}]`);
-            if (result.success) {
-              console.log(`${prefix} ${result.action || result.type || 'action'}: ${dim(result.message || 'ok')}`);
-            } else {
-              console.log(`${prefix} ${result.action || result.type || 'action'}: ${dim('failed')} ${result.error || ''}`);
-            }
-          },
-          async () => {
-            warn('AI requested a screenshot. Use /capture to add visual context, then ask again.');
-          },
-          { userMessage: isContinueLike ? lastNonTrivialUserMessage : line }
-        );
-        if (!resumed.success) {
-          error(resumed.error || 'Action execution failed');
-        }
-
-        // Also record the resumed outcome for auto-run drift handling.
-        try {
-          if (!executeModeExplicit && targetProcessName && effectiveExecuteMode === 'auto') {
-            const outcome = preferences.recordAutoRunOutcome(targetProcessName, !!resumed.success);
-            if (outcome?.demoted) {
-              warn(`Auto-run demoted to prompt for app "${outcome.key}" (2 consecutive failures).`);
-            }
-          }
-        } catch {}
-      } else {
-        if (execResult.pendingActionId) ai.rejectPendingAction(execResult.pendingActionId);
-        info('Cancelled.');
-      }
+    if (execResult?.cancelled) {
       continue;
     }
 
-    if (!execResult.success) {
+    if (execResult?.postVerificationFailed) {
+      warn(execResult.error || 'Post-action verification could not confirm target after retries.');
+      const fg = execResult?.postVerification?.foreground;
+      if (fg && fg.success) {
+        info(`Foreground after retries: ${fg.processName || 'unknown'} | ${fg.title || 'untitled'}`);
+      }
+    }
+
+    if (execResult?.postVerification?.needsFollowUp) {
+      const hint = execResult?.postVerification?.popupHint;
+      warn(`Detected a likely post-launch dialog${hint ? `: ${hint}` : ''}. I can continue with synthesis/actions to complete startup.`);
+    }
+
+    if (execResult?.postVerification?.popupRecipe?.attempted) {
+      const details = execResult.postVerification.popupRecipe;
+      const recipeLabel = details.recipeId ? ` [${details.recipeId}]` : '';
+      info(`Popup recipe${recipeLabel} attempted (${details.steps} step${details.steps === 1 ? '' : 's'})${details.completed ? '' : ' with partial completion'}.`);
+    }
+
+    if (Array.isArray(execResult?.postVerification?.runningPids) && execResult.postVerification.runningPids.length) {
+      info(`Running target PID(s): ${execResult.postVerification.runningPids.join(', ')}`);
+    }
+
+    if (!execResult?.success) {
       error(execResult.error || 'One or more actions failed');
     }
   }
@@ -678,13 +794,37 @@ async function run(args, flags) {
   }
 
   const ai = require('../../main/ai-service');
+  const { getUIWatcher } = require('../../main/ui-watcher');
+  let watcher = null;
+  let watcherStartedByChat = false;
+
+  try {
+    watcher = getUIWatcher({ pollInterval: 400, focusedWindowOnly: false, enabled: true });
+    if (!watcher.isPolling) {
+      watcher.start();
+      watcherStartedByChat = true;
+    }
+    if (typeof ai.setUIWatcher === 'function') {
+      ai.setUIWatcher(watcher);
+    }
+    info(`UI Watcher: ${watcher.isPolling ? 'polling' : 'inactive'}`);
+  } catch (e) {
+    warn(`UI Watcher unavailable: ${e.message}`);
+  }
 
   // Quick hint if user expected command REPL
   if (flags.quiet !== true) {
     console.log(dim('Tip: use /login to authenticate, /status to verify.'));
   }
 
-  await runChatLoop(ai, flags);
+  try {
+    await runChatLoop(ai, flags);
+  } finally {
+    if (watcher && watcherStartedByChat) {
+      try { watcher.stop(); } catch {}
+    }
+  }
+
   return { success: true };
 }
 

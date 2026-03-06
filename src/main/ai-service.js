@@ -157,6 +157,7 @@ function getSemanticDOMContextText() {
 
 // Available models for GitHub Copilot (based on Copilot CLI changelog)
 const COPILOT_MODELS = {
+  'gpt-5.4': { name: 'GPT-5.4', id: 'gpt-5.4', vision: false },
   'claude-sonnet-4.5': { name: 'Claude Sonnet 4.5', id: 'claude-sonnet-4.5-20250929', vision: true },
   'claude-sonnet-4': { name: 'Claude Sonnet 4', id: 'claude-sonnet-4-20250514', vision: true },
   'claude-opus-4.5': { name: 'Claude Opus 4.5', id: 'claude-opus-4.5', vision: true },
@@ -168,6 +169,51 @@ const COPILOT_MODELS = {
   'o1-mini': { name: 'o1 Mini', id: 'o1-mini', vision: false },
   'o3-mini': { name: 'o3 Mini', id: 'o3-mini', vision: false }
 };
+
+// Runtime-discovered Copilot models (merged with static defaults above).
+const dynamicCopilotModels = {};
+let copilotModelDiscoveryAttempted = false;
+
+function modelRegistry() {
+  return { ...COPILOT_MODELS, ...dynamicCopilotModels };
+}
+
+function inferVisionCapability(modelId = '') {
+  const id = String(modelId || '').toLowerCase();
+  if (!id) return false;
+  if (/\bo1\b|\bo3-mini\b|\bo1-mini\b/.test(id)) return false;
+  if (id.includes('vision')) return true;
+  // Most current GPT-4.x and Claude 4.x variants in Copilot support image input.
+  if (id.includes('gpt-4') || id.includes('claude')) return true;
+  return false;
+}
+
+function normalizeModelKeyFromId(modelId) {
+  const raw = String(modelId || '').trim().toLowerCase();
+  if (!raw) return '';
+  // Drop date suffixes like -20250929 so picker ids stay stable.
+  return raw.replace(/-20\d{6}$/g, '');
+}
+
+function upsertDynamicCopilotModel(entry) {
+  if (!entry || !entry.id) return;
+  const idLower = String(entry.id).toLowerCase();
+  // Keep picker focused on chat-capable model families.
+  if (idLower.includes('embedding') || idLower.includes('ada-002') || idLower.startsWith('oswe-')) {
+    return;
+  }
+  if (!/(gpt|claude|gemini|\bo1\b|\bo3\b|grok)/i.test(idLower)) {
+    return;
+  }
+  const key = normalizeModelKeyFromId(entry.id);
+  if (!key) return;
+  if (COPILOT_MODELS[key]) return; // Keep curated defaults authoritative.
+  dynamicCopilotModels[key] = {
+    name: entry.name || entry.id,
+    id: entry.id,
+    vision: entry.vision ?? inferVisionCapability(entry.id)
+  };
+}
 
 // Default Copilot model
 let currentCopilotModel = 'gpt-4o';
@@ -424,10 +470,21 @@ let apiKeys = {
 let currentModelMetadata = {
   modelId: currentCopilotModel,
   provider: currentProvider,
-  modelVersion: COPILOT_MODELS[currentCopilotModel]?.id || null,
-  capabilities: COPILOT_MODELS[currentCopilotModel]?.vision ? ['vision', 'text'] : ['text'],
+  modelVersion: modelRegistry()[currentCopilotModel]?.id || null,
+  capabilities: modelRegistry()[currentCopilotModel]?.vision ? ['vision', 'text'] : ['text'],
   lastUpdated: new Date().toISOString()
 };
+
+function refreshCurrentModelMetadata() {
+  const selected = modelRegistry()[currentCopilotModel];
+  currentModelMetadata = {
+    modelId: currentCopilotModel,
+    provider: currentProvider,
+    modelVersion: selected?.id || null,
+    capabilities: selected?.vision ? ['vision', 'text'] : ['text'],
+    lastUpdated: new Date().toISOString()
+  };
+}
 
 // Token persistence path — lives inside ~/.liku-cli/ alongside Electron userData
 const LIKU_HOME = path.join(os.homedir(), '.liku-cli');
@@ -441,6 +498,40 @@ let oauthCallback = null;
 let conversationHistory = [];
 const MAX_HISTORY = 20;
 const HISTORY_FILE = path.join(LIKU_HOME, 'conversation-history.json');
+const MODEL_PREF_FILE = path.join(LIKU_HOME, 'model-preference.json');
+
+// Lightweight browser continuity state (in-memory for this process).
+let browserSessionState = {
+  url: null,
+  title: null,
+  goalStatus: 'unknown', // unknown | in_progress | achieved | needs_attention
+  lastStrategy: null,
+  lastUserIntent: null,
+  lastUpdated: null
+};
+
+function getBrowserSessionState() {
+  return { ...browserSessionState };
+}
+
+function updateBrowserSessionState(patch = {}) {
+  browserSessionState = {
+    ...browserSessionState,
+    ...patch,
+    lastUpdated: new Date().toISOString()
+  };
+}
+
+function resetBrowserSessionState() {
+  browserSessionState = {
+    url: null,
+    title: null,
+    goalStatus: 'unknown',
+    lastStrategy: null,
+    lastUserIntent: null,
+    lastUpdated: new Date().toISOString()
+  };
+}
 
 /**
  * Load conversation history from disk (survives process restarts)
@@ -473,8 +564,51 @@ function saveConversationHistory() {
   }
 }
 
+function saveModelPreference() {
+  try {
+    if (!fs.existsSync(LIKU_HOME)) {
+      fs.mkdirSync(LIKU_HOME, { recursive: true, mode: 0o700 });
+    }
+    fs.writeFileSync(
+      MODEL_PREF_FILE,
+      JSON.stringify({ copilotModel: currentCopilotModel, savedAt: new Date().toISOString() }),
+      { mode: 0o600 }
+    );
+  } catch (e) {
+    console.warn('[AI] Could not save model preference:', e.message);
+  }
+}
+
+function loadModelPreference() {
+  try {
+    if (!fs.existsSync(MODEL_PREF_FILE)) {
+      return;
+    }
+    const parsed = JSON.parse(fs.readFileSync(MODEL_PREF_FILE, 'utf-8'));
+    const preferred = String(parsed?.copilotModel || '').trim().toLowerCase();
+    if (!preferred) return;
+
+    const registry = modelRegistry();
+    if (registry[preferred]) {
+      currentCopilotModel = preferred;
+      refreshCurrentModelMetadata();
+      return;
+    }
+
+    // If preference was saved as raw model id, register it dynamically and restore it.
+    upsertDynamicCopilotModel({ id: preferred, name: preferred, vision: inferVisionCapability(preferred) });
+    if (modelRegistry()[preferred]) {
+      currentCopilotModel = preferred;
+      refreshCurrentModelMetadata();
+    }
+  } catch (e) {
+    console.warn('[AI] Could not load model preference:', e.message);
+  }
+}
+
 // Restore history on module load
 loadConversationHistory();
+loadModelPreference();
 
 // Visual context for AI awareness
 let visualContextBuffer = [];
@@ -671,6 +805,7 @@ When the user asks you to DO something, respond with a JSON action block:
 ### Action Types:
 - \`{"type": "click_element", "text": "<button text>"}\` - **PREFERRED**: Click element by text (uses Windows UI Automation)
 - \`{"type": "find_element", "text": "<search text>"}\` - Find element and return its info
+- \`{"type": "get_text", "text": "<window or control hint>"}\` - Read visible text from matching UI element/window
 - \`{"type": "click", "x": <number>, "y": <number>}\` - Left click at pixel coordinates (use as fallback)
 - \`{"type": "double_click", "x": <number>, "y": <number>}\` - Double click
 - \`{"type": "right_click", "x": <number>, "y": <number>}\` - Right click
@@ -699,6 +834,11 @@ When the user asks you to DO something, respond with a JSON action block:
 - Respond with natural language describing what you see
 - Be specific about UI elements, text, buttons
 
+**For ACKNOWLEDGEMENT / CHIT-CHAT messages** (e.g., "thanks", "outstanding work", "great"):
+- Respond briefly in natural language.
+- Do NOT output JSON action blocks.
+- Do NOT request screenshots.
+
 **For ACTION requests** (click here, type this, open that):
 - **YOU MUST respond with the JSON action block — NEVER respond with only a plan or description**
 - **NEVER say "Let me proceed" or "I will click" without including the actual \`\`\`json action block**
@@ -707,7 +847,19 @@ When the user asks you to DO something, respond with a JSON action block:
 - Prefer \`click_element\` over coordinate clicks when targeting named UI elements
 - Add \`wait\` actions between steps that need UI to update
 - Add verification step to confirm success
-- **If an element is NOT in the Live UI State**: Use \`{"type": "screenshot"}\` first, then use coordinates from the screenshot to click. Do NOT give up or say "I can't find the element."
+- For low-risk deterministic tasks (e.g., open app, open URL, save file), provide the COMPLETE end-to-end action sequence in ONE JSON block (do not stop after only step 1).
+- Only split into partial "step 1" plans when the task is genuinely ambiguous or high-risk.
+- **If an element is NOT in the Live UI State**: first try a non-visual fallback (window focus, keyboard navigation, search/type) and only request \`{"type": "screenshot"}\` as a LAST resort when those fail or the user explicitly asks for visual verification.
+- **If user asks about popup/dialog options**: do NOT ask for screenshot first. Try 
+  1) focus target window, 
+  2) \`find_element\`/\`get_text\` for dialog text and common buttons, 
+  3) only then request screenshot as last resort.
+- **If user asks to choose/play/select the "top/highest/best/most" result**: do NOT ask for screenshot first. Use non-visual strategies in this order:
+  1) apply site-native sort/filter controls,
+  2) use URL/query + \`run_command\` to resolve ranking from structured page data when possible,
+  3) perform deterministic selection action,
+  4) request screenshot only if all non-visual attempts fail.
+- **Continuity rule**: if the active page title or recent action output indicates the requested browser objective is already achieved, acknowledge completion and avoid proposing additional screenshot steps.
 - **If you need to interact with web content inside an app** (like VS Code panels, browser tabs): Use keyboard shortcuts or coordinate-based clicks since web UI may not appear in UIA tree
 
 **Common Task Patterns**:
@@ -737,7 +889,7 @@ Be precise, use platform-correct shortcuts, and execute actions confidently!
 3. **If user says "proceed" or "go ahead", output the JSON actions IMMEDIATELY.**
 4. **For window switching**: when using 
   \`bring_window_to_front\` / \`send_window_to_back\` / \`minimize_window\` / \`restore_window\`, you **MUST include \`processName\` when you know it** (e.g., \"msedge\", \"code\"). Title-only matching is a fallback.
-5. **When you can't find an element in Live UI State, take a screenshot and use pixel coordinates.** Don't give up.
+5. **When you can't find an element in Live UI State, first use non-visual fallback actions; request screenshot only as last resort.** Don't give up.
 6. **One response = one action block.** Don't split actions across multiple messages unless the user asks you to wait.`;
 
 /**
@@ -768,15 +920,11 @@ function setApiKey(provider, key) {
  * Set the Copilot model
  */
 function setCopilotModel(model) {
-  if (COPILOT_MODELS[model]) {
+  const registry = modelRegistry();
+  if (registry[model]) {
     currentCopilotModel = model;
-    currentModelMetadata = {
-      modelId: model,
-      provider: currentProvider,
-      modelVersion: COPILOT_MODELS[model].id,
-      capabilities: COPILOT_MODELS[model].vision ? ['vision', 'text'] : ['text'],
-      lastUpdated: new Date().toISOString()
-    };
+    refreshCurrentModelMetadata();
+    saveModelPreference();
     return true;
   }
   return false;
@@ -786,7 +934,8 @@ function setCopilotModel(model) {
  * Resolve a requested Copilot model key to a valid configured key.
  */
 function resolveCopilotModelKey(requestedModel) {
-  if (requestedModel && COPILOT_MODELS[requestedModel]) {
+  const registry = modelRegistry();
+  if (requestedModel && registry[requestedModel]) {
     return requestedModel;
   }
   return currentCopilotModel;
@@ -796,12 +945,105 @@ function resolveCopilotModelKey(requestedModel) {
  * Get available Copilot models
  */
 function getCopilotModels() {
-  return Object.entries(COPILOT_MODELS).map(([key, value]) => ({
+  return Object.entries(modelRegistry()).map(([key, value]) => ({
     id: key,
     name: value.name,
     vision: value.vision,
     current: key === currentCopilotModel
   }));
+}
+
+function loadCopilotTokenIfNeeded() {
+  if (apiKeys.copilot) return true;
+  return loadCopilotToken();
+}
+
+function requestJson(hostname, requestPath, headers = {}, timeoutMs = 7000) {
+  return new Promise((resolve, reject) => {
+    const req = https.request({
+      hostname,
+      path: requestPath,
+      method: 'GET',
+      headers,
+      timeout: timeoutMs
+    }, (res) => {
+      let body = '';
+      res.on('data', chunk => body += chunk);
+      res.on('end', () => {
+        if (res.statusCode >= 400) {
+          return reject(new Error(`HTTP_${res.statusCode}`));
+        }
+        try {
+          resolve(JSON.parse(body || '{}'));
+        } catch {
+          reject(new Error('Invalid JSON response'));
+        }
+      });
+    });
+    req.on('error', reject);
+    req.on('timeout', () => req.destroy(new Error('Request timeout')));
+    req.end();
+  });
+}
+
+async function discoverCopilotModels(force = false) {
+  if (copilotModelDiscoveryAttempted && !force) return getCopilotModels();
+  copilotModelDiscoveryAttempted = true;
+
+  if (!loadCopilotTokenIfNeeded()) {
+    return getCopilotModels();
+  }
+
+  if (!apiKeys.copilotSession) {
+    try {
+      await exchangeForCopilotSession();
+    } catch {
+      return getCopilotModels();
+    }
+  }
+
+  const headers = {
+    'Authorization': `Bearer ${apiKeys.copilotSession}`,
+    'Accept': 'application/json',
+    'User-Agent': 'GithubCopilot/1.0.0',
+    'Editor-Version': 'vscode/1.96.0',
+    'Editor-Plugin-Version': 'copilot-chat/0.22.0',
+    'Copilot-Integration-Id': 'vscode-chat'
+  };
+
+  const candidates = [
+    { host: 'api.githubcopilot.com', path: '/models' },
+    { host: 'copilot-proxy.githubusercontent.com', path: '/v1/models' }
+  ];
+
+  for (const endpoint of candidates) {
+    try {
+      const payload = await requestJson(endpoint.host, endpoint.path, headers, 8000);
+      const rows = Array.isArray(payload?.data)
+        ? payload.data
+        : Array.isArray(payload?.models)
+          ? payload.models
+          : [];
+
+      if (!rows.length) continue;
+
+      for (const row of rows) {
+        if (!row) continue;
+        const id = String(row.id || row.model || '').trim();
+        if (!id) continue;
+        const capabilities = Array.isArray(row.capabilities) ? row.capabilities.map(c => String(c).toLowerCase()) : [];
+        upsertDynamicCopilotModel({
+          id,
+          name: row.display_name || row.name || id,
+          vision: capabilities.includes('vision') ? true : inferVisionCapability(id)
+        });
+      }
+    } catch {
+      // Best-effort discovery; ignore endpoint-specific failures.
+    }
+  }
+
+  return getCopilotModels();
 }
 
 /**
@@ -886,6 +1128,23 @@ async function buildMessages(userMessage, includeVisual = false, options = {}) {
           messages.push({ role: 'system', content: msg.trim() });
         }
       }
+    }
+  } catch {}
+
+  // Explicit browser continuity state to reduce drift between turns.
+  try {
+    const state = getBrowserSessionState();
+    if (state.lastUpdated) {
+      const continuity = [
+        '## Browser Session State',
+        `- url: ${state.url || 'unknown'}`,
+        `- title: ${state.title || 'unknown'}`,
+        `- goalStatus: ${state.goalStatus || 'unknown'}`,
+        `- lastStrategy: ${state.lastStrategy || 'none'}`,
+        `- lastUserIntent: ${state.lastUserIntent || 'none'}`,
+        '- Rule: If goalStatus is achieved and user intent is acknowledgement/chit-chat, do not propose actions or screenshots.'
+      ].join('\n');
+      messages.push({ role: 'system', content: continuity });
     }
   } catch {}
 
@@ -1470,10 +1729,8 @@ function exchangeForCopilotSession() {
  */
 async function callCopilot(messages, modelOverride = null, requestOptions = {}) {
   // Ensure we have OAuth token
-  if (!apiKeys.copilot) {
-    if (!loadCopilotToken()) {
-      throw new Error('Not authenticated. Use /login to authenticate with GitHub Copilot.');
-    }
+  if (!loadCopilotTokenIfNeeded()) {
+    throw new Error('Not authenticated. Use /login to authenticate with GitHub Copilot.');
   }
 
   // Exchange for session token if we don't have one
@@ -1485,39 +1742,49 @@ async function callCopilot(messages, modelOverride = null, requestOptions = {}) 
     }
   }
 
+  // Best effort: discover any newly available Copilot models for /model picker.
+  discoverCopilotModels().catch(() => {});
+
   return new Promise((resolve, reject) => {
     const hasVision = messages.some(m => Array.isArray(m.content));
     const modelKey = resolveCopilotModelKey(modelOverride);
-    const modelInfo = COPILOT_MODELS[modelKey] || COPILOT_MODELS['gpt-4o'];
-    const modelId = hasVision && !modelInfo.vision ? 'gpt-4o' : modelInfo.id;
+    const registry = modelRegistry();
+    const modelInfo = registry[modelKey] || registry['gpt-4o'];
+    const requestedModelId = hasVision && !modelInfo.vision ? 'gpt-4o' : modelInfo.id;
+    const fallbackModelId = 'gpt-4o';
+    let modelId = requestedModelId;
     
     console.log(`[Copilot] Vision request: ${hasVision}, Model: ${modelId} (key=${modelKey})`);
     
     const enableTools = requestOptions?.enableTools !== false;
-    const payload = {
-      model: modelId,
-      messages: messages,
-      max_tokens: Number.isFinite(Number(requestOptions?.max_tokens)) ? Number(requestOptions.max_tokens) : 4096,
-      temperature: typeof requestOptions?.temperature === 'number' ? requestOptions.temperature : 0.7,
-      stream: false
+
+    const makeRequestBody = (selectedModelId) => {
+      const payload = {
+        model: selectedModelId,
+        messages: messages,
+        max_tokens: Number.isFinite(Number(requestOptions?.max_tokens)) ? Number(requestOptions.max_tokens) : 4096,
+        temperature: typeof requestOptions?.temperature === 'number' ? requestOptions.temperature : 0.7,
+        stream: false
+      };
+
+      // Structured outputs (OpenAI-compatible) for strict JSON schema.
+      if (requestOptions?.response_format) {
+        payload.response_format = requestOptions.response_format;
+      }
+
+      if (enableTools) {
+        payload.tools = LIKU_TOOLS;
+        payload.tool_choice = requestOptions?.tool_choice || 'auto';
+      } else {
+        payload.tool_choice = 'none';
+      }
+
+      return JSON.stringify(payload);
     };
 
-    // Structured outputs (OpenAI-compatible) for strict JSON schema.
-    if (requestOptions?.response_format) {
-      payload.response_format = requestOptions.response_format;
-    }
-
-    if (enableTools) {
-      payload.tools = LIKU_TOOLS;
-      payload.tool_choice = requestOptions?.tool_choice || 'auto';
-    } else {
-      payload.tool_choice = 'none';
-    }
-
-    const data = JSON.stringify(payload);
-
     // Try multiple endpoint formats
-    const tryEndpoint = (hostname, pathPrefix = '') => {
+    const tryEndpoint = (hostname, pathPrefix = '', selectedModelId = modelId) => {
+      const data = makeRequestBody(selectedModelId);
       const headers = {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${apiKeys.copilotSession}`,
@@ -1545,7 +1812,7 @@ async function callCopilot(messages, modelOverride = null, requestOptions = {}) 
         headers: headers
       };
 
-      console.log(`[Copilot] Calling ${hostname}${options.path} with model ${modelId}...`);
+      console.log(`[Copilot] Calling ${hostname}${options.path} with model ${selectedModelId}...`);
 
       return new Promise((resolveReq, rejectReq) => {
         const req = https.request(options, (res) => {
@@ -1612,10 +1879,24 @@ async function callCopilot(messages, modelOverride = null, requestOptions = {}) 
     };
 
     // Try primary endpoint first
-    tryEndpoint('api.githubcopilot.com')
+    tryEndpoint('api.githubcopilot.com', '', modelId)
       .then(resolve)
       .catch(async (err) => {
         console.log('[Copilot] Primary endpoint failed:', err.message);
+
+        // Some models are visible in account model lists but not available on /chat/completions.
+        // Retry once with a known-good chat model to preserve continuity.
+        const unsupportedModel = /unsupported_api_for_model|not accessible via the \/chat\/completions endpoint/i.test(err.message || '');
+        if (unsupportedModel && modelId !== fallbackModelId) {
+          try {
+            console.log(`[Copilot] Model ${modelId} unsupported on chat endpoint; retrying with fallback ${fallbackModelId}...`);
+            modelId = fallbackModelId;
+            const result = await tryEndpoint('api.githubcopilot.com', '', modelId);
+            return resolve(result);
+          } catch (fallbackErr) {
+            err = fallbackErr;
+          }
+        }
         
         // If session expired, re-exchange and retry once
         if (err.message === 'SESSION_EXPIRED') {
@@ -1631,7 +1912,7 @@ async function callCopilot(messages, modelOverride = null, requestOptions = {}) 
         // Try alternate endpoint
         try {
           console.log('[Copilot] Trying alternate endpoint...');
-          const result = await tryEndpoint('copilot-proxy.githubusercontent.com', '/v1');
+          const result = await tryEndpoint('copilot-proxy.githubusercontent.com', '/v1', modelId);
           resolve(result);
         } catch (altErr) {
           console.log('[Copilot] Alternate endpoint also failed:', altErr.message);
@@ -1850,6 +2131,7 @@ function looksLikeAutomationRequest(text) {
   const verbSignals = [
     'click', 'double click', 'right click', 'type', 'press', 'scroll', 'drag',
     'open', 'close', 'select', 'focus', 'bring to front', 'minimize', 'restore',
+    'play', 'choose', 'pick',
     'find', 'search for', 'screenshot', 'capture'
   ];
 
@@ -1909,7 +2191,8 @@ async function sendMessage(userMessage, options = {}) {
               }
             }
             effectiveModel = resolveCopilotModelKey(model);
-            if (includeVisualContext && COPILOT_MODELS[effectiveModel] && !COPILOT_MODELS[effectiveModel].vision) {
+            const availableModels = modelRegistry();
+            if (includeVisualContext && availableModels[effectiveModel] && !availableModels[effectiveModel].vision) {
               const visionFallback = AI_PROVIDERS.copilot.visionModel || 'gpt-4o';
               console.log(`[AI] Model ${effectiveModel} lacks vision, upgrading to ${visionFallback} for visual context`);
               effectiveModel = visionFallback;
@@ -2116,7 +2399,7 @@ async function sendMessage(userMessage, options = {}) {
       message: response,
       provider: usedProvider,
       model: effectiveModel,
-      modelVersion: COPILOT_MODELS[effectiveModel]?.id || null,
+      modelVersion: modelRegistry()[effectiveModel]?.id || null,
       hasVisualContext: includeVisualContext && visualContextBuffer.length > 0
     };
 
@@ -2473,7 +2756,17 @@ function handleCommand(command) {
     if (dashIdx > 0) s = s.slice(0, dashIdx);
     // Common copy-paste variants
     s = s.replace(/^→\s*/, '').trim();
-    return s.toLowerCase();
+    const lowered = s.toLowerCase();
+    if (modelRegistry()[lowered]) {
+      return lowered;
+    }
+    // Accept raw provider model ids (e.g. claude-sonnet-4.5-20250929)
+    for (const [key, def] of Object.entries(modelRegistry())) {
+      if (String(def?.id || '').toLowerCase() === lowered) {
+        return key;
+      }
+    }
+    return lowered;
   }
 
   const parts = tokenize(String(command || '').trim());
@@ -2501,8 +2794,9 @@ function handleCommand(command) {
     case '/clear':
       conversationHistory = [];
       clearVisualContext();
+      resetBrowserSessionState();
       saveConversationHistory();
-      return { type: 'system', message: 'Conversation and visual context cleared.' };
+      return { type: 'system', message: 'Conversation, visual context, and browser session state cleared.' };
 
     case '/vision':
       if (parts[1] === 'on') {
@@ -2539,6 +2833,32 @@ function handleCommand(command) {
     }
 
     case '/login':
+      if (oauthInProgress) {
+        return {
+          type: 'info',
+          message: 'Login is already in progress. Complete the browser step and return here.'
+        };
+      }
+
+      // If a token already exists and can be exchanged, report authenticated instead of failing.
+      if (loadCopilotTokenIfNeeded()) {
+        return exchangeForCopilotSession()
+          .then(() => ({
+            type: 'system',
+            message: 'Already authenticated with GitHub Copilot. Session refreshed successfully.'
+          }))
+          .catch(() => startCopilotOAuth()
+            .then(result => ({
+              type: 'login',
+              message: `GitHub Copilot authentication started!\n\nYour code: ${result.user_code}\n\nA browser window has opened. Enter the code to authorize.\nWaiting for authentication...`
+            }))
+            .catch(err => ({
+              type: 'error',
+              message: `Login failed: ${err.message}`
+            }))
+          );
+      }
+
       // Start GitHub Copilot OAuth device code flow
       return startCopilotOAuth()
         .then(result => ({
@@ -2564,7 +2884,7 @@ function handleCommand(command) {
         if (parts[1] === '--set') {
           requested = parts.slice(2).join(' ');
         } else if (parts[1] === '--current' || parts[1] === 'current') {
-          const cur = COPILOT_MODELS[currentCopilotModel];
+          const cur = modelRegistry()[currentCopilotModel];
           return {
             type: 'info',
             message: `Current model: ${cur?.name || currentCopilotModel} (${currentCopilotModel})`
@@ -2575,13 +2895,13 @@ function handleCommand(command) {
 
         const model = normalizeModelKey(requested);
         if (setCopilotModel(model)) {
-          const modelInfo = COPILOT_MODELS[model];
+          const modelInfo = modelRegistry()[model];
           return { 
             type: 'system', 
             message: `Switched to ${modelInfo.name}${modelInfo.vision ? ' (supports vision)' : ''}`
           };
         } else {
-          const available = Object.entries(COPILOT_MODELS)
+          const available = Object.entries(modelRegistry())
             .map(([k, v]) => `  ${k} - ${v.name}`)
             .join('\n');
           return { 
@@ -2594,17 +2914,19 @@ function handleCommand(command) {
         const list = models.map(m => 
           `${m.current ? '→' : ' '} ${m.id} - ${m.name}${m.vision ? ' 👁' : ''}`
         ).join('\n');
+        const active = modelRegistry()[currentCopilotModel];
         return {
           type: 'info',
-          message: `Current model: ${COPILOT_MODELS[currentCopilotModel].name}\n\nAvailable models:\n${list}\n\nUse /model <id> to switch (you can also paste "id - display name")`
+          message: `Current model: ${active?.name || currentCopilotModel}\n\nAvailable models:\n${list}\n\nUse /model <id> to switch (you can also paste "id - display name")`
         };
       }
 
     case '/status':
+      loadCopilotTokenIfNeeded();
       const status = getStatus();
       return {
         type: 'info',
-        message: `Provider: ${status.provider}\nModel: ${COPILOT_MODELS[currentCopilotModel]?.name || currentCopilotModel}\nCopilot: ${status.hasCopilotKey ? 'Authenticated' : 'Not authenticated'}\nOpenAI: ${status.hasOpenAIKey ? 'Key set' : 'No key'}\nAnthropic: ${status.hasAnthropicKey ? 'Key set' : 'No key'}\nHistory: ${status.historyLength} messages\nVisual: ${status.visualContextCount} captures`
+        message: `Provider: ${status.provider}\nModel: ${modelRegistry()[currentCopilotModel]?.name || currentCopilotModel}\nCopilot: ${status.hasCopilotKey ? 'Authenticated' : 'Not authenticated'}\nOpenAI: ${status.hasOpenAIKey ? 'Key set' : 'No key'}\nAnthropic: ${status.hasAnthropicKey ? 'Key set' : 'No key'}\nHistory: ${status.historyLength} messages\nVisual: ${status.visualContextCount} captures`
       };
 
     case '/help':
@@ -2614,6 +2936,7 @@ function handleCommand(command) {
 /login - Authenticate with GitHub Copilot (recommended)
 /logout - Remove GitHub Copilot authentication
 /model [name] - List or set Copilot model
+/sequence [on|off] - (CLI chat) step-by-step execution prompts
 /provider [name] - Get/set AI provider (copilot, openai, anthropic, ollama)
 /setkey <provider> <key> - Set API key
 /status - Show authentication status
@@ -2642,10 +2965,11 @@ function setOAuthCallback(callback) {
  * Get current status
  */
 function getStatus() {
+  const registry = modelRegistry();
   return {
     provider: currentProvider,
     model: currentCopilotModel,
-    modelName: COPILOT_MODELS[currentCopilotModel]?.name || currentCopilotModel,
+    modelName: registry[currentCopilotModel]?.name || currentCopilotModel,
     hasCopilotKey: !!apiKeys.copilot,
     hasApiKey: currentProvider === 'copilot' ? !!apiKeys.copilot : 
                currentProvider === 'openai' ? !!apiKeys.openai :
@@ -2654,6 +2978,7 @@ function getStatus() {
     hasAnthropicKey: !!apiKeys.anthropic,
     historyLength: conversationHistory.length,
     visualContextCount: visualContextBuffer.length,
+    browserSessionState: getBrowserSessionState(),
     availableProviders: Object.keys(AI_PROVIDERS),
     copilotModels: getCopilotModels()
   };
@@ -3033,6 +3358,88 @@ function normalizeUrlCandidate(text) {
   return null;
 }
 
+function extractRequestedAppName(text) {
+  if (!text || typeof text !== 'string') return null;
+  const normalized = text.replace(/\s+/g, ' ').trim();
+  if (!normalized) return null;
+
+  const m = normalized.match(/\b(open|launch|start|run)\b\s+(?:the\s+)?(.+?)\s+\b(app|application|program)\b/i);
+  if (m && m[2]) {
+    return m[2].trim();
+  }
+
+  const short = normalized.match(/\b(open|launch|start|run)\b\s+(.+)/i);
+  if (short && short[2] && short[2].length <= 48 && !/https?:\/\//i.test(short[2])) {
+    return short[2].trim();
+  }
+
+  return null;
+}
+
+function buildProcessCandidatesFromAppName(appName) {
+  const raw = String(appName || '').trim();
+  if (!raw) return [];
+  const lower = raw.toLowerCase();
+  const compact = lower.replace(/[^a-z0-9]+/g, '');
+  const tokens = lower.split(/[^a-z0-9]+/).filter(Boolean);
+  const candidates = new Set();
+
+  // Known app mappings.
+  const known = [
+    { re: /\bmpc\s*3\b/i, names: ['mpc3', 'mpc'] },
+    { re: /visual\s+studio\s+code|\bvscode\b/i, names: ['code'] },
+    { re: /microsoft\s+edge/i, names: ['msedge'] },
+    { re: /google\s+chrome/i, names: ['chrome'] },
+    { re: /mozilla\s+firefox|\bfirefox\b/i, names: ['firefox'] }
+  ];
+  for (const row of known) {
+    if (row.re.test(lower)) {
+      row.names.forEach(n => candidates.add(n));
+    }
+  }
+
+  if (compact.length >= 2) candidates.add(compact);
+  if (tokens.length) {
+    tokens.forEach(t => {
+      if (t.length >= 2) candidates.add(t);
+    });
+    if (tokens.length >= 2) {
+      candidates.add(tokens.join(''));
+    }
+  }
+
+  return Array.from(candidates).slice(0, 6);
+}
+
+function buildTitleHintsFromAppName(appName) {
+  const raw = String(appName || '').trim();
+  if (!raw) return [];
+  const compact = raw.replace(/\s+/g, '');
+  const hints = [raw, compact].filter(Boolean);
+  return Array.from(new Set(hints));
+}
+
+function buildVerifyTargetHintFromAppName(appName) {
+  return {
+    appName,
+    processNames: buildProcessCandidatesFromAppName(appName),
+    titleHints: buildTitleHintsFromAppName(appName),
+    popupKeywords: ['license', 'activation', 'signin', 'login', 'update', 'setup', 'installer', 'warning', 'permission', 'eula', 'project', 'new project', 'open project', 'workspace']
+  };
+}
+
+function buildOpenApplicationActions(appName) {
+  const verifyTarget = buildVerifyTargetHintFromAppName(appName);
+  return [
+    { type: 'key', key: 'win', reason: 'Open Start menu', verifyTarget },
+    { type: 'wait', ms: 220 },
+    { type: 'type', text: appName, reason: `Search for ${appName}` },
+    { type: 'wait', ms: 140 },
+    { type: 'key', key: 'enter', reason: `Launch ${appName}`, verifyTarget },
+    { type: 'wait', ms: 2200 }
+  ];
+}
+
 function extractFirstUrlFromText(text) {
   if (!text || typeof text !== 'string') return null;
   const t = text.trim();
@@ -3080,17 +3487,18 @@ function buildBrowserWindowTitleTarget(target) {
   const channel = target.channel || 'stable';
 
   if (target.browser === 'edge') {
-    if (channel === 'beta') return 're:.*\\bMicrosoft Edge Beta$';
-    if (channel === 'dev') return 're:.*\\bMicrosoft Edge Dev$';
-    if (channel === 'canary') return 're:.*\\bMicrosoft Edge Canary$';
-    return 're:.*\\bMicrosoft Edge$';
+    if (channel === 'beta') return 're:.*\\bMicrosoft Edge(?: Beta)?$';
+    if (channel === 'dev') return 're:.*\\bMicrosoft Edge(?: Dev)?$';
+    if (channel === 'canary') return 're:.*\\bMicrosoft Edge(?: Canary)?$';
+    // Stable requests should still tolerate channel variants if those are running.
+    return 're:.*\\bMicrosoft Edge(?: Beta| Dev| Canary)?$';
   }
 
   if (target.browser === 'chrome') {
-    if (channel === 'beta') return 're:.*\\bGoogle Chrome Beta$';
-    if (channel === 'dev') return 're:.*\\bGoogle Chrome Dev$';
-    if (channel === 'canary') return 're:.*\\bGoogle Chrome Canary$';
-    return 're:.*\\bGoogle Chrome$';
+    if (channel === 'beta') return 're:.*\\bGoogle Chrome(?: Beta)?$';
+    if (channel === 'dev') return 're:.*\\bGoogle Chrome(?: Dev)?$';
+    if (channel === 'canary') return 're:.*\\bGoogle Chrome(?: Canary)?$';
+    return 're:.*\\bGoogle Chrome(?: Beta| Dev| Canary)?$';
   }
 
   if (target.browser === 'firefox') {
@@ -3099,6 +3507,197 @@ function buildBrowserWindowTitleTarget(target) {
   }
 
   return null;
+}
+
+function extractSearchQueryFromText(text) {
+  if (!text || typeof text !== 'string') return null;
+  const normalized = text.replace(/\s+/g, ' ').trim();
+  if (!normalized) return null;
+
+  const searchMatch = normalized.match(/\bsearch\s+(?:for\s+)?["']?(.+?)["']?(?:\s+(?:then|and\s+then)\b|$)/i);
+  if (!searchMatch || !searchMatch[1]) return null;
+
+  const query = searchMatch[1].trim();
+  if (!query || query.length < 2) return null;
+  return query;
+}
+
+function hasRankingIntent(text) {
+  if (!text || typeof text !== 'string') return false;
+  const t = text.toLowerCase();
+  return /(highest|most|top|best|lowest|least)\b/.test(t)
+    || /\bnumber of views\b/.test(t)
+    || /\bview\s*count\b/.test(t);
+}
+
+function buildYouTubeTopViewedPlaybackActions() {
+  const command = `
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+
+$u = ''
+try { $u = (Get-Clipboard -Raw).Trim() } catch {}
+
+if (-not $u -or $u -notmatch 'youtube\\.com') {
+  $ytProc = Get-Process -Name msedge,chrome,firefox -ErrorAction SilentlyContinue |
+    Where-Object { $_.MainWindowTitle -match 'YouTube' } |
+    Select-Object -First 1
+
+  if (-not $ytProc) {
+    throw 'Could not infer YouTube context from clipboard or browser title.'
+  }
+
+  $title = [string]$ytProc.MainWindowTitle
+  $q = ($title -replace '^\\(\\d+\\)\\s*', '' -replace '\\s*-\\s*YouTube.*$', '').Trim()
+  if (-not $q) {
+    throw 'Could not infer search query from YouTube title.'
+  }
+  $u = 'https://www.youtube.com/results?search_query=' + [uri]::EscapeDataString($q)
+}
+
+if ($u -notmatch 'youtube\\.com') {
+  throw 'Current context is not YouTube.'
+}
+
+if ($u -match 'search_query=([^&]+)') {
+  $q = [uri]::UnescapeDataString($matches[1])
+} else {
+  throw 'Current YouTube URL is not a search results page; run search first.'
+}
+
+$sorted = 'https://www.youtube.com/results?search_query=' + [uri]::EscapeDataString($q) + '&sp=CAMSAhAB'
+$html = (Invoke-WebRequest -UseBasicParsing -Uri $sorted -TimeoutSec 20).Content
+$ids = [regex]::Matches($html, '"videoId":"([A-Za-z0-9_-]{11})"') | ForEach-Object { $_.Groups[1].Value }
+$first = $ids | Select-Object -Unique | Select-Object -First 1
+
+if (-not $first) {
+  throw 'Could not locate a playable video id from sorted results.'
+}
+
+$watch = 'https://www.youtube.com/watch?v=' + $first
+Start-Process $watch
+Write-Output ('Opened top-view candidate: ' + $watch)
+`.trim();
+
+  return [
+    {
+      type: 'bring_window_to_front',
+      title: 're:.*\\b(Microsoft Edge|Google Chrome|Mozilla Firefox)(?: Beta| Dev| Canary)?$',
+      processName: 'msedge',
+      continue_on_error: true,
+      reason: 'Focus browser if available'
+    },
+    { type: 'wait', ms: 450 },
+    { type: 'key', key: 'ctrl+l', reason: 'Focus browser address bar' },
+    { type: 'wait', ms: 120 },
+    { type: 'key', key: 'ctrl+c', reason: 'Copy current URL for non-visual resolver' },
+    { type: 'wait', ms: 120 },
+    {
+      type: 'run_command',
+      shell: 'powershell',
+      command,
+      reason: 'Resolve and open highest-view YouTube result without screenshot'
+    },
+    { type: 'wait', ms: 1800 }
+  ];
+}
+
+const NON_VISUAL_WEB_STRATEGIES = [
+  {
+    id: 'youtube-top-view-playback',
+    match: ({ userMessage }) => {
+      const t = String(userMessage || '').toLowerCase();
+      const likelyYoutube = t.includes('youtube') || t.includes('video');
+      const playIntent = t.includes('play') || t.includes('open');
+      return likelyYoutube && playIntent && hasRankingIntent(t);
+    },
+    buildActions: () => buildYouTubeTopViewedPlaybackActions()
+  }
+];
+
+function applyNonVisualWebStrategies(actions, context = {}) {
+  for (const strategy of NON_VISUAL_WEB_STRATEGIES) {
+    try {
+      if (strategy.match(context, actions)) {
+        return {
+          actions: strategy.buildActions(context, actions),
+          strategyId: strategy.id
+        };
+      }
+    } catch {
+      // Ignore strategy-level failures and continue.
+    }
+  }
+  return {
+    actions,
+    strategyId: null
+  };
+}
+
+function isBrowserProcessName(name) {
+  const n = String(name || '').toLowerCase();
+  return n.includes('msedge') || n.includes('chrome') || n.includes('firefox');
+}
+
+function looksLikeBrowserTitle(title) {
+  const t = String(title || '').toLowerCase();
+  return t.includes('edge') || t.includes('chrome') || t.includes('firefox') || t.includes('youtube');
+}
+
+function actionsLikelyBrowserSession(actions) {
+  if (!Array.isArray(actions) || actions.length === 0) return false;
+  return actions.some((a) => {
+    const type = String(a?.type || '').toLowerCase();
+    if (type === 'run_command') return true;
+    if ((type === 'bring_window_to_front' || type === 'focus_window') && (isBrowserProcessName(a?.processName) || looksLikeBrowserTitle(a?.title))) return true;
+    if ((type === 'type' || type === 'key') && /ctrl\+l|youtube|https?:\/\//i.test(String(a?.text || a?.key || ''))) return true;
+    return false;
+  });
+}
+
+function extractUrlFromActions(actions) {
+  if (!Array.isArray(actions)) return null;
+  for (const action of actions) {
+    if (String(action?.type || '').toLowerCase() !== 'type') continue;
+    const candidate = normalizeUrlCandidate(String(action?.text || '').trim());
+    if (candidate) return candidate;
+  }
+  return null;
+}
+
+function extractUrlFromResults(results) {
+  if (!Array.isArray(results)) return null;
+  for (const result of results) {
+    const haystack = [result?.output, result?.stdout, result?.message, result?.result]
+      .filter(Boolean)
+      .map(v => String(v))
+      .join('\n');
+    const m = haystack.match(/https?:\/\/[^\s"'<>]+/i);
+    if (m) return normalizeUrlCandidate(m[0]);
+  }
+  return null;
+}
+
+function updateBrowserSessionAfterExecution(actionData, executionSummary = {}) {
+  const actions = Array.isArray(actionData?.actions) ? actionData.actions : [];
+  if (!actionsLikelyBrowserSession(actions)) return;
+
+  const patch = {};
+  if (typeof executionSummary.userMessage === 'string' && executionSummary.userMessage.trim()) {
+    patch.lastUserIntent = executionSummary.userMessage.trim().slice(0, 300);
+  }
+
+  const urlFromActions = extractUrlFromActions(actions);
+  const urlFromResults = extractUrlFromResults(executionSummary.results);
+  patch.url = urlFromResults || urlFromActions || browserSessionState.url;
+
+  const fg = executionSummary.postVerification?.foreground;
+  if (fg && fg.success && looksLikeBrowserTitle(fg.title)) {
+    patch.title = fg.title;
+  }
+
+  patch.goalStatus = executionSummary.success ? 'achieved' : 'needs_attention';
+  updateBrowserSessionState(patch);
 }
 
 function isVsCodeIntegratedBrowserRequest(text) {
@@ -3121,14 +3720,15 @@ function isVsCodeIntegratedBrowserRequest(text) {
   return hasVsCodeContext && mentionsIntegrated;
 }
 
-function buildBrowserOpenUrlActions(target, url) {
+function buildBrowserOpenUrlActions(target, url, options = {}) {
+  const searchQuery = typeof options.searchQuery === 'string' ? options.searchQuery.trim() : '';
   const title = buildBrowserWindowTitleTarget(target);
   const browser = target?.browser;
   const processName = browser === 'edge' ? 'msedge' : browser === 'chrome' ? 'chrome' : browser === 'firefox' ? 'firefox' : '';
   const human = browser === 'edge' ? 'Microsoft Edge' : browser === 'chrome' ? 'Google Chrome' : browser === 'firefox' ? 'Mozilla Firefox' : 'Browser';
   const channelLabel = target?.channel && target.channel !== 'stable' ? ` ${target.channel}` : '';
 
-  return [
+  const actions = [
     {
       type: 'bring_window_to_front',
       title: title || human,
@@ -3142,6 +3742,27 @@ function buildBrowserOpenUrlActions(target, url) {
     { type: 'key', key: 'enter', reason: 'Navigate' },
     { type: 'wait', ms: 3000 }
   ];
+
+  if (searchQuery) {
+    let isYouTube = false;
+    try {
+      const parsed = new URL(url);
+      isYouTube = /(^|\.)youtube\.com$/i.test(parsed.hostname || '');
+    } catch {
+      isYouTube = /youtube\.com/i.test(String(url || ''));
+    }
+    if (isYouTube) {
+      actions.push(
+        { type: 'key', key: '/', reason: 'Focus YouTube search box' },
+        { type: 'wait', ms: 180 },
+        { type: 'type', text: searchQuery, reason: 'Enter search query' },
+        { type: 'key', key: 'enter', reason: 'Run search' },
+        { type: 'wait', ms: 2500 }
+      );
+    }
+  }
+
+  return actions;
 }
 
 function prependVsCodeFocusIfMissing(actions) {
@@ -3226,6 +3847,17 @@ function buildVsCodeSimpleBrowserOpenUrlActions(url) {
 function rewriteActionsForReliability(actions, context = {}) {
   if (!Array.isArray(actions) || actions.length === 0) return actions;
 
+  const userMessage = typeof context.userMessage === 'string' ? context.userMessage : '';
+  const strategySelection = applyNonVisualWebStrategies(actions, { userMessage });
+  if (strategySelection.actions !== actions) {
+    updateBrowserSessionState({
+      goalStatus: 'in_progress',
+      lastStrategy: strategySelection.strategyId || 'non-visual',
+      lastUserIntent: userMessage.trim().slice(0, 300)
+    });
+    return strategySelection.actions;
+  }
+
   // If the AI is already using the Simple Browser command palette flow, keep it,
   // but ensure we focus VS Code first (models often forget this).
   const alreadySimpleBrowser = actions.some(
@@ -3237,8 +3869,22 @@ function rewriteActionsForReliability(actions, context = {}) {
 
   // Intent-aware rewrite: if the USER asked to open a URL in VS Code integrated browser,
   // run the full deterministic Simple Browser flow even if the model tries incremental steps.
-  const userMessage = typeof context.userMessage === 'string' ? context.userMessage : '';
+  const requestedAppName = extractRequestedAppName(userMessage);
   const requestedUrl = extractFirstUrlFromText(userMessage);
+
+  if (requestedAppName && !requestedUrl) {
+    const lowSignalTypes = new Set(['bring_window_to_front', 'focus_window', 'key', 'type', 'wait', 'screenshot']);
+    const lowSignal = actions.every((a) => lowSignalTypes.has(a?.type));
+    const screenshotFirst = actions[0]?.type === 'screenshot';
+    const longPlan = actions.length >= 6;
+    const tinyPlan = actions.length <= 2;
+    const hasSearchType = actions.some((a) => a?.type === 'type' && typeof a.text === 'string' && a.text.trim().length > 0);
+    const hasLaunchEnter = actions.some((a) => a?.type === 'key' && /^enter$/i.test(String(a.key || '').trim()));
+    const incompleteLaunchPlan = !hasSearchType || !hasLaunchEnter;
+    if ((screenshotFirst || longPlan || tinyPlan || incompleteLaunchPlan) && lowSignal) {
+      return buildOpenApplicationActions(requestedAppName);
+    }
+  }
 
   const explicitBrowser = extractExplicitBrowserTarget(userMessage);
   if (explicitBrowser?.browser && explicitBrowser.browser !== 'vscode') {
@@ -3249,10 +3895,17 @@ function rewriteActionsForReliability(actions, context = {}) {
   // If the user explicitly asked for a browser + URL, prefer a deterministic
   // keyboard-only browser flow for low-signal plans.
   if (requestedUrl && explicitBrowser?.browser && explicitBrowser.browser !== 'vscode') {
+    const searchQuery = extractSearchQueryFromText(userMessage);
     const onlyLowSignal = actions.every((a) => ['bring_window_to_front', 'focus_window', 'key', 'wait', 'screenshot'].includes(a?.type));
     const tinyPlan = actions.length <= 2;
     if (tinyPlan || onlyLowSignal) {
-      return buildBrowserOpenUrlActions(explicitBrowser, requestedUrl);
+      updateBrowserSessionState({
+        url: requestedUrl,
+        goalStatus: 'in_progress',
+        lastStrategy: 'deterministic-browser-open-url',
+        lastUserIntent: userMessage.trim().slice(0, 300)
+      });
+      return buildBrowserOpenUrlActions(explicitBrowser, requestedUrl, { searchQuery });
     }
   }
 
@@ -3268,6 +3921,12 @@ function rewriteActionsForReliability(actions, context = {}) {
       /visual\s+studio\s+code/i.test(actions[0]?.title);
 
     if (tinyPlan || onlyLowSignal || isDetourScreenshotOnly || isDetourCommandPaletteOnly || isDetourBringVsCodeOnly) {
+      updateBrowserSessionState({
+        url: requestedUrl,
+        goalStatus: 'in_progress',
+        lastStrategy: 'deterministic-vscode-simple-browser',
+        lastUserIntent: userMessage.trim().slice(0, 300)
+      });
       return buildVsCodeSimpleBrowserOpenUrlActions(requestedUrl);
     }
   }
@@ -3287,6 +3946,12 @@ function rewriteActionsForReliability(actions, context = {}) {
     .find(Boolean);
 
   if (clickPreview && hasCtrlL && typedUrl) {
+    updateBrowserSessionState({
+      url: typedUrl,
+      goalStatus: 'in_progress',
+      lastStrategy: 'rewrite-preview-to-simple-browser',
+      lastUserIntent: userMessage.trim().slice(0, 300)
+    });
     // Rewrite to a keyboard-only VS Code Simple Browser flow.
     // This avoids UIA element discovery (webviews are often not exposed) and avoids screenshots.
     return [
@@ -3312,6 +3977,563 @@ function rewriteActionsForReliability(actions, context = {}) {
   return actions;
 }
 
+const POST_ACTION_VERIFY_MAX_RETRIES = 2;
+const POST_ACTION_VERIFY_SETTLE_MS = 900;
+const POST_ACTION_VERIFY_POLL_INTERVAL_MS = 450;
+const POST_ACTION_VERIFY_MAX_POLL_CYCLES = 8;
+const POPUP_RECIPE_MAX_ACTIONS = 6;
+
+function sleepMs(ms) {
+  return new Promise(resolve => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
+}
+
+function normalizeTextForMatch(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+function inferLaunchVerificationTarget(actionData, userMessage = '') {
+  const actions = Array.isArray(actionData?.actions) ? actionData.actions : [];
+  const explicitHint = [...actions]
+    .reverse()
+    .map(a => a?.verifyTarget)
+    .find(v => v && typeof v === 'object');
+
+  const target = {
+    appName: extractRequestedAppName(userMessage) || null,
+    processNames: [],
+    titleHints: [],
+    popupKeywords: []
+  };
+
+  if (explicitHint) {
+    if (typeof explicitHint.appName === 'string' && explicitHint.appName.trim()) {
+      target.appName = explicitHint.appName.trim();
+    }
+    if (Array.isArray(explicitHint.processNames)) {
+      target.processNames.push(...explicitHint.processNames.map(v => String(v || '').trim()).filter(Boolean));
+    }
+    if (Array.isArray(explicitHint.titleHints)) {
+      target.titleHints.push(...explicitHint.titleHints.map(v => String(v || '').trim()).filter(Boolean));
+    }
+    if (Array.isArray(explicitHint.popupKeywords)) {
+      target.popupKeywords.push(...explicitHint.popupKeywords.map(v => String(v || '').trim()).filter(Boolean));
+    }
+  }
+
+  const focusAction = [...actions].reverse().find((a) =>
+    a &&
+    (a.type === 'bring_window_to_front' || a.type === 'focus_window') &&
+    (typeof a.processName === 'string' || typeof a.title === 'string')
+  );
+
+  if (focusAction) {
+    if (typeof focusAction.processName === 'string' && focusAction.processName.trim()) {
+      target.processNames.push(focusAction.processName.trim());
+    }
+    if (typeof focusAction.title === 'string' && focusAction.title.trim()) {
+      target.titleHints.push(focusAction.title.trim());
+    }
+  }
+
+  if (!target.appName) {
+    const hasWin = actions.some((a) => a?.type === 'key' && /^win$/i.test(String(a?.key || '').trim()));
+    const hasEnter = actions.some((a) => a?.type === 'key' && /^enter$/i.test(String(a?.key || '').trim()));
+    const typed = [...actions].reverse().find((a) => a?.type === 'type' && typeof a?.text === 'string' && a.text.trim().length > 0);
+    if (hasWin && hasEnter && typed) {
+      target.appName = typed.text.trim();
+    }
+  }
+
+  if (target.appName) {
+    target.processNames.push(...buildProcessCandidatesFromAppName(target.appName));
+    target.titleHints.push(...buildTitleHintsFromAppName(target.appName));
+  }
+
+  target.processNames = Array.from(new Set(target.processNames.map(v => v.toLowerCase())));
+  target.titleHints = Array.from(new Set(target.titleHints));
+  target.popupKeywords = Array.from(new Set(target.popupKeywords.map(v => v.toLowerCase())));
+
+  return target;
+}
+
+function isPostLaunchVerificationApplicable(actionData, userMessage = '') {
+  const actions = Array.isArray(actionData?.actions) ? actionData.actions : [];
+  if (!actions.length) return false;
+
+  const target = inferLaunchVerificationTarget(actionData, userMessage);
+  const hasTargetSignal = !!(target.appName || target.processNames.length || target.titleHints.length);
+  if (!hasTargetSignal) return false;
+
+  return actions.some((a) => {
+    if (!a || typeof a !== 'object') return false;
+    if (a.type === 'bring_window_to_front' || a.type === 'focus_window') return true;
+    if (a.type === 'key') {
+      const k = String(a.key || '').trim().toLowerCase();
+      return k === 'win' || k === 'enter';
+    }
+    return false;
+  });
+}
+
+function evaluateForegroundAgainstTarget(foreground, target) {
+  if (!foreground || !foreground.success) {
+    return { matched: false, matchReason: 'no-foreground', needsFollowUp: false, popupHint: null };
+  }
+
+  const proc = normalizeTextForMatch(foreground.processName || '');
+  const title = String(foreground.title || '');
+  const titleNorm = normalizeTextForMatch(title);
+  const haystack = `${proc} ${titleNorm}`.trim();
+  const popupWords = Array.isArray(target.popupKeywords) && target.popupKeywords.length
+    ? target.popupKeywords
+    : ['license', 'activation', 'signin', 'login', 'update', 'setup', 'installer', 'warning', 'permission', 'eula', 'project', 'new project', 'open project', 'workspace'];
+
+  const hasPopupKeyword = popupWords.some(word => word && titleNorm.includes(normalizeTextForMatch(word)));
+
+  const withFollowUp = (matched, matchReason) => ({
+    matched,
+    matchReason,
+    needsFollowUp: !!(matched && hasPopupKeyword),
+    popupHint: hasPopupKeyword ? title : null
+  });
+
+  for (const processName of target.processNames || []) {
+    const expectedProc = normalizeTextForMatch(processName);
+    if (expectedProc && proc.includes(expectedProc)) {
+      return withFollowUp(true, 'process');
+    }
+  }
+
+  for (const hint of target.titleHints || []) {
+    const raw = String(hint || '').trim();
+    if (!raw) continue;
+    if (/^re:/i.test(raw)) {
+      try {
+        const re = new RegExp(raw.slice(3), 'i');
+        if (re.test(title)) {
+          return withFollowUp(true, 'title-regex');
+        }
+      } catch {
+        // Ignore invalid regex; fallback to plain contains.
+      }
+    }
+    const expectedTitle = normalizeTextForMatch(raw.replace(/^re:/i, ''));
+    if (expectedTitle && titleNorm.includes(expectedTitle)) {
+      return withFollowUp(true, 'title');
+    }
+  }
+
+  if (target.appName) {
+    const tokens = normalizeTextForMatch(target.appName)
+      .split(' ')
+      .map(t => t.trim())
+      .filter(Boolean);
+    const strongTokens = tokens.filter(t => t.length >= 3);
+    const checks = strongTokens.length ? strongTokens : tokens;
+    if (checks.length && checks.some(t => haystack.includes(t))) {
+      return withFollowUp(true, 'app-name');
+    }
+  }
+
+  return withFollowUp(false, 'none');
+}
+
+function buildPostLaunchSelfHealPlans(target, runtime = {}) {
+  const plans = [];
+  const hasRunningCandidates = !!runtime.hasRunningCandidates;
+
+  const preferredProcess = Array.isArray(target.processNames) && target.processNames.length
+    ? target.processNames[0]
+    : null;
+  const preferredTitle = Array.isArray(target.titleHints) && target.titleHints.length
+    ? target.titleHints[0]
+    : null;
+
+  // First try to focus existing running window to avoid accidental re-launch.
+  if (preferredProcess || preferredTitle) {
+    plans.push([
+      {
+        type: 'bring_window_to_front',
+        title: preferredTitle || undefined,
+        processName: preferredProcess || undefined,
+        reason: 'Self-heal: focus already running target window'
+      },
+      { type: 'wait', ms: 750 }
+    ]);
+  }
+
+  // Only relaunch when no matching process appears to be running.
+  if (target.appName && !hasRunningCandidates) {
+    plans.push(buildOpenApplicationActions(target.appName));
+  }
+
+  return plans;
+}
+
+function normalizeProcessName(name) {
+  return String(name || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\.exe$/i, '')
+    .replace(/[^a-z0-9]+/g, '');
+}
+
+function isLikelyInstallerProcess(name) {
+  const n = String(name || '').toLowerCase();
+  return /setup|installer|install|update|bootstrap|unins/.test(n);
+}
+
+function matchesAnyProcessName(procName, expected = []) {
+  const actual = normalizeProcessName(procName);
+  if (!actual) return false;
+  return (Array.isArray(expected) ? expected : []).some((candidate) => {
+    const wanted = normalizeProcessName(candidate);
+    return wanted && (actual === wanted || actual.startsWith(wanted) || wanted.startsWith(actual));
+  });
+}
+
+async function getRunningTargetProcesses(target) {
+  if (!target || !Array.isArray(target.processNames) || !target.processNames.length) {
+    return [];
+  }
+
+  if (typeof systemAutomation.getRunningProcessesByNames !== 'function') {
+    return [];
+  }
+
+  try {
+    const list = await systemAutomation.getRunningProcessesByNames(target.processNames);
+    if (!Array.isArray(list)) return [];
+    return list.filter((item) => {
+      if (!matchesAnyProcessName(item?.processName, target.processNames)) return false;
+      return !isLikelyInstallerProcess(item?.processName);
+    });
+  } catch {
+    return [];
+  }
+}
+
+async function pollForegroundForTarget(target, maxCycles = POST_ACTION_VERIFY_MAX_POLL_CYCLES) {
+  const cycles = Math.max(0, Number(maxCycles) || 0);
+  let foreground = null;
+  let evalResult = { matched: false, matchReason: 'none', needsFollowUp: false, popupHint: null };
+
+  for (let i = 1; i <= cycles; i++) {
+    await sleepMs(POST_ACTION_VERIFY_POLL_INTERVAL_MS);
+    foreground = await systemAutomation.getForegroundWindowInfo();
+    evalResult = evaluateForegroundAgainstTarget(foreground, target);
+    if (evalResult.matched) {
+      return {
+        matched: true,
+        cyclesUsed: i,
+        foreground,
+        evalResult
+      };
+    }
+  }
+
+  return {
+    matched: false,
+    cyclesUsed: cycles,
+    foreground,
+    evalResult
+  };
+}
+
+function buildPopupFollowUpRecipe(target) {
+  return buildPopupFollowUpRecipeSelection(target, '');
+}
+
+const POPUP_RECIPE_LIBRARY = [
+  {
+    id: 'generic-license-consent',
+    titlePatterns: [/license|eula|terms|agreement|consent/i],
+    appPatterns: [],
+    buttons: ['Accept', 'I Agree', 'Agree', 'Accept & Continue', 'Continue', 'OK']
+  },
+  {
+    id: 'generic-permissions',
+    titlePatterns: [/permission|allow|security|access|control/i],
+    appPatterns: [],
+    buttons: ['Allow', 'Grant', 'Enable', 'Yes', 'Continue', 'OK']
+  },
+  {
+    id: 'generic-update-setup',
+    titlePatterns: [/setup|configuration|update|first\s*run|welcome/i],
+    appPatterns: [],
+    buttons: ['Next', 'Continue', 'Skip', 'Not now', 'Finish', 'Launch']
+  },
+  {
+    id: 'mpc-first-launch',
+    titlePatterns: [/mpc|model\s*context|first\s*run|setup|welcome|license/i],
+    appPatterns: [/\bmpc\b/i, /model\s*context/i],
+    buttons: ['Accept', 'I Agree', 'Continue', 'Next', 'Launch', 'OK']
+  }
+];
+
+function buildRecipeActionsFromButtons(buttons, recipeId) {
+  const uniqueButtons = Array.from(new Set((Array.isArray(buttons) ? buttons : [])
+    .map((b) => String(b || '').trim())
+    .filter(Boolean)));
+
+  const actions = [
+    { type: 'wait', ms: 550, reason: `Allow popup to render (${recipeId})` },
+    ...uniqueButtons.map((text) => ({
+      type: 'click_element',
+      text,
+      continue_on_error: true,
+      reason: `Popup follow-up (${recipeId})`
+    }))
+  ];
+
+  return actions.slice(0, POPUP_RECIPE_MAX_ACTIONS);
+}
+
+function recipeMatchesContext(rule, appNorm, popupTitleNorm) {
+  if (!rule) return false;
+  const titlePatterns = Array.isArray(rule.titlePatterns) ? rule.titlePatterns : [];
+  const appPatterns = Array.isArray(rule.appPatterns) ? rule.appPatterns : [];
+
+  const titleMatch = titlePatterns.length
+    ? titlePatterns.some((re) => re && re.test(popupTitleNorm))
+    : false;
+  const appMatch = appPatterns.length
+    ? appPatterns.some((re) => re && re.test(appNorm))
+    : false;
+
+  // Prefer title-keyed matching; app-specific rules can still trigger by app match.
+  return titleMatch || appMatch;
+}
+
+function scoreRecipeMatch(rule, appNorm, popupTitleNorm) {
+  const titlePatterns = Array.isArray(rule?.titlePatterns) ? rule.titlePatterns : [];
+  const appPatterns = Array.isArray(rule?.appPatterns) ? rule.appPatterns : [];
+  const titleHit = titlePatterns.some((re) => re && re.test(popupTitleNorm));
+  const appHit = appPatterns.some((re) => re && re.test(appNorm));
+
+  // Higher score means more specific signal. App-specific matches outrank generic.
+  return (appHit ? 10 : 0) + (titleHit ? 3 : 0);
+}
+
+function buildPopupFollowUpRecipeSelection(target, popupTitle = '') {
+  const appNorm = normalizeTextForMatch(target?.appName || '');
+  const popupTitleNorm = normalizeTextForMatch(popupTitle || '');
+
+  const matched = POPUP_RECIPE_LIBRARY
+    .filter((rule) => recipeMatchesContext(rule, appNorm, popupTitleNorm))
+    .sort((a, b) => scoreRecipeMatch(b, appNorm, popupTitleNorm) - scoreRecipeMatch(a, appNorm, popupTitleNorm));
+
+  // Fallback to generic consent flow if we know a popup exists but no specialized rule matched.
+  const selected = matched.length ? matched[0] : {
+    id: 'generic-fallback',
+    buttons: ['Continue', 'OK', 'Yes']
+  };
+
+  return {
+    recipeId: selected.id,
+    actions: buildRecipeActionsFromButtons(selected.buttons, selected.id)
+  };
+}
+
+async function executePopupFollowUpRecipe(target, actionExecutor, popupTitle = '') {
+  const selection = buildPopupFollowUpRecipeSelection(target, popupTitle);
+  const recipe = selection.actions;
+  if (!recipe.length) {
+    return { attempted: false, completed: false, steps: 0, recipeId: selection.recipeId };
+  }
+
+  let steps = 0;
+  for (const action of recipe) {
+    steps++;
+    const result = await (actionExecutor ? actionExecutor(action) : systemAutomation.executeAction(action));
+    if (!result?.success && !action.continue_on_error) {
+      return { attempted: true, completed: false, steps, recipeId: selection.recipeId };
+    }
+  }
+
+  return { attempted: true, completed: true, steps, recipeId: selection.recipeId };
+}
+
+async function verifyAndSelfHealPostActions(actionData, options = {}) {
+  const userMessage = typeof options.userMessage === 'string' ? options.userMessage : '';
+  const actionExecutor = options.actionExecutor;
+  const enablePopupRecipes = !!options.enablePopupRecipes;
+
+  if (!isPostLaunchVerificationApplicable(actionData, userMessage)) {
+    return { applicable: false, verified: true, healed: false, attempts: 0 };
+  }
+
+  const target = inferLaunchVerificationTarget(actionData, userMessage);
+  let runningProcesses = await getRunningTargetProcesses(target);
+  let foreground = await systemAutomation.getForegroundWindowInfo();
+  const initialEval = evaluateForegroundAgainstTarget(foreground, target);
+  if (initialEval.matched) {
+    const base = {
+      applicable: true,
+      verified: true,
+      healed: false,
+      attempts: 0,
+      target,
+      foreground,
+      runningProcesses,
+      runningPids: runningProcesses.map((p) => p.pid).filter(Number.isFinite),
+      needsFollowUp: initialEval.needsFollowUp,
+      popupHint: initialEval.popupHint,
+      matchReason: initialEval.matchReason
+    };
+
+    if (enablePopupRecipes && initialEval.needsFollowUp) {
+      const followUp = await executePopupFollowUpRecipe(target, actionExecutor, initialEval.popupHint || '');
+      if (followUp.attempted) {
+        await sleepMs(POST_ACTION_VERIFY_SETTLE_MS);
+        const fgAfterFollowUp = await systemAutomation.getForegroundWindowInfo();
+        const evalAfterFollowUp = evaluateForegroundAgainstTarget(fgAfterFollowUp, target);
+        return {
+          ...base,
+          foreground: fgAfterFollowUp,
+          popupRecipe: {
+            enabled: true,
+            attempted: followUp.attempted,
+            completed: followUp.completed,
+            steps: followUp.steps,
+            recipeId: followUp.recipeId
+          },
+          needsFollowUp: evalAfterFollowUp.needsFollowUp,
+          popupHint: evalAfterFollowUp.popupHint,
+          matchReason: evalAfterFollowUp.matchReason
+        };
+      }
+    }
+
+    return base;
+  }
+
+  // If process exists, poll before retrying to avoid duplicate app launches.
+  if (runningProcesses.length) {
+    const polled = await pollForegroundForTarget(target, POST_ACTION_VERIFY_MAX_POLL_CYCLES);
+    foreground = polled.foreground || foreground;
+    if (polled.matched) {
+      return {
+        applicable: true,
+        verified: true,
+        healed: false,
+        attempts: 0,
+        pollCyclesUsed: polled.cyclesUsed,
+        target,
+        foreground,
+        runningProcesses,
+        runningPids: runningProcesses.map((p) => p.pid).filter(Number.isFinite),
+        needsFollowUp: polled.evalResult.needsFollowUp,
+        popupHint: polled.evalResult.popupHint,
+        matchReason: polled.evalResult.matchReason
+      };
+    }
+  }
+
+  const recoveryPlans = buildPostLaunchSelfHealPlans(target, {
+    hasRunningCandidates: runningProcesses.length > 0
+  });
+  if (!recoveryPlans.length) {
+    const lastEval = evaluateForegroundAgainstTarget(foreground, target);
+    return {
+      applicable: true,
+      verified: false,
+      healed: false,
+      attempts: 0,
+      target,
+      foreground,
+      runningProcesses,
+      runningPids: runningProcesses.map((p) => p.pid).filter(Number.isFinite),
+      needsFollowUp: lastEval.needsFollowUp,
+      popupHint: lastEval.popupHint,
+      matchReason: lastEval.matchReason
+    };
+  }
+
+  for (let attempt = 1; attempt <= POST_ACTION_VERIFY_MAX_RETRIES; attempt++) {
+    console.log(`[AI-SERVICE] Post-action verification retry ${attempt}/${POST_ACTION_VERIFY_MAX_RETRIES}`);
+    let sequenceOk = true;
+    const plan = recoveryPlans[Math.min(attempt - 1, recoveryPlans.length - 1)] || [];
+
+    for (const action of plan) {
+      const result = await (actionExecutor ? actionExecutor(action) : systemAutomation.executeAction(action));
+      if (!result?.success && !action.continue_on_error) {
+        sequenceOk = false;
+        break;
+      }
+    }
+
+    if (!sequenceOk) {
+      await sleepMs(250);
+      continue;
+    }
+
+    await sleepMs(POST_ACTION_VERIFY_SETTLE_MS + (attempt * 150));
+    runningProcesses = await getRunningTargetProcesses(target);
+    foreground = await systemAutomation.getForegroundWindowInfo();
+    const evalResult = evaluateForegroundAgainstTarget(foreground, target);
+    if (evalResult.matched) {
+      const base = {
+        applicable: true,
+        verified: true,
+        healed: true,
+        attempts: attempt,
+        target,
+        foreground,
+        runningProcesses,
+        runningPids: runningProcesses.map((p) => p.pid).filter(Number.isFinite),
+        needsFollowUp: evalResult.needsFollowUp,
+        popupHint: evalResult.popupHint,
+        matchReason: evalResult.matchReason
+      };
+
+      if (enablePopupRecipes && evalResult.needsFollowUp) {
+        const followUp = await executePopupFollowUpRecipe(target, actionExecutor, evalResult.popupHint || '');
+        if (followUp.attempted) {
+          await sleepMs(POST_ACTION_VERIFY_SETTLE_MS);
+          const fgAfterFollowUp = await systemAutomation.getForegroundWindowInfo();
+          const evalAfterFollowUp = evaluateForegroundAgainstTarget(fgAfterFollowUp, target);
+          return {
+            ...base,
+            foreground: fgAfterFollowUp,
+            popupRecipe: {
+              enabled: true,
+              attempted: followUp.attempted,
+              completed: followUp.completed,
+              steps: followUp.steps,
+              recipeId: followUp.recipeId
+            },
+            needsFollowUp: evalAfterFollowUp.needsFollowUp,
+            popupHint: evalAfterFollowUp.popupHint,
+            matchReason: evalAfterFollowUp.matchReason
+          };
+        }
+      }
+
+      return base;
+    }
+  }
+
+  runningProcesses = await getRunningTargetProcesses(target);
+  const finalEval = evaluateForegroundAgainstTarget(foreground, target);
+  return {
+    applicable: true,
+    verified: false,
+    healed: false,
+    attempts: POST_ACTION_VERIFY_MAX_RETRIES,
+    target,
+    foreground,
+    runningProcesses,
+    runningPids: runningProcesses.map((p) => p.pid).filter(Number.isFinite),
+    needsFollowUp: finalEval.needsFollowUp,
+    popupHint: finalEval.popupHint,
+    matchReason: finalEval.matchReason
+  };
+}
+
 /**
  * Execute actions from AI response with safety checks
  * @param {Object} actionData - Parsed action data with actions array
@@ -3327,7 +4549,14 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
     return { success: false, error: 'No valid actions provided' };
   }
 
-  const { onRequireConfirmation, targetAnalysis = {}, actionExecutor, skipSafetyConfirmation = false, userMessage } = options;
+  const {
+    onRequireConfirmation,
+    targetAnalysis = {},
+    actionExecutor,
+    skipSafetyConfirmation = false,
+    userMessage,
+    enablePopupRecipes = false
+  } = options;
 
   console.log('[AI-SERVICE] Executing actions:', actionData.thought || 'No thought provided');
   const preflighted = preflightActions(actionData, { userMessage });
@@ -3341,6 +4570,7 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
   let screenshotRequested = false;
   let pendingConfirmation = false;
   let lastTargetWindowHandle = null;
+  let postVerification = { applicable: false, verified: true, healed: false, attempts: 0 };
 
   for (let i = 0; i < actionData.actions.length; i++) {
     const action = actionData.actions[i];
@@ -3473,12 +4703,40 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
     }
   }
 
+  let success = !pendingConfirmation && results.every(r => r.success);
+  let error = null;
+
+  if (success && !pendingConfirmation) {
+    postVerification = await verifyAndSelfHealPostActions(actionData, {
+      userMessage,
+      actionExecutor,
+      enablePopupRecipes
+    });
+    if (postVerification.applicable && !postVerification.verified) {
+      error = 'Post-action verification could not confirm target after bounded retries';
+    }
+  }
+
+  if (!success && !error && !pendingConfirmation) {
+    error = 'One or more actions failed';
+  }
+
+  updateBrowserSessionAfterExecution(actionData, {
+    success: success && !error,
+    results,
+    postVerification,
+    userMessage
+  });
+
   return {
-    success: !pendingConfirmation && results.every(r => r.success),
+    success,
     thought: actionData.thought,
     verification: actionData.verification,
     results,
+    error,
     screenshotRequested,
+    postVerification,
+    postVerificationFailed: !!(postVerification.applicable && !postVerification.verified),
     pendingConfirmation,
     pendingActionId: pendingConfirmation ? getPendingAction()?.actionId : null
   };
@@ -3496,7 +4754,7 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
     return { success: false, error: 'No pending action to resume' };
   }
   
-  const { actionExecutor, userMessage } = options;
+  const { actionExecutor, userMessage, enablePopupRecipes = false } = options;
   
   console.log('[AI-SERVICE] Resuming after user confirmation');
 
@@ -3513,6 +4771,7 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
   const results = [...pending.completedResults];
   let screenshotRequested = false;
   let lastTargetWindowHandle = null;
+  let postVerification = { applicable: false, verified: true, healed: false, attempts: 0 };
   
   // Execute the confirmed action and remaining actions
   for (let i = 0; i < pending.remainingActions.length; i++) {
@@ -3585,13 +4844,40 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
   }
   
   clearPendingAction();
+
+  let success = results.every(r => r.success);
+  let error = null;
+
+  if (success) {
+    postVerification = await verifyAndSelfHealPostActions(
+      { actions: pending.remainingActions || [] },
+      { userMessage, actionExecutor, enablePopupRecipes }
+    );
+    if (postVerification.applicable && !postVerification.verified) {
+      error = 'Post-action verification could not confirm target after bounded retries';
+    }
+  }
+
+  if (!success && !error) {
+    error = 'One or more actions failed';
+  }
+
+  updateBrowserSessionAfterExecution({ actions: pending.remainingActions || [] }, {
+    success: success && !error,
+    results,
+    postVerification,
+    userMessage
+  });
   
   return {
-    success: results.every(r => r.success),
+    success,
     thought: pending.thought,
     verification: pending.verification,
     results,
+    error,
     screenshotRequested,
+    postVerification,
+    postVerificationFailed: !!(postVerification.applicable && !postVerification.verified),
     userConfirmed: true
   };
 }
@@ -3608,6 +4894,7 @@ module.exports = {
   setApiKey,
   setCopilotModel,
   getCopilotModels,
+  discoverCopilotModels,
   getCurrentCopilotModel,
   getModelMetadata,
   addVisualContext,
