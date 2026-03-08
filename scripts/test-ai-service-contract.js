@@ -81,6 +81,14 @@ test('status payload shape remains stable', () => {
   assert.strictEqual(typeof status.provider, 'string');
   assert.strictEqual(typeof status.model, 'string');
   assert.strictEqual(typeof status.modelName, 'string');
+  assert.strictEqual(typeof status.configuredModel, 'string');
+  assert.strictEqual(typeof status.configuredModelName, 'string');
+  assert.strictEqual(typeof status.requestedModel, 'string');
+  assert.ok(status.runtimeModel === null || typeof status.runtimeModel === 'string');
+  assert.ok(status.runtimeModelName === null || typeof status.runtimeModelName === 'string');
+  assert.ok(status.runtimeEndpointHost === null || typeof status.runtimeEndpointHost === 'string');
+  assert.ok(status.runtimeActualModelId === null || typeof status.runtimeActualModelId === 'string');
+  assert.ok(status.runtimeLastValidated === null || typeof status.runtimeLastValidated === 'string');
   assert.strictEqual(typeof status.hasCopilotKey, 'boolean');
   assert.strictEqual(typeof status.hasApiKey, 'boolean');
   assert.strictEqual(typeof status.hasOpenAIKey, 'boolean');

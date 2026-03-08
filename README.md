@@ -48,6 +48,13 @@ liku chat
 This runs an AI chat loop that can emit and execute the same JSON actions as the overlay.
 It also supports a **Teach** flow that persists app-scoped preferences (execution mode + action/negative policies) under `~/.liku-cli/preferences.json`.
 
+Recent model-routing upgrades in `liku chat` and the Electron chat:
+- Copilot models are grouped by capability instead of a single vision flag.
+- Chat-facing selectors now separate `Agentic Vision`, `Reasoning / Planning`, and `Standard Chat` models.
+- Legacy-unavailable selections like `gpt-5.4` are canonicalized away from the picker and no longer appear as first-class chat choices.
+- Capability reroutes are surfaced back to the user instead of silently replacing the chosen model.
+- `(plan)` routes to the existing multi-agent supervisor in non-destructive plan-only mode.
+
 Recent reliability upgrades in `liku chat`:
 - Multi-block model replies are parsed across all JSON fences and the best executable plan is selected.
 - Browser continuity is tracked with explicit session state (`url`, `title`, `goalStatus`, `lastStrategy`) to reduce drift across turns.
@@ -120,6 +127,7 @@ The hook layer enforces role boundaries at runtime. Read-only roles are prevente
 - `/research <query>`: Execute deep workspace/web research.
 - `/build <spec>`: Generate implementation from a spec.
 - `/verify <target>`: Run validation checks on a feature or UI.
+- `/model`: Show grouped Copilot model inventory or switch to a specific model.
 - `/agentic`: Toggle **Autonomous Mode** (Allow AI actions without manual confirmation).
 - `/recipes [on|off]`: Toggle bounded popup follow-up recipes for first-launch dialogs.
 
@@ -207,6 +215,8 @@ npm run test:ui            # UI automation baseline
 node scripts/test-ai-service-contract.js
 node scripts/test-ai-service-commands.js
 node scripts/test-ai-service-provider-orchestration.js
+node scripts/test-ai-service-copilot-chat-response.js
+node scripts/test-ai-service-response-heuristics.js
 
 # Hook artifact enforcement proof
 node scripts/test-hook-artifacts.js

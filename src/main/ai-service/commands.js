@@ -4,6 +4,7 @@ function createCommandHandler(dependencies) {
     captureVisualContext,
     clearVisualContext,
     exchangeForCopilotSession,
+    getCopilotModels,
     getCurrentCopilotModel,
     getCurrentProvider,
     getStatus,
@@ -20,6 +21,57 @@ function createCommandHandler(dependencies) {
     slashCommandHelpers,
     startCopilotOAuth
   } = dependencies;
+
+  function getDisplayModels() {
+    if (typeof getCopilotModels === 'function') {
+      return getCopilotModels().filter((model) => model.selectable !== false);
+    }
+    return Object.entries(modelRegistry()).map(([key, value]) => ({
+      id: key,
+      name: value.name,
+      vision: !!value.vision,
+      capabilities: value.capabilities || null,
+      category: value.capabilities?.tools && value.capabilities?.vision
+        ? 'agentic-vision'
+        : value.capabilities?.reasoning
+          ? 'reasoning-planning'
+          : 'standard-chat',
+      categoryLabel: value.capabilities?.tools && value.capabilities?.vision
+        ? 'Agentic Vision'
+        : value.capabilities?.reasoning
+          ? 'Reasoning / Planning'
+          : 'Standard Chat',
+      current: key === getCurrentCopilotModel(),
+      selectable: true
+    }));
+  }
+
+  function formatCapabilitySuffix(model) {
+    const caps = model.capabilities || {};
+    const labels = [];
+    if (caps.tools) labels.push('tools');
+    if (caps.vision) labels.push('vision');
+    if (caps.reasoning) labels.push('reasoning');
+    return labels.length ? ` [${labels.join(', ')}]` : '';
+  }
+
+  function formatGroupedModelList(models) {
+    const sections = [];
+    const grouped = new Map();
+    for (const model of models) {
+      const key = model.categoryLabel || 'Other';
+      if (!grouped.has(key)) grouped.set(key, []);
+      grouped.get(key).push(model);
+    }
+    for (const [label, entries] of grouped.entries()) {
+      sections.push(`${label}:`);
+      for (const model of entries) {
+        sections.push(`${model.current ? '→' : ' '} ${model.id} - ${model.name}${formatCapabilitySuffix(model)}`);
+      }
+      sections.push('');
+    }
+    return sections.join('\n').trim();
+  }
 
   function handleCommand(command) {
     const parts = slashCommandHelpers.tokenize(String(command || '').trim());
@@ -128,24 +180,15 @@ function createCommandHandler(dependencies) {
             };
           }
 
-          const available = Object.entries(modelRegistry())
-            .map(([key, value]) => `  ${key} - ${value.name}`)
-            .join('\n');
+          const available = formatGroupedModelList(getDisplayModels());
           return {
             type: 'error',
             message: `Unknown model. Available models:\n${available}`
           };
         }
 
-        const models = Object.entries(modelRegistry()).map(([key, value]) => ({
-          id: key,
-          name: value.name,
-          vision: value.vision,
-          current: key === getCurrentCopilotModel()
-        }));
-        const list = models
-          .map((model) => `${model.current ? '→' : ' '} ${model.id} - ${model.name}${model.vision ? ' 👁' : ''}`)
-          .join('\n');
+        const models = getDisplayModels();
+        const list = formatGroupedModelList(models);
         const currentModel = getCurrentCopilotModel();
         const active = modelRegistry()[currentModel];
         return {
@@ -156,9 +199,11 @@ function createCommandHandler(dependencies) {
       case '/status': {
         loadCopilotTokenIfNeeded();
         const status = getStatus();
+        const runtimeModelLabel = status.runtimeModelName || 'not yet validated';
+        const runtimeHostLabel = status.runtimeEndpointHost || 'not yet validated';
         return {
           type: 'info',
-          message: `Provider: ${status.provider}\nModel: ${modelRegistry()[getCurrentCopilotModel()]?.name || getCurrentCopilotModel()}\nCopilot: ${status.hasCopilotKey ? 'Authenticated' : 'Not authenticated'}\nOpenAI: ${status.hasOpenAIKey ? 'Key set' : 'No key'}\nAnthropic: ${status.hasAnthropicKey ? 'Key set' : 'No key'}\nHistory: ${status.historyLength} messages\nVisual: ${status.visualContextCount} captures`
+          message: `Provider: ${status.provider}\nConfigured model: ${status.configuredModelName || modelRegistry()[getCurrentCopilotModel()]?.name || getCurrentCopilotModel()} (${status.configuredModel || getCurrentCopilotModel()})\nRequested model: ${status.requestedModel || status.configuredModel || getCurrentCopilotModel()}\nRuntime model: ${runtimeModelLabel}${status.runtimeModel ? ` (${status.runtimeModel})` : ''}\nRuntime endpoint: ${runtimeHostLabel}\nCopilot: ${status.hasCopilotKey ? 'Authenticated' : 'Not authenticated'}\nOpenAI: ${status.hasOpenAIKey ? 'Key set' : 'No key'}\nAnthropic: ${status.hasAnthropicKey ? 'Key set' : 'No key'}\nHistory: ${status.historyLength} messages\nVisual: ${status.visualContextCount} captures`
         };
       }
 

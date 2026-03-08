@@ -135,6 +135,8 @@ Use these when refactoring `src/main/ai-service.js` or any extracted module unde
 node scripts/test-ai-service-contract.js
 node scripts/test-ai-service-commands.js
 node scripts/test-ai-service-provider-orchestration.js
+node scripts/test-ai-service-copilot-chat-response.js
+node scripts/test-ai-service-response-heuristics.js
 node scripts/test-ai-service-provider-registry.js
 node scripts/test-ai-service-model-registry.js
 node scripts/test-ai-service-policy.js
@@ -150,9 +152,19 @@ What they cover:
 - facade export and result-shape stability
 - extracted slash-command behavior
 - provider fallback and dispatch orchestration
+- streamed Copilot chat response parsing and truncation heuristics
 - provider/model registry state handling
 - policy and preference-parser helpers
 - browser/session/history/UI-context seams
+
+### Manual Checks for Model Selection
+
+When changing model-selection UX or Copilot routing, add these checks:
+
+1. Open Electron chat and confirm the model selector is grouped into `Agentic Vision`, `Reasoning / Planning`, and `Standard Chat`.
+2. Change models from the selector and verify the selected option remains aligned after the backend acknowledges the `/model` command.
+3. Run `/status` and verify `Configured model`, `Requested model`, and `Runtime model` are coherent.
+4. Trigger a visual or automation-heavy prompt from a non-vision/reasoning-focused model and verify any reroute is surfaced explicitly.
 
 Recommended refactor validation order:
 

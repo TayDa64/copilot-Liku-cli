@@ -8,6 +8,36 @@ const { success, error, info, warn, highlight, dim, bold } = require('../util/ou
 const systemAutomation = require('../../main/system-automation');
 const preferences = require('../../main/preferences');
 
+function extractPlanMacro(text) {
+  const requested = /\(plan\)/i.test(String(text || ''));
+  return {
+    requested,
+    cleanedText: String(text || '').replace(/\(plan\)/ig, ' ').replace(/\s{2,}/g, ' ').trim()
+  };
+}
+
+function formatPlanOnlyResult(result) {
+  const payload = result?.result || result;
+  if (!payload) return 'Plan created, but no details were returned.';
+  const lines = [];
+  if (payload.plan?.rawPlan) {
+    lines.push(payload.plan.rawPlan.trim());
+  }
+  if (Array.isArray(payload.tasks) && payload.tasks.length > 0) {
+    lines.push('');
+    lines.push('Tasks:');
+    payload.tasks.forEach((task) => {
+      lines.push(`- ${task.step}. ${task.description} [${task.targetAgent}]`);
+    });
+  }
+  if (Array.isArray(payload.assumptions) && payload.assumptions.length > 0) {
+    lines.push('');
+    lines.push('Assumptions:');
+    payload.assumptions.forEach((assumption) => lines.push(`- ${assumption}`));
+  }
+  return lines.join('\n').trim() || 'Plan created successfully.';
+}
+
 async function interactiveSelectFromList({ rl, items, title, formatItem }) {
   if (!process.stdin.isTTY || typeof process.stdin.setRawMode !== 'function') {
     return undefined;
@@ -177,12 +207,20 @@ async function interactiveSelectModel(models) {
     stdout.write(`\n${bold('Select Copilot model')} ${dim('(↑/↓ to select, Enter to confirm, Esc to cancel)')}\n`);
     renderedLines += 2;
 
+    let lastCategory = null;
     for (let i = 0; i < models.length; i++) {
       const m = models[i];
+      if (m.categoryLabel && m.categoryLabel !== lastCategory) {
+        stdout.write(`${dim(m.categoryLabel)}\n`);
+        renderedLines += 1;
+        lastCategory = m.categoryLabel;
+      }
       const cursor = i === index ? '>' : ' ';
-      const vision = m.vision ? ' 👁' : '';
+      const capabilities = Array.isArray(m.capabilityList) && m.capabilityList.length
+        ? dim(` [${m.capabilityList.join(', ')}]`)
+        : '';
       const current = m.current ? dim(' (current)') : '';
-      stdout.write(`${cursor} ${m.id} - ${m.name}${vision}${current}\n`);
+      stdout.write(`${cursor} ${m.id} - ${m.name}${capabilities}${current}\n`);
       renderedLines += 1;
     }
   };
@@ -280,6 +318,15 @@ ${highlight('Notes:')}
   - When prompted to run actions: ${highlight('a')} enables auto-run for the target app, ${highlight('d')} disables it,
     ${highlight('c')} teaches a new rule (preference) for this app.
 `);
+}
+
+function formatResponseHeader(resp) {
+  const provider = resp?.provider || 'ai';
+  const runtimeModel = resp?.model ? `:${resp.model}` : '';
+  const requestedSuffix = resp?.requestedModel && resp.requestedModel !== resp.model
+    ? ` via ${resp.requestedModel}`
+    : '';
+  return `[${provider}${runtimeModel}${requestedSuffix}]`;
 }
 
 async function executeActionBatchWithSafeguards(ai, actionData, rl, userMessage, options = {}) {
@@ -438,7 +485,7 @@ async function runChatLoop(ai, options) {
           if (typeof ai.discoverCopilotModels === 'function') {
             await Promise.resolve(ai.discoverCopilotModels());
           }
-          const models = await Promise.resolve(ai.getCopilotModels());
+          const models = (await Promise.resolve(ai.getCopilotModels())).filter((modelItem) => modelItem.selectable !== false);
           if (!Array.isArray(models) || models.length === 0) {
             warn('No models available.');
             continue;
@@ -522,6 +569,23 @@ async function runChatLoop(ai, options) {
     }
 
     const includeVisualUsed = includeVisualNext;
+    const planMacro = extractPlanMacro(line);
+
+    if (planMacro.requested) {
+      try {
+        const { getOrchestrator } = require('./agent');
+        info('Planning mode: delegating to multi-agent supervisor.');
+        const planResult = await getOrchestrator().plan(planMacro.cleanedText || line, { mode: 'plan-only' });
+        if (!planResult.success) {
+          error(planResult.error || 'Planning mode failed');
+          continue;
+        }
+        console.log(`\n${dim('[planner]')}\n${formatPlanOnlyResult(planResult.result)}\n`);
+        continue;
+      } catch (planError) {
+        warn(`Planning mode unavailable, falling back to standard chat: ${planError.message}`);
+      }
+    }
 
     // Send message
     let resp = await ai.sendMessage(line, {
@@ -538,7 +602,10 @@ async function runChatLoop(ai, options) {
     }
 
     // Print assistant response
-    console.log(`\n${dim(`[${resp.provider}${resp.model ? ':' + resp.model : ''}]`)}\n${resp.message}\n`);
+    if (resp.routingNote) {
+      info(resp.routingNote);
+    }
+    console.log(`\n${dim(formatResponseHeader(resp))}\n${resp.message}\n`);
 
     let actionData = ai.parseActions(resp.message);
     let hasActions = !!(actionData && Array.isArray(actionData.actions) && actionData.actions.length > 0);
@@ -699,7 +766,7 @@ async function runChatLoop(ai, options) {
             break;
           }
 
-          console.log(`\n${dim(`[${resp.provider}${resp.model ? ':' + resp.model : ''}]`)}\n${resp.message}\n`);
+          console.log(`\n${dim(formatResponseHeader(resp))}\n${resp.message}\n`);
           actionData = ai.parseActions(resp.message);
           hasActions = !!(actionData && Array.isArray(actionData.actions) && actionData.actions.length > 0);
           if (!hasActions) {

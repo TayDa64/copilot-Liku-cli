@@ -327,7 +327,63 @@ class AgentOrchestrator extends EventEmitter {
     });
   }
 
+  async plan(task, options = {}) {
+    if (!this.currentSession) {
+      this.startSession({ task: task.description || task, mode: 'plan-only' });
+    }
+
+    const supervisor = this.getSupervisor();
+    const context = {
+      sessionId: this.currentSession.id,
+      ...options,
+      planOnly: true
+    };
+
+    try {
+      const analysis = await supervisor.analyzeTask(task, context);
+      const plan = await supervisor.createPlan(analysis);
+      supervisor.currentPlan = plan;
+      const tasks = await supervisor.decomposeTasks(plan);
+      supervisor.decomposedTasks = tasks;
+      const dependencyGraph = supervisor.buildDependencyGraph(tasks);
+
+      const result = {
+        mode: 'plan-only',
+        analysis,
+        plan,
+        tasks,
+        assumptions: plan.assumptions || supervisor.assumptions || [],
+        dependencyGraph,
+        summary: {
+          total: tasks.length,
+          builderTasks: tasks.filter((taskItem) => taskItem.targetAgent === AgentRole.BUILDER).length,
+          verifierTasks: tasks.filter((taskItem) => taskItem.targetAgent === AgentRole.VERIFIER).length
+        },
+        timestamp: new Date().toISOString()
+      };
+
+      this.emit('task:complete', { task, result: { success: true, result } });
+      return {
+        success: true,
+        result,
+        session: this.currentSession.id,
+        handoffs: this.handoffHistory
+      };
+    } catch (error) {
+      this.emit('task:error', { task, error });
+      return {
+        success: false,
+        error: error.message,
+        session: this.currentSession.id,
+        handoffs: this.handoffHistory
+      };
+    }
+  }
+
   async orchestrate(task, options = {}) {
+    if (options.mode === 'plan-only') {
+      return this.plan(task, options);
+    }
     // Full orchestration via Supervisor
     return this.execute(task, {
       ...options,

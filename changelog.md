@@ -1,3 +1,29 @@
+## Unreleased - 2026-03-08
+
+### Copilot Model Capability Separation
+- Replaced the old vision-only model distinction with a richer capability matrix in the Copilot model registry.
+- Grouped chat-facing Copilot models into `Agentic Vision`, `Reasoning / Planning`, and `Standard Chat` categories.
+- Removed legacy-unavailable selections like `gpt-5.4` from the active chat-facing picker inventory while preserving backward-compatible canonicalization for older saved state.
+
+### Routing and Status Transparency
+- Added capability-aware model routing defaults for visual, automation, and planning intents.
+- Surfaced explicit reroute notices instead of silently swapping models underneath the user.
+- Expanded `/status` and `getStatus()` with configured/requested/runtime model metadata and live Copilot model inventory.
+
+### Shared Model UX and Renderer Sync
+- Updated `/model` output and the terminal picker to render grouped model inventory with capability hints.
+- Hydrated the Electron model selector from live AI status instead of stale static assumptions.
+- Fixed a renderer sync gap where successful `/model` changes did not push refreshed AI status back to the chat UI, causing selection drift during real use.
+
+### Plan-Only and Automation Reliability
+- Added `(plan)` routing to the existing multi-agent orchestrator in non-destructive `plan-only` mode.
+- Added live UI target prevalidation before coordinate clicks.
+- Hardened Windows process enumeration so inaccessible `StartTime` values no longer crash the validation path.
+
+### Verification
+- Verified targeted passes for `test-ai-service-model-registry`, `test-ai-service-provider-orchestration`, and `test-ai-service-commands`.
+- Verified a full local regression batch in `regression-run.log`.
+
 ## 0.0.14 - Liku Edition - 2026-03-07
 
 ### Multi-Agent Hook Enforcement

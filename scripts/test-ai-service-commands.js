@@ -39,10 +39,34 @@ const handler = createCommandHandler({
     clearedVisual = true;
   },
   exchangeForCopilotSession: () => Promise.resolve(),
+  getCopilotModels: () => ([
+    {
+      id: 'gpt-4o',
+      name: 'GPT-4o',
+      categoryLabel: 'Agentic Vision',
+      capabilityList: ['tools', 'vision'],
+      current: true,
+      selectable: true
+    },
+    {
+      id: 'gpt-4.1',
+      name: 'GPT-4.1',
+      categoryLabel: 'Standard Chat',
+      capabilityList: ['chat'],
+      current: false,
+      selectable: true
+    }
+  ]),
   getCurrentCopilotModel: () => 'gpt-4o',
   getCurrentProvider: () => currentProvider,
   getStatus: () => ({
     provider: currentProvider,
+    configuredModel: 'gpt-4o',
+    configuredModelName: 'GPT-4o',
+    requestedModel: 'gpt-5.4',
+    runtimeModel: 'gpt-4o',
+    runtimeModelName: 'GPT-4o',
+    runtimeEndpointHost: 'api.githubcopilot.com',
     hasCopilotKey: true,
     hasOpenAIKey: false,
     hasAnthropicKey: false,
@@ -56,13 +80,13 @@ const handler = createCommandHandler({
   logoutCopilot: () => {},
   modelRegistry: () => ({
     'gpt-4o': { name: 'GPT-4o', vision: true },
-    'gpt-5.4': { name: 'GPT-5.4', vision: false }
+    'gpt-4.1': { name: 'GPT-4.1', vision: false }
   }),
   resetBrowserSessionState: () => {
     resetBrowser = true;
   },
   setApiKey: () => true,
-  setCopilotModel: (model) => model === 'gpt-5.4',
+  setCopilotModel: (model) => model === 'gpt-4.1',
   setProvider: (provider) => {
     if (!['copilot', 'openai', 'anthropic', 'ollama'].includes(provider)) {
       return false;
@@ -73,7 +97,7 @@ const handler = createCommandHandler({
   slashCommandHelpers: createSlashCommandHelpers({
     modelRegistry: () => ({
       'gpt-4o': { id: 'gpt-4o' },
-      'gpt-5.4': { id: 'gpt-5.4' }
+      'gpt-4.1': { id: 'gpt-4.1' }
     })
   }),
   startCopilotOAuth: () => Promise.resolve({ user_code: 'ABCD-EFGH' })
@@ -101,15 +125,19 @@ test('clear command resets history and visual state', () => {
 });
 
 test('model command uses normalized model keys', () => {
-  const result = handler.handleCommand('/model gpt-5.4 - GPT-5.4');
+  const result = handler.handleCommand('/model gpt-4.1 - GPT-4.1');
   assert.strictEqual(result.type, 'system');
-  assert.ok(result.message.includes('Switched to GPT-5.4'));
+  assert.ok(result.message.includes('Switched to GPT-4.1'));
 });
 
 test('status command preserves status text shape', () => {
   const result = handler.handleCommand('/status');
   assert.strictEqual(result.type, 'info');
   assert.ok(result.message.includes('Provider: openai'));
+  assert.ok(result.message.includes('Configured model: GPT-4o (gpt-4o)'));
+  assert.ok(result.message.includes('Requested model: gpt-5.4'));
+  assert.ok(result.message.includes('Runtime model: GPT-4o (gpt-4o)'));
+  assert.ok(result.message.includes('Runtime endpoint: api.githubcopilot.com'));
   assert.ok(result.message.includes('History: 7 messages'));
   assert.ok(result.message.includes('Visual: 2 captures'));
 });

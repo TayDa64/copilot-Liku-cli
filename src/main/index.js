@@ -990,6 +990,13 @@ function setupIPC() {
   // Handle chat messages
   ipcMain.on('chat-message', async (event, message) => {
     console.log('Chat message:', message);
+
+    const emitAIStatusChanged = () => {
+      if (chatWindow && !chatWindow.isDestroyed()) {
+        const status = aiService.getStatus();
+        chatWindow.webContents.send('ai-status-changed', status);
+      }
+    };
     
     // Check for slash commands first
     if (message.startsWith('/')) {
@@ -1302,6 +1309,9 @@ function setupIPC() {
             type: commandResult.type,
             timestamp: Date.now()
           });
+        }
+        if (commandResult.type !== 'error' && (/^\/model\b/i.test(message) || /^\/provider\b/i.test(message) || /^\/login\b/i.test(message))) {
+          emitAIStatusChanged();
         }
         return;
       }
@@ -2282,6 +2292,8 @@ function setupIPC() {
     };
   });
 
+  ipcMain.handle('get-ai-status', () => aiService.getStatus());
+
   // ===== DEBUG / SMOKE IPC HANDLERS =====
   ipcMain.handle('debug-window-state', () => {
     if (!enableDebugIPC) {
@@ -2761,7 +2773,9 @@ function setupIPC() {
         });
       }
 
-      const result = await orchestrator.orchestrate(task);
+      const result = options?.mode === 'plan-only'
+        ? await orchestrator.plan(task, options)
+        : await orchestrator.orchestrate(task, options);
       
       // Notify chat of completion
       if (chatWindow && !chatWindow.isDestroyed()) {

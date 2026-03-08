@@ -42,6 +42,8 @@ const {
   formatNegativePolicyViolationSystemMessage
 } = require('./ai-service/policy-enforcement');
 const { LIKU_TOOLS, toolCallsToActions } = require('./ai-service/providers/copilot/tools');
+const { parseCopilotChatResponse } = require('./ai-service/providers/copilot/chat-response');
+const { shouldAutoContinueResponse } = require('./ai-service/response-heuristics');
 const {
   createConversationHistoryStore
 } = require('./ai-service/conversation-history');
@@ -89,6 +91,12 @@ function getInspectService() {
 
 // GitHub Copilot OAuth Configuration
 const COPILOT_CLIENT_ID = 'Iv1.b507a08c87ecfe98';
+const GITHUB_API_HOST = 'api.github.com';
+const COPILOT_CHAT_HOST = 'copilot-proxy.githubusercontent.com';
+const COPILOT_ALT_CHAT_HOST = 'api.githubcopilot.com';
+const COPILOT_TOKEN_PATH = '/copilot_internal/v2/token';
+const COPILOT_CHAT_PATH = '/chat/completions';
+let preferredCopilotChatHost = COPILOT_CHAT_HOST;
 
 // Current configuration
 const providerRegistry = createProviderRegistry(process.env);
@@ -112,10 +120,12 @@ let oauthCallback = null;
 const MAX_HISTORY = 20;
 const HISTORY_FILE = path.join(LIKU_HOME, 'conversation-history.json');
 const MODEL_PREF_FILE = path.join(LIKU_HOME, 'model-preference.json');
+const MODEL_RUNTIME_FILE = path.join(LIKU_HOME, 'copilot-runtime-state.json');
 
 const copilotModelRegistry = createCopilotModelRegistry({
   likuHome: LIKU_HOME,
   modelPrefFile: MODEL_PREF_FILE,
+  runtimeStateFile: MODEL_RUNTIME_FILE,
   initialProvider: getCurrentProvider()
 });
 const {
@@ -123,8 +133,12 @@ const {
   discoverCopilotModels: discoverCopilotModelsFromRegistry,
   getCopilotModels: getCopilotModelsFromRegistry,
   getCurrentCopilotModel: getCurrentCopilotModelFromRegistry,
+  getRuntimeSelection,
+  getValidatedChatFallback,
   loadModelPreference,
   modelRegistry,
+  recordRuntimeSelection,
+  rememberValidatedChatFallback,
   resolveCopilotModelKey: resolveCopilotModelKeyFromRegistry,
   setCopilotModel: setCopilotModelInRegistry,
   setProvider: syncProviderModelMetadata
@@ -298,6 +312,7 @@ const commandHandler = createCommandHandler({
   },
   clearVisualContext,
   exchangeForCopilotSession,
+  getCopilotModels,
   getCurrentCopilotModel,
   getCurrentProvider,
   getStatus,
@@ -325,6 +340,94 @@ const commandHandler = createCommandHandler({
  */
 async function buildMessages(userMessage, includeVisual = false, options = {}) {
   return messageBuilder.buildMessages(userMessage, includeVisual, options);
+}
+
+function getCopilotModelCapabilities(modelKey) {
+  const entry = modelRegistry()[modelKey] || {};
+  return entry.capabilities || {
+    chat: true,
+    tools: !!entry.vision,
+    vision: !!entry.vision,
+    reasoning: /^o(1|3)/i.test(String(entry.id || modelKey || '')),
+    completion: false,
+    automation: !!entry.vision,
+    planning: !!entry.vision || /^o(1|3)/i.test(String(entry.id || modelKey || ''))
+  };
+}
+
+function supportsCopilotCapability(modelKey, capability) {
+  return !!getCopilotModelCapabilities(modelKey)[capability];
+}
+
+function parseInlineIntentTags(userMessage) {
+  const detectedTags = [];
+  const tagPattern = /\((vs code|browser|plan|research)\)/ig;
+  const cleanedMessage = String(userMessage || '')
+    .replace(tagPattern, (_match, tag) => {
+      detectedTags.push(String(tag || '').trim().toLowerCase());
+      return ' ';
+    })
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+
+  const extraSystemMessages = [];
+  if (detectedTags.includes('vs code')) {
+    extraSystemMessages.push('CONTEXT DIRECTIVE: Focus on VS Code workspace tasks, file edits, and editor-safe operations.');
+  }
+  if (detectedTags.includes('browser')) {
+    extraSystemMessages.push('CONTEXT DIRECTIVE: Treat this as a browser automation task. Verify the browser window before sending input.');
+  }
+  if (detectedTags.includes('research')) {
+    extraSystemMessages.push('CONTEXT DIRECTIVE: Answer in research mode. Prefer findings and options. Avoid executable action plans unless explicitly requested.');
+  }
+  if (detectedTags.includes('plan')) {
+    extraSystemMessages.push('CONTEXT DIRECTIVE: Respond in plan mode. Prefer numbered steps, assumptions, and validation notes. Avoid executable action plans unless explicitly requested.');
+  }
+
+  return {
+    cleanedMessage: cleanedMessage || String(userMessage || ''),
+    tags: detectedTags,
+    extraSystemMessages
+  };
+}
+
+function prevalidateActionTarget(action) {
+  if (!action || action.x === undefined || action.y === undefined) {
+    return { success: true };
+  }
+
+  if (!uiWatcher || !uiWatcher.isPolling || typeof uiWatcher.getElementAtPoint !== 'function') {
+    return { success: true };
+  }
+
+  const liveElement = uiWatcher.getElementAtPoint(action.x, action.y);
+  if (!liveElement) {
+    return {
+      success: false,
+      error: `No live UI element was found at (${action.x}, ${action.y}). Refresh context and retry.`
+    };
+  }
+
+  const expectedTerms = [action.targetLabel, action.targetText]
+    .filter(Boolean)
+    .map((value) => String(value).trim().toLowerCase())
+    .filter(Boolean);
+
+  if (expectedTerms.length > 0) {
+    const liveText = Object.values(liveElement)
+      .filter((value) => typeof value === 'string')
+      .join(' ')
+      .toLowerCase();
+    const hasExpectedMatch = expectedTerms.some((term) => liveText.includes(term));
+    if (!hasExpectedMatch) {
+      return {
+        success: false,
+        error: `Live UI target at (${action.x}, ${action.y}) does not match the expected control. Refresh context before executing.`
+      };
+    }
+  }
+
+  return { success: true, liveElement };
 }
 
 // ===== GITHUB COPILOT OAUTH =====
@@ -522,15 +625,16 @@ async function exchangeForCopilotSession() {
 
   return new Promise((resolve, reject) => {
     const req = https.request({
-      hostname: 'api.githubcopilot.com',
-      path: '/copilot_internal/v2/token',
+      hostname: GITHUB_API_HOST,
+      path: COPILOT_TOKEN_PATH,
       method: 'GET',
       headers: {
         'Authorization': `Bearer ${apiKeys.copilot}`,
         'Accept': 'application/json',
         'User-Agent': 'GithubCopilot/1.0.0',
         'Editor-Version': 'vscode/1.96.0',
-        'Editor-Plugin-Version': 'copilot-chat/0.22.0'
+        'Editor-Plugin-Version': 'copilot-chat/0.22.0',
+        'X-GitHub-Api-Version': '2024-12-15'
       }
     }, (res) => {
       let body = '';
@@ -538,7 +642,8 @@ async function exchangeForCopilotSession() {
       res.on('end', () => {
         try {
           if (res.statusCode >= 400) {
-            return reject(new Error(`Session exchange failed (${res.statusCode})`));
+            const detail = String(body || '').trim().slice(0, 200);
+            return reject(new Error(`Session exchange failed (${res.statusCode})${detail ? `: ${detail}` : ''}`));
           }
           const result = JSON.parse(body || '{}');
           const token = result.token || result.access_token;
@@ -568,18 +673,42 @@ async function callCopilot(messages, modelOverride = null, requestOptions = {}) 
   }
 
   const hasVision = messages.some((message) => Array.isArray(message.content));
+  const modelKey = resolveCopilotModelKey(modelOverride);
+  const registry = modelRegistry();
+  const modelInfo = registry[modelKey] || registry['gpt-4o'];
+  const modelName = modelInfo?.name || modelKey || 'selected model';
+  const enableTools = requestOptions?.enableTools !== false;
+  const requireTools = requestOptions?.requireTools === true;
+
+  if (hasVision && !supportsCopilotCapability(modelKey, 'vision')) {
+    throw new Error(`Capability Error: Model '${modelName}' does not support visual context. Choose an Agentic Vision model.`);
+  }
+
+  if (enableTools && requireTools && !supportsCopilotCapability(modelKey, 'tools')) {
+    throw new Error(`Capability Error: Model '${modelName}' does not support tools or automation actions.`);
+  }
 
   return new Promise((resolve, reject) => {
-    const modelKey = resolveCopilotModelKey(modelOverride);
-    const registry = modelRegistry();
-    const modelInfo = registry[modelKey] || registry['gpt-4o'];
-    const requestedModelId = hasVision && !modelInfo.vision ? 'gpt-4o' : modelInfo.id;
-    const fallbackModelId = 'gpt-4o';
-    let modelId = requestedModelId;
+    const fallbackModelKey = 'gpt-4o';
+    let activeModelKey = modelKey;
+    let modelId = modelInfo.id;
+
+    const resolveModelKeyFromId = (selectedModelId, preferredKey = activeModelKey) => {
+      const normalizedId = String(selectedModelId || '').trim().toLowerCase();
+      if (!normalizedId) return preferredKey;
+      for (const [key, value] of Object.entries(registry)) {
+        if (String(key).toLowerCase() === normalizedId || String(value?.id || '').toLowerCase() === normalizedId) {
+          return key;
+        }
+      }
+      return preferredKey;
+    };
 
     console.log(`[Copilot] Vision request: ${hasVision}, Model: ${modelId} (key=${modelKey})`);
-
-    const enableTools = requestOptions?.enableTools !== false;
+    const toolsEnabledForModel = enableTools && supportsCopilotCapability(activeModelKey, 'tools');
+    if (enableTools && !toolsEnabledForModel) {
+      console.log(`[Copilot] Model ${activeModelKey} does not advertise tool support; sending plain chat request.`);
+    }
 
     const makeRequestBody = (selectedModelId) => {
       const payload = {
@@ -587,14 +716,14 @@ async function callCopilot(messages, modelOverride = null, requestOptions = {}) 
         messages: messages,
         max_tokens: Number.isFinite(Number(requestOptions?.max_tokens)) ? Number(requestOptions.max_tokens) : 4096,
         temperature: typeof requestOptions?.temperature === 'number' ? requestOptions.temperature : 0.7,
-        stream: false
+        stream: true
       };
 
       if (requestOptions?.response_format) {
         payload.response_format = requestOptions.response_format;
       }
 
-      if (enableTools) {
+      if (toolsEnabledForModel) {
         payload.tools = LIKU_TOOLS;
         payload.tool_choice = requestOptions?.tool_choice || 'auto';
       } else {
@@ -609,14 +738,15 @@ async function callCopilot(messages, modelOverride = null, requestOptions = {}) 
       const headers = {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${apiKeys.copilotSession}`,
-        'Accept': 'application/json',
+        'Accept': 'text/event-stream, application/json',
         'User-Agent': 'GithubCopilot/1.0.0',
         'Editor-Version': 'vscode/1.96.0',
         'Editor-Plugin-Version': 'copilot-chat/0.22.0',
         'Copilot-Integration-Id': 'vscode-chat',
         'X-Request-Id': `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`,
         'Openai-Organization': 'github-copilot',
-        'Openai-Intent': 'conversation-panel',
+        'OpenAI-Intent': 'conversation-panel',
+        'X-GitHub-Api-Version': '2025-05-01',
         'Content-Length': Buffer.byteLength(data)
       };
 
@@ -627,9 +757,10 @@ async function callCopilot(messages, modelOverride = null, requestOptions = {}) 
 
       const options = {
         hostname: hostname,
-        path: pathPrefix + '/chat/completions',
+        path: pathPrefix + COPILOT_CHAT_PATH,
         method: 'POST',
-        headers: headers
+        headers: headers,
+        timeout: 30000
       };
 
       console.log(`[Copilot] Calling ${hostname}${options.path} with model ${selectedModelId}...`);
@@ -657,29 +788,44 @@ async function callCopilot(messages, modelOverride = null, requestOptions = {}) 
             }
 
             try {
-              const result = JSON.parse(body);
-              if (result.choices && result.choices[0]) {
-                const choice = result.choices[0];
-                const msg = choice.message;
-                
-                // Handle native tool calls — convert to action JSON block
-                if (msg.tool_calls && msg.tool_calls.length > 0) {
-                  const actions = toolCallsToActions(msg.tool_calls);
+              const parsed = parseCopilotChatResponse(body, res.headers || {});
+              if (parsed.toolCalls && parsed.toolCalls.length > 0) {
+                  const actions = toolCallsToActions(parsed.toolCalls);
                   const actionBlock = JSON.stringify({
-                    thought: msg.content || 'Executing requested actions',
+                    thought: parsed.content || 'Executing requested actions',
                     actions,
                     verification: 'Verify the actions completed successfully'
                   }, null, 2);
-                  console.log(`[Copilot] Received ${msg.tool_calls.length} tool_calls, converted to action block`);
-                  resolveReq('```json\n' + actionBlock + '\n```');
-                } else {
-                  resolveReq(msg.content);
-                }
-              } else if (result.error) {
-                rejectReq(new Error(result.error.message || 'Copilot API error'));
+                  const runtimeModelKey = resolveModelKeyFromId(selectedModelId, activeModelKey);
+                  recordRuntimeSelection({
+                    requestedModel: modelKey,
+                    runtimeModel: runtimeModelKey,
+                    endpointHost: hostname,
+                    actualModelId: selectedModelId
+                  });
+                  console.log(`[Copilot] Received ${parsed.toolCalls.length} tool_calls, converted to action block`);
+                  resolveReq({
+                    content: '```json\n' + actionBlock + '\n```',
+                    effectiveModel: runtimeModelKey,
+                    requestedModel: modelKey,
+                    actualModelId: selectedModelId,
+                    endpointHost: hostname
+                  });
               } else {
-                console.error('[Copilot] Unexpected response:', JSON.stringify(result).substring(0, 300));
-                rejectReq(new Error('Invalid response format'));
+                const runtimeModelKey = resolveModelKeyFromId(selectedModelId, activeModelKey);
+                recordRuntimeSelection({
+                  requestedModel: modelKey,
+                  runtimeModel: runtimeModelKey,
+                  endpointHost: hostname,
+                  actualModelId: selectedModelId
+                });
+                resolveReq({
+                  content: parsed.content,
+                  effectiveModel: runtimeModelKey,
+                  requestedModel: modelKey,
+                  actualModelId: selectedModelId,
+                  endpointHost: hostname
+                });
               }
             } catch (e) {
               console.error('[Copilot] Parse error. Body:', body.substring(0, 300));
@@ -692,37 +838,37 @@ async function callCopilot(messages, modelOverride = null, requestOptions = {}) 
           console.error('[Copilot] Request error:', e.message);
           rejectReq(e);
         });
+
+        req.on('timeout', () => {
+          req.destroy(new Error('REQUEST_TIMEOUT'));
+        });
         
         req.write(data);
         req.end();
       });
     };
 
-    // Try primary endpoint first
-    tryEndpoint('api.githubcopilot.com', '', modelId)
-      .then(resolve)
+    const primaryHost = preferredCopilotChatHost;
+    const alternateHost = primaryHost === COPILOT_CHAT_HOST ? COPILOT_ALT_CHAT_HOST : COPILOT_CHAT_HOST;
+
+    tryEndpoint(primaryHost, '', modelId)
+      .then((result) => {
+        preferredCopilotChatHost = primaryHost;
+        resolve(result);
+      })
       .catch(async (err) => {
         console.log('[Copilot] Primary endpoint failed:', err.message);
 
-        // Some models are visible in account model lists but not available on /chat/completions.
-        // Retry once with a known-good chat model to preserve continuity.
-        const unsupportedModel = /unsupported_api_for_model|not accessible via the \/chat\/completions endpoint/i.test(err.message || '');
-        if (unsupportedModel && modelId !== fallbackModelId) {
-          try {
-            console.log(`[Copilot] Model ${modelId} unsupported on chat endpoint; retrying with fallback ${fallbackModelId}...`);
-            modelId = fallbackModelId;
-            const result = await tryEndpoint('api.githubcopilot.com', '', modelId);
-            return resolve(result);
-          } catch (fallbackErr) {
-            err = fallbackErr;
-          }
+        const unsupportedModel = /unsupported_api_for_model|not accessible via the \/chat\/completions endpoint|not available/i.test(err.message || '');
+        if (unsupportedModel) {
+          return reject(new Error(`Selected Copilot model '${modelName}' is not available on the chat endpoint. Choose a different model.`));
         }
         
         // If session expired, re-exchange and retry once
         if (err.message === 'SESSION_EXPIRED') {
           try {
             await exchangeForCopilotSession();
-            const result = await tryEndpoint('api.githubcopilot.com');
+            const result = await tryEndpoint(primaryHost, '', modelId);
             return resolve(result);
           } catch (retryErr) {
             return reject(new Error('Session expired. Please try /login again.'));
@@ -732,7 +878,8 @@ async function callCopilot(messages, modelOverride = null, requestOptions = {}) 
         // Try alternate endpoint
         try {
           console.log('[Copilot] Trying alternate endpoint...');
-          const result = await tryEndpoint('copilot-proxy.githubusercontent.com', '/v1', modelId);
+          const result = await tryEndpoint(alternateHost, '', modelId);
+          preferredCopilotChatHost = alternateHost;
           resolve(result);
         } catch (altErr) {
           console.log('[Copilot] Alternate endpoint also failed:', altErr.message);
@@ -742,6 +889,8 @@ async function callCopilot(messages, modelOverride = null, requestOptions = {}) 
             reject(new Error('Access denied. Ensure you have an active GitHub Copilot subscription.'));
           } else if (err.message.includes('PARSE_ERROR')) {
             reject(new Error('API returned invalid response. You may need to re-authenticate with /login'));
+          } else if (err.message.includes('REQUEST_TIMEOUT')) {
+            reject(new Error('Copilot API timed out. Check connectivity and try again.'));
           } else {
             reject(new Error(`Copilot API error: ${err.message}`));
           }
@@ -921,28 +1070,6 @@ function callOllama(messages) {
  * Detect if AI response was truncated mid-stream
  * Uses heuristics to identify incomplete responses
  */
-function detectTruncation(response) {
-  if (!response || response.length < 100) return false;
-  
-  const truncationSignals = [
-    // Ends mid-JSON block
-    /```json\s*\{[^}]*$/s.test(response),
-    // Ends with unclosed code block
-    (response.match(/```/g) || []).length % 2 !== 0,
-    // Ends mid-sentence (lowercase letter or comma, no terminal punctuation)
-    /[a-z,]\s*$/i.test(response) && !/[.!?:]\s*$/i.test(response),
-    // Ends with numbered list item starting
-    /\d+\.\s*$/m.test(response),
-    // Ends with "- " suggesting incomplete list item
-    /-\s*$/m.test(response),
-    // Has unclosed parentheses/brackets
-    (response.match(/\(/g) || []).length > (response.match(/\)/g) || []).length,
-    (response.match(/\[/g) || []).length > (response.match(/\]/g) || []).length
-  ];
-  
-  return truncationSignals.some(Boolean);
-}
-
 function looksLikeAutomationRequest(text) {
   if (!text) return false;
   const t = String(text).toLowerCase();
@@ -994,13 +1121,20 @@ async function sendMessage(userMessage, options = {}) {
     extraSystemMessages = []
   } = options;
 
+  const parsedTags = parseInlineIntentTags(userMessage);
+  const tagSet = new Set(parsedTags.tags);
+  const effectiveEnforceActions = enforceActions && !tagSet.has('research') && !tagSet.has('plan');
+
   // Enhance message with coordinate context if provided
-  let enhancedMessage = userMessage;
+  let enhancedMessage = parsedTags.cleanedMessage;
   if (coordinates) {
-    enhancedMessage = `[User selected coordinates: (${coordinates.x}, ${coordinates.y}) with label "${coordinates.label}"]\n\n${userMessage}`;
+    enhancedMessage = `[User selected coordinates: (${coordinates.x}, ${coordinates.y}) with label "${coordinates.label}"]\n\n${parsedTags.cleanedMessage}`;
   }
 
-  const baseExtraSystemMessages = Array.isArray(extraSystemMessages) ? extraSystemMessages : [];
+  const baseExtraSystemMessages = [
+    ...(Array.isArray(extraSystemMessages) ? extraSystemMessages : []),
+    ...parsedTags.extraSystemMessages
+  ];
 
   // Build messages with optional visual context
   const messages = await buildMessages(enhancedMessage, includeVisualContext, {
@@ -1008,16 +1142,24 @@ async function sendMessage(userMessage, options = {}) {
   });
 
   try {
-    const providerResult = await providerOrchestrator.requestWithFallback(messages, model, includeVisualContext);
+    const providerResult = await providerOrchestrator.requestWithFallback(messages, model, {
+      includeVisualContext,
+      requiresAutomation: looksLikeAutomationRequest(enhancedMessage) || tagSet.has('browser'),
+      preferPlanning: tagSet.has('plan') || tagSet.has('vs code'),
+      requiresTools: looksLikeAutomationRequest(enhancedMessage),
+      tags: parsedTags.tags
+    });
     let response = providerResult.response;
     let effectiveModel = providerResult.effectiveModel;
+    const requestedModel = providerResult.requestedModel || providerResult.effectiveModel;
+    const providerMetadata = providerResult.providerMetadata || null;
     let usedProvider = providerResult.usedProvider;
 
     // Auto-continuation for truncated responses
     let fullResponse = response;
     let continuationCount = 0;
     
-    while (detectTruncation(fullResponse) && continuationCount < maxContinuations) {
+    while (shouldAutoContinueResponse(fullResponse, hasActions(fullResponse)) && continuationCount < maxContinuations) {
       continuationCount++;
       console.log(`[AI] Response appears truncated, continuing (${continuationCount}/${maxContinuations})...`);
       
@@ -1046,7 +1188,7 @@ async function sendMessage(userMessage, options = {}) {
     // If the user likely wanted automation, but the model returned only intent text,
     // re-prompt once to emit a JSON action block.
     if (
-      enforceActions &&
+      effectiveEnforceActions &&
       usedProvider === 'copilot' &&
       looksLikeAutomationRequest(enhancedMessage) &&
       !hasActions(response)
@@ -1153,7 +1295,11 @@ async function sendMessage(userMessage, options = {}) {
       message: response,
       provider: usedProvider,
       model: effectiveModel,
+      requestedModel,
       modelVersion: modelRegistry()[effectiveModel]?.id || null,
+      endpointHost: providerMetadata?.endpointHost || null,
+      routingNote: providerMetadata?.routing?.message || null,
+      routing: providerMetadata?.routing || null,
       hasVisualContext: includeVisualContext && visualContextStore.getVisualContextCount() > 0
     };
 
@@ -1335,9 +1481,11 @@ function handleCommand(command) {
     case '/status':
       loadCopilotTokenIfNeeded();
       const status = getStatus();
+      const runtimeModelLabel = status.runtimeModelName || 'not yet validated';
+      const runtimeHostLabel = status.runtimeEndpointHost || 'not yet validated';
       return {
         type: 'info',
-        message: `Provider: ${status.provider}\nModel: ${modelRegistry()[getCurrentCopilotModel()]?.name || getCurrentCopilotModel()}\nCopilot: ${status.hasCopilotKey ? 'Authenticated' : 'Not authenticated'}\nOpenAI: ${status.hasOpenAIKey ? 'Key set' : 'No key'}\nAnthropic: ${status.hasAnthropicKey ? 'Key set' : 'No key'}\nHistory: ${status.historyLength} messages\nVisual: ${status.visualContextCount} captures`
+        message: `Provider: ${status.provider}\nConfigured model: ${status.configuredModelName} (${status.configuredModel})\nRequested model: ${status.requestedModel}\nRuntime model: ${runtimeModelLabel}${status.runtimeModel ? ` (${status.runtimeModel})` : ''}\nRuntime endpoint: ${runtimeHostLabel}\nCopilot: ${status.hasCopilotKey ? 'Authenticated' : 'Not authenticated'}\nOpenAI: ${status.hasOpenAIKey ? 'Key set' : 'No key'}\nAnthropic: ${status.hasAnthropicKey ? 'Key set' : 'No key'}\nHistory: ${status.historyLength} messages\nVisual: ${status.visualContextCount} captures`
       };
 
     case '/help':
@@ -1377,10 +1525,20 @@ function setOAuthCallback(callback) {
  */
 function getStatus() {
   const registry = modelRegistry();
+  const configuredModel = getCurrentCopilotModel();
+  const runtime = getRuntimeSelection();
   return {
     provider: getCurrentProvider(),
-    model: getCurrentCopilotModel(),
-    modelName: registry[getCurrentCopilotModel()]?.name || getCurrentCopilotModel(),
+    model: configuredModel,
+    modelName: registry[configuredModel]?.name || configuredModel,
+    configuredModel,
+    configuredModelName: registry[configuredModel]?.name || configuredModel,
+    requestedModel: runtime.requestedModel || configuredModel,
+    runtimeModel: runtime.runtimeModel,
+    runtimeModelName: runtime.runtimeModel ? (registry[runtime.runtimeModel]?.name || runtime.runtimeModel) : null,
+    runtimeEndpointHost: runtime.endpointHost,
+    runtimeActualModelId: runtime.actualModelId,
+    runtimeLastValidated: runtime.lastValidated,
     hasCopilotKey: !!apiKeys.copilot,
     hasApiKey: getCurrentProvider() === 'copilot' ? !!apiKeys.copilot : 
            getCurrentProvider() === 'openai' ? !!apiKeys.openai :
@@ -3077,6 +3235,22 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
     // AUTO-FOCUS: Check if this is an interaction that requires window focus (click/type)
     // and if the target window is in the background.
     if ((action.type === 'click' || action.type === 'double_click' || action.type === 'right_click') && action.x !== undefined) {
+      const prevalidation = prevalidateActionTarget(action);
+      if (!prevalidation.success) {
+        const blockedResult = {
+          success: false,
+          action: action.type,
+          error: prevalidation.error,
+          reason: action.reason || '',
+          safety
+        };
+        results.push(blockedResult);
+        if (onAction) {
+          onAction(blockedResult, i, actionData.actions.length);
+        }
+        break;
+      }
+
       if (uiWatcher && uiWatcher.isPolling) {
         const elementAtPoint = uiWatcher.getElementAtPoint(action.x, action.y);
         if (elementAtPoint && elementAtPoint.windowHandle) {
@@ -3225,6 +3399,22 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
     }
 
     if ((action.type === 'click' || action.type === 'double_click' || action.type === 'right_click') && action.x !== undefined) {
+      const prevalidation = prevalidateActionTarget(action);
+      if (!prevalidation.success) {
+        const blockedResult = {
+          success: false,
+          action: action.type,
+          error: prevalidation.error,
+          reason: action.reason || '',
+          userConfirmed: i === 0
+        };
+        results.push(blockedResult);
+        if (onAction) {
+          onAction(blockedResult, i, pending.remainingActions.length);
+        }
+        break;
+      }
+
       if (uiWatcher && uiWatcher.isPolling) {
         const elementAtPoint = uiWatcher.getElementAtPoint(action.x, action.y);
         if (elementAtPoint && elementAtPoint.windowHandle) {

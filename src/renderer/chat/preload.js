@@ -47,6 +47,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onScreenCaptured: (callback) => ipcRenderer.on('screen-captured', (event, data) => callback(data)),
   onVisualContextUpdate: (callback) => ipcRenderer.on('visual-context-update', (event, data) => callback(data)),
   onProviderChanged: (callback) => ipcRenderer.on('provider-changed', (event, data) => callback(data)),
+  onAIStatusChanged: (callback) => ipcRenderer.on('ai-status-changed', (event, data) => callback(data)),
   onScreenAnalysis: (callback) => ipcRenderer.on('screen-analysis', (event, data) => callback(data)),
   onAuthStatus: (callback) => ipcRenderer.on('auth-status', (event, data) => callback(data)),
   onTokenUsage: (callback) => ipcRenderer.on('token-usage', (event, data) => callback(data)),

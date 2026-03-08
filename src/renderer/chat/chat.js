@@ -186,11 +186,86 @@ function setModel(model) {
   window.electronAPI.sendMessage(`/model ${model}`);
 }
 
+function applyAIStatus(status) {
+  if (!status || typeof status !== 'object') return;
+
+  if (status.provider) {
+    currentProvider = status.provider;
+    if (providerSelect) {
+      providerSelect.value = status.provider;
+    }
+    updateModelSelector(status.provider);
+  }
+
+  if (status.model) {
+    currentModel = status.model;
+  }
+
+  if (Array.isArray(status.copilotModels)) {
+    populateModelSelector(status.copilotModels, status.model || currentModel);
+  } else if (modelSelect && currentModel) {
+    modelSelect.value = currentModel;
+  }
+}
+
 function updateModelSelector(provider) {
   if (!modelSelect) return;
   
   // Only show model selector for Copilot
   modelSelect.style.display = provider === 'copilot' ? 'block' : 'none';
+}
+
+function populateModelSelector(models, selectedModel) {
+  if (!modelSelect || !Array.isArray(models)) return;
+
+  modelSelect.innerHTML = '';
+  const groups = new Map();
+
+  models
+    .filter((model) => model && model.selectable !== false)
+    .forEach((model) => {
+      const label = model.categoryLabel || 'Other';
+      if (!groups.has(label)) groups.set(label, []);
+      groups.get(label).push(model);
+    });
+
+  for (const [label, entries] of groups.entries()) {
+    const optgroup = document.createElement('optgroup');
+    optgroup.label = label;
+    entries.forEach((model) => {
+      const option = document.createElement('option');
+      option.value = model.id;
+      option.textContent = `${model.name} (${model.id})`;
+      if ((selectedModel && model.id === selectedModel) || model.current) {
+        option.selected = true;
+      }
+      optgroup.appendChild(option);
+    });
+    modelSelect.appendChild(optgroup);
+  }
+}
+
+function extractPlanMacro(text) {
+  const rawText = String(text || '');
+  return {
+    requested: /\(plan\)/i.test(rawText),
+    cleanedText: rawText.replace(/\(plan\)/ig, ' ').replace(/\s{2,}/g, ' ').trim()
+  };
+}
+
+function formatPlanOnlyResult(result) {
+  const payload = result?.result || result;
+  if (!payload) return 'Plan created, but no details were returned.';
+  const lines = [];
+  if (payload.plan?.rawPlan) {
+    lines.push(payload.plan.rawPlan.trim());
+  }
+  if (Array.isArray(payload.tasks) && payload.tasks.length) {
+    lines.push('');
+    lines.push('Tasks:');
+    payload.tasks.forEach((task) => lines.push(`- ${task.step}. ${task.description} [${task.targetAgent}]`));
+  }
+  return lines.join('\n').trim() || 'Plan created successfully.';
 }
 
 // ===== MESSAGE FUNCTIONS =====
@@ -279,6 +354,9 @@ async function routeToAgent(text, agentType) {
   try {
     let result;
     switch (agentType) {
+      case 'plan':
+        result = await window.electronAPI.agentRun({ task: text, options: { mode: 'plan-only' } });
+        break;
       case 'produce': {
         const cleaned = text.replace(/^\s*\/produce\b\s*/i, '');
         const parsed = parseProduceOptions(cleaned || text);
@@ -311,9 +389,9 @@ async function routeToAgent(text, agentType) {
     removeTypingIndicator();
     
     if (result.success) {
-      const responseText = result.result?.result?.response || 
-                          result.result?.response || 
-                          JSON.stringify(result.result, null, 2);
+      const responseText = agentType === 'plan'
+        ? formatPlanOnlyResult(result.result?.result || result.result)
+        : result.result?.result?.response || result.result?.response || JSON.stringify(result.result, null, 2);
       addMessage(`✅ Agent completed:\n${responseText}`, 'agent');
     } else {
       addMessage(`❌ Agent error: ${result.error}`, 'system');
@@ -335,6 +413,14 @@ function sendMessage() {
   if (!text) return;
 
   addMessage(text, 'user');
+  const planMacro = extractPlanMacro(text);
+
+  if (planMacro.requested) {
+    routeToAgent(planMacro.cleanedText || text, 'plan');
+    messageInput.value = '';
+    messageInput.style.height = 'auto';
+    return;
+  }
   
   // Check for agent-level tasks
   const agentType = detectAgentIntent(text);
@@ -499,6 +585,9 @@ window.electronAPI.onDotSelected((data) => {
 window.electronAPI.onAgentResponse((data) => {
   removeTypingIndicator();
   const msgType = data.type === 'error' ? 'system' : 'agent';
+  if (data.routingNote) {
+    addMessage(data.routingNote, 'system', data.timestamp, { subtype: 'routing' });
+  }
   
   // Check if response contains actions
   if (data.hasActions && data.actionData && data.actionData.actions) {
@@ -558,6 +647,29 @@ if (window.electronAPI.onAuthStatus) {
       providerSelect.value = data.provider;
       currentProvider = data.provider;
     }
+  });
+}
+
+if (window.electronAPI.onProviderChanged) {
+  window.electronAPI.onProviderChanged((data) => {
+    if (data?.status) {
+      applyAIStatus(data.status);
+      return;
+    }
+
+    if (data?.provider) {
+      currentProvider = data.provider;
+      if (providerSelect) {
+        providerSelect.value = data.provider;
+      }
+      updateModelSelector(data.provider);
+    }
+  });
+}
+
+if (window.electronAPI.onAIStatusChanged) {
+  window.electronAPI.onAIStatusChanged((status) => {
+    applyAIStatus(status);
   });
 }
 
@@ -637,6 +749,14 @@ window.electronAPI.getState().then(state => {
 // Initialize auth status display as pending until check completes
 updateAuthStatus('pending', currentProvider);
 updateModelSelector(currentProvider);
+
+if (window.electronAPI.getAIStatus) {
+  window.electronAPI.getAIStatus().then((status) => {
+    applyAIStatus(status);
+  }).catch((err) => {
+    console.warn('[CHAT] Failed to hydrate model selector:', err);
+  });
+}
 
 // ===== AGENTIC ACTION UI =====
 function showActionConfirmation(actionData) {
