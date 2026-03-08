@@ -1,3 +1,44 @@
+## 0.0.14 - Liku Edition - 2026-03-07
+
+### Multi-Agent Hook Enforcement
+- Added deterministic worker artifacts under `.github/hooks/artifacts/` so stop-hook validation can enforce required report sections even when `SubagentStop` payloads include metadata only.
+- Tightened security hook behavior so read-only workers may update only their role-scoped artifact path instead of arbitrary repo files.
+- Added direct verification harnesses: `scripts/test-hook-artifacts.js` and `scripts/test-hook-artifacts.ps1`.
+
+### AI Service Modularization
+- Extracted system prompt generation into `src/main/ai-service/system-prompt.js`.
+- Extracted message assembly into `src/main/ai-service/message-builder.js`.
+- Extracted slash-command handling into `src/main/ai-service/commands.js`.
+- Extracted provider fallback and dispatch orchestration into `src/main/ai-service/providers/orchestration.js`.
+- Added extracted state and support modules for browser session state, conversation history, UI context, visual context, provider registry, Copilot model registry, policy enforcement, preference parsing, slash-command helpers, and action parsing.
+
+### Verification
+- Added characterization coverage for the compatibility facade and extracted seams.
+- Verified fresh local passes for provider orchestration, contract stability, v0.0.6 feature coverage, and bug-fix regression coverage.
+
+## 0.0.13 - Liku Edition - 2026-03-06
+
+### Browser Continuity State (Session Grounding)
+- Added lightweight `BrowserSessionState` in `src/main/ai-service.js` with `url`, `title`, `goalStatus`, `lastStrategy`, `lastUserIntent`, and `lastUpdated`.
+- Browser session state is now injected into system messages so each new turn is grounded in explicit continuity data, not only conversation memory.
+- State is exposed via `/status` and reset by `/clear`.
+- State is updated from deterministic rewrite selection and post-execution verification outcomes.
+
+### Action Parsing Reliability (Critical)
+- Fixed `parseAIActions` to parse all fenced JSON blocks and select the best executable action plan instead of always taking the first block.
+- This resolves multi-block model responses where the first block is a tiny focus-only preface and later blocks contain the real workflow.
+
+### Deterministic Browser Flow Improvements
+- Added no-URL YouTube rewrite support for prompts like "using edge open a new youtube page, then search for ...".
+- When browser + YouTube + search intent is detected, low-signal or fragmented plans are rewritten into a complete deterministic flow:
+  - focus target browser
+  - open `https://www.youtube.com`
+  - run search query
+
+### Chat Orchestration Guardrails
+- Added non-action/chit-chat execution guard in terminal chat so acknowledgements do not trigger action execution.
+- Added prompt-level continuity rule to avoid extra screenshot detours when objective appears already achieved.
+
 ## 0.0.12 - Liku Edition - 2026-03-04
 
 ### Terminal Chat: `liku chat`

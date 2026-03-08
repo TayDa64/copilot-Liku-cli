@@ -1,254 +1,79 @@
 # Implementation Summary
 
-## Overview
+## Scope
+This summary reflects the current state of `copilot-liku-cli` as of 2026-03-06, including the reliability and continuity work completed in this session.
 
-This implementation delivers a complete Electron-based application with a headless agent architecture and ultra-thin overlay interface, following all requirements from the problem statement.
+## Current Architecture
+- CLI-first runtime with optional Electron overlay.
+- `liku chat` headless interactive mode with AI planning and action execution.
+- Native Windows automation layer (`system-automation.js`) with window/process controls and UI automation integration.
+- Reliability pipeline in `ai-service.js`:
+  - action normalization
+  - deterministic rewrites for known intent patterns
+  - bounded post-action verification and self-heal
+  - policy rails and safety confirmation handling
 
-## ✅ Completed Requirements
+## Session Implementations (2026-03-06)
 
-### Core Architecture
-- [x] Main process with Node.js managing all windows and system integration
-- [x] Overlay window: transparent, full-screen, always-on-top, click-through by default
-- [x] Chat window: small, edge-docked at bottom-right corner
-- [x] System tray icon with context menu
-- [x] Global hotkeys for window control
+### 1. Browser Continuity State
+Implemented a lightweight in-memory `BrowserSessionState` in `src/main/ai-service.js` with:
+- `url`
+- `title`
+- `goalStatus` (`unknown`, `in_progress`, `achieved`, `needs_attention`)
+- `lastStrategy`
+- `lastUserIntent`
+- `lastUpdated`
 
-### Overlay Window Features
-- [x] Borderless, transparent, full-screen window
-- [x] Always-on-top with platform-specific optimizations
-- [x] Click-through mode using `setIgnoreMouseEvents(true, {forward: true})`
-- [x] Selection mode for dot interaction
-- [x] Coarse grid (100px spacing) and fine grid (50px spacing)
-- [x] Visual mode indicator
-- [x] CSS pointer-events for selective interaction
+Behavior added:
+- Injected as explicit system context in `buildMessages(...)` so model planning is grounded by concrete browser continuity state.
+- Exposed via `/status` (`getStatus()`).
+- Reset by `/clear`.
+- Updated from deterministic rewrite selection and post-execution outcomes.
 
-### Chat Window Features
-- [x] Edge-docked at bottom-right corner
-- [x] Never overlaps main action area
-- [x] Chat history with user/agent/system messages
-- [x] Input field for commands
-- [x] Mode controls (Passive/Selection buttons)
-- [x] Task list placeholder
-- [x] Opens via hotkey or tray click
-- [x] Auto-hides to minimize screen obstruction
+### 2. Multi-Block JSON Parsing Fix
+Updated `parseAIActions(...)` in `src/main/system-automation.js`.
 
-### Footprint Reduction
-- [x] Single main process
-- [x] Minimal renderers with vanilla JavaScript (no React/Vue/Angular)
-- [x] No heavy CSS frameworks
-- [x] Removed all unused dependencies (webpack, etc.)
-- [x] Single persistent overlay renderer (no repeated creation/destruction)
-- [x] No continuous polling or background processing
-- [x] Clean IPC message schema for agent offloading
-- [x] Aggressive tree-shaking ready (minimal bundle)
+Before:
+- parser captured only the first fenced JSON block.
 
-### Interaction Design
-- [x] Overlay transparent and sparse (dots only in selection mode)
-- [x] Chat off to the side (bottom-right)
-- [x] Global hotkeys for non-intrusive activation
-- [x] Suggestions appear in overlay (dots)
-- [x] Chat window can hide/minimize to tray
-- [x] Safe zone placement (bottom-right corner)
-- [x] Transient mode indicator
+After:
+- parser scans all fenced JSON blocks.
+- normalizes each candidate action list.
+- scores candidates and selects the best executable plan.
 
-### Platform Support
-- [x] macOS: `screen-saver` window level, hidden from Dock, menu bar tray
-- [x] Windows: Standard always-on-top, system tray integration
-- [x] Tray icon with context menu on both platforms
-- [x] Platform-specific window configurations
+Result:
+- fixes execution failures where the first block is a short focus preface and later blocks contain the actual workflow.
 
-### Security
-- [x] Context isolation enabled
-- [x] Node integration disabled in renderers
-- [x] Secure preload scripts for IPC
-- [x] Content Security Policy headers
-- [x] No remote content loading
-- [x] Electron 35.7.5 (no known vulnerabilities)
-- [x] CodeQL security scan: 0 alerts
+### 3. Deterministic Browser Rewrite Upgrade (No-URL YouTube)
+Added intent inference for prompts like:
+- "using edge open a new youtube page, then search for stateful file breakdown"
 
-### Implementation Plan Steps
-1. [x] Electron skeleton (main + overlay + tray)
-2. [x] Chat window separation and placement
-3. [x] Mode toggling and click routing
-4. [x] Agent integration (stub implemented)
-5. [x] Performance pass (optimized)
+When browser + YouTube + search intent is present and the model output is low-signal/fragmented, the plan is rewritten into a complete deterministic sequence:
+- focus browser
+- navigate to `https://www.youtube.com`
+- run search query
 
-## 📊 Technical Achievements
+This closes a gap where deterministic rewrite previously depended on explicit URLs.
 
-### Code Quality
-- **Total Files**: 12
-- **Lines of Code**: ~800 (excluding documentation)
-- **Dependencies**: 1 (Electron only)
-- **Security Vulnerabilities**: 0
-- **Code Review Issues**: All resolved
+### 4. Chat Continuity and Execution Guardrails
+Documented and retained in current implementation:
+- non-action/chit-chat guard in terminal chat to avoid accidental execution on acknowledgements.
+- continuity rule in prompt policy to avoid unnecessary screenshot detours when objective appears already achieved.
+- optional popup follow-up recipes (`/recipes on|off`) for bounded first-launch dialog handling.
 
-### Performance Targets
-- **Memory Usage**: Target < 300MB (baseline ~150MB + renderers ~50MB)
-- **CPU Idle**: Target < 0.5%
-- **Startup Time**: Target < 3 seconds
-- **Bundle Size**: Minimal (vanilla JS, no frameworks)
+## Validation Performed
+- Static diagnostics: no errors reported on changed files.
+- Parser sanity check: multi-block response now selects a richer executable action block.
+- Preflight sanity check: no-URL YouTube prompt rewrites to full open + search sequence.
 
-### Documentation
-- **ELECTRON_README.md**: 150+ lines - Usage guide and overview
-- **ARCHITECTURE.md**: 400+ lines - Complete system architecture
-- **CONFIGURATION.md**: 250+ lines - Configuration examples
-- **TESTING.md**: 250+ lines - Comprehensive testing guide
-- **Total Documentation**: ~1,050 lines
+## Files Updated in Session
+- `src/main/ai-service.js`
+- `src/main/system-automation.js`
+- `src/cli/commands/chat.js` (continuity/chit-chat and popup recipe controls)
 
-## 🎯 Key Features
+## Commits
+- `eaea6c5` - `feat: add browser session continuity state`
+- `7fc1698` - `fix: choose best action block and rewrite youtube search intents`
 
-### 1. Ultra-Thin Overlay
-- Completely transparent background
-- Only dots visible during selection mode
-- Invisible to users in passive mode
-- No performance impact when idle
-
-### 2. Non-Intrusive Chat
-- Hidden by default
-- Positioned at screen edge
-- Never blocks working area
-- Quick access via hotkey
-
-### 3. Smart Mode System
-- **Passive**: Full click-through, zero overhead
-- **Selection**: Interactive dots for targeting
-- Automatic return to passive after selection
-- Visual feedback with mode indicator
-
-### 4. Extensible Agent Integration
-- Clean IPC message schema
-- Stub agent ready for replacement
-- Support for external API or worker process
-- Message routing infrastructure in place
-
-### 5. Production-Ready Security
-- All Electron security best practices
-- Context isolation throughout
-- No vulnerabilities detected
-- CSP headers configured
-
-## 📁 Project Structure
-
-```
-copilot-Liku-cli/
-├── package.json                    # Dependencies and scripts
-├── .gitignore                      # Ignore node_modules and artifacts
-├── ELECTRON_README.md              # Usage guide
-├── ARCHITECTURE.md                 # System architecture
-├── CONFIGURATION.md                # Configuration examples
-├── TESTING.md                      # Testing guide
-└── src/
-    ├── main/
-    │   └── index.js               # Main process (270 lines)
-    ├── renderer/
-    │   ├── overlay/
-    │   │   ├── index.html         # Overlay UI (240 lines)
-    │   │   └── preload.js         # Overlay IPC bridge
-    │   └── chat/
-    │       ├── index.html         # Chat UI (290 lines)
-    │       └── preload.js         # Chat IPC bridge
-    └── assets/
-        └── tray-icon.png          # System tray icon
-```
-
-## 🚀 Usage
-
-### Installation
-```bash
-npm install
-```
-
-### Running
-```bash
-npm start
-```
-
-### Hotkeys
-- `Ctrl+Alt+Space` (Cmd+Alt+Space on macOS): Toggle chat
-- `Ctrl+Shift+O` (Cmd+Shift+O on macOS): Toggle overlay
-
-### Tray Menu
-- Right-click tray icon for menu
-- "Open Chat" - Show/hide chat window
-- "Toggle Overlay" - Show/hide overlay
-- "Quit" - Exit application
-
-## 🔄 Next Steps (For Future Development)
-
-### Agent Integration
-1. Replace stub in `src/main/index.js`
-2. Connect to external agent API or worker process
-3. Implement screen capture for analysis
-4. Add LLM-based reasoning
-
-### Enhanced Features
-1. Persistent window positioning
-2. Custom tray icon (currently using placeholder)
-3. Settings panel
-4. Task list implementation
-5. Fine-tune grid density based on screen size
-6. Add keyboard navigation for dots
-7. Implement highlight layers for suggested targets
-
-### Performance Optimization
-1. Profile memory usage over long sessions
-2. Implement viewport-based dot rendering for large screens
-3. Add lazy loading for chat history
-4. Optimize canvas rendering if needed
-
-### Platform Enhancements
-1. Better fullscreen app handling on macOS
-2. Windows UWP app compatibility testing
-3. Multi-display support improvements
-4. Accessibility features
-
-## ✨ Highlights
-
-### What Makes This Implementation Special
-
-1. **Truly Minimal**: Only 1 dependency (Electron), vanilla JavaScript throughout
-2. **Non-Intrusive**: Overlay click-through by default, chat at screen edge
-3. **Secure by Design**: All best practices, zero vulnerabilities
-4. **Well Documented**: 1,000+ lines of comprehensive documentation
-5. **Production Ready**: Clean code, proper error handling, extensible architecture
-6. **Cross-Platform**: Works on macOS and Windows with appropriate optimizations
-
-### Design Decisions
-
-1. **Vanilla JS over frameworks**: Reduces bundle size by ~90%, faster startup
-2. **Edge-docked chat**: Prevents workspace obstruction
-3. **Mode-based interaction**: Click-through by default prevents accidental interference
-4. **Preload scripts**: Secure IPC without exposing full Electron APIs
-5. **Single persistent windows**: Avoids memory allocation churn
-
-## 🔒 Security Summary
-
-- **Context Isolation**: Enabled in all renderers
-- **Node Integration**: Disabled in all renderers
-- **CSP Headers**: Configured to prevent XSS
-- **Dependency Audit**: 0 vulnerabilities
-- **CodeQL Scan**: 0 alerts
-- **Electron Version**: 35.7.5 (latest secure version)
-
-## 📈 Success Metrics
-
-- ✅ All requirements from problem statement implemented
-- ✅ All code review feedback addressed
-- ✅ Security audit passed (0 issues)
-- ✅ Syntax validation passed
-- ✅ Dependency audit passed (0 vulnerabilities)
-- ✅ Documentation complete and comprehensive
-- ✅ Clean git history with incremental commits
-
-## 🎉 Conclusion
-
-This implementation successfully delivers a production-ready Electron application that meets all specified requirements for a headless agent with ultra-thin overlay architecture. The codebase is clean, secure, well-documented, and ready for agent integration and future enhancements.
-
-The architecture prioritizes:
-- **Performance**: Minimal footprint, no wasted resources
-- **Security**: All best practices, zero vulnerabilities
-- **Usability**: Non-intrusive, intuitive interaction
-- **Extensibility**: Clean APIs ready for agent integration
-- **Maintainability**: Clear documentation, organized code
-
-Ready for the next phase: actual agent integration and real-world testing!
+## Outcome
+The runtime is now significantly more robust against verbose/multi-section model responses and is better grounded across browser turns, improving flow and reducing false restarts or screenshot detours in real use.

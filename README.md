@@ -19,7 +19,7 @@ We're bringing the power of GitHub Copilot coding agent directly to your termina
 
 - **Unified Intelligence:** Combines terminal-native development with visual-spatial awareness.
 - **Ultra-Thin Overlay:** A transparent Electron layer for high-performance UI element detection and interaction.
-- **Multi-Agent Orchestration:** A sophisticated **Supervisor-Builder-Verifier** pattern for complex, multi-step task execution.
+- **Multi-Agent Orchestration:** A trigger-based **Supervisor / Researcher / Architect / Builder / Verifier / Diagnostician / Vision Operator** system for complex tasks.
 - **Liku CLI Suite:** A comprehensive set of automation tools (`click`, `find`, `type`, `keys`, `screenshot`) available from any shell.
 - **Event-Driven UI Watcher:** Real-time UI state tracking via Windows UI Automation events with automatic polling fallback.
 - **Defensive AI Architecture:** Engineered for minimal footprint ($<300$MB memory) and zero-intrusion workflows.
@@ -47,6 +47,12 @@ liku chat
 
 This runs an AI chat loop that can emit and execute the same JSON actions as the overlay.
 It also supports a **Teach** flow that persists app-scoped preferences (execution mode + action/negative policies) under `~/.liku-cli/preferences.json`.
+
+Recent reliability upgrades in `liku chat`:
+- Multi-block model replies are parsed across all JSON fences and the best executable plan is selected.
+- Browser continuity is tracked with explicit session state (`url`, `title`, `goalStatus`, `lastStrategy`) to reduce drift across turns.
+- Deterministic browser rewrites now cover no-URL YouTube search requests (for example: "using edge open a new youtube page, then search for ...").
+- Non-action acknowledgements/chit-chat are filtered to prevent accidental action execution.
 
 ### Automation Commands
 | Command | Usage | Description |
@@ -97,12 +103,17 @@ Liku perceives your workspace through a dual-mode interaction layer.
 
 ## 🤖 Multi-Agent System
 
-The Liku Edition moves beyond single-turn responses with a specialized team of agents:
+The Liku Edition moves beyond single-turn responses with a trigger-based team of agents:
 
-- **Supervisor**: Task planning and decomposition.
-- **Builder**: Code implementation and file modifications.
-- **Verifier**: Phased validation and automated testing.
-- **Researcher**: Workspace context gathering and info retrieval.
+- **Supervisor**: Routes work by trigger, delegates only, and keeps the overall plan coherent.
+- **Researcher**: Gathers codebase or documentation context when the target area is still unclear.
+- **Architect**: Checks reuse, design boundaries, and consistency before implementation starts.
+- **Builder**: Implements code only after the plan and target files are concrete.
+- **Verifier**: Runs independent validation immediately after code changes.
+- **Diagnostician**: Isolates root cause when verification fails or behavior is unclear.
+- **Vision Operator**: Interprets screenshots, overlay behavior, browser-visible state, and desktop UI evidence.
+
+The hook layer enforces role boundaries at runtime. Read-only roles are prevented from mutating files, and evidence-based stop hooks require structured outputs before subagents can finish. See [docs/AGENT_ORCHESTRATION.md](docs/AGENT_ORCHESTRATION.md) for the full routing and hook contract.
 
 ### Chat Slash Commands
 - `/orchestrate <task>`: Start full multi-agent workflow.
@@ -110,6 +121,17 @@ The Liku Edition moves beyond single-turn responses with a specialized team of a
 - `/build <spec>`: Generate implementation from a spec.
 - `/verify <target>`: Run validation checks on a feature or UI.
 - `/agentic`: Toggle **Autonomous Mode** (Allow AI actions without manual confirmation).
+- `/recipes [on|off]`: Toggle bounded popup follow-up recipes for first-launch dialogs.
+
+### Runtime Enforcement
+
+The multi-agent layer is enforced at runtime rather than only described in docs:
+
+- Read-only workers are blocked from mutating arbitrary repo files.
+- Worker final reports are mirrored to role-specific artifacts under `.github/hooks/artifacts/`.
+- Stop hooks validate required evidence sections from those artifacts when the editor runtime omits inline worker output.
+
+See [docs/AGENT_ORCHESTRATION.md](docs/AGENT_ORCHESTRATION.md) for the full hook and evidence contract.
 
 ## 📦 Getting Started
 
@@ -180,6 +202,14 @@ npm run smoke
 npm run smoke:shortcuts    # Runtime + shortcut diagnostics
 npm run smoke:chat-direct  # Chat visibility (no keyboard emulation)
 npm run test:ui            # UI automation baseline
+
+# AI-service seam and compatibility checks
+node scripts/test-ai-service-contract.js
+node scripts/test-ai-service-commands.js
+node scripts/test-ai-service-provider-orchestration.js
+
+# Hook artifact enforcement proof
+node scripts/test-hook-artifacts.js
 ```
 
 ## 🛠️ Technical Architecture
@@ -194,7 +224,25 @@ GitHub Copilot-Liku CLI is built on a "Defensive AI" architecture — minimal fo
 | **.NET UIA Host** | Persistent JSONL process for Windows UI Automation (9 commands, thread-safe, event streaming) |
 | **UI Watcher** | 4-state machine: POLLING ↔ EVENT_MODE ↔ FALLBACK with 10s health check |
 | **Overlay** | Transparent Electron window with grid, inspect regions, and click-through passthrough |
-| **Agent System** | Supervisor → Builder / Researcher → Verifier pipeline |
+| **Agent System** | Supervisor routes to Researcher / Architect / Builder / Verifier / Diagnostician / Vision Operator |
+
+### AI Service Modularization
+
+`src/main/ai-service.js` remains the public compatibility facade, but the internals are now being split into focused modules so the CLI and Electron paths can keep a stable API while responsibilities move behind characterization tests.
+
+Recently extracted seams include:
+
+- `src/main/ai-service/system-prompt.js`
+- `src/main/ai-service/message-builder.js`
+- `src/main/ai-service/commands.js`
+- `src/main/ai-service/providers/orchestration.js`
+- `src/main/ai-service/browser-session-state.js`
+- `src/main/ai-service/conversation-history.js`
+- `src/main/ai-service/ui-context.js`
+- `src/main/ai-service/visual-context.js`
+- provider/model registry and policy/preference helper modules
+
+This keeps external behavior stable while making the runtime easier to validate and evolve one seam at a time.
 
 ### Performance Benchmarks
 
@@ -222,6 +270,7 @@ GitHub Copilot-Liku CLI is built on a "Defensive AI" architecture — minimal fo
 - **[Publishing Guide](PUBLISHING.md)** — How to publish the package to npm
 - **[Release Process](RELEASE_PROCESS.md)** — How to create and manage releases
 - **[Architecture](ARCHITECTURE.md)** — System design and architecture
+- **[Agent Orchestration](docs/AGENT_ORCHESTRATION.md)** — Multi-agent routing, role triggers, and hook enforcement
 - **[Configuration](CONFIGURATION.md)** — Configuration options
 - **[Testing](TESTING.md)** — Testing guide and practices
 

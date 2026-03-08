@@ -12,6 +12,72 @@ This application implements an Electron-based headless agent system with an ultr
 4. **Secure**: Context isolation, no Node integration in renderers, CSP headers
 5. **Extensible**: Clean IPC message schema ready for agent integration
 
+## Multi-Agent Orchestration
+
+The repo's custom-agent layer uses a trigger-based coordinator-worker model under [.github/agents](.github/agents).
+
+### Roles
+
+- **Supervisor** owns task routing and delegates only.
+- **Researcher** gathers workspace or documentation context when the target area is still unclear.
+- **Architect** validates reuse opportunities, design boundaries, and consistency before changes are made.
+- **Builder** performs implementation once the plan and files are concrete.
+- **Verifier** performs independent validation immediately after changes.
+- **Diagnostician** isolates root cause when verification fails or the failure mode is ambiguous.
+- **Vision Operator** analyzes screenshots, overlay behavior, accessibility state, and browser-visible results.
+
+### Routing Triggers
+
+- Use **Researcher** when the code location, supporting docs, or high-volume context is unclear.
+- Use **Architect** when design reuse, structural consistency, or boundary choices matter.
+- Use **Builder** only after the task is specific enough to implement safely.
+- Use **Verifier** after every code change.
+- Use **Diagnostician** when the verifier finds a regression or the root cause is not yet known.
+- Use **Vision Operator** when UI state, screenshots, overlay behavior, or browser-visible results matter.
+
+### Hook Enforcement
+
+The orchestration layer is reinforced by hook policies under [.github/hooks](.github/hooks):
+
+- `PreToolUse` blocks disallowed tool classes by role.
+- `SubagentStop` checks each role's final response for required evidence sections before allowing completion.
+- `PostToolUse` records an audit trail.
+
+The practical effect is that routing is not just descriptive. Read-only roles are restricted from mutating files, and worker outputs must carry enough evidence to pass stop-hook quality gates.
+
+See [docs/AGENT_ORCHESTRATION.md](docs/AGENT_ORCHESTRATION.md) for the detailed routing and role contract.
+
+## AI Service Architecture
+
+The runtime still exposes a single public entrypoint at `src/main/ai-service.js`, but the implementation is being decomposed into smaller internal modules behind that facade.
+
+### Current Internal Seams
+
+- `system-prompt.js`: platform-aware prompt text and action instructions.
+- `message-builder.js`: prompt assembly, history injection, inspect context, live UI context, semantic DOM context, and provider-specific vision formatting.
+- `commands.js`: slash-command handling for `/provider`, `/model`, `/status`, `/login`, `/capture`, `/vision`, and `/clear`.
+- `providers/registry.js`: provider selection state and API-key storage.
+- `providers/copilot/model-registry.js`: Copilot model metadata, preference persistence, and dynamic discovery.
+- `providers/orchestration.js`: fallback chain selection and provider dispatch for initial response, continuation, and regeneration flows.
+- `browser-session-state.js`, `conversation-history.js`, `visual-context.js`, and `ui-context.js`: runtime state holders previously embedded in the monolith.
+
+### Compatibility Strategy
+
+- `src/main/ai-service.js` remains the only supported public entrypoint during the migration.
+- Extracted modules are composed from the facade instead of being consumed directly by app code.
+- Source-sensitive regression markers remain in the facade because some tests still inspect literal strings in that file.
+
+### Verification Strategy
+
+The modularization work is gated by focused characterization tests in addition to broader smoke coverage:
+
+- `scripts/test-ai-service-contract.js`
+- `scripts/test-ai-service-commands.js`
+- `scripts/test-ai-service-provider-orchestration.js`
+- existing `scripts/test-v006-features.js` and `scripts/test-bug-fixes.js`
+
+This allows internal seams to move without changing the external contract seen by the CLI, Electron runtime, or agent adapters.
+
 ## System Architecture
 
 ```

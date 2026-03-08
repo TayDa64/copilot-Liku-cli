@@ -127,6 +127,52 @@ Why this is the default path:
 - Uses non-zero exit codes on mismatch so CI/local scripts can fail fast.
 - Avoids accidental global key injection in default baseline runs.
 
+### AI Service Characterization Tests
+
+Use these when refactoring `src/main/ai-service.js` or any extracted module under `src/main/ai-service/`:
+
+```bash
+node scripts/test-ai-service-contract.js
+node scripts/test-ai-service-commands.js
+node scripts/test-ai-service-provider-orchestration.js
+node scripts/test-ai-service-provider-registry.js
+node scripts/test-ai-service-model-registry.js
+node scripts/test-ai-service-policy.js
+node scripts/test-ai-service-preference-parser.js
+node scripts/test-ai-service-state.js
+node scripts/test-ai-service-ui-context.js
+node scripts/test-ai-service-visual-context.js
+node scripts/test-ai-service-slash-command-helpers.js
+```
+
+What they cover:
+
+- facade export and result-shape stability
+- extracted slash-command behavior
+- provider fallback and dispatch orchestration
+- provider/model registry state handling
+- policy and preference-parser helpers
+- browser/session/history/UI-context seams
+
+Recommended refactor validation order:
+
+1. Run the focused seam test for the module you changed.
+2. Run `node scripts/test-ai-service-contract.js`.
+3. Run `node scripts/test-v006-features.js` and `node scripts/test-bug-fixes.js`.
+4. Run broader smoke tests only after the seam-level checks are green.
+
+### Hook Enforcement Verification
+
+When changing `.github/hooks` or worker artifact contracts, run:
+
+```bash
+node scripts/test-hook-artifacts.js
+# or
+powershell -NoProfile -File scripts/test-hook-artifacts.ps1
+```
+
+These checks validate the artifact-backed stop-hook path rather than just unit-level helper behavior.
+
 ### Unit Tests (Future)
 ```javascript
 // Example test structure

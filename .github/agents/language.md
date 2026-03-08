@@ -14,10 +14,22 @@ Source: Burke Holland "Ultralight Orchestration" + community routing tests + VS 
 | **recursive-builder** | `['GPT-5.2 (copilot)', 'GPT-5.3-codex (copilot)']` | Parent (Claude Opus 4.6)* | `false` | Code implementation |
 | **recursive-verifier** | `['GPT-5.2 (copilot)', 'GPT-5.3-codex (copilot)']` | Parent (Claude Opus 4.6)* | `false` | Verification pipeline |
 | **recursive-researcher** | `['GPT-5.2 (copilot)', 'Gemini 3.1 Pro (Preview) (copilot)']` | Parent (Claude Opus 4.6)* | `false` | Context gathering (RLC) |
+| **recursive-architect** | `['GPT-5.2 (copilot)', 'Claude Sonnet 4.5 (copilot)']` | Parent (Claude Opus 4.6)* | `false` | Pattern validation and reuse guidance |
+| **recursive-diagnostician** | `['GPT-5.2 (copilot)', 'GPT-5.3-codex (copilot)']` | Parent (Claude Opus 4.6)* | `false` | Root-cause analysis |
+| **recursive-vision-operator** | `['GPT-5.2 (copilot)', 'Gemini 3.1 Pro (Preview) (copilot)']` | Parent (Claude Opus 4.6)* | `false` | UI state and visual workflow analysis |
 | **recursive-supervisor** | (none — inherits picker) | Parent (Claude Opus 4.6) | `true` | Orchestrator, delegates only |
 
 \* `model:` field is declared for future-proofing but **not honored** by `runSubagent` as of 2026-02-23.
 When VS Code ships the `agent` tool, these declarations will take effect.
+
+### Routing policy intent (2026-03-07)
+- `recursive-supervisor`: route to workers by trigger, not fixed sequence.
+- `recursive-researcher`: trigger when codebase location, docs, or high-volume context is unclear.
+- `recursive-architect`: trigger when reuse, design boundaries, or consistency questions matter.
+- `recursive-builder`: trigger only after the plan and target files are concrete.
+- `recursive-verifier`: trigger immediately after every code change.
+- `recursive-diagnostician`: trigger when verification fails or root cause is unclear.
+- `recursive-vision-operator`: trigger when screenshots, overlay behavior, desktop UI state, or browser-visible outcomes matter.
 
 ---
 
