@@ -30,3 +30,6 @@ docs/pdf/*.txt
 
 # Hook logs (runtime artifacts)
 .github/hooks/logs/*.jsonl
+
+# Test artifacts
+.tmp-hook-check/
