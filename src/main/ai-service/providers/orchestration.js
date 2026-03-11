@@ -93,12 +93,12 @@ function createProviderOrchestrator(dependencies) {
       case 'copilot':
         return callCopilot(messages, effectiveModel, requestOptions);
       case 'openai':
-        return callOpenAI(messages);
+        return callOpenAI(messages, requestOptions);
       case 'anthropic':
-        return callAnthropic(messages);
+        return callAnthropic(messages, requestOptions);
       case 'ollama':
       default:
-        return callOllama(messages);
+        return callOllama(messages, requestOptions);
     }
   }
 

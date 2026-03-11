@@ -6,6 +6,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 
 let passed = 0;
 let failed = 0;
@@ -320,13 +321,18 @@ assert(lookup !== null, 'Registered tool can be looked up');
 assert(lookup.entry.description === 'Multiply two numbers', 'Tool description is stored');
 
 const defs = toolRegistry.getDynamicToolDefinitions();
-assert(defs.length > 0, 'Dynamic tool definitions are generated');
-assert(defs[0].function.name === 'dynamic_test-calculator', 'Tool name has dynamic_ prefix');
+assert(defs.length === 0, 'Unapproved tool excluded from definitions');
 
 // Test approval gate (Phase 3b)
 assert(lookup.entry.approved === false, 'Newly registered tool is unapproved by default');
 const approveResult = toolRegistry.approveTool('test-calculator');
 assert(approveResult.success === true, 'approveTool returns success');
+
+// After approval, definitions should include the tool
+const defsAfterApprove = toolRegistry.getDynamicToolDefinitions();
+assert(defsAfterApprove.length > 0, 'Approved tool appears in definitions');
+assert(defsAfterApprove[0].function.name === 'dynamic_test-calculator', 'Tool name has dynamic_ prefix');
+
 const approvedLookup = toolRegistry.lookupTool('test-calculator');
 assert(approvedLookup.entry.approved === true, 'Tool is approved after approveTool()');
 assert(typeof approvedLookup.entry.approvedAt === 'string', 'approvedAt timestamp is set');
@@ -440,6 +446,186 @@ const aiService = require('../src/main/ai-service');
   assert(reflSrc.includes("action: 'negative_policy_applied'"), 'negative_policy returns applied status');
   assert(reflSrc.includes("source: 'reflection'"), 'Policy records reflection as source');
 }
+
+// ═══════════════════════════════════════════════════════════
+//  Phase 6 — Safety Hardening (PreToolUse Hook, Reflection Cap, Failure Decay,
+//            Phase Execution, LRU Pruning, Log Rotation, Provider Phase Params)
+// ═══════════════════════════════════════════════════════════
+console.log('\n--- Phase 6: Safety Hardening ---\n');
+
+// 6a. PreToolUse hook runner module
+{
+  const hookRunner = require('../src/main/tools/hook-runner');
+  assert(typeof hookRunner.runPreToolUseHook === 'function', 'runPreToolUseHook is exported');
+  assert(typeof hookRunner.loadHooksConfig === 'function', 'loadHooksConfig is exported');
+
+  // Loading config should succeed
+  const config = hookRunner.loadHooksConfig();
+  assert(config !== null, 'hooks config loads successfully');
+  assert(config.hooks && config.hooks.PreToolUse, 'PreToolUse hook is defined in config');
+  assert(Array.isArray(config.hooks.PreToolUse), 'PreToolUse is an array');
+}
+
+// 6b. PreToolUse hook wiring in system-automation
+{
+  const sysSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'system-automation.js'), 'utf8');
+  assert(sysSrc.includes("require('./tools/hook-runner')"), 'system-automation imports hook-runner');
+  assert(sysSrc.includes('runPreToolUseHook'), 'system-automation calls runPreToolUseHook');
+  assert(sysSrc.includes('hookResult.denied'), 'system-automation checks hook denial');
+  assert(sysSrc.includes("denied by PreToolUse hook"), 'system-automation throws on hook denial');
+}
+
+// 6c. Bounded reflection loop (max 2 iterations)
+{
+  const aiSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'ai-service.js'), 'utf8');
+  assert(aiSrc.includes('MAX_REFLECTION_ITERATIONS = 2'), 'MAX_REFLECTION_ITERATIONS is 2');
+  assert(aiSrc.includes('reflectionIteration < MAX_REFLECTION_ITERATIONS'), 'Reflection loop is bounded');
+  assert(aiSrc.includes('reflectionIteration++'), 'Reflection tracks iteration count');
+  assert(aiSrc.includes('Reflection exhausted after'), 'Exhaustion warning is logged');
+}
+
+// 6d. Session failure count decay on success
+{
+  const reflSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'telemetry', 'reflection-trigger.js'), 'utf8');
+  assert(reflSrc.includes('consecutiveFailCount = 0'), 'consecutiveFailCount resets on success');
+  assert(reflSrc.includes('sessionFailureCount - 1'), 'sessionFailureCount decays on success');
+  assert(reflSrc.includes('Math.max(0,'), 'Session failure count never goes negative');
+}
+
+// 6e. Phase execution in sendMessage
+{
+  const aiSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'ai-service.js'), 'utf8');
+  assert(aiSrc.includes("phase: 'execution'"), 'sendMessage passes phase:execution to provider');
+}
+
+// 6f. Memory LRU pruning
+{
+  const memStore = require('../src/main/memory/memory-store');
+  assert(typeof memStore.pruneOldNotes === 'function', 'pruneOldNotes is exported');
+  assert(memStore.MAX_NOTES === 500, 'MAX_NOTES is 500');
+
+  const memSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'memory', 'memory-store.js'), 'utf8');
+  assert(memSrc.includes('pruneOldNotes()'), 'addNote calls pruneOldNotes');
+  assert(memSrc.includes('noteIds.length <= MAX_NOTES'), 'pruneOldNotes checks against MAX_NOTES');
+}
+
+// 6g. Telemetry log rotation
+{
+  const telemetry = require('../src/main/telemetry/telemetry-writer');
+  assert(telemetry.MAX_LOG_SIZE === 10 * 1024 * 1024, 'MAX_LOG_SIZE is 10MB');
+
+  const telSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'telemetry', 'telemetry-writer.js'), 'utf8');
+  assert(telSrc.includes('MAX_LOG_SIZE'), 'telemetry-writer defines MAX_LOG_SIZE');
+  assert(telSrc.includes('.rotated-'), 'Log rotation renames to .rotated-');
+  assert(telSrc.includes('stats.size >= MAX_LOG_SIZE'), 'Size check triggers rotation');
+}
+
+// 6h. Phase params for all providers
+{
+  const orchSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'ai-service', 'providers', 'orchestration.js'), 'utf8');
+  assert(orchSrc.includes('callOpenAI(messages, requestOptions)'), 'callProvider passes requestOptions to OpenAI');
+  assert(orchSrc.includes('callAnthropic(messages, requestOptions)'), 'callProvider passes requestOptions to Anthropic');
+  assert(orchSrc.includes('callOllama(messages, requestOptions)'), 'callProvider passes requestOptions to Ollama');
+
+  const aiSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'ai-service.js'), 'utf8');
+  assert(aiSrc.includes('function callOpenAI(messages, requestOptions)'), 'callOpenAI accepts requestOptions');
+  assert(aiSrc.includes('function callAnthropic(messages, requestOptions)'), 'callAnthropic accepts requestOptions');
+  assert(aiSrc.includes('function callOllama(messages, requestOptions)'), 'callOllama accepts requestOptions');
+  assert(aiSrc.includes('requestOptions.temperature'), 'Provider functions use requestOptions.temperature');
+}
+
+// 6i. Reflection trigger functional test — success decays sessionFailureCount
+{
+  const reflectionTrigger = require('../src/main/telemetry/reflection-trigger');
+  reflectionTrigger.resetSession();
+
+  // Pump 2 failures to set sessionFailureCount = 2
+  reflectionTrigger.evaluateOutcome({ task: 'test-decay', phase: 'execution', outcome: 'failure' });
+  reflectionTrigger.evaluateOutcome({ task: 'test-decay-2', phase: 'execution', outcome: 'failure' });
+
+  // Success should decay sessionFailureCount
+  const successResult = reflectionTrigger.evaluateOutcome({ task: 'test-decay-3', phase: 'execution', outcome: 'success' });
+  assert(successResult.shouldReflect === false, 'Success returns shouldReflect=false');
+  assert(successResult.reason === 'success', 'Success reason is "success"');
+
+  // Another success should further decay
+  reflectionTrigger.evaluateOutcome({ task: 'test-decay-4', phase: 'execution', outcome: 'success' });
+
+  // Now only 0 session failures — 3 more failures needed to trigger session threshold
+  const f1 = reflectionTrigger.evaluateOutcome({ task: 'new-task', phase: 'execution', outcome: 'failure' });
+  assert(f1.shouldReflect === false, 'First failure after decay does not trigger reflection');
+
+  reflectionTrigger.resetSession();
+}
+
+// ═══════════════════════════════════════════════════════════
+//  Phase 7: Next-Level Enhancements
+// ═══════════════════════════════════════════════════════════
+console.log('\n--- Phase 7: Next-Level Enhancements ---\n');
+
+// == AWM procedural memory extraction ==
+// Verify ai-service.js has AWM extraction in the success path
+const aiServiceSourceP7 = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'ai-service.js'), 'utf-8');
+assert(aiServiceSourceP7.includes('MIN_STEPS_FOR_PROCEDURE'), 'AWM: MIN_STEPS_FOR_PROCEDURE constant defined');
+assert(aiServiceSourceP7.includes("type: 'procedural'"), 'AWM: procedural memory note written on success');
+assert(aiServiceSourceP7.includes("tags: ['procedure', 'awm', 'success']"), 'AWM: procedure notes tagged with awm');
+assert(aiServiceSourceP7.includes('skillRouter.addSkill(skillId'), 'AWM: auto-registers as skill');
+assert(aiServiceSourceP7.includes("awm-extraction"), 'AWM: source type is awm-extraction');
+
+// == PostToolUse hook ==
+const hookRunnerP7 = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'tools', 'hook-runner.js'), 'utf-8');
+assert(hookRunnerP7.includes('runPostToolUseHook'), 'PostToolUse: function defined in hook-runner');
+assert(hookRunnerP7.includes('PostToolUse'), 'PostToolUse: reads PostToolUse from config');
+assert(hookRunnerP7.includes('resultType'), 'PostToolUse: passes resultType in hook input');
+assert(hookRunnerP7.includes('COPILOT_HOOK_INPUT_PATH'), 'PostToolUse: sets env var');
+
+// Verify hook-runner exports runPostToolUseHook
+const hookRunner = require('../src/main/tools/hook-runner');
+assert(typeof hookRunner.runPostToolUseHook === 'function', 'PostToolUse: runPostToolUseHook exported');
+assert(typeof hookRunner.runPreToolUseHook === 'function', 'PostToolUse: runPreToolUseHook still exported');
+assert(typeof hookRunner.loadHooksConfig === 'function', 'PostToolUse: loadHooksConfig still exported');
+
+// Verify PostToolUse wired into system-automation dynamic_tool case
+const sysAutoP7 = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'system-automation.js'), 'utf-8');
+assert(sysAutoP7.includes('runPostToolUseHook'), 'PostToolUse: wired into system-automation');
+assert(sysAutoP7.includes('runPostToolUseHook(`dynamic_'), 'PostToolUse: called with dynamic_ prefix');
+
+// Verify audit-log.ps1 supports COPILOT_HOOK_INPUT_PATH
+const auditLogPs1 = fs.readFileSync(path.join(__dirname, '..', '.github', 'hooks', 'scripts', 'audit-log.ps1'), 'utf-8');
+assert(auditLogPs1.includes('COPILOT_HOOK_INPUT_PATH'), 'PostToolUse: audit-log.ps1 supports file-based input');
+assert(auditLogPs1.includes('[Console]::In.ReadToEnd()'), 'PostToolUse: audit-log.ps1 still supports stdin');
+
+// == Filter unapproved dynamic tools ==
+const toolRegistrySource = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'tools', 'tool-registry.js'), 'utf-8');
+assert(toolRegistrySource.includes('entry.approved'), 'ToolRegistry: getDynamicToolDefinitions filters by approved');
+// Functional test: register unapproved tool, verify it's excluded from definitions
+const toolRegistryP7 = require('../src/main/tools/tool-registry');
+
+// == CLI subcommands ==
+const cliSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'cli', 'liku.js'), 'utf-8');
+assert(cliSource.includes("memory:"), 'CLI: memory command registered');
+assert(cliSource.includes("skills:"), 'CLI: skills command registered');
+assert(cliSource.includes("tools:"), 'CLI: tools command registered');
+
+// Verify CLI command modules exist and export run()
+const cliMemory = require('../src/cli/commands/memory');
+assert(typeof cliMemory.run === 'function', 'CLI: memory command exports run()');
+const cliSkills = require('../src/cli/commands/skills');
+assert(typeof cliSkills.run === 'function', 'CLI: skills command exports run()');
+const cliTools = require('../src/cli/commands/tools');
+assert(typeof cliTools.run === 'function', 'CLI: tools command exports run()');
+
+// == Telemetry summary analytics ==
+const telemetryWriter = require('../src/main/telemetry/telemetry-writer');
+assert(typeof telemetryWriter.getTelemetrySummary === 'function', 'Telemetry: getTelemetrySummary exported');
+
+// Functional test: call with no data, verify structure
+const emptySummary = telemetryWriter.getTelemetrySummary('1970-01-01');
+assert(emptySummary.total === 0, 'Telemetry summary: empty date returns total=0');
+assert(emptySummary.successes === 0, 'Telemetry summary: empty date returns successes=0');
+assert(emptySummary.successRate === 0, 'Telemetry summary: empty date returns successRate=0');
+assert(typeof emptySummary.byAction === 'object', 'Telemetry summary: byAction is object');
+assert(Array.isArray(emptySummary.topFailures), 'Telemetry summary: topFailures is array');
 
 // ═══════════════════════════════════════════════════════════
 //  Integration — AI Service still loads

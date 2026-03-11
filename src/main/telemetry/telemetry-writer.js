@@ -15,6 +15,7 @@ const path = require('path');
 const { LIKU_HOME } = require('../../shared/liku-home');
 
 const TELEMETRY_DIR = path.join(LIKU_HOME, 'telemetry', 'logs');
+const MAX_LOG_SIZE = 10 * 1024 * 1024; // 10 MB
 
 // ─── Task ID generation ─────────────────────────────────────
 
@@ -47,6 +48,20 @@ function writeTelemetry(payload) {
 
     const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
     const logPath = path.join(TELEMETRY_DIR, `${today}.jsonl`);
+
+    // Rotate log file if it exceeds MAX_LOG_SIZE
+    try {
+      if (fs.existsSync(logPath)) {
+        const stats = fs.statSync(logPath);
+        if (stats.size >= MAX_LOG_SIZE) {
+          const rotatedPath = path.join(TELEMETRY_DIR, `${today}.rotated-${Date.now()}.jsonl`);
+          fs.renameSync(logPath, rotatedPath);
+          console.log(`[Telemetry] Rotated log ${today}.jsonl (${(stats.size / 1024 / 1024).toFixed(1)}MB)`);
+        }
+      }
+    } catch (rotErr) {
+      console.warn('[Telemetry] Log rotation failed (non-fatal):', rotErr.message);
+    }
 
     const record = {
       timestamp: new Date().toISOString(),
@@ -129,6 +144,63 @@ function listTelemetryDates() {
   }
 }
 
+/**
+ * Generate a summary of telemetry data for a given date (or today).
+ * Groups by action type, computes success rates, and highlights top failures.
+ *
+ * @param {string} [date] - Date string (YYYY-MM-DD), defaults to today
+ * @returns {object} Summary with counts, rates, and top failures
+ */
+function getTelemetrySummary(date) {
+  const entries = readTelemetry(date);
+  if (!entries || entries.length === 0) {
+    return { total: 0, successes: 0, failures: 0, successRate: 0, byAction: {}, topFailures: [] };
+  }
+
+  let successes = 0;
+  let failures = 0;
+  const byAction = {};
+  const failureReasons = {};
+
+  for (const entry of entries) {
+    const outcome = entry.outcome || 'unknown';
+    if (outcome === 'success') successes++;
+    else if (outcome === 'failure') failures++;
+
+    // Group by action type
+    const actions = entry.actions || [];
+    for (const action of actions) {
+      const key = action.type || 'unknown';
+      if (!byAction[key]) byAction[key] = { total: 0, success: 0, failure: 0 };
+      byAction[key].total++;
+      if (outcome === 'success') byAction[key].success++;
+      else if (outcome === 'failure') byAction[key].failure++;
+    }
+
+    // Track failure reasons
+    if (outcome === 'failure') {
+      const reason = (entry.context && entry.context.error) || entry.task || 'unknown';
+      const shortReason = reason.slice(0, 100);
+      failureReasons[shortReason] = (failureReasons[shortReason] || 0) + 1;
+    }
+  }
+
+  // Top failures sorted by count
+  const topFailures = Object.entries(failureReasons)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 5)
+    .map(([reason, count]) => ({ reason, count }));
+
+  return {
+    total: entries.length,
+    successes,
+    failures,
+    successRate: entries.length > 0 ? Math.round((successes / entries.length) * 100) : 0,
+    byAction,
+    topFailures
+  };
+}
+
 module.exports = {
   writeTelemetry,
   readTelemetry,
@@ -136,5 +208,7 @@ module.exports = {
   getTodayFailureCount,
   listTelemetryDates,
   generateTaskId,
-  TELEMETRY_DIR
+  getTelemetrySummary,
+  TELEMETRY_DIR,
+  MAX_LOG_SIZE
 };

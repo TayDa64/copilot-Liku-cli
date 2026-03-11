@@ -39,9 +39,10 @@ function evaluateOutcome(telemetryPayload) {
   telemetryWriter.writeTelemetry(telemetryPayload);
 
   if (telemetryPayload.outcome !== 'failure') {
-    // Success resets consecutive failure tracking
-    if (lastTaskType === telemetryPayload.task) {
-      consecutiveFailCount = 0;
+    // Success resets both consecutive and decays session failure tracking
+    consecutiveFailCount = 0;
+    if (sessionFailureCount > 0) {
+      sessionFailureCount = Math.max(0, sessionFailureCount - 1);
     }
     return { shouldReflect: false, reason: 'success', failures: [] };
   }

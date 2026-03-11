@@ -2212,6 +2212,7 @@ async function executeAction(action) {
       case 'dynamic_tool': {
         const toolRegistry = require('./tools/tool-registry');
         const sandbox = require('./tools/sandbox');
+        const { runPreToolUseHook, runPostToolUseHook } = require('./tools/hook-runner');
         const lookup = toolRegistry.lookupTool(action.toolName);
         if (!lookup) {
           throw new Error(`Dynamic tool not found: ${action.toolName}`);
@@ -2219,9 +2220,22 @@ async function executeAction(action) {
         if (!lookup.entry.approved) {
           throw new Error(`Dynamic tool '${action.toolName}' has not been approved. Use approveTool() to approve it before execution.`);
         }
+        // PreToolUse hook gate — security-check.ps1 can deny dynamic tools
+        const hookResult = runPreToolUseHook(`dynamic_${action.toolName}`, action.args || {});
+        if (hookResult.denied) {
+          throw new Error(`Dynamic tool '${action.toolName}' denied by PreToolUse hook: ${hookResult.reason}`);
+        }
         console.log(`[AUTOMATION] Executing dynamic tool: ${action.toolName}`);
         const execResult = sandbox.executeDynamicTool(lookup.absolutePath, action.args || {});
         toolRegistry.recordInvocation(action.toolName);
+        // PostToolUse hook — audit-log.ps1 for execution audit trail
+        try {
+          runPostToolUseHook(`dynamic_${action.toolName}`, action.args || {}, {
+            success: execResult.success,
+            result: execResult.result,
+            error: execResult.error
+          });
+        } catch (_) { /* audit logging is non-fatal */ }
         if (!execResult.success) {
           throw new Error(`Dynamic tool failed: ${execResult.error}`);
         }

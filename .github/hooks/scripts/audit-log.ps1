@@ -1,6 +1,11 @@
 $ErrorActionPreference = "Stop"
 try {
-    $hookInput = [Console]::In.ReadToEnd() | ConvertFrom-Json
+    # Support both COPILOT_HOOK_INPUT_PATH (file-based) and stdin (piped)
+    if ($env:COPILOT_HOOK_INPUT_PATH -and (Test-Path $env:COPILOT_HOOK_INPUT_PATH)) {
+        $hookInput = Get-Content $env:COPILOT_HOOK_INPUT_PATH -Raw | ConvertFrom-Json
+    } else {
+        $hookInput = [Console]::In.ReadToEnd() | ConvertFrom-Json
+    }
     $toolName = $hookInput.toolName
     $toolArgs = $hookInput.toolArgs
     $resultType = $hookInput.toolResult.resultType

@@ -1,3 +1,32 @@
+## Unreleased - 2026-03-11
+
+### Cognitive Layer — Phase 7: Next-Level Enhancements
+- **AWM Procedural Memory Extraction**: Successful multi-step action sequences (3+ steps) are now extracted as procedural memory notes and auto-registered as skills via `skillRouter.addSkill()`. Implements the Agent Workflow Memory (AWM) concept from the plan.
+- **PostToolUse Hook Wiring**: Dynamic tool execution now invokes the `PostToolUse` hook (`audit-log.ps1`) for audit logging after sandbox execution. Updated `audit-log.ps1` to support both `COPILOT_HOOK_INPUT_PATH` (file-based) and stdin input methods.
+- **Unapproved Tool Filtering**: `getDynamicToolDefinitions()` now filters out unapproved tools, preventing the model from seeing tools it cannot execute.
+- **CLI Subcommands**: Added `liku memory`, `liku skills`, and `liku tools` commands for managing agent memory notes, the skill library, and the dynamic tool registry from the command line.
+- **Telemetry Summary Analytics**: Added `getTelemetrySummary(date)` providing success rates, per-action breakdowns, and top failure reasons.
+- Added 30 Phase 7 tests (206 cognitive assertions total, 0 failures).
+
+### Cognitive Layer — Phase 6: Safety Hardening
+- **PreToolUse Hook Enforcement**: New `hook-runner.js` module invokes `.github/hooks/` security scripts before dynamic tool execution. Fails closed on errors.
+- **Bounded Reflection Loop**: Reflection iterations capped at `MAX_REFLECTION_ITERATIONS = 2` to prevent runaway loops.
+- **Session Failure Decay**: `sessionFailureCount` now decays by 1 on each success instead of being monotonically increasing.
+- **Phase Params for All Providers**: `requestOptions` (temperature/top_p from phase params) forwarded to OpenAI, Anthropic, and Ollama providers, not just Copilot.
+- **Execution Phase Signal**: `sendMessage()` now passes `phase: 'execution'` to the provider orchestration layer.
+- **Memory LRU Pruning**: `addNote()` prunes oldest notes when count exceeds `MAX_NOTES` (500).
+- **Telemetry Log Rotation**: Telemetry JSONL files rotate at 10MB with `.rotated-{timestamp}` naming.
+- Added 35 Phase 6 safety tests.
+
+### Cognitive Layer — Phases 0–5: Core Implementation
+- **Phase 0**: Structured `~/.liku/` home directory with migration from `~/.liku-cli/` (copy, not move).
+- **Phase 1**: Agentic Memory (A-MEM) — CRUD for structured notes with Zettelkasten-style linking, keyword relevance, and token-budgeted context injection.
+- **Phase 2**: RLVR Telemetry — Structured telemetry writer, reflection trigger with consecutive/session failure thresholds, phase-aware temperature params (stripped for reasoning models).
+- **Phase 3**: Dynamic Tool Generation — VM sandbox (no fs/process/require), 16 banned patterns, 5s timeout, approval gate, PreToolUse hook enforcement.
+- **Phase 4**: Semantic Skill Router — Keyword-based skill selection, 1500-token budget, max 3 skills, usage tracking.
+- **Phase 5**: Deeper Integration — Cognitive awareness in system prompt, `/memory`/`/skills`/`/tools` slash commands, telemetry wiring in preferences, policy wiring in reflection.
+- 10 new source modules, 11 modified files, 206 cognitive + 29 regression = 235 total assertions across 15 suites.
+
 ## Unreleased - 2026-03-08
 
 ### Copilot Model Capability Separation

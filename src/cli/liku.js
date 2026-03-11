@@ -51,6 +51,9 @@ const COMMANDS = {
   scroll: { desc: 'Scroll up or down', file: 'scroll', args: '<up|down> [amount]' },
   wait: { desc: 'Wait for element to appear', file: 'wait', args: '<text> [timeout]' },
   repl: { desc: 'Interactive automation shell', file: 'repl' },
+  memory: { desc: 'Manage agent memory notes', file: 'memory', args: '[list|show|search|stats]' },
+  skills: { desc: 'Manage the skill library', file: 'skills', args: '[list|search|show]' },
+  tools: { desc: 'Manage dynamic tool registry', file: 'tools', args: '[list|show|approve|revoke]' },
 };
 
 /**

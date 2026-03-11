@@ -918,7 +918,7 @@ async function callCopilot(messages, modelOverride = null, requestOptions = {}) 
 /**
  * Call OpenAI API
  */
-function callOpenAI(messages) {
+function callOpenAI(messages, requestOptions) {
   return new Promise((resolve, reject) => {
     const config = AI_PROVIDERS.openai;
     const hasVision = messages.some(m => Array.isArray(m.content));
@@ -927,7 +927,8 @@ function callOpenAI(messages) {
       model: hasVision ? config.visionModel : config.model,
       messages: messages,
       max_tokens: 2048,
-      temperature: 0.7
+      temperature: (requestOptions && requestOptions.temperature !== undefined) ? requestOptions.temperature : 0.7,
+      ...(requestOptions && requestOptions.top_p !== undefined ? { top_p: requestOptions.top_p } : {})
     });
 
     const options = {
@@ -967,7 +968,7 @@ function callOpenAI(messages) {
 /**
  * Call Anthropic API
  */
-function callAnthropic(messages) {
+function callAnthropic(messages, requestOptions) {
   return new Promise((resolve, reject) => {
     const config = AI_PROVIDERS.anthropic;
     
@@ -979,7 +980,9 @@ function callAnthropic(messages) {
       model: config.model,
       max_tokens: 2048,
       system: systemMsg ? systemMsg.content : '',
-      messages: otherMessages
+      messages: otherMessages,
+      ...(requestOptions && requestOptions.temperature !== undefined ? { temperature: requestOptions.temperature } : {}),
+      ...(requestOptions && requestOptions.top_p !== undefined ? { top_p: requestOptions.top_p } : {})
     });
 
     const options = {
@@ -1021,7 +1024,7 @@ function callAnthropic(messages) {
 /**
  * Call Ollama API (local)
  */
-function callOllama(messages) {
+function callOllama(messages, requestOptions) {
   return new Promise((resolve, reject) => {
     const config = AI_PROVIDERS.ollama;
     
@@ -1037,7 +1040,8 @@ function callOllama(messages) {
           Array.isArray(m.content) ? m.content.map(c => c.text || '').join('\n') : '',
         images: m.images || undefined
       })),
-      stream: false
+      stream: false,
+      ...(requestOptions && requestOptions.temperature !== undefined ? { options: { temperature: requestOptions.temperature } } : {})
     });
 
     const options = {
@@ -1201,7 +1205,8 @@ async function sendMessage(userMessage, options = {}) {
       requiresAutomation: looksLikeAutomationRequest(enhancedMessage) || tagSet.has('browser'),
       preferPlanning: tagSet.has('plan') || tagSet.has('vs code'),
       requiresTools: looksLikeAutomationRequest(enhancedMessage),
-      tags: parsedTags.tags
+      tags: parsedTags.tags,
+      phase: 'execution'
     });
     let response = providerResult.response;
     let effectiveModel = providerResult.effectiveModel;
@@ -3479,9 +3484,46 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
         source: { type: 'execution', timestamp: new Date().toISOString(), outcome: outcomeLabel }
       });
 
-      // Evaluate for reflection trigger (RLVR feedback loop)
+      // AWM — Agent Workflow Memory: extract reusable procedures from successful multi-step sequences
+      const MIN_STEPS_FOR_PROCEDURE = 3;
+      if (outcomeLabel === 'success' && actionSummary.length >= MIN_STEPS_FOR_PROCEDURE) {
+        try {
+          const stepDescriptions = actionSummary.map((a, i) =>
+            `${i + 1}. ${a.type}${a.text ? `: "${a.text}"` : ''}${a.key ? `: ${a.key}` : ''}`
+          ).join('\n');
+          const procedureContent = `Procedure: ${actionData.thought || userMessage || 'multi-step sequence'}\n\nSteps:\n${stepDescriptions}`;
+          const procedureKeywords = extractKeywords(actionData.thought || userMessage || '');
+
+          // Write procedural memory note for future retrieval
+          memoryStore.addNote({
+            type: 'procedural',
+            content: procedureContent,
+            context: userMessage || actionData.thought || '',
+            keywords: procedureKeywords,
+            tags: ['procedure', 'awm', 'success'],
+            source: { type: 'awm-extraction', timestamp: new Date().toISOString(), stepCount: actionSummary.length }
+          });
+
+          // Auto-register as a skill if it has a clear intent (thought field)
+          if (actionData.thought && actionData.thought.length > 10) {
+            const skillId = `awm-${Date.now().toString(36)}`;
+            skillRouter.addSkill(skillId, {
+              keywords: procedureKeywords,
+              tags: ['awm', 'auto-generated'],
+              content: `# ${actionData.thought}\n\n${procedureContent}\n\n_Auto-extracted from successful execution on ${new Date().toISOString()}_`
+            });
+            console.log(`[AI-SERVICE] AWM: Extracted procedure as skill "${skillId}" (${actionSummary.length} steps)`);
+          }
+        } catch (awmErr) {
+          console.warn('[AI-SERVICE] AWM extraction error (non-fatal):', awmErr.message);
+        }
+      }
+
+      // Evaluate for reflection trigger (RLVR feedback loop) — bounded to MAX_REFLECTION_ITERATIONS
+      const MAX_REFLECTION_ITERATIONS = 2;
       if (failedActions.length > 0) {
-        const evaluation = reflectionTrigger.evaluateOutcome({
+        let reflectionIteration = 0;
+        let evaluation = reflectionTrigger.evaluateOutcome({
           task: actionData.thought || userMessage || 'action sequence',
           phase: 'execution',
           outcome: 'failure',
@@ -3489,8 +3531,9 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
           context: { error, failedCount: failedActions.length, totalCount: results.length }
         });
 
-        if (evaluation.shouldReflect) {
-          console.log(`[AI-SERVICE] Reflection triggered: ${evaluation.reason}`);
+        while (evaluation.shouldReflect && reflectionIteration < MAX_REFLECTION_ITERATIONS) {
+          reflectionIteration++;
+          console.log(`[AI-SERVICE] Reflection triggered (iteration ${reflectionIteration}/${MAX_REFLECTION_ITERATIONS}): ${evaluation.reason}`);
           const reflectionPrompt = reflectionTrigger.buildReflectionPrompt(evaluation.failures);
 
           try {
@@ -3504,11 +3547,29 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
 
             if (reflectionResult && reflectionResult.response) {
               reflectionApplied = reflectionTrigger.applyReflectionResult(reflectionResult.response);
-              console.log(`[AI-SERVICE] Reflection result: ${reflectionApplied.action} — ${reflectionApplied.detail}`);
+              console.log(`[AI-SERVICE] Reflection result (iteration ${reflectionIteration}): ${reflectionApplied.action} — ${reflectionApplied.detail}`);
+              // If reflection applied a concrete action, stop iterating
+              if (reflectionApplied.applied) break;
             }
           } catch (reflErr) {
             console.warn('[AI-SERVICE] Reflection AI call failed (non-fatal):', reflErr.message);
+            break;
           }
+
+          // Re-evaluate — if still above threshold, loop will continue
+          if (reflectionIteration < MAX_REFLECTION_ITERATIONS) {
+            evaluation = reflectionTrigger.evaluateOutcome({
+              task: actionData.thought || userMessage || 'action sequence',
+              phase: 'reflection',
+              outcome: 'failure',
+              actions: actionSummary,
+              context: { error, reflectionIteration }
+            });
+          }
+        }
+
+        if (reflectionIteration >= MAX_REFLECTION_ITERATIONS && !reflectionApplied?.applied) {
+          console.warn(`[AI-SERVICE] Reflection exhausted after ${MAX_REFLECTION_ITERATIONS} iterations without resolution`);
         }
       }
     } catch (cogErr) {

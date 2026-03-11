@@ -180,7 +180,9 @@ function listTools() {
  */
 function getDynamicToolDefinitions() {
   const registry = loadRegistry();
-  return Object.entries(registry.tools).map(([name, entry]) => ({
+  return Object.entries(registry.tools)
+    .filter(([, entry]) => entry.approved)
+    .map(([name, entry]) => ({
     type: 'function',
     function: {
       name: `dynamic_${name}`,

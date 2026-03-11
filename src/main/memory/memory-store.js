@@ -25,6 +25,7 @@ const INDEX_FILE = path.join(MEMORY_DIR, 'index.json');
 
 const MEMORY_TOKEN_BUDGET = 2000;
 const DEFAULT_NOTE_LIMIT = 5;
+const MAX_NOTES = 500;
 
 // ─── ULID-lite (monotonic, no dependency) ──────────────────
 
@@ -96,6 +97,32 @@ function deleteNoteFile(id) {
   } catch (err) {
     console.warn(`[Memory] Failed to delete note file ${id}:`, err.message);
   }
+}
+
+// ─── LRU Pruning ────────────────────────────────────────────
+
+/**
+ * Prune oldest notes when the index exceeds MAX_NOTES.
+ * Removes least-recently-updated notes first.
+ */
+function pruneOldNotes() {
+  const index = loadIndex();
+  const noteIds = Object.keys(index.notes || {});
+  if (noteIds.length <= MAX_NOTES) return 0;
+
+  const sortedByAge = noteIds
+    .map(id => ({ id, updatedAt: index.notes[id].updatedAt || index.notes[id].createdAt || '' }))
+    .sort((a, b) => a.updatedAt.localeCompare(b.updatedAt));
+
+  const toRemove = sortedByAge.slice(0, noteIds.length - MAX_NOTES);
+  for (const { id } of toRemove) {
+    deleteNoteFile(id);
+    delete index.notes[id];
+  }
+
+  saveIndex(index);
+  console.log(`[Memory] Pruned ${toRemove.length} old notes (limit: ${MAX_NOTES})`);
+  return toRemove.length;
 }
 
 // ─── Scoring ────────────────────────────────────────────────
@@ -176,6 +203,10 @@ function addNote(noteData) {
   writeNote(note); // re-write with links
 
   saveIndex(index);
+
+  // LRU pruning — keep index within MAX_NOTES
+  pruneOldNotes();
+
   return note;
 }
 
@@ -312,9 +343,11 @@ module.exports = {
   getRelevantNotes,
   getMemoryContext,
   listNotes,
+  pruneOldNotes,
   generateNoteId,
   MEMORY_DIR,
   NOTES_DIR,
   MEMORY_TOKEN_BUDGET,
-  DEFAULT_NOTE_LIMIT
+  DEFAULT_NOTE_LIMIT,
+  MAX_NOTES
 };
