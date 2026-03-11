@@ -10,6 +10,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const gridMath = require('../shared/grid-math');
+const { writeTelemetry } = require('./telemetry/telemetry-writer');
 
 // Action types the AI can request
 const ACTION_TYPES = {
@@ -2208,6 +2209,27 @@ async function executeAction(action) {
         break;
       }
         
+      case 'dynamic_tool': {
+        const toolRegistry = require('./tools/tool-registry');
+        const sandbox = require('./tools/sandbox');
+        const lookup = toolRegistry.lookupTool(action.toolName);
+        if (!lookup) {
+          throw new Error(`Dynamic tool not found: ${action.toolName}`);
+        }
+        if (!lookup.entry.approved) {
+          throw new Error(`Dynamic tool '${action.toolName}' has not been approved. Use approveTool() to approve it before execution.`);
+        }
+        console.log(`[AUTOMATION] Executing dynamic tool: ${action.toolName}`);
+        const execResult = sandbox.executeDynamicTool(lookup.absolutePath, action.args || {});
+        toolRegistry.recordInvocation(action.toolName);
+        if (!execResult.success) {
+          throw new Error(`Dynamic tool failed: ${execResult.error}`);
+        }
+        result.message = `Dynamic tool '${action.toolName}' returned: ${JSON.stringify(execResult.result)}`;
+        result.toolResult = execResult.result;
+        break;
+      }
+        
       default:
         throw new Error(`Unknown action type: ${action.type}`);
     }
@@ -2218,6 +2240,18 @@ async function executeAction(action) {
   }
   
   result.duration = Date.now() - startTime;
+
+  // Write structured telemetry for RLVR feedback loop
+  try {
+    writeTelemetry({
+      task: result.message || action.type,
+      phase: 'execution',
+      outcome: result.success ? 'success' : 'failure',
+      actions: [{ type: action.type, ...(action.text ? { text: action.text } : {}), ...(action.key ? { key: action.key } : {}) }],
+      context: { actionType: action.type, duration: result.duration }
+    });
+  } catch (_) { /* telemetry is non-fatal */ }
+
   return result;
 }
 

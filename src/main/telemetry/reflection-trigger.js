@@ -18,6 +18,7 @@
 
 const telemetryWriter = require('./telemetry-writer');
 const memoryStore = require('../memory/memory-store');
+const { mergeAppPolicy } = require('../preferences');
 
 const CONSECUTIVE_FAIL_THRESHOLD = 2;
 const SESSION_FAIL_THRESHOLD = 3;
@@ -157,17 +158,29 @@ function applyReflectionResult(reflectionResponse) {
       }
 
       case 'negative_policy': {
-        // Negative policies require user approval — record the suggestion
+        // Apply negative policy to preferences AND record as a memory note
         if (result.details && result.details.policyRule) {
+          // Write the policy into preferences if a target process is specified
+          const processName = result.details.processName || result.details.targetApp || '_global';
+          mergeAppPolicy(processName, {
+            negativePolicies: [{
+              rule: result.details.policyRule,
+              reason: result.rootCause || 'Reflection-suggested policy',
+              addedAt: new Date().toISOString(),
+              source: 'reflection'
+            }]
+          }, { updatedBy: 'reflection-trigger' });
+
+          // Also record in memory for contextual retrieval
           memoryStore.addNote({
             type: 'semantic',
-            content: `Suggested negative policy: ${result.details.policyRule}`,
+            content: `Negative policy applied for ${processName}: ${result.details.policyRule}`,
             context: result.rootCause || '',
             keywords: result.details.keywords || [],
-            tags: ['negative-policy', 'reflection'],
+            tags: ['negative-policy', 'reflection', 'applied'],
             source: { type: 'reflection', timestamp: new Date().toISOString() }
           });
-          return { applied: true, action: 'negative_policy_noted', detail: result.details.policyRule };
+          return { applied: true, action: 'negative_policy_applied', detail: result.details.policyRule, processName };
         }
         break;
       }

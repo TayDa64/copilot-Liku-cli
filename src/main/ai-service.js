@@ -41,7 +41,7 @@ const {
   formatActionPolicyViolationSystemMessage,
   formatNegativePolicyViolationSystemMessage
 } = require('./ai-service/policy-enforcement');
-const { LIKU_TOOLS, toolCallsToActions } = require('./ai-service/providers/copilot/tools');
+const { LIKU_TOOLS, toolCallsToActions, getToolDefinitions } = require('./ai-service/providers/copilot/tools');
 const { parseCopilotChatResponse } = require('./ai-service/providers/copilot/chat-response');
 const { shouldAutoContinueResponse } = require('./ai-service/response-heuristics');
 const {
@@ -73,6 +73,7 @@ const { createMessageBuilder } = require('./ai-service/message-builder');
 const { SYSTEM_PROMPT } = require('./ai-service/system-prompt');
 const skillRouter = require('./memory/skill-router');
 const memoryStore = require('./memory/memory-store');
+const reflectionTrigger = require('./telemetry/reflection-trigger');
 
 // ===== ENVIRONMENT DETECTION =====
 const PLATFORM = process.platform; // 'win32', 'darwin', 'linux'
@@ -716,21 +717,30 @@ async function callCopilot(messages, modelOverride = null, requestOptions = {}) 
       console.log(`[Copilot] Model ${activeModelKey} does not advertise tool support; sending plain chat request.`);
     }
 
+    const isReasoningModel = supportsCopilotCapability(activeModelKey, 'reasoning');
+
     const makeRequestBody = (selectedModelId) => {
       const payload = {
         model: selectedModelId,
         messages: messages,
         max_tokens: Number.isFinite(Number(requestOptions?.max_tokens)) ? Number(requestOptions.max_tokens) : 4096,
-        temperature: typeof requestOptions?.temperature === 'number' ? requestOptions.temperature : 0.7,
         stream: true
       };
+
+      // Reasoning models (o1, o3-mini) reject temperature/top_p/top_k — strip them
+      if (!isReasoningModel) {
+        payload.temperature = typeof requestOptions?.temperature === 'number' ? requestOptions.temperature : 0.7;
+        if (typeof requestOptions?.top_p === 'number') {
+          payload.top_p = requestOptions.top_p;
+        }
+      }
 
       if (requestOptions?.response_format) {
         payload.response_format = requestOptions.response_format;
       }
 
       if (toolsEnabledForModel) {
-        payload.tools = LIKU_TOOLS;
+        payload.tools = getToolDefinitions();
         payload.tool_choice = requestOptions?.tool_choice || 'auto';
       } else {
         payload.tool_choice = 'none';
@@ -1070,6 +1080,24 @@ function callOllama(messages) {
     req.write(data);
     req.end();
   });
+}
+
+// Stop-words excluded from keyword extraction
+const STOP_WORDS = new Set(['the','a','an','is','are','was','were','be','been','being','have','has','had',
+  'do','does','did','will','would','shall','should','may','might','can','could','to','of','in','for',
+  'on','with','at','by','from','as','into','through','during','before','after','above','below','and',
+  'but','or','not','no','so','if','then','than','too','very','just','about','up','out','it','its','i','my','me']);
+
+/**
+ * Extract meaningful keywords from a text string for memory tagging.
+ */
+function extractKeywords(text) {
+  if (!text) return [];
+  return text.toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, ' ')
+    .split(/\s+/)
+    .filter(w => w.length > 2 && !STOP_WORDS.has(w))
+    .slice(0, 10);
 }
 
 /**
@@ -1514,6 +1542,73 @@ function handleCommand(command) {
         message: `Provider: ${status.provider}\nConfigured model: ${status.configuredModelName} (${status.configuredModel})\nRequested model: ${status.requestedModel}\nRuntime model: ${runtimeModelLabel}${status.runtimeModel ? ` (${status.runtimeModel})` : ''}\nRuntime endpoint: ${runtimeHostLabel}\nCopilot: ${status.hasCopilotKey ? 'Authenticated' : 'Not authenticated'}\nOpenAI: ${status.hasOpenAIKey ? 'Key set' : 'No key'}\nAnthropic: ${status.hasAnthropicKey ? 'Key set' : 'No key'}\nHistory: ${status.historyLength} messages\nVisual: ${status.visualContextCount} captures`
       };
 
+    case '/memory': {
+      if (parts[1] === 'clear') {
+        const notesMap = memoryStore.listNotes();
+        let removed = 0;
+        for (const id of Object.keys(notesMap)) {
+          memoryStore.removeNote(id);
+          removed++;
+        }
+        return { type: 'system', message: `Cleared ${removed} memory note(s).` };
+      }
+      if (parts[1] === 'search' && parts[2]) {
+        const query = parts.slice(2).join(' ');
+        const notes = memoryStore.getRelevantNotes(query, 5);
+        if (notes.length === 0) {
+          return { type: 'info', message: `No memory notes match "${query}".` };
+        }
+        const list = notes.map(n => `  [${n.type}] ${n.content.slice(0, 80)}${n.content.length > 80 ? '...' : ''}`).join('\n');
+        return { type: 'info', message: `Memory notes matching "${query}":\n${list}` };
+      }
+      // Default: list recent notes
+      const notesMap = memoryStore.listNotes();
+      const allNotes = Object.entries(notesMap);
+      if (allNotes.length === 0) {
+        return { type: 'info', message: 'No memory notes yet. Notes are created automatically from task outcomes and reflections.' };
+      }
+      const recent = allNotes.slice(-10);
+      const list = recent.map(([id, n]) => `  ${id} [${n.type}] ${(n.content || '').slice(0, 60)}${(n.content || '').length > 60 ? '...' : ''}`).join('\n');
+      return { type: 'info', message: `Memory (${allNotes.length} total, showing last ${recent.length}):\n${list}\n\nUse /memory search <query> to find specific notes, /memory clear to reset.` };
+    }
+
+    case '/skills': {
+      const skills = skillRouter.listSkills();
+      const entries = Object.entries(skills);
+      if (entries.length === 0) {
+        return { type: 'info', message: 'No skills registered. Skills are learned procedures that load automatically when relevant.' };
+      }
+      const list = entries.map(([id, s]) =>
+        `  ${id} — keywords: [${(s.keywords || []).join(', ')}] — used: ${s.useCount || 0}x`
+      ).join('\n');
+      return { type: 'info', message: `Registered skills (${entries.length}):\n${list}` };
+    }
+
+    case '/tools': {
+      const toolRegistry = require('./tools/tool-registry');
+      const tools = toolRegistry.listTools();
+      const entries = Object.entries(tools);
+      if (entries.length === 0) {
+        return { type: 'info', message: 'No dynamic tools registered. Tools can be proposed by the AI and require user approval before execution.' };
+      }
+      if (parts[1] === 'approve' && parts[2]) {
+        const result = toolRegistry.approveTool(parts[2]);
+        return result.success
+          ? { type: 'system', message: `Tool '${parts[2]}' approved for execution.` }
+          : { type: 'error', message: result.error };
+      }
+      if (parts[1] === 'revoke' && parts[2]) {
+        const result = toolRegistry.revokeTool(parts[2]);
+        return result.success
+          ? { type: 'system', message: `Tool '${parts[2]}' approval revoked.` }
+          : { type: 'error', message: result.error };
+      }
+      const list = entries.map(([name, t]) =>
+        `  ${name} — ${t.description || 'no description'} — ${t.approved ? '✓ approved' : '✗ unapproved'} — invocations: ${t.invocations || 0}`
+      ).join('\n');
+      return { type: 'info', message: `Dynamic tools (${entries.length}):\n${list}\n\nUse /tools approve <name> or /tools revoke <name> to manage.` };
+    }
+
     case '/help':
       return {
         type: 'info',
@@ -1528,6 +1623,9 @@ function handleCommand(command) {
 /clear - Clear conversation history
 /vision [on|off] - Manage visual context
 /capture - Capture screen for AI analysis
+/memory [search <query>|clear] - View/search/clear long-term memory
+/skills - List learned skills
+/tools [approve|revoke <name>] - Manage dynamic tools
 /help - Show this help`
       };
 
@@ -3357,6 +3455,67 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
     userMessage
   });
 
+  // ===== COGNITIVE FEEDBACK LOOP =====
+  // Write episodic memory + evaluate for reflection (non-fatal wrapping)
+  let reflectionApplied = null;
+  if (!pendingConfirmation) {
+    try {
+      const failedActions = results.filter(r => !r.success);
+      const actionSummary = (actionData.actions || []).map(a => ({
+        type: a.type,
+        ...(a.text ? { text: a.text } : {}),
+        ...(a.key ? { key: a.key } : {})
+      }));
+
+      // Write episodic memory note for significant outcomes
+      const outcomeLabel = (success && !error) ? 'success' : 'failure';
+      memoryStore.addNote({
+        type: 'episodic',
+        content: `Task ${outcomeLabel}: ${actionData.thought || userMessage || 'action sequence'}` +
+          (error ? ` — ${error}` : ''),
+        context: userMessage || actionData.thought || '',
+        keywords: extractKeywords(userMessage || actionData.thought || ''),
+        tags: ['execution', outcomeLabel],
+        source: { type: 'execution', timestamp: new Date().toISOString(), outcome: outcomeLabel }
+      });
+
+      // Evaluate for reflection trigger (RLVR feedback loop)
+      if (failedActions.length > 0) {
+        const evaluation = reflectionTrigger.evaluateOutcome({
+          task: actionData.thought || userMessage || 'action sequence',
+          phase: 'execution',
+          outcome: 'failure',
+          actions: actionSummary,
+          context: { error, failedCount: failedActions.length, totalCount: results.length }
+        });
+
+        if (evaluation.shouldReflect) {
+          console.log(`[AI-SERVICE] Reflection triggered: ${evaluation.reason}`);
+          const reflectionPrompt = reflectionTrigger.buildReflectionPrompt(evaluation.failures);
+
+          try {
+            const reflectionResult = await providerOrchestrator.requestWithFallback(
+              [
+                { role: 'system', content: reflectionPrompt }
+              ],
+              null, // use default model
+              { phase: 'reflection' }
+            );
+
+            if (reflectionResult && reflectionResult.response) {
+              reflectionApplied = reflectionTrigger.applyReflectionResult(reflectionResult.response);
+              console.log(`[AI-SERVICE] Reflection result: ${reflectionApplied.action} — ${reflectionApplied.detail}`);
+            }
+          } catch (reflErr) {
+            console.warn('[AI-SERVICE] Reflection AI call failed (non-fatal):', reflErr.message);
+          }
+        }
+      }
+    } catch (cogErr) {
+      console.warn('[AI-SERVICE] Cognitive feedback loop error (non-fatal):', cogErr.message);
+    }
+  }
+
   return {
     success,
     thought: actionData.thought,
@@ -3367,7 +3526,8 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
     postVerification,
     postVerificationFailed: !!(postVerification.applicable && !postVerification.verified),
     pendingConfirmation,
-    pendingActionId: pendingConfirmation ? getPendingAction()?.actionId : null
+    pendingActionId: pendingConfirmation ? getPendingAction()?.actionId : null,
+    reflectionApplied
   };
 }
 
@@ -3579,5 +3739,9 @@ module.exports = {
   clearSemanticDOMSnapshot,
   // Tool-calling
   LIKU_TOOLS,
-  toolCallsToActions
+  toolCallsToActions,
+  getToolDefinitions,
+  // Cognitive layer (v0.0.15)
+  memoryStore,
+  skillRouter
 };

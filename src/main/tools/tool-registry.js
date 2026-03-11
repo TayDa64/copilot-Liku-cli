@@ -79,6 +79,7 @@ function registerTool(name, { code, description, parameters }) {
     parameters: parameters || {},
     createdBy: 'ai',
     createdAt: new Date().toISOString(),
+    approved: false,
     invocations: 0,
     lastInvokedAt: null
   };
@@ -123,6 +124,33 @@ function lookupTool(name) {
     entry,
     absolutePath: path.join(TOOLS_DIR, entry.file)
   };
+}
+
+/**
+ * Approve a dynamic tool for execution (Phase 3b gate).
+ */
+function approveTool(name) {
+  const registry = loadRegistry();
+  if (!registry.tools[name]) {
+    return { success: false, error: 'Tool not found' };
+  }
+  registry.tools[name].approved = true;
+  registry.tools[name].approvedAt = new Date().toISOString();
+  saveRegistry(registry);
+  return { success: true };
+}
+
+/**
+ * Revoke approval for a dynamic tool.
+ */
+function revokeTool(name) {
+  const registry = loadRegistry();
+  if (!registry.tools[name]) {
+    return { success: false, error: 'Tool not found' };
+  }
+  registry.tools[name].approved = false;
+  saveRegistry(registry);
+  return { success: true };
 }
 
 /**
@@ -175,6 +203,8 @@ module.exports = {
   registerTool,
   unregisterTool,
   lookupTool,
+  approveTool,
+  revokeTool,
   recordInvocation,
   listTools,
   getDynamicToolDefinitions,

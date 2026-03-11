@@ -86,16 +86,18 @@ test('Agent event listener is registered', () => {
 // ===== PHASE 3: RESPONSE CONTINUATION =====
 console.log('\n--- Phase 3: Response Continuation ---\n');
 
-test('detectTruncation function exists', () => {
+test('detectTruncation function exists in response-heuristics', () => {
+  const heuristicsCode = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'ai-service', 'response-heuristics.js'), 'utf8');
+  assert(heuristicsCode.includes('function detectTruncation'), 'Should have detectTruncation function in response-heuristics.js');
   const aiServiceCode = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'ai-service.js'), 'utf8');
-  assert(aiServiceCode.includes('function detectTruncation'), 'Should have detectTruncation function');
+  assert(aiServiceCode.includes('shouldAutoContinueResponse'), 'ai-service.js should import shouldAutoContinueResponse');
 });
 
 test('detectTruncation checks for common truncation signals', () => {
-  const aiServiceCode = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'ai-service.js'), 'utf8');
-  assert(aiServiceCode.includes('```json'), 'Should detect mid-JSON truncation');
-  assert(aiServiceCode.includes('unclosed code block'), 'Should detect unclosed code blocks');
-  assert(aiServiceCode.includes('mid-sentence'), 'Should detect mid-sentence truncation');
+  const heuristicsCode = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'ai-service', 'response-heuristics.js'), 'utf8');
+  assert(heuristicsCode.includes('```json'), 'Should detect mid-JSON truncation');
+  assert(heuristicsCode.includes('truncationSignals'), 'Should aggregate truncation signals');
+  assert(/\(response\.match\(\/```\/g\)/.test(heuristicsCode), 'Should detect unclosed code blocks via bracket count');
 });
 
 test('sendMessage has maxContinuations option', () => {
@@ -105,7 +107,7 @@ test('sendMessage has maxContinuations option', () => {
 
 test('Auto-continuation logic is implemented', () => {
   const aiServiceCode = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'ai-service.js'), 'utf8');
-  assert(aiServiceCode.includes('while (detectTruncation'), 'Should have continuation loop');
+  assert(aiServiceCode.includes('while (shouldAutoContinueResponse'), 'Should have continuation loop using shouldAutoContinueResponse');
   assert(aiServiceCode.includes('Continue from where you left off'), 'Should send continuation prompt');
 });
 

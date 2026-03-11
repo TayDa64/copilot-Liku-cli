@@ -323,6 +323,17 @@ const defs = toolRegistry.getDynamicToolDefinitions();
 assert(defs.length > 0, 'Dynamic tool definitions are generated');
 assert(defs[0].function.name === 'dynamic_test-calculator', 'Tool name has dynamic_ prefix');
 
+// Test approval gate (Phase 3b)
+assert(lookup.entry.approved === false, 'Newly registered tool is unapproved by default');
+const approveResult = toolRegistry.approveTool('test-calculator');
+assert(approveResult.success === true, 'approveTool returns success');
+const approvedLookup = toolRegistry.lookupTool('test-calculator');
+assert(approvedLookup.entry.approved === true, 'Tool is approved after approveTool()');
+assert(typeof approvedLookup.entry.approvedAt === 'string', 'approvedAt timestamp is set');
+const revokeResult = toolRegistry.revokeTool('test-calculator');
+assert(revokeResult.success === true, 'revokeTool returns success');
+assert(toolRegistry.lookupTool('test-calculator').entry.approved === false, 'Tool is unapproved after revokeTool()');
+
 // Cleanup
 toolRegistry.unregisterTool('test-calculator', true);
 assert(toolRegistry.lookupTool('test-calculator') === null, 'Tool was unregistered');
@@ -332,11 +343,109 @@ try { fs.unlinkSync(testToolPath); } catch {}
 try { fs.unlinkSync(infiniteToolPath); } catch {}
 
 // ═══════════════════════════════════════════════════════════
+//  Phase 2b: Reflection Loop Wiring
+// ═══════════════════════════════════════════════════════════
+console.log('\n--- Phase 2b: Reflection Loop Wiring ---\n');
+
+const reflectionTrigger = require('../src/main/telemetry/reflection-trigger');
+
+assert(typeof reflectionTrigger.evaluateOutcome === 'function', 'evaluateOutcome is available for wiring');
+assert(typeof reflectionTrigger.buildReflectionPrompt === 'function', 'buildReflectionPrompt is available for wiring');
+assert(typeof reflectionTrigger.applyReflectionResult === 'function', 'applyReflectionResult is available for wiring');
+assert(typeof reflectionTrigger.resetSession === 'function', 'resetSession is available');
+
+// Verify reflection trigger is wired into ai-service (imported)
+const aiServiceSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'ai-service.js'), 'utf-8');
+assert(aiServiceSource.includes("require('./telemetry/reflection-trigger')"), 'ai-service.js imports reflection-trigger');
+assert(aiServiceSource.includes('reflectionTrigger.evaluateOutcome'), 'ai-service.js calls evaluateOutcome');
+assert(aiServiceSource.includes('reflectionTrigger.buildReflectionPrompt'), 'ai-service.js calls buildReflectionPrompt');
+assert(aiServiceSource.includes('reflectionTrigger.applyReflectionResult'), 'ai-service.js calls applyReflectionResult');
+assert(aiServiceSource.includes('reflectionApplied'), 'executeActions returns reflectionApplied field');
+
+// Verify episodic memory write is wired into executeActions
+assert(aiServiceSource.includes("memoryStore.addNote") && aiServiceSource.includes("type: 'episodic'"), 'executeActions writes episodic memory notes');
+assert(aiServiceSource.includes("tags: ['execution'"), 'Episodic notes are tagged with execution');
+
+// Verify extractKeywords utility
+assert(aiServiceSource.includes('function extractKeywords'), 'extractKeywords helper exists');
+
+// ═══════════════════════════════════════════════════════════
+//  Phase 3b: Dynamic Tool Approval Gate
+// ═══════════════════════════════════════════════════════════
+console.log('\n--- Phase 3b: Dynamic Tool Approval Gate ---\n');
+
+const sysAutoSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'system-automation.js'), 'utf-8');
+assert(sysAutoSource.includes('lookup.entry.approved'), 'system-automation checks approval before sandbox execution');
+assert(sysAutoSource.includes('lookup.absolutePath'), 'system-automation uses correct absolutePath property');
+assert(typeof toolRegistry.approveTool === 'function', 'approveTool is exported from tool-registry');
+assert(typeof toolRegistry.revokeTool === 'function', 'revokeTool is exported from tool-registry');
+
+// ═══════════════════════════════════════════════════════════
+//  Phase 5 — Deeper Integration (Reasoning Model + Slash Commands + Telemetry)
+// ═══════════════════════════════════════════════════════════
+console.log('\n--- Phase 5: Deeper Integration ---\n');
+
+const aiService = require('../src/main/ai-service');
+
+// 5a. Reasoning model temperature stripping in makeRequestBody
+{
+  const aiSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'ai-service.js'), 'utf8');
+  assert(aiSrc.includes("supportsCopilotCapability(activeModelKey, 'reasoning')"), 'makeRequestBody checks for reasoning model capability');
+  assert(aiSrc.includes('if (!isReasoningModel)'), 'Temperature is conditionally omitted for reasoning models');
+}
+
+// 5b. System prompt cognitive awareness
+{
+  const systemPromptSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'ai-service', 'system-prompt.js'), 'utf8');
+  assert(systemPromptSrc.includes('Long-Term Memory'), 'System prompt mentions Long-Term Memory');
+  assert(systemPromptSrc.includes('Skills Library'), 'System prompt mentions Skills Library');
+  assert(systemPromptSrc.includes('Dynamic Tools'), 'System prompt mentions Dynamic Tools');
+  assert(systemPromptSrc.includes('Cognitive Awareness'), 'System prompt has Cognitive Awareness section');
+  assert(systemPromptSrc.includes('Memory Context'), 'System prompt describes Memory Context injection');
+  assert(systemPromptSrc.includes('Relevant Skills'), 'System prompt describes Relevant Skills injection');
+  assert(systemPromptSrc.includes('Reflection'), 'System prompt describes Reflection mechanism');
+}
+
+// 5c. Slash commands exist
+{
+  assert(typeof aiService.handleCommand === 'function', 'handleCommand is available');
+
+  const memoryResult = aiService.handleCommand('/memory');
+  assert(memoryResult !== null && memoryResult.type === 'info', '/memory command returns info response');
+
+  const skillsResult = aiService.handleCommand('/skills');
+  assert(skillsResult !== null && skillsResult.type === 'info', '/skills command returns info response');
+
+  const toolsResult = aiService.handleCommand('/tools');
+  assert(toolsResult !== null && toolsResult.type === 'info', '/tools command returns info response');
+
+  const helpResult = aiService.handleCommand('/help');
+  assert(helpResult.message.includes('/memory'), '/help lists /memory command');
+  assert(helpResult.message.includes('/skills'), '/help lists /skills command');
+  assert(helpResult.message.includes('/tools'), '/help lists /tools command');
+}
+
+// 5d. recordAutoRunOutcome writes telemetry
+{
+  const prefSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'preferences.js'), 'utf8');
+  assert(prefSrc.includes("require('./telemetry/telemetry-writer')"), 'preferences.js imports telemetry-writer');
+  assert(prefSrc.includes("event: 'auto_run_outcome'"), 'recordAutoRunOutcome writes auto_run_outcome telemetry');
+}
+
+// 5e. Reflection negative_policy writes to preferences
+{
+  const reflSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'telemetry', 'reflection-trigger.js'), 'utf8');
+  assert(reflSrc.includes("require('../preferences')"), 'reflection-trigger imports preferences');
+  assert(reflSrc.includes('mergeAppPolicy'), 'negative_policy calls mergeAppPolicy');
+  assert(reflSrc.includes("action: 'negative_policy_applied'"), 'negative_policy returns applied status');
+  assert(reflSrc.includes("source: 'reflection'"), 'Policy records reflection as source');
+}
+
+// ═══════════════════════════════════════════════════════════
 //  Integration — AI Service still loads
 // ═══════════════════════════════════════════════════════════
 console.log('\n--- Integration: AI Service Module ---\n');
 
-const aiService = require('../src/main/ai-service');
 assert(typeof aiService.sendMessage === 'function', 'sendMessage still exported');
 assert(typeof aiService.getStatus === 'function', 'getStatus still exported');
 assert(typeof aiService.handleCommand === 'function', 'handleCommand still exported');

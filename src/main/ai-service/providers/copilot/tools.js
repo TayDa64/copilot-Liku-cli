@@ -174,6 +174,10 @@ const LIKU_TOOLS = [
 ];
 
 function toolCallsToActions(toolCalls) {
+  // Lazy-load to avoid circular dependencies at module level
+  let toolRegistry;
+  try { toolRegistry = require('../../../tools/tool-registry'); } catch { toolRegistry = null; }
+
   return toolCalls.map((tc) => {
     let args;
     try {
@@ -212,12 +216,32 @@ function toolCallsToActions(toolCalls) {
         }
         return { type: 'focus_window', windowHandle: args.windowHandle };
       default:
+        // Check dynamic tool registry (Phase 3 — AutoAct sandbox tools)
+        if (toolRegistry && name.startsWith('dynamic_')) {
+          return { type: 'dynamic_tool', toolName: name.replace('dynamic_', ''), args };
+        }
         return { type: name, ...args };
     }
   });
 }
 
+/**
+ * Return tool definitions including any registered dynamic tools.
+ * Static LIKU_TOOLS are always included; dynamic tools from the registry
+ * are appended at runtime.
+ */
+function getToolDefinitions() {
+  let dynamicDefs = [];
+  try {
+    const toolRegistry = require('../../../tools/tool-registry');
+    dynamicDefs = toolRegistry.getDynamicToolDefinitions();
+  } catch { /* tool-registry not available or empty */ }
+  if (dynamicDefs.length === 0) return LIKU_TOOLS;
+  return [...LIKU_TOOLS, ...dynamicDefs];
+}
+
 module.exports = {
   LIKU_TOOLS,
-  toolCallsToActions
+  toolCallsToActions,
+  getToolDefinitions
 };

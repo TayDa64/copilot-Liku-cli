@@ -14,6 +14,8 @@ function createProviderOrchestrator(dependencies) {
     resolveCopilotModelKey
   } = dependencies;
 
+  const { getPhaseParams } = require('./phase-params');
+
   function getModelCapabilities(modelKey) {
     const entry = modelRegistry()[modelKey] || {};
     if (entry.capabilities) {
@@ -38,7 +40,8 @@ function createProviderOrchestrator(dependencies) {
         preferPlanning: !!includeVisualContextOrOptions.preferPlanning,
         requiresTools: !!includeVisualContextOrOptions.requiresTools,
         explicitRequestedModel: includeVisualContextOrOptions.explicitRequestedModel !== false,
-        tags: Array.isArray(includeVisualContextOrOptions.tags) ? includeVisualContextOrOptions.tags : []
+        tags: Array.isArray(includeVisualContextOrOptions.tags) ? includeVisualContextOrOptions.tags : [],
+        phase: includeVisualContextOrOptions.phase || null
       };
     }
 
@@ -48,7 +51,8 @@ function createProviderOrchestrator(dependencies) {
       preferPlanning: false,
       requiresTools: false,
       explicitRequestedModel: true,
-      tags: []
+      tags: [],
+      phase: null
     };
   }
 
@@ -84,10 +88,10 @@ function createProviderOrchestrator(dependencies) {
     }
   }
 
-  async function callProvider(provider, messages, effectiveModel) {
+  async function callProvider(provider, messages, effectiveModel, requestOptions) {
     switch (provider) {
       case 'copilot':
-        return callCopilot(messages, effectiveModel);
+        return callCopilot(messages, effectiveModel, requestOptions);
       case 'openai':
         return callOpenAI(messages);
       case 'anthropic':
@@ -137,8 +141,8 @@ function createProviderOrchestrator(dependencies) {
     };
   }
 
-  async function invokeProvider(provider, messages, effectiveModel) {
-    const rawResult = await callProvider(provider, messages, effectiveModel);
+  async function invokeProvider(provider, messages, effectiveModel, requestOptions) {
+    const rawResult = await callProvider(provider, messages, effectiveModel, requestOptions);
     return normalizeProviderResult(provider, rawResult, effectiveModel);
   }
 
@@ -206,13 +210,24 @@ function createProviderOrchestrator(dependencies) {
     for (const provider of fallbackChain) {
       try {
         ensureProviderReady(provider);
+        // Compute phase-aware request options (RLVR Phase 2)
+        let requestOptions;
+        if (routingContext.phase) {
+          const capabilities = getModelCapabilities(effectiveModel);
+          requestOptions = getPhaseParams(routingContext.phase, capabilities);
+        }
         if (provider === 'copilot') {
           const resolved = resolveEffectiveCopilotModel(requestedModel, routingContext);
           effectiveModel = resolved.effectiveModel;
           requestedCopilotModel = resolved.requestedModel || requestedCopilotModel;
           routing = resolved.routing || routing;
+          // Re-compute phase params after model resolution (model may have changed)
+          if (routingContext.phase) {
+            const capabilities = getModelCapabilities(effectiveModel);
+            requestOptions = getPhaseParams(routingContext.phase, capabilities);
+          }
         }
-        const result = await invokeProvider(provider, messages, effectiveModel);
+        const result = await invokeProvider(provider, messages, effectiveModel, requestOptions);
         response = result.response;
         effectiveModel = result.effectiveModel;
         requestedCopilotModel = result.requestedModel;

@@ -9,6 +9,7 @@ const fs = require('fs');
 const path = require('path');
 
 const { LIKU_HOME } = require('../shared/liku-home');
+const { writeTelemetry } = require('./telemetry/telemetry-writer');
 const PREFS_FILE = path.join(LIKU_HOME, 'preferences.json');
 
 const EXECUTION_MODE = {
@@ -187,6 +188,16 @@ function recordAutoRunOutcome(processName, success) {
   policy.updatedAt = nowIso();
   prefs.appPolicies[key] = policy;
   savePreferences(prefs);
+
+  // Write structured telemetry for the RLVR feedback loop
+  writeTelemetry({
+    event: 'auto_run_outcome',
+    processName: key,
+    success,
+    demoted,
+    stats: { ...policy.stats },
+    timestamp: nowIso()
+  });
 
   return { success: true, demoted, key, policy };
 }
