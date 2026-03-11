@@ -191,12 +191,10 @@ function recordAutoRunOutcome(processName, success) {
 
   // Write structured telemetry for the RLVR feedback loop
   writeTelemetry({
-    event: 'auto_run_outcome',
-    processName: key,
-    success,
-    demoted,
-    stats: { ...policy.stats },
-    timestamp: nowIso()
+    task: `auto_run:${key}`,
+    phase: 'execution',
+    outcome: success ? 'success' : 'failure',
+    context: { event: 'auto_run_outcome', processName: key, demoted, stats: { ...policy.stats } }
   });
 
   return { success: true, demoted, key, policy };

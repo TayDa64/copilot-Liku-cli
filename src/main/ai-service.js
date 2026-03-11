@@ -74,6 +74,7 @@ const { SYSTEM_PROMPT } = require('./ai-service/system-prompt');
 const skillRouter = require('./memory/skill-router');
 const memoryStore = require('./memory/memory-store');
 const reflectionTrigger = require('./telemetry/reflection-trigger');
+const { runPreToolUseHook, runPostToolUseHook } = require('./tools/hook-runner');
 
 // ===== ENVIRONMENT DETECTION =====
 const PLATFORM = process.platform; // 'win32', 'darwin', 'linux'
@@ -3506,13 +3507,19 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
 
           // Auto-register as a skill if it has a clear intent (thought field)
           if (actionData.thought && actionData.thought.length > 10) {
-            const skillId = `awm-${Date.now().toString(36)}`;
-            skillRouter.addSkill(skillId, {
-              keywords: procedureKeywords,
-              tags: ['awm', 'auto-generated'],
-              content: `# ${actionData.thought}\n\n${procedureContent}\n\n_Auto-extracted from successful execution on ${new Date().toISOString()}_`
-            });
-            console.log(`[AI-SERVICE] AWM: Extracted procedure as skill "${skillId}" (${actionSummary.length} steps)`);
+            // PreToolUse gate — ensure skill creation is permitted by hook policy
+            const hookGate = runPreToolUseHook('awm_create_skill', { thought: actionData.thought, stepCount: actionSummary.length });
+            if (hookGate.denied) {
+              console.log(`[AI-SERVICE] AWM: Skill creation denied by PreToolUse hook: ${hookGate.reason}`);
+            } else {
+              const skillId = `awm-${Date.now().toString(36)}`;
+              skillRouter.addSkill(skillId, {
+                keywords: procedureKeywords,
+                tags: ['awm', 'auto-generated'],
+                content: `# ${actionData.thought}\n\n${procedureContent}\n\n_Auto-extracted from successful execution on ${new Date().toISOString()}_`
+              });
+              console.log(`[AI-SERVICE] AWM: Extracted procedure as skill "${skillId}" (${actionSummary.length} steps)`);
+            }
           }
         } catch (awmErr) {
           console.warn('[AI-SERVICE] AWM extraction error (non-fatal):', awmErr.message);
@@ -3548,6 +3555,13 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
             if (reflectionResult && reflectionResult.response) {
               reflectionApplied = reflectionTrigger.applyReflectionResult(reflectionResult.response);
               console.log(`[AI-SERVICE] Reflection result (iteration ${reflectionIteration}): ${reflectionApplied.action} — ${reflectionApplied.detail}`);
+              // PostToolUse audit for reflection pass
+              try {
+                runPostToolUseHook('reflection_pass', { iteration: reflectionIteration, reason: evaluation.reason }, {
+                  success: !!reflectionApplied.applied,
+                  result: reflectionApplied.action
+                });
+              } catch (_) { /* audit is non-fatal */ }
               // If reflection applied a concrete action, stop iterating
               if (reflectionApplied.applied) break;
             }

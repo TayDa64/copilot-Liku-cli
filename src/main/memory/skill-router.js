@@ -30,7 +30,21 @@ const TOKEN_BUDGET = 1500;
 function loadIndex() {
   try {
     if (fs.existsSync(INDEX_FILE)) {
-      return JSON.parse(fs.readFileSync(INDEX_FILE, 'utf-8'));
+      const raw = JSON.parse(fs.readFileSync(INDEX_FILE, 'utf-8'));
+      // Prune stale entries — remove skills whose files no longer exist (R7)
+      let pruned = false;
+      for (const [id, entry] of Object.entries(raw)) {
+        const skillPath = path.join(SKILLS_DIR, entry.file || `${id}.md`);
+        if (!fs.existsSync(skillPath)) {
+          delete raw[id];
+          pruned = true;
+          console.log(`[SkillRouter] Pruned stale skill: ${id} (file missing)`);
+        }
+      }
+      if (pruned) {
+        try { saveIndex(raw); } catch { /* non-critical */ }
+      }
+      return raw;
     }
   } catch (err) {
     console.warn('[SkillRouter] Failed to read index:', err.message);
@@ -61,14 +75,16 @@ function scoreSkill(entry, messageLower) {
 
   const keywords = entry.keywords || [];
   for (const kw of keywords) {
-    if (messageLower.includes(kw.toLowerCase())) {
+    const escaped = kw.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    if (new RegExp(`\\b${escaped}\\b`).test(messageLower)) {
       score += 2;
     }
   }
 
   const tags = entry.tags || [];
   for (const tag of tags) {
-    if (messageLower.includes(tag.toLowerCase())) {
+    const escaped = tag.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    if (new RegExp(`\\b${escaped}\\b`).test(messageLower)) {
       score += 1;
     }
   }

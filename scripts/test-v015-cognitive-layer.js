@@ -628,6 +628,75 @@ assert(typeof emptySummary.byAction === 'object', 'Telemetry summary: byAction i
 assert(Array.isArray(emptySummary.topFailures), 'Telemetry summary: topFailures is array');
 
 // ═══════════════════════════════════════════════════════════
+//  Phase 8: Audit-Driven Fixes (Telemetry Schema, Staleness,
+//           Hook Wiring, Word-Boundary Scoring, Comment Fix)
+// ═══════════════════════════════════════════════════════════
+console.log('\n--- Phase 8: Audit-Driven Fixes ---\n');
+
+// 8a. recordAutoRunOutcome telemetry schema fix
+{
+  const prefSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'preferences.js'), 'utf8');
+  assert(prefSrc.includes("task: `auto_run:"), 'recordAutoRunOutcome uses task: field');
+  assert(prefSrc.includes("phase: 'execution'"), 'recordAutoRunOutcome uses phase: field');
+  assert(prefSrc.includes("outcome: success ? 'success' : 'failure'"), 'recordAutoRunOutcome maps to outcome: field');
+  assert(prefSrc.includes('context: {'), 'recordAutoRunOutcome puts extras in context: field');
+}
+
+// 8b. Skill index staleness pruning
+{
+  const routerSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'memory', 'skill-router.js'), 'utf8');
+  assert(routerSrc.includes('Pruned stale skill'), 'loadIndex prunes stale skill entries');
+  assert(routerSrc.includes('!fs.existsSync(skillPath)'), 'Staleness check uses fs.existsSync');
+}
+
+// 8c. Skill scoring uses word-boundary regex
+{
+  const routerSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'memory', 'skill-router.js'), 'utf8');
+  assert(routerSrc.includes('new RegExp(`\\\\b${escaped}\\\\b`)'), 'Keyword scoring uses word-boundary regex');
+  // Functional test: substring should NOT match when not a whole word
+  const skillRouter = require('../src/main/memory/skill-router');
+  const testSkillId = `test-wordboundary-${Date.now()}`;
+  skillRouter.addSkill(testSkillId, {
+    keywords: ['click'],
+    tags: ['test'],
+    content: '# Test word boundary matching'
+  });
+  // "click" should match "click the button" but not "clicker game"
+  const matchResult = skillRouter.getRelevantSkillsContext('click the button');
+  assert(matchResult.includes(testSkillId) || matchResult.includes('word boundary'), 'Whole word "click" matches in relevant context');
+  const noMatchResult = skillRouter.getRelevantSkillsContext('autoclicker game');
+  assert(!noMatchResult.includes(testSkillId), 'Substring "click" in "autoclicker" does NOT match');
+  skillRouter.removeSkill(testSkillId);
+}
+
+// 8d. PreToolUse hook wired for AWM skill creation
+{
+  const aiSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'ai-service.js'), 'utf8');
+  assert(aiSrc.includes("runPreToolUseHook('awm_create_skill'"), 'PreToolUse gate before AWM skill creation');
+  assert(aiSrc.includes('hookGate.denied'), 'AWM checks if hook denies skill creation');
+}
+
+// 8e. PostToolUse hook wired for reflection passes
+{
+  const aiSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'ai-service.js'), 'utf8');
+  assert(aiSrc.includes("runPostToolUseHook('reflection_pass'"), 'PostToolUse after reflection pass');
+  assert(aiSrc.includes('iteration: reflectionIteration'), 'Reflection PostToolUse includes iteration info');
+}
+
+// 8f. hook-runner imported in ai-service
+{
+  const aiSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'ai-service.js'), 'utf8');
+  assert(aiSrc.includes("require('./tools/hook-runner')"), 'ai-service imports hook-runner');
+}
+
+// 8g. Trace-writer comment references ~/.liku/ (not ~/.liku-cli/)
+{
+  const twSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'agents', 'trace-writer.js'), 'utf8');
+  assert(twSrc.includes('~/.liku/traces/'), 'trace-writer comment references ~/.liku/ path');
+  assert(!twSrc.includes('~/.liku-cli/traces/'), 'trace-writer does NOT reference stale ~/.liku-cli/ path');
+}
+
+// ═══════════════════════════════════════════════════════════
 //  Integration — AI Service still loads
 // ═══════════════════════════════════════════════════════════
 console.log('\n--- Integration: AI Service Module ---\n');

@@ -2,7 +2,7 @@
  * Agent Trace Writer — persistent JSONL flight recorder
  * 
  * Subscribes to orchestrator events and writes a structured trace log
- * to ~/.liku-cli/traces/<sessionId>.jsonl for post-hoc debugging.
+ * to ~/.liku/traces/<sessionId>.jsonl for post-hoc debugging.
  */
 
 const fs = require('fs');
