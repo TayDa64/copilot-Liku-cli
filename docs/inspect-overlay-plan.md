@@ -1,5 +1,7 @@
 # Inspect Overlay Implementation Plan
 
+> **Design document**: Inspect mode (basic version) is implemented. This plan covers the full vision including verification heatmaps and advanced tooltip metadata. See [QUICKSTART.md](../QUICKSTART.md) for current inspect mode usage.
+
 ## Goal
 Provide a devtools-style inspect layer that shares the same grounding data
 between the user and the AI, improving precision for actionable targets.

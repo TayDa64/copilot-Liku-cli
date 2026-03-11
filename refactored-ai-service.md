@@ -1,5 +1,7 @@
 # Refactored AI Service Plan
 
+> **Active plan**: This document guides the ongoing modularization of `src/main/ai-service.js`. See [ARCHITECTURE.md](ARCHITECTURE.md) for the current internal seam inventory.
+
 ## Purpose
 
 This document defines the implementation plan for refactoring `src/main/ai-service.js` into a modular system without losing any existing functionality.

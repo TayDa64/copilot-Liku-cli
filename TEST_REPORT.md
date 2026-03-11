@@ -1,4 +1,8 @@
-# v0.0.5 Test Report
+# Test Report (Historical)
+
+> **Note**: This file contains historical test snapshots. For the current test suite and how to run it, see [TESTING.md](TESTING.md).
+
+## v0.0.5 Test Report
 
 **Date**: February 3, 2026  
 **Total Tests**: 24  

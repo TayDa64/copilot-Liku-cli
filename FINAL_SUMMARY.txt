@@ -1,13 +1,26 @@
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║                                                                              ║
+║                      ⚠️  HISTORICAL DOCUMENT — ARCHIVAL ONLY                  ║
+║                                                                              ║
+║  This file describes the state of the initial Electron overlay prototype     ║
+║  from January 23, 2026. The project has since evolved into a CLI-first      ║
+║  hybrid tool with multi-provider AI, Windows UIA automation, multi-agent    ║
+║  orchestration, and characterization test infrastructure.                    ║
+║                                                                              ║
+║  For current status see: PROJECT_STATUS.md and IMPLEMENTATION_SUMMARY.md    ║
+║                                                                              ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                                                                              ║
 ║           ELECTRON HEADLESS AGENT + ULTRA-THIN OVERLAY ARCHITECTURE          ║
-║                           IMPLEMENTATION COMPLETE ✅                          ║
+║                  INITIAL BASELINE IMPLEMENTATION COMPLETE ✅                  ║
 ║                                                                              ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 
 PROJECT: copilot-Liku-cli
-STATUS: ✅ COMPLETE - Production Ready
-DATE: January 23, 2026
+STATUS: HISTORICAL — Initial baseline completed January 23, 2026
+DATE: January 23, 2026 (see PROJECT_STATUS.md for current state)
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 

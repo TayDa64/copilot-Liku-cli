@@ -37,23 +37,16 @@ This will:
 Edit `changelog.md` to document all changes:
 
 ```markdown
-## [1.0.0] - 2024-XX-XX
+## 0.0.15 - Liku Edition - 2026-XX-XX
 
 ### Added
 - New CLI commands for automation
-- Global npm installation support
-- Comprehensive documentation
 
 ### Changed
 - Improved error handling
-- Updated dependencies
 
 ### Fixed
 - Fixed issue with PATH on Windows
-- Resolved CLI startup errors
-
-### Breaking Changes
-- Renamed command `foo` to `bar`
 ```
 
 ### 4. Push Changes
@@ -69,8 +62,8 @@ git push origin --tags
 #### Option 1: Via GitHub Web Interface
 
 1. Go to https://github.com/TayDa64/copilot-Liku-cli/releases/new
-2. Select the tag you just created (e.g., `v1.0.0`)
-3. Set release title: `v1.0.0 - Release Name`
+2. Select the tag you just created (e.g., `v0.0.15`)
+3. Set release title: `v0.0.15 - Liku Edition`
 4. Copy release notes from changelog
 5. Mark as pre-release if beta/alpha
 6. Click "Publish release"

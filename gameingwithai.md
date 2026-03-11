@@ -1,21 +1,6 @@
-# Gaming With AI (Copilot-Liku) — Implementation Plan (Brainstorm, Grounded)# Gaming With AI (Copilot-Liku) — Implementation Plan (Brainstorm, Grounded)
+# Gaming With AI (Copilot-Liku) — Implementation Plan
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+> **Forward-looking brainstorm**: This document explores gaming-oriented AI workflows using Liku's verification primitives.
 
 
 

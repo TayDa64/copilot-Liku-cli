@@ -37,17 +37,16 @@ This will:
 
 Document changes in `changelog.md`:
 ```markdown
-## [1.0.0] - 2024-XX-XX
+## 0.0.15 - Liku Edition - 2026-XX-XX
 
 ### Added
-- Global npm installation support
-- Comprehensive installation guides
+- Description of new features
 
 ### Changed
-- Updated package.json with repository metadata
+- Description of changes
 
 ### Fixed
-- Made CLI executable on all platforms
+- Description of fixes
 ```
 
 ### 3. Verify Package Contents
@@ -84,9 +83,21 @@ npm uninstall -g copilot-liku-cli
 
 ### 5. Run Tests
 
-Ensure all tests pass:
+Ensure all characterization and smoke tests pass:
 ```bash
-npm test
+# Smoke suite
+npm run smoke
+
+# AI-service contract stability
+node scripts/test-ai-service-contract.js
+node scripts/test-ai-service-provider-orchestration.js
+node scripts/test-v006-features.js
+node scripts/test-bug-fixes.js
+
+# Hook artifact enforcement
+node scripts/test-hook-artifacts.js
+
+# UI automation baseline
 npm run test:ui
 ```
 

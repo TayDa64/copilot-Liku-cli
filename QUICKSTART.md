@@ -3,9 +3,9 @@
 ## Installation & Setup
 
 ### Prerequisites
-- Node.js v22 or higher
-- npm v10 or higher
-- macOS or Windows operating system
+- Node.js v18 or higher (v22 recommended)
+- npm v9 or higher
+- macOS, Windows, or Linux operating system
 
 ### Install
 
@@ -173,7 +173,7 @@ To interact with screen elements:
 In the chat window:
 1. Type your command in the input field
 2. Press **Enter** or click **"Send"**
-3. The agent (currently a stub) will echo your message
+4. The AI will respond with suggestions or action plans
 4. Messages appear in the chat history
 
 ### 5. Returning to Passive Mode

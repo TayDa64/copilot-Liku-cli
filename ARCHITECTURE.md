@@ -10,7 +10,7 @@ This application implements an Electron-based headless agent system with an ultr
 2. **Non-Intrusive**: Transparent overlay, edge-docked chat, never blocks user workspace
 3. **Performance-First**: Click-through by default, minimal background processing
 4. **Secure**: Context isolation, no Node integration in renderers, CSP headers
-5. **Extensible**: Clean IPC message schema ready for agent integration
+5. **Extensible**: Clean IPC message schema with multi-provider AI service and agent orchestration
 
 ## Multi-Agent Orchestration
 
@@ -164,8 +164,8 @@ This allows internal seams to move without changing the external contract seen b
 ```
 
 **Key Functions:**
-- `generateCoarseGrid()`: Creates 100px spacing grid
-- `generateFineGrid()`: Creates 50px spacing grid
+- `generateCoarseGrid()`: Creates ~100px spacing grid
+- `generateFineGrid()`: Creates ~25px spacing grid
 - `renderDots()`: Renders interactive dots
 - `selectDot()`: Handles dot click events
 - `updateModeDisplay()`: Updates UI based on mode
@@ -367,49 +367,14 @@ All resources loaded locally, no CDN or external dependencies.
 
 ## Extensibility Points
 
-### Agent Integration
-Replace stub in `src/main/index.js`:
-```javascript
-ipcMain.on('chat-message', async (event, message) => {
-  // Call external agent API or worker process
-  const response = await agent.process(message);
-  chatWindow.webContents.send('agent-response', response);
-});
-```
+### AI Service Providers
+New providers can be added by implementing the provider interface in `src/main/ai-service/providers/` and registering in the provider registry. The orchestration layer handles fallback chains and dispatch.
 
-### Custom Grid Patterns
-Add to overlay renderer:
-```javascript
-function generateCustomGrid(pattern) {
-  // Implement custom dot placement logic
-}
-```
+### CLI Commands
+New CLI commands are added as modules in `src/cli/commands/` and registered in the `COMMANDS` table in `src/cli/liku.js`.
 
-### Additional Windows
-Follow pattern:
-```javascript
-function createSettingsWindow() {
-  settingsWindow = new BrowserWindow({
-    webPreferences: {
-      contextIsolation: true,
-      nodeIntegration: false,
-      preload: path.join(__dirname, 'preload.js')
-    }
-  });
-}
-```
-
-### Plugin System (Future)
-```javascript
-// Example plugin interface
-const plugin = {
-  name: 'screen-capture',
-  init: (mainProcess) => {
-    // Register IPC handlers
-    ipcMain.on('capture-screen', plugin.captureScreen);
-  }
-};
-```
+### Agent Roles
+New orchestration roles can be added as agent definition files in `.github/agents/` with corresponding hook policies in `.github/hooks/`.
 
 ## Platform Differences
 
@@ -450,6 +415,12 @@ const plugin = {
 2. Check `contextBridge` exposure
 3. Enable IPC logging in DevTools
 4. Verify correct channel names
+
+### AI Service Issues
+1. Check provider authentication (`/login` or environment variables)
+2. Verify model availability with `/status`
+3. Check capability routing with `/model`
+4. Review conversation state with `/status`
 
 ## Best Practices
 

@@ -205,6 +205,8 @@
 
 ## 0.0.341 - 2025-10-14
 
+> **Note**: Entries below this line are from the upstream GitHub Copilot CLI project. They document the base tool this fork extends.
+
 - Added `/terminal-setup` command to set up multi-line input on terminals not implementing the kitty protocol
 - Fixed a bug where rejecting an MCP tool call would reject all future tool calls (fixes https://github.com/github/copilot-cli/issues/290)
 - Fixed a regression where calling `/model` with an argument did not work properly

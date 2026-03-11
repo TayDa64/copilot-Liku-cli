@@ -2,11 +2,22 @@
 
 ## Current State
 - Status: active development on `main`
-- Package version: `0.0.13`
-- Last implementation date: 2026-03-07
+- Published package version: `0.0.13`
+- Latest tagged version: `0.0.14` (2026-03-07)
+- Unreleased work: 2026-03-08 (capability separation, plan-only routing, UIA prevalidation)
 - Latest local commits:
   - `7fc1698` - fix: choose best action block and rewrite youtube search intents
   - `eaea6c5` - feat: add browser session continuity state
+
+## Delivered Since Last Publish
+
+### Capability-Based Model Routing (Unreleased)
+- Replaced the old vision-only model distinction with a richer capability matrix.
+- Grouped Copilot models into `Agentic Vision`, `Reasoning / Planning`, and `Standard Chat`.
+- Surfaced explicit reroute notices instead of silent model swaps.
+- Added `(plan)` routing to the supervisor in non-destructive plan-only mode.
+- Added live UI target prevalidation before coordinate clicks.
+- Hardened Windows process enumeration (inaccessible `StartTime` no longer crashes).
 
 ## Delivered in This Session
 

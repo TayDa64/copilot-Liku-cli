@@ -1,121 +1,95 @@
-# Electron Headless Agent + Ultra-Thin Overlay
+# Electron Overlay + Chat UI
 
-This is an implementation of an Electron-based application with a headless agent architecture and ultra-thin overlay interface.
+The optional Electron layer provides a visual overlay and chat interface on top of the headless CLI. It is **not required** for CLI commands or `liku chat`.
 
 ## Architecture
 
-The application consists of three main components:
+The Electron app consists of three runtime components:
 
 ### 1. Main Process (`src/main/index.js`)
-- Manages overlay window (transparent, full-screen, always-on-top)
-- Manages chat window (small, edge-docked)
-- Handles system tray icon and context menu
-- Registers global hotkeys:
-  - `Ctrl+Alt+Space` (or `Cmd+Alt+Space` on macOS): Toggle chat window
-  - `Ctrl+Shift+O` (or `Cmd+Shift+O` on macOS): Toggle overlay window
-- Manages IPC communication between windows
+- Window lifecycle management (overlay, chat, tray)
+- IPC router for all inter-window communication
+- Global hotkey registration
+- Visual context capture (full-screen, region, active-window)
+- Action execution pipeline with DPI/coordinate conversion
+- Integration with `ai-service.js` for multi-provider AI
 
-### 2. Overlay Window (`src/renderer/overlay/`)
-- Full-screen, transparent, always-on-top window
-- Click-through by default (passive mode)
-- Displays a coarse grid of dots (100px spacing)
-- In selection mode, dots become interactive
-- Minimal footprint with vanilla JavaScript
+### 2. Overlay Renderer (`src/renderer/overlay/`)
+- Full-screen, transparent, always-on-top, click-through by default
+- Dot grid system (coarse ~100px, fine ~25px) with alphanumeric labels
+- Inspect mode: highlights actionable UI elements using accessibility APIs
+- Region overlays for AI-targeted interactions
+- Pulse feedback animation for executed clicks
 
-### 3. Chat Window (`src/renderer/chat/`)
-- Small window positioned at bottom-right by default
-- Contains:
-  - Chat history display
-  - Mode controls (Passive/Selection)
-  - Input field for commands
-- Hidden by default, shown via hotkey or tray icon
+### 3. Chat Renderer (`src/renderer/chat/`)
+- Edge-docked control surface with message history
+- Provider/model selection UI hydrated from live AI status
+- Capture buttons, action confirmation (Execute/Cancel), and mode controls
+- Supports all slash commands (`/login`, `/model`, `/status`, `/orchestrate`, etc.)
 
-## Installation
+## Launching
 
 ```bash
-npm install
-```
-
-## Running the Application
-
-```bash
+liku start
+# or
 npm start
 ```
 
-## Usage
-
-1. **Launch the application** - The overlay starts in passive mode (click-through)
-2. **Open chat window** - Click tray icon or press `Ctrl+Alt+Space`
-3. **Enable selection mode** - Click "Selection" button in chat window
-4. **Select dots** - Click any dot on the overlay to select it
-5. **Return to passive mode** - Automatically switches back after selection, or click "Passive" button
-
 ## Modes
 
-### Passive Mode
-- Overlay is completely click-through
-- Users can interact with applications normally
-- Overlay is invisible to mouse events
+| Mode | Description |
+| :--- | :--- |
+| **Passive** | Overlay is invisible and click-through. Normal computer use. |
+| **Selection** | Overlay shows interactive dot grid. Click to select coordinates. |
+| **Inspect** | Accessibility-driven UI element highlighting with bounding boxes and tooltips. |
 
-### Selection Mode
-- Overlay captures mouse events
-- Dots become interactive
-- Click dots to select screen positions
-- Automatically returns to passive mode after selection
+## Global Hotkeys
 
-## Platform-Specific Behavior
+| Shortcut | Action |
+| :--- | :--- |
+| `Ctrl+Alt+Space` | Toggle chat window |
+| `Ctrl+Shift+O` | Toggle overlay visibility |
+| `Ctrl+Alt+I` | Toggle inspect mode |
+| `Ctrl+Alt+F` | Toggle fine grid |
+| `Ctrl+Alt+G` | Show all grid levels |
+| `Ctrl+Alt+=` / `-` | Zoom in/out grid |
 
-### macOS
-- Uses `screen-saver` window level to float above fullscreen apps
-- Hides from Dock
-- Tray icon appears in menu bar
+## Coordinate Contract
 
-### Windows
-- Uses standard `alwaysOnTop` behavior
-- Tray icon appears in system tray
-- Works with most windowed applications
+The overlay operates in CSS/DIP space. Automation uses physical pixels. The main process performs all necessary conversions:
 
-## Architecture Benefits
+1. **Dot selection**: overlay CSS coords → main converts to DIP → stored
+2. **Action execution**: AI image-space coords → DIP → physical screen pixels
+3. **Region-resolved actions**: UIA provides physical coords directly, bypass image scaling
+4. **Pulse feedback**: physical coords → converted back to CSS/DIP for overlay rendering
 
-1. **Minimal footprint**: Single overlay renderer with vanilla JS, no heavy frameworks
-2. **Non-intrusive**: Overlay is transparent and sparse; chat is at screen edge
-3. **Performance**: Click-through mode prevents unnecessary event processing
-4. **Extensibility**: IPC message system ready for agent integration
-5. **Cross-platform**: Works on macOS and Windows with appropriate adaptations
+This prevents click drift on HiDPI displays where the scale factor ≠ 1.
 
-## Future Enhancements
+## Capture Flows
 
-- Agent integration (LLM-based reasoning)
-- Screen capture and analysis
-- Fine grid mode for precise targeting
-- Highlight layers for suggested targets
-- Persistent window positioning
-- Custom tray icon
-- Task list implementation
-- Settings panel
+- **Full-screen capture**: hides overlay pre-capture to avoid artifacts
+- **Region capture**: captures a specific ROI
+- **Active-window capture**: captures the focused application window
+- **Streaming mode**: optional continuous active-window capture
 
-## Development
+## Security
 
-The application follows Electron best practices:
-- Context isolation enabled
-- Node integration disabled in renderers
-- Preload scripts for secure IPC
-- Minimal renderer dependencies
-- Single persistent windows (no repeated creation/destruction)
+- `contextIsolation: true` in all renderer windows
+- `nodeIntegration: false` — renderers have no direct Node.js access
+- CSP headers restrict resource loading to `'self'`
+- Preload scripts expose only the minimum required IPC bridges
 
-## File Structure
+## Tray Menu
 
-```
-src/
-├── main/
-│   └── index.js           # Main process
-├── renderer/
-│   ├── overlay/
-│   │   ├── index.html     # Overlay UI
-│   │   └── preload.js     # Overlay IPC bridge
-│   └── chat/
-│       ├── index.html     # Chat UI
-│       └── preload.js     # Chat IPC bridge
-└── assets/
-    └── tray-icon.png      # System tray icon (placeholder)
-```
+Right-click the system tray icon:
+- **Open Chat** — show/hide the chat window
+- **Toggle Overlay** — show/hide the overlay
+- **Quit** — exit the application
+
+## Platform Notes
+
+| Platform | Behavior |
+| :--- | :--- |
+| **macOS** | `screen-saver` window level, hidden from Dock, accessibility permissions required |
+| **Windows** | Standard `alwaysOnTop`, hidden from taskbar, .NET UIA host for native automation |
+| **Linux** | Standard `alwaysOnTop`, AT-SPI2 recommended |

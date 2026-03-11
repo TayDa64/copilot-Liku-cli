@@ -1,5 +1,7 @@
 # GPT Workspace Report
 
+> **Historical snapshot**: This report was generated early in the project and many of the issues described have since been resolved. For current project status, see [PROJECT_STATUS.md](PROJECT_STATUS.md).
+
 ## Current State & Issues
 - Overlay logic was blocked by CSP inline-script; now externalized (`src/renderer/overlay/overlay.js` with `script-src 'self'`), so dots/grid should render again. Tested via CSP check; initial inline error reproduced in logs.
 - Overlay clicks were swallowed because `#overlay-container` had `pointer-events: none`; switched to `pointer-events: auto` so dots can be interacted with. Click-through is now governed by `BrowserWindow#setIgnoreMouseEvents`.

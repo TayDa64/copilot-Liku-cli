@@ -57,7 +57,7 @@
 ### IPC Communication
 - [ ] Dot selection in overlay appears in chat
 - [ ] Mode changes from chat affect overlay
-- [ ] Messages from chat get echoed back (stub agent)
+- [ ] Chat messages route through AI service and return responses
 
 ### Window Management
 - [ ] Overlay stays on top of all windows
@@ -186,59 +186,14 @@ powershell -NoProfile -File scripts/test-hook-artifacts.ps1
 These checks validate the artifact-backed stop-hook path rather than just unit-level helper behavior.
 
 ### Unit Tests (Future)
-```javascript
-// Example test structure
-describe('Overlay Window', () => {
-  it('should create overlay window', () => {
-    // Test window creation
-  });
-  
-  it('should set click-through mode', () => {
-    // Test ignore mouse events
-  });
-  
-  it('should generate dot grid', () => {
-    // Test dot generation
-  });
-});
 
-describe('IPC Communication', () => {
-  it('should send dot selection', () => {
-    // Test IPC message
-  });
-  
-  it('should handle mode changes', () => {
-    // Test mode switching
-  });
-});
-```
+The project currently uses characterization tests and smoke tests rather than a traditional unit test framework. The AI-service characterization tests under `scripts/test-ai-service-*.js` cover contract stability, command handling, provider orchestration, and state management.
+
+A migration to a formal test framework (e.g., `node:test` or `vitest`) is a future goal.
 
 ### Integration Tests (Future)
-```javascript
-const { Application } = require('spectron');
 
-describe('Application Launch', () => {
-  let app;
-  
-  beforeEach(async () => {
-    app = new Application({
-      path: electron,
-      args: [path.join(__dirname, '..')]
-    });
-    await app.start();
-  });
-  
-  afterEach(async () => {
-    if (app && app.isRunning()) {
-      await app.stop();
-    }
-  });
-  
-  it('should show tray icon', async () => {
-    // Test tray presence
-  });
-});
-```
+Full end-to-end integration tests using Electron test runners are planned but not yet in place. Current integration coverage is provided by the smoke suite (`npm run smoke`) which validates 233+ assertions across runtime health, shortcut routing, and command system behavior.
 
 ## Performance Testing
 

@@ -273,7 +273,7 @@ npm install -g copilot-liku-cli
 If you have multiple Node versions installed, ensure you're using the correct one:
 
 ```bash
-node --version    # Should be v22 or higher
+node --version    # Should be v18 or higher (v22 recommended)
 which node        # Shows which Node is in use
 ```
 

@@ -1,5 +1,7 @@
 # Integrated Terminal Architecture for Copilot Liku CLI
 
+> **Design proposal**: The `run_command` action type referenced here is already implemented in `system-automation.js`. This document proposes a further step: an embedded terminal panel within the Electron UI using node-pty + xterm.js.
+
 ## Executive Summary
 
 This document proposes adding an **integrated terminal** to the Copilot Liku CLI Electron app. This eliminates the unreliable approach of opening external terminals via Windows automation (Win+R, SendKeys) and enables the AI to directly execute shell commands within the app.

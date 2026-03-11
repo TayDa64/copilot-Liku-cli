@@ -6,10 +6,10 @@ Thank you for your interest in contributing to Copilot-Liku CLI! This guide will
 
 ### Prerequisites
 
-- **Node.js** v22 or higher
-- **npm** v10 or higher
+- **Node.js** v18 or higher (v22 recommended)
+- **npm** v9 or higher
 - **Git**
-- (On Windows) **PowerShell** v6 or higher
+- (On Windows) **PowerShell** v5.1 or higher; .NET 9 SDK for building the UIA host
 
 ### Initial Setup
 
@@ -52,8 +52,19 @@ liku click "Button"   # Test automation commands
 
 2. **Run existing tests:**
 ```bash
-npm test              # Run test suite
-npm run test:ui       # Run UI automation tests
+# Smoke suite (deterministic, 233+ assertions)
+npm run smoke
+
+# AI-service characterization tests
+node scripts/test-ai-service-contract.js
+node scripts/test-ai-service-commands.js
+node scripts/test-ai-service-provider-orchestration.js
+
+# UI automation baseline
+npm run test:ui
+
+# Hook artifact enforcement
+node scripts/test-hook-artifacts.js
 ```
 
 3. **Manual testing:**
@@ -88,12 +99,22 @@ copilot-Liku-cli/
 │   │   ├── liku.js       # Main CLI entry point
 │   │   ├── commands/     # Command implementations
 │   │   └── util/         # CLI utilities
-│   ├── main/             # Electron main process
-│   ├── renderer/         # Electron renderer process
-│   └── shared/           # Shared utilities
-├── scripts/              # Build and test scripts
+│   ├── main/             # Electron main process + AI service
+│   │   ├── index.js      # Electron app entry
+│   │   ├── ai-service.js # AI service compatibility facade
+│   │   ├── ai-service/   # Extracted AI service modules
+│   │   ├── ui-automation/ # UI automation API
+│   │   └── system-automation.js # Action execution
+│   ├── native/           # Native host (.NET UIA)
+│   ├── renderer/         # Electron renderer processes
+│   └── shared/           # Shared utilities (grid-math, etc.)
+├── scripts/              # Build, test, and smoke scripts
 ├── docs/                 # Additional documentation
-└── package.json          # Package configuration with bin entry
+├── .github/
+│   ├── agents/           # Multi-agent role definitions
+│   └── hooks/            # Hook enforcement scripts
+├── ultimate-ai-system/   # ESM monorepo (stream parser, VS Code ext)
+└── package.json
 ```
 
 ### Making Changes
