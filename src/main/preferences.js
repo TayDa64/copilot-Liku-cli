@@ -7,9 +7,8 @@
 
 const fs = require('fs');
 const path = require('path');
-const os = require('os');
 
-const LIKU_HOME = path.join(os.homedir(), '.liku-cli');
+const { LIKU_HOME } = require('../shared/liku-home');
 const PREFS_FILE = path.join(LIKU_HOME, 'preferences.json');
 
 const EXECUTION_MODE = {

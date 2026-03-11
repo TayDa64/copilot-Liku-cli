@@ -7,9 +7,9 @@
 
 const fs = require('fs');
 const path = require('path');
-const os = require('os');
 
-const TRACE_DIR = path.join(os.homedir(), '.liku-cli', 'traces');
+const { LIKU_HOME } = require('../../shared/liku-home');
+const TRACE_DIR = path.join(LIKU_HOME, 'traces');
 
 class TraceWriter {
   constructor(orchestrator) {

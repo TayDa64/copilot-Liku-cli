@@ -238,6 +238,11 @@ async function executeCommand(name, cmdArgs, flags, options) {
  * Main entry point
  */
 async function main() {
+  // Bootstrap ~/.liku/ directory structure before any command runs
+  const { ensureLikuStructure, migrateIfNeeded } = require('../shared/liku-home');
+  ensureLikuStructure();
+  migrateIfNeeded();
+
   const { command, args, flags, options } = parseArgs(process.argv);
 
   // Handle global flags

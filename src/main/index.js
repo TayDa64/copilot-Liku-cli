@@ -99,10 +99,13 @@ const inspectService = require('./inspect-service.js');
 const { UIProvider } = require('./ui-automation/core/ui-provider.js');
 
 
-// Persistent app data lives in ~/.liku-cli/ so sessions, tokens, and
-// preferences survive across reboots.  Ephemeral caches stay in tempdir.
-const LIKU_HOME = path.join(os.homedir(), '.liku-cli');
-const userDataPath = path.join(LIKU_HOME, 'session');
+// Persistent app data lives in ~/.liku/ (config, memory, skills, telemetry).
+// Electron session data stays in ~/.liku-cli/session/ to avoid Chromium lock issues.
+const { LIKU_HOME, LIKU_HOME_OLD, ensureLikuStructure, migrateIfNeeded } = require('../shared/liku-home');
+ensureLikuStructure();
+migrateIfNeeded();
+
+const userDataPath = path.join(LIKU_HOME_OLD, 'session');
 const cacheRoot = path.join(os.tmpdir(), 'copilot-liku-cache');
 const mediaCache = path.join(cacheRoot, 'media');
 

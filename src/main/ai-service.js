@@ -71,6 +71,8 @@ const {
 } = require('./ai-service/visual-context');
 const { createMessageBuilder } = require('./ai-service/message-builder');
 const { SYSTEM_PROMPT } = require('./ai-service/system-prompt');
+const skillRouter = require('./memory/skill-router');
+const memoryStore = require('./memory/memory-store');
 
 // ===== ENVIRONMENT DETECTION =====
 const PLATFORM = process.platform; // 'win32', 'darwin', 'linux'
@@ -108,8 +110,12 @@ const {
   setProvider: setActiveProvider
 } = providerRegistry;
 
-// Token persistence path — lives inside ~/.liku-cli/ alongside Electron userData
-const LIKU_HOME = path.join(os.homedir(), '.liku-cli');
+// Token persistence path — lives inside ~/.liku/
+const { LIKU_HOME, ensureLikuStructure, migrateIfNeeded } = require('../shared/liku-home');
+
+// Bootstrap home directory on module load
+ensureLikuStructure();
+migrateIfNeeded();
 const TOKEN_FILE = path.join(LIKU_HOME, 'copilot-token.json');
 
 // OAuth state
@@ -1135,6 +1141,26 @@ async function sendMessage(userMessage, options = {}) {
     ...(Array.isArray(extraSystemMessages) ? extraSystemMessages : []),
     ...parsedTags.extraSystemMessages
   ];
+
+  // Inject relevant skills into system prompt (Phase 4 — Semantic Skill Router)
+  try {
+    const skillsContext = skillRouter.getRelevantSkillsContext(enhancedMessage);
+    if (skillsContext) {
+      baseExtraSystemMessages.push(skillsContext);
+    }
+  } catch (err) {
+    console.warn('[AI] Skill router error (non-fatal):', err.message);
+  }
+
+  // Inject relevant memory notes (Phase 1 — Agentic Memory)
+  try {
+    const memoryContext = memoryStore.getMemoryContext(enhancedMessage);
+    if (memoryContext) {
+      baseExtraSystemMessages.push(memoryContext);
+    }
+  } catch (err) {
+    console.warn('[AI] Memory store error (non-fatal):', err.message);
+  }
 
   // Build messages with optional visual context
   const messages = await buildMessages(enhancedMessage, includeVisualContext, {
