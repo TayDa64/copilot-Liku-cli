@@ -887,6 +887,12 @@ async function run(args, flags) {
   try {
     await runChatLoop(ai, flags);
   } finally {
+    // N4: Save session summary as episodic memory note on exit
+    try {
+      if (typeof ai.saveSessionNote === 'function') {
+        ai.saveSessionNote();
+      }
+    } catch {}
     if (watcher && watcherStartedByChat) {
       try { watcher.stop(); } catch {}
     }

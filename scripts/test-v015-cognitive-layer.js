@@ -804,6 +804,218 @@ console.log('\n--- Phase 9: Design-Level Hardening ---\n');
 }
 
 // ═══════════════════════════════════════════════════════════
+//  Phase 10 — N3: End-to-End Dynamic Tool Smoke Test
+// ═══════════════════════════════════════════════════════════
+console.log('\n--- Phase 10: E2E Dynamic Tool Pipeline (N3) ---\n');
+
+// 10a-10h run as async tests because sandbox uses child_process.fork
+async function runE2ESmokeTests() {
+  const toolRegistry = require('../src/main/tools/tool-registry');
+  const sandbox = require('../src/main/tools/sandbox');
+  const telemetryWriter = require('../src/main/telemetry/telemetry-writer');
+
+  // 10a. Clean up any leftover test tool from previous runs
+  try { toolRegistry.unregisterTool('e2e-fibonacci', true); } catch {}
+
+  // 10b. Propose a Fibonacci tool (quarantine)
+  const fibCode = `
+    function fib(n) { return n <= 1 ? n : fib(n - 1) + fib(n - 2); }
+    result = fib(args.n || 10);
+  `;
+  const proposal = toolRegistry.proposeTool('e2e-fibonacci', {
+    code: fibCode,
+    description: 'Calculate Fibonacci number',
+    parameters: { n: 'number' }
+  });
+  assert(proposal.success === true, '10a. proposeTool succeeds');
+  assert(proposal.proposalPath && proposal.proposalPath.includes('proposed'), '10b. tool is in proposed/ quarantine');
+
+  // 10c. Tool is visible in proposals
+  const proposals = toolRegistry.listProposals();
+  assert(proposals['e2e-fibonacci'] !== undefined, '10c. tool appears in listProposals');
+  assert(proposals['e2e-fibonacci'].status === 'proposed', '10c. tool status is proposed');
+
+  // 10d. Tool lookup resolves but is NOT approved
+  const beforeApproval = toolRegistry.lookupTool('e2e-fibonacci');
+  assert(beforeApproval !== null, '10d. lookupTool finds proposed tool');
+  assert(beforeApproval.entry.approved === false, '10d. tool is not yet approved');
+
+  // 10e. Approve (promote from proposed/ to dynamic/)
+  const approveResult = toolRegistry.approveTool('e2e-fibonacci');
+  assert(approveResult.success === true, '10e. approveTool succeeds');
+
+  // 10f. After approval, tool is in dynamic/ and approved
+  const afterApproval = toolRegistry.lookupTool('e2e-fibonacci');
+  assert(afterApproval.entry.approved === true, '10f. tool is approved after promotion');
+  assert(afterApproval.entry.status === 'active', '10f. tool status is active');
+  assert(afterApproval.absolutePath.includes('dynamic'), '10f. tool file is in dynamic/ directory');
+  assert(fs.existsSync(afterApproval.absolutePath), '10f. tool file exists on disk');
+
+  // 10g. Execute in sandbox (child_process.fork → vm.Script → IPC result)
+  const execResult = await sandbox.executeDynamicTool(afterApproval.absolutePath, { n: 10 });
+  assert(execResult.success === true, '10g. sandbox execution succeeds');
+  assert(execResult.result === 55, '10g. Fibonacci(10) = 55 (correct result)');
+
+  // 10h. Record invocation + write telemetry, verify telemetry exists
+  toolRegistry.recordInvocation('e2e-fibonacci');
+  const afterExec = toolRegistry.lookupTool('e2e-fibonacci');
+  assert(afterExec.entry.invocations >= 1, '10h. invocation count incremented');
+
+  telemetryWriter.writeTelemetry({
+    task: 'e2e-fibonacci-test',
+    phase: 'execution',
+    outcome: 'success',
+    context: { event: 'e2e_smoke_test', result: 55 }
+  });
+  const todayEntries = telemetryWriter.readTelemetry();
+  const fibEntry = todayEntries.find(e => e.task === 'e2e-fibonacci-test');
+  assert(fibEntry !== undefined, '10h. telemetry entry written for E2E test');
+  assert(fibEntry.outcome === 'success', '10h. telemetry outcome is success');
+
+  // 10i. Clean up
+  toolRegistry.unregisterTool('e2e-fibonacci', true);
+  assert(toolRegistry.lookupTool('e2e-fibonacci') === null, '10i. tool cleaned up after E2E test');
+}
+
+// ═══════════════════════════════════════════════════════════
+//  Phase 11 — N1-T2: TF-IDF Skill Routing
+// ═══════════════════════════════════════════════════════════
+console.log('\n--- Phase 11: TF-IDF Skill Routing (N1-T2) ---\n');
+
+// 11a. tokenize
+const tfidfTokenize = skillRouter.tokenize;
+assert(typeof tfidfTokenize === 'function', '11a. tokenize exported');
+const tokens = tfidfTokenize('Hello, world! How are you today?');
+assert(Array.isArray(tokens), '11a. tokenize returns array');
+assert(tokens.includes('hello'), '11a. tokenize lowercases');
+assert(tokens.includes('world'), '11a. tokenize strips punctuation');
+assert(!tokens.includes(''), '11a. no empty tokens');
+
+// 11b. termFrequency
+const tf = skillRouter.termFrequency(['cat', 'dog', 'cat']);
+assert(typeof tf === 'object', '11b. termFrequency returns object');
+assert(Math.abs(tf.cat - 2/3) < 0.001, '11b. tf(cat) ≈ 0.667');
+assert(Math.abs(tf.dog - 1/3) < 0.001, '11b. tf(dog) ≈ 0.333');
+
+// 11c. inverseDocFrequency
+const idf = skillRouter.inverseDocFrequency([
+  { cat: 0.5, dog: 0.5 },
+  { cat: 0.5, fish: 0.5 }
+]);
+assert(idf.cat === 0, '11c. idf(cat) = 0 (appears in all docs)');
+assert(idf.dog > 0, '11c. idf(dog) > 0 (appears in 1 doc)');
+assert(idf.fish > 0, '11c. idf(fish) > 0 (appears in 1 doc)');
+
+// 11d. cosineSimilarity
+const sim1 = skillRouter.cosineSimilarity({ a: 1, b: 0 }, { a: 1, b: 0 });
+assert(Math.abs(sim1 - 1) < 0.001, '11d. identical vectors → similarity 1');
+const sim2 = skillRouter.cosineSimilarity({ a: 1 }, { b: 1 });
+assert(sim2 === 0, '11d. orthogonal vectors → similarity 0');
+
+// 11e. tfidfScores with real skill index
+const testIndex = {
+  'deploy-aws': { keywords: ['deploy', 'aws', 'lambda', 'cloud'], tags: ['devops'] },
+  'react-hooks': { keywords: ['react', 'hooks', 'useState', 'useEffect'], tags: ['frontend'] },
+  'database-sql': { keywords: ['database', 'sql', 'query', 'postgres'], tags: ['backend'] }
+};
+const deployScores = skillRouter.tfidfScores(testIndex, 'how do I deploy to AWS lambda?');
+assert(deployScores instanceof Map, '11e. tfidfScores returns Map');
+assert(deployScores.has('deploy-aws'), '11e. deploy-aws matched');
+// deploy-aws should score highest because "deploy", "aws", "lambda" all match
+const awsScore = deployScores.get('deploy-aws') || 0;
+const reactScore = deployScores.get('react-hooks') || 0;
+assert(awsScore > reactScore, '11e. deploy-aws scores higher than react-hooks for deploy query');
+
+// 11f. TF-IDF integration with getRelevantSkillsContext
+// Add test skills, query, verify TF-IDF boosting works
+const tfidfSkillContent = '# AWS Deployment\nDeploy serverless functions to AWS Lambda using SAM.';
+skillRouter.addSkill('tfidf-test-aws', {
+  keywords: ['deploy', 'aws', 'lambda'],
+  tags: ['devops'],
+  content: tfidfSkillContent
+});
+skillRouter.addSkill('tfidf-test-react', {
+  keywords: ['react', 'component'],
+  tags: ['frontend'],
+  content: '# React Guide\nBuild React components with hooks.'
+});
+
+const ctx = skillRouter.getRelevantSkillsContext('deploy to aws lambda');
+assert(typeof ctx === 'string', '11f. getRelevantSkillsContext returns string');
+assert(ctx.includes('tfidf-test-aws'), '11f. TF-IDF boosted AWS skill is returned');
+
+// Clean up
+skillRouter.removeSkill('tfidf-test-aws');
+skillRouter.removeSkill('tfidf-test-react');
+
+// ═══════════════════════════════════════════════════════════
+//  Phase 12 — N4: Session Persistence
+// ═══════════════════════════════════════════════════════════
+console.log('\n--- Phase 12: Session Persistence (N4) ---\n');
+
+// 12a. saveSessionNote is exported
+assert(typeof aiService.saveSessionNote === 'function', '12a. saveSessionNote exported from ai-service');
+
+// 12b. saveSessionNote with no history returns null (nothing to save)
+// Note: In a fresh test context, history may be empty
+const sessionResult = aiService.saveSessionNote();
+// It's ok if it's null (empty history) or a note object (if there's previous history)
+assert(sessionResult === null || (sessionResult && sessionResult.id), '12b. saveSessionNote returns null or note');
+
+// ═══════════════════════════════════════════════════════════
+//  Phase 13 — N6: Cross-Model Reflection
+// ═══════════════════════════════════════════════════════════
+console.log('\n--- Phase 13: Cross-Model Reflection (N6) ---\n');
+
+// 13a. setReflectionModel / getReflectionModel exported
+assert(typeof aiService.setReflectionModel === 'function', '13a. setReflectionModel exported');
+assert(typeof aiService.getReflectionModel === 'function', '13a. getReflectionModel exported');
+
+// 13b. Default is null
+assert(aiService.getReflectionModel() === null, '13b. default reflection model is null');
+
+// 13c. Set and get
+aiService.setReflectionModel('o3-mini');
+assert(aiService.getReflectionModel() === 'o3-mini', '13c. reflection model set to o3-mini');
+
+// 13d. Clear
+aiService.setReflectionModel(null);
+assert(aiService.getReflectionModel() === null, '13d. reflection model cleared');
+
+// 13e. /rmodel command
+const rmodelResult = aiService.handleCommand('/rmodel');
+assert(rmodelResult !== null, '13e. /rmodel command recognized');
+assert(rmodelResult.type === 'info', '13e. /rmodel shows info');
+assert(rmodelResult.message.includes('default'), '13e. /rmodel message shows default state');
+
+const rmodelSetResult = aiService.handleCommand('/rmodel o1');
+assert(rmodelSetResult.type === 'system', '13e. /rmodel o1 sets model');
+assert(aiService.getReflectionModel() === 'o1', '13e. reflection model now o1');
+
+const rmodelOffResult = aiService.handleCommand('/rmodel off');
+assert(rmodelOffResult.type === 'system', '13e. /rmodel off clears');
+assert(aiService.getReflectionModel() === null, '13e. reflection model back to null');
+
+// ═══════════════════════════════════════════════════════════
+//  Phase 14 — N5: Analytics CLI Command
+// ═══════════════════════════════════════════════════════════
+console.log('\n--- Phase 14: Analytics CLI Command (N5) ---\n');
+
+// 14a. Analytics module loads
+const analyticsCmd = require('../src/cli/commands/analytics');
+assert(typeof analyticsCmd.run === 'function', '14a. analytics command has run function');
+assert(typeof analyticsCmd.showHelp === 'function', '14a. analytics command has showHelp function');
+
+// 14b. Analytics can run (produces result for today — we wrote telemetry in Phase 10)
+async function runAnalyticsTests() {
+  const result = await analyticsCmd.run([], { days: 1 });
+  assert(result.success === true, '14b. analytics returns success');
+  assert(typeof result.count === 'number', '14b. analytics returns count');
+  // We wrote at least one telemetry entry in Phase 10
+  assert(result.count >= 1, '14b. analytics finds at least 1 entry');
+}
+
+// ═══════════════════════════════════════════════════════════
 //  Integration — AI Service still loads
 // ═══════════════════════════════════════════════════════════
 console.log('\n--- Integration: AI Service Module ---\n');
@@ -816,6 +1028,10 @@ assert(typeof aiService.handleCommand === 'function', 'handleCommand still expor
 //  Summary (after async sandbox tests complete)
 // ═══════════════════════════════════════════════════════════
 runAsyncSandboxTests().then(() => {
+  return runE2ESmokeTests();
+}).then(() => {
+  return runAnalyticsTests();
+}).then(() => {
   console.log(`\n========================================`);
   console.log(`  v0.0.15 Cognitive Layer Test Summary`);
   console.log(`========================================`);

@@ -60,6 +60,102 @@ function saveIndex(index) {
   fs.writeFileSync(INDEX_FILE, JSON.stringify(index, null, 2), 'utf-8');
 }
 
+// ─── TF-IDF Scoring ────────────────────────────────────────
+
+/**
+ * Tokenize text into lowercase terms, stripping punctuation.
+ * Returns an array of terms (words with length >= 2).
+ */
+function tokenize(text) {
+  return (text || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(t => t.length >= 2);
+}
+
+/**
+ * Compute term frequency map for a token array.
+ * Returns { term: frequency } where frequency = count / totalTokens.
+ */
+function termFrequency(tokens) {
+  const counts = {};
+  for (const t of tokens) counts[t] = (counts[t] || 0) + 1;
+  const total = tokens.length || 1;
+  const tf = {};
+  for (const [term, count] of Object.entries(counts)) tf[term] = count / total;
+  return tf;
+}
+
+/**
+ * Build IDF map from an array of TF maps.
+ * idf(term) = log(N / df(term)) where df = number of docs containing term.
+ */
+function inverseDocFrequency(tfMaps) {
+  const N = tfMaps.length || 1;
+  const df = {};
+  for (const tf of tfMaps) {
+    for (const term of Object.keys(tf)) df[term] = (df[term] || 0) + 1;
+  }
+  const idf = {};
+  for (const [term, count] of Object.entries(df)) idf[term] = Math.log(N / count);
+  return idf;
+}
+
+/**
+ * Convert a TF map into a TF-IDF vector using the given IDF map.
+ */
+function tfidfVector(tf, idf) {
+  const vec = {};
+  for (const [term, freq] of Object.entries(tf)) {
+    vec[term] = freq * (idf[term] || 0);
+  }
+  return vec;
+}
+
+/**
+ * Cosine similarity between two sparse vectors.
+ */
+function cosineSimilarity(a, b) {
+  let dot = 0, magA = 0, magB = 0;
+  for (const term of Object.keys(a)) {
+    magA += a[term] * a[term];
+    if (b[term]) dot += a[term] * b[term];
+  }
+  for (const val of Object.values(b)) magB += val * val;
+  if (magA === 0 || magB === 0) return 0;
+  return dot / (Math.sqrt(magA) * Math.sqrt(magB));
+}
+
+/**
+ * Score all skills using TF-IDF cosine similarity against the query.
+ * Returns Map<id, similarity> for entries with similarity > 0.
+ */
+function tfidfScores(index, queryText) {
+  const entries = Object.entries(index);
+  if (entries.length === 0) return new Map();
+
+  // Build document text for each skill: keywords + tags + id
+  const docTexts = entries.map(([id, entry]) =>
+    [id, ...(entry.keywords || []), ...(entry.tags || [])].join(' ')
+  );
+
+  // Compute TF for each doc + query
+  const docTFs = docTexts.map(t => termFrequency(tokenize(t)));
+  const queryTF = termFrequency(tokenize(queryText));
+
+  // IDF from the corpus (docs only, not query)
+  const idf = inverseDocFrequency(docTFs);
+
+  // TF-IDF vectors
+  const queryVec = tfidfVector(queryTF, idf);
+
+  const scores = new Map();
+  entries.forEach(([id], i) => {
+    const docVec = tfidfVector(docTFs[i], idf);
+    const sim = cosineSimilarity(queryVec, docVec);
+    if (sim > 0) scores.set(id, sim);
+  });
+
+  return scores;
+}
+
 // ─── Scoring ────────────────────────────────────────────────
 
 /**
@@ -116,9 +212,16 @@ function getRelevantSkillsContext(userMessage, limit) {
   limit = limit || DEFAULT_LIMIT;
   const messageLower = userMessage.toLowerCase();
 
-  // Score and rank
+  // TF-IDF cosine similarity scores (Tier 2)
+  const tfidf = tfidfScores(index, userMessage);
+
+  // Combined score: keyword match + TF-IDF similarity (scaled up)
   const scored = entries
-    .map(([id, entry]) => ({ id, entry, score: scoreSkill(entry, messageLower) }))
+    .map(([id, entry]) => {
+      const keywordScore = scoreSkill(entry, messageLower);
+      const semanticScore = (tfidf.get(id) || 0) * 5; // scale to comparable range
+      return { id, entry, score: keywordScore + semanticScore };
+    })
     .filter(s => s.score > 0)
     .sort((a, b) => b.score - a.score)
     .slice(0, limit);
@@ -214,6 +317,13 @@ module.exports = {
   addSkill,
   removeSkill,
   listSkills,
+  // TF-IDF internals (exported for testing)
+  tokenize,
+  termFrequency,
+  inverseDocFrequency,
+  tfidfVector,
+  cosineSimilarity,
+  tfidfScores,
   SKILLS_DIR,
   TOKEN_BUDGET,
   DEFAULT_LIMIT

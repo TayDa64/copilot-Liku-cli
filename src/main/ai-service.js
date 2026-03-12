@@ -1613,6 +1613,20 @@ function handleCommand(command) {
       return { type: 'info', message: `Dynamic tools (${entries.length}):\n${list}\n\nUse /tools approve <name> or /tools revoke <name> to manage.` };
     }
 
+    case '/rmodel': {
+      // N6: Set reflection model override
+      if (parts[1]) {
+        if (parts[1].toLowerCase() === 'off' || parts[1].toLowerCase() === 'clear') {
+          setReflectionModel(null);
+          return { type: 'system', message: 'Reflection model cleared. Reflection will use the default model.' };
+        }
+        setReflectionModel(parts[1]);
+        return { type: 'system', message: `Reflection model set to ${parts[1]}. Self-correction passes will use this model.` };
+      }
+      const current = getReflectionModel();
+      return { type: 'info', message: `Reflection model: ${current || '(default — same as chat model)'}\nUse /rmodel <model> to set, /rmodel off to clear.` };
+    }
+
     case '/help':
       return {
         type: 'info',
@@ -1630,6 +1644,7 @@ function handleCommand(command) {
 /memory [search <query>|clear] - View/search/clear long-term memory
 /skills - List learned skills
 /tools [approve|revoke <name>] - Manage dynamic tools
+/rmodel [model|off] - Set reflection model for self-correction
 /help - Show this help`
       };
 
@@ -3546,7 +3561,7 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
               [
                 { role: 'system', content: reflectionPrompt }
               ],
-              null, // use default model
+              reflectionModelOverride, // N6: use reasoning model for reflection when configured
               { phase: 'reflection' }
             );
 
@@ -3767,6 +3782,67 @@ function gridToPixels(coord) {
   return systemAutomation.gridToPixels(coord);
 }
 
+// ─── Session Persistence (N4) ──────────────────────────────
+
+/**
+ * Reflection model override (N6). When set, reflection passes
+ * use this model instead of the default/action model.
+ * Prefer a reasoning model (o1, o3-mini) for self-correction.
+ */
+let reflectionModelOverride = null;
+
+function setReflectionModel(modelKey) {
+  reflectionModelOverride = modelKey || null;
+}
+
+function getReflectionModel() {
+  return reflectionModelOverride;
+}
+
+/**
+ * Save an episodic memory note summarizing the current session.
+ * Called on chat exit. Extracts user messages from recent history
+ * as a lightweight session summary — no AI call needed.
+ */
+function saveSessionNote() {
+  try {
+    const history = historyStore.getRecentConversationHistory(20);
+    const userMessages = history
+      .filter(m => m.role === 'user')
+      .map(m => (m.content || '').slice(0, 120));
+    if (userMessages.length === 0) return null;
+
+    const summary = userMessages.join(' | ');
+    const keywords = extractTopKeywords(userMessages.join(' '), 8);
+
+    return memoryStore.addNote({
+      type: 'episodic',
+      content: `Session summary (${new Date().toISOString().slice(0, 10)}): ${summary}`,
+      context: { source: 'session-exit', messageCount: history.length },
+      keywords,
+      tags: ['session', 'episodic'],
+      source: { type: 'session', timestamp: new Date().toISOString() }
+    });
+  } catch (err) {
+    console.warn('[AI] saveSessionNote error (non-fatal):', err.message);
+    return null;
+  }
+}
+
+/**
+ * Extract the N most frequent meaningful words from text.
+ */
+function extractTopKeywords(text, n) {
+  const stop = new Set(['the', 'and', 'for', 'that', 'this', 'with', 'from', 'are', 'was', 'were',
+    'been', 'have', 'has', 'had', 'not', 'but', 'what', 'all', 'can', 'will', 'one', 'her', 'his',
+    'they', 'its', 'any', 'which', 'would', 'there', 'their', 'said', 'each', 'she', 'how', 'use',
+    'could', 'into', 'than', 'other', 'some', 'these', 'then', 'just', 'about', 'also', 'more']);
+  const words = text.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(w => w.length >= 3 && !stop.has(w));
+  const freq = {};
+  for (const w of words) freq[w] = (freq[w] || 0) + 1;
+  return Object.entries(freq).sort((a, b) => b[1] - a[1]).slice(0, n).map(e => e[0]);
+}
+
 module.exports = {
   setProvider,
   setApiKey,
@@ -3816,5 +3892,10 @@ module.exports = {
   getToolDefinitions,
   // Cognitive layer (v0.0.15)
   memoryStore,
-  skillRouter
+  skillRouter,
+  // Session persistence (N4)
+  saveSessionNote,
+  // Cross-model reflection (N6)
+  setReflectionModel,
+  getReflectionModel
 };

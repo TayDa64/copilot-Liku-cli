@@ -54,6 +54,7 @@ const COMMANDS = {
   memory: { desc: 'Manage agent memory notes', file: 'memory', args: '[list|show|search|stats]' },
   skills: { desc: 'Manage the skill library', file: 'skills', args: '[list|search|show]' },
   tools: { desc: 'Manage dynamic tool registry', file: 'tools', args: '[list|show|approve|revoke]' },
+  analytics: { desc: 'View telemetry analytics', file: 'analytics', args: '[--days N] [--raw]' },
 };
 
 /**
