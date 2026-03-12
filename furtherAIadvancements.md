@@ -1,8 +1,8 @@
 # Further AI Advancements — v0.0.15+ Implementation Plan
 
-> **Status**: Plan-mode draft — 2026-03-11
-> **Prerequisite**: All documentation updated and committed (9b81cad).
+> **Status**: Phases 0–9 COMPLETE — 2026-03-12 (commit `8aefc19`)
 > **Prior art**: [advancingFeatures.md](advancingFeatures.md) covers vision/overlay/coordinate hardening (Phases 0–4). This document covers the **cognitive layer** that sits above that substrate.
+> **Test coverage**: 256 cognitive + 29 regression = 285 assertions, 0 failures across 15+ suites.
 
 ---
 
@@ -16,10 +16,13 @@
 6. [Phase 2 — Reinforcement via Verifiable Rewards (RLVR Adaptation)](#phase-2--reinforcement-via-verifiable-rewards)
 7. [Phase 3 — Dynamic Tool Generation (AutoAct Adaptation)](#phase-3--dynamic-tool-generation)
 8. [Phase 4 — Semantic Skill Router (Context Window Management)](#phase-4--semantic-skill-router)
-9. [Cross-Cutting Concerns](#cross-cutting-concerns)
-10. [Dependency Graph](#dependency-graph)
-11. [Risk Register](#risk-register)
-12. [Acceptance Criteria (per phase)](#acceptance-criteria)
+9. [Phase 5–8 — Integration, Safety, AWM, Audit Fixes](#phase-5-8--integration-safety-awm-audit)
+10. [Phase 9 — Design-Level Hardening (Gemini Audit)](#phase-9--design-level-hardening)
+11. [Cross-Cutting Concerns](#cross-cutting-concerns)
+12. [Dependency Graph](#dependency-graph)
+13. [Risk Register](#risk-register)
+14. [Acceptance Criteria (per phase)](#acceptance-criteria)
+15. [Next-Stage Roadmap](#next-stage-roadmap)
 
 ---
 
@@ -653,88 +656,139 @@ The brainstorm uses `fs-extra` (`fs.ensureDirSync`, `fs.readJsonSync`, `fs.copyS
 ## Dependency Graph
 
 ```
-Phase 0: ~/.liku/ Structure
+Phase 0: ~/.liku/ Structure ✅
     │
-    ├──▶ Phase 1: Agentic Memory
+    ├──▶ Phase 1: Agentic Memory ✅
     │        │
-    │        ├──▶ Phase 2: RLVR Telemetry + Reflection
+    │        ├──▶ Phase 2: RLVR Telemetry + Reflection ✅
     │        │        │
-    │        │        └──▶ Phase 3: Dynamic Tool Generation
+    │        │        └──▶ Phase 3: Dynamic Tool Generation ✅
+    │        │                 │
+    │        │                 └──▶ Phase 9: Sandbox hardening (fork), Proposal flow ✅
     │        │
-    │        └──▶ Phase 4: Semantic Skill Router
+    │        └──▶ Phase 4: Semantic Skill Router ✅
+    │                 │
+    │                 └──▶ Phase 9: BPE token counting ✅
+    │
+    ├──▶ Phase 5: Deep Integration (prompts, commands, wiring) ✅
+    │
+    ├──▶ Phase 6–7: Safety + AWM + Hooks ✅
+    │
+    ├──▶ Phase 8: Audit fixes ✅
     │
     └──▶ (independent) advancingFeatures.md Phases 0–4
          (vision/overlay/coordinate hardening)
 ```
 
-**Phase 0 is the only prerequisite.** Phases 1–4 can proceed in parallel after Phase 0, but the natural order above reflects the dependency on memory (Phase 1) being available for telemetry (Phase 2) and skill routing (Phase 4).
-
-Phase 3 (Dynamic Tools) depends on Phase 2's telemetry for the reward signal but can be started in parallel with a mock telemetry path.
+All phases are complete. Phases 5–9 were implemented across commits `461ce31` → `bc27d62` → `f1fa1a6` → `8aefc19`.
 
 ---
 
 ## Risk Register
 
-| # | Risk | Impact | Mitigation |
-|---|------|--------|------------|
-| R1 | AI-generated tool executes destructive code | CRITICAL | VM sandbox with no `fs`/`process` access, 5s timeout, banned pattern validation, PreToolUse hook gate |
-| R2 | Context window bloat from memory/skills | HIGH | Hard token caps (2000 for memory, 1500 for skills), keyword-based selection, limit=5 notes |
-| R3 | Reasoning model API errors from temperature params | HIGH | `getPhaseParams()` strips all generation params for reasoning models |
-| R4 | Migration corrupts user data | MEDIUM | Copy-not-move strategy, old directory preserved |
-| R5 | Reflection loop doesn't converge | MEDIUM | Max 2 reflection passes per task, then fail with structured error |
-| R6 | Dynamic tool `vm` sandbox bypass via prototype pollution | MEDIUM | `Object.freeze` on args, provide only primitive constructors in context |
-| R7 | Skill index grows stale (files deleted but index retained) | LOW | Skill router validates file existence before loading; prune stale entries |
-| R8 | Memory JSONL files grow unbounded | LOW | Rotate telemetry logs at 10MB; memory notes pruned by LRU when > 500 |
+| # | Risk | Impact | Mitigation | Status |
+|---|------|--------|------------|--------|
+| R1 | AI-generated tool executes destructive code | CRITICAL | `child_process.fork()` sandbox with no shared memory, minimal env, `SIGKILL` on timeout, `vm.createContext` allowlist in worker, banned pattern static validation, PreToolUse hook gate | ✅ Mitigated (Phase 9) |
+| R2 | Context window bloat from memory/skills | HIGH | BPE token counting via `js-tiktoken` (cl100k_base), hard caps (2000 tokens memory, 1500 tokens skills), keyword-based selection, limit=5 notes | ✅ Mitigated (Phase 9) |
+| R3 | Reasoning model API errors from temperature params | HIGH | `getPhaseParams()` strips all generation params for reasoning models | ✅ Mitigated (Phase 2) |
+| R4 | Migration corrupts user data | MEDIUM | Copy-not-move strategy, old directory preserved | ✅ Mitigated (Phase 0) |
+| R5 | Reflection loop doesn't converge | MEDIUM | Max 2 reflection passes per task (`MAX_REFLECTION_ITERATIONS`), session failure decay on success | ✅ Mitigated (Phase 6) |
+| R6 | Dynamic tool sandbox bypass via prototype pollution | MEDIUM | Process-level isolation via `child_process.fork()` — VM escape only compromises short-lived worker. `Object.freeze` on args, allowlist of safe globals in worker | ✅ Mitigated (Phase 9) |
+| R7 | Skill index grows stale (files deleted but index retained) | LOW | `loadIndex()` prunes stale entries via `fs.existsSync` check on every load | ✅ Mitigated (Phase 8) |
+| R8 | Memory JSONL files grow unbounded | LOW | Telemetry logs rotate at 10MB (`MAX_LOG_SIZE`); memory notes pruned by LRU when > 500 (`MAX_NOTES`) | ✅ Mitigated (Phase 6) |
+| R9 | Tool proposals bypass validation | LOW | Quarantine directory (`tools/proposed/`), `proposeTool()` runs `validateToolSource()` before writing, `approveTool()` promotes from quarantine to active | ✅ Mitigated (Phase 9) |
 
 ---
 
 ## Acceptance Criteria
 
-### Phase 0 — Structured Home Directory
-- [ ] `~/.liku/` is created on first run with all subdirectories
-- [ ] Existing `~/.liku-cli/*.json` files are copied (not moved) to `~/.liku/`
-- [ ] All existing CLI commands (`liku chat`, `liku click`, etc.) work unchanged
-- [ ] Electron overlay starts normally with preferences loaded from new path
-- [ ] `~/.liku-cli/` is not deleted or modified
+### Phase 0 — Structured Home Directory ✅ COMPLETE
+- [x] `~/.liku/` is created on first run with all subdirectories
+- [x] Existing `~/.liku-cli/*.json` files are copied (not moved) to `~/.liku/`
+- [x] All existing CLI commands (`liku chat`, `liku click`, etc.) work unchanged
+- [x] Electron overlay starts normally with preferences loaded from new path
+- [x] `~/.liku-cli/` is not deleted or modified
 
-### Phase 1 — Agentic Memory
-- [ ] `memory-store.js` can create/read/update/delete notes
-- [ ] Notes have structured attributes (type, keywords, tags, links)
-- [ ] `getRelevantNotes(query, 5)` returns notes matching keyword overlap
-- [ ] Memory context injected into system prompt is ≤ 2000 tokens
-- [ ] Multiple sessions share the same memory store (persistence verified)
+### Phase 1 — Agentic Memory ✅ COMPLETE
+- [x] `memory-store.js` can create/read/update/delete notes
+- [x] Notes have structured attributes (type, keywords, tags, links)
+- [x] `getRelevantNotes(query, 5)` returns notes matching keyword overlap
+- [x] Memory context injected into system prompt is ≤ 2000 BPE tokens (via `js-tiktoken`)
+- [x] Multiple sessions share the same memory store (persistence verified)
 
-### Phase 2 — RLVR Telemetry
-- [ ] Action execution writes structured telemetry to `~/.liku/telemetry/logs/`
-- [ ] Failure telemetry triggers reflection pass (with max 2 iterations)
-- [ ] `PHASE_PARAMS` correctly strips `temperature`/`top_p` for reasoning models
-- [ ] Reflection output can update memory or propose a preference correction
-- [ ] Existing `recordAutoRunOutcome()` demotion logic continues to work
+### Phase 2 — RLVR Telemetry ✅ COMPLETE
+- [x] Action execution writes structured telemetry to `~/.liku/telemetry/logs/`
+- [x] Failure telemetry triggers reflection pass (with max 2 iterations)
+- [x] `PHASE_PARAMS` correctly strips `temperature`/`top_p` for reasoning models
+- [x] Reflection output can update memory or propose a preference correction
+- [x] Existing `recordAutoRunOutcome()` demotion logic continues to work
 
-### Phase 3 — Dynamic Tool Generation
-- [ ] VM sandbox executes tool scripts with no access to `fs`, `process`, `require`
-- [ ] Scripts exceeding 5-second timeout are terminated
-- [ ] Scripts containing banned patterns are rejected before execution
-- [ ] Dynamic tools appear in tool definitions sent to the API
-- [ ] `PreToolUse` hook fires before dynamic tool execution
-- [ ] User approval required for new tool registration (Phase 3b)
+### Phase 3 — Dynamic Tool Generation ✅ COMPLETE
+- [x] Sandbox executes tool scripts in isolated child process (`child_process.fork`)
+- [x] Worker has no access to `fs`, `process`, `require`, or parent memory
+- [x] Worker env stripped to `{ NODE_ENV: 'sandbox', PATH }` only
+- [x] Scripts exceeding 5-second timeout are terminated via `SIGKILL`
+- [x] Scripts containing banned patterns are rejected before execution (16 patterns)
+- [x] Dynamic tools appear in tool definitions sent to the API
+- [x] `PreToolUse` hook fires before dynamic tool execution
+- [x] User approval required for new tool registration (Phase 3b — proposal flow)
 
-### Phase 4 — Semantic Skill Router
-- [ ] Skills are loaded from `~/.liku/skills/` via index
-- [ ] Only matching skills (by keyword) are injected into system prompt
-- [ ] Maximum 3 skills / 1500 tokens injected per request
-- [ ] Skill index updates use count and last-used timestamp
-- [ ] Missing skill files (deleted externally) are handled gracefully
+### Phase 4 — Semantic Skill Router ✅ COMPLETE
+- [x] Skills are loaded from `~/.liku/skills/` via index
+- [x] Only matching skills (by keyword with word-boundary regex) are injected into system prompt
+- [x] Maximum 3 skills / 1500 BPE tokens injected per request (via `js-tiktoken`)
+- [x] Skill index updates use count and last-used timestamp
+- [x] Missing skill files (deleted externally) are pruned from index on load
+
+### Phase 5 — Deeper Integration ✅ COMPLETE
+- [x] System prompt describes Memory, Skills, Tools, and Reflection capabilities
+- [x] `/memory`, `/skills`, `/tools` slash commands registered and functional
+- [x] Telemetry wiring in `recordAutoRunOutcome()` with proper schema
+- [x] Policy wiring in reflection trigger for negative policy enforcement
+
+### Phase 6 — Safety Hardening ✅ COMPLETE
+- [x] `hook-runner.js` invokes PreToolUse and PostToolUse hooks
+- [x] Reflection loop bounded at 2 iterations (`MAX_REFLECTION_ITERATIONS`)
+- [x] Session failure count decays on success
+- [x] Phase params forwarded to all providers (OpenAI/Anthropic/Ollama)
+- [x] Memory LRU pruning at 500 notes; telemetry log rotation at 10MB
+
+### Phase 7 — Next-Level Enhancements ✅ COMPLETE
+- [x] AWM procedural memory extraction from successful multi-step sequences
+- [x] Auto-skill registration from AWM (with PreToolUse hook gate)
+- [x] PostToolUse hook wired for dynamic tool audit logging
+- [x] Unapproved tools filtered from API tool definitions
+- [x] CLI subcommands: `liku memory`, `liku skills`, `liku tools`
+
+### Phase 8 — Audit-Driven Fixes ✅ COMPLETE
+- [x] `recordAutoRunOutcome` telemetry uses proper schema (task/phase/outcome)
+- [x] Skill index staleness pruning via `fs.existsSync`
+- [x] Word-boundary regex for keyword matching
+- [x] PreToolUse hook gates AWM skill creation
+- [x] PostToolUse audit hook after reflection passes
+
+### Phase 9 — Design-Level Hardening ✅ COMPLETE (commit `8aefc19`)
+- [x] BPE token counting via `js-tiktoken` replaces character heuristics
+- [x] Proposal→approve→register flow with `tools/proposed/` quarantine
+- [x] CLI `proposals` and `reject` subcommands in `liku tools`
+- [x] `child_process.fork()` sandbox replaces in-process `vm.createContext`
+- [x] `message-builder.js` accepts explicit `skillsContext`/`memoryContext` params
+- [x] Dedicated `## Relevant Skills` and `## Working Memory` section headers in prompt
 
 ---
 
-## Implementation Order (Recommended)
+## Implementation Order (Actual)
 
-1. **Phase 0** — Immediate. Non-breaking, sets the foundation. Start with `liku-home.js` and `preferences.js` update.
-2. **Phase 4** — Next. Skill router is the simplest new feature (pure read, no side effects). Can be tested with manually-created skill files.
-3. **Phase 1** — Memory store. Medium complexity. Test with manual note creation, then wire into AI service.
-4. **Phase 2** — Telemetry + reflection. Requires Phase 1 for memory writes. Test with mock failures first.
-5. **Phase 3** — Dynamic tools. Highest risk, implement last. Start with Phase 3a (sandbox only).
+1. **Phase 0** — Structured `~/.liku/` home directory (commit `461ce31`)
+2. **Phase 1** — Agentic Memory with Zettelkasten linking (commit `461ce31`)
+3. **Phase 2** — RLVR Telemetry + Reflection trigger (commit `461ce31`)
+4. **Phase 3** — Dynamic Tool Generation with VM sandbox (commit `461ce31`)
+5. **Phase 4** — Semantic Skill Router with keyword matching (commit `461ce31`)
+6. **Phase 5** — Deeper Integration — prompt, commands, wiring (commit `461ce31`)
+7. **Phase 6** — Safety Hardening — hooks, bounds, decay, pruning (commit `bc27d62`)
+8. **Phase 7** — AWM, PostToolUse, CLI, telemetry analytics (commit `bc27d62`)
+9. **Phase 8** — Audit-driven fixes from deep gap analysis (commit `f1fa1a6`)
+10. **Phase 9** — Design-level hardening from Gemini brainstorm (commit `8aefc19`)
 
 ---
 
@@ -744,9 +798,52 @@ Phase 3 (Dynamic Tools) depends on Phase 2's telemetry for the reward signal but
 
 They are complementary and can be developed in parallel:
 
-| Layer | Document | Key Deliverables |
-|-------|----------|-----------------|
-| Perception | advancingFeatures.md | ROI capture, coordinate contract, pattern-first UIA, event watcher |
-| Cognition | **This document** | Memory, RLVR reflection, dynamic tools, skill routing |
+| Layer | Document | Key Deliverables | Status |
+|-------|----------|-----------------|--------|
+| Perception | advancingFeatures.md | ROI capture, coordinate contract, pattern-first UIA, event watcher | In progress |
+| Cognition | **This document** | Memory, RLVR reflection, dynamic tools, skill routing, sandbox, BPE tokens | ✅ Complete |
 
-The perception layer provides better inputs (higher-quality visual context, reliable element targeting). The cognition layer produces better outputs (learned skills, adaptive behavior, self-correction). Together, they form the autonomous agent loop described in the Grok/Gemini brainstorm.
+---
+
+## Next-Stage Roadmap
+
+With all 10 phases (0–9) complete, the following items represent the next evolution of the cognitive layer. These are ordered by impact and feasibility.
+
+### N1 — Embedding-Based Skill Routing
+**Priority**: HIGH | **Complexity**: MEDIUM
+
+Replace keyword-matching in `skill-router.js` with semantic similarity using lightweight embeddings. The current word-boundary regex approach works but misses synonyms and conceptual matches.
+
+- **Approach**: Use `transformers.js` (ONNX Runtime) for local embedding inference, or call an embedding API (OpenAI `text-embedding-3-small`)
+- **Fallback**: Keep keyword matching as fallback when embeddings aren't available (offline mode)
+- **Metric**: Measure skill selection precision — compare keyword vs. embedding routing on a labeled test set
+
+### N2 — Auto-Registration for Hook-Approved Tools (Phase 3c)
+**Priority**: MEDIUM | **Complexity**: LOW
+
+Currently, tool proposals require manual `liku tools approve <name>`. Add an auto-registration path for tools that pass:
+1. Static validation (existing `validateToolSource()`)
+2. Sandbox execution test (new: run tool with sample args, verify output)
+3. PreToolUse hook approval (existing hook gate)
+
+Auto-registered tools would have a `status: 'auto-approved'` flag and could be revoked at any time.
+
+### N3 — End-to-End Smoke Test for Dynamic Tools
+**Priority**: MEDIUM | **Complexity**: LOW
+
+Create an integration test that exercises the full pipeline: AI proposes tool → quarantine → approve → execute → telemetry → reflection. Currently only unit-tested per component.
+
+### N4 — Persistent Conversation Context (Cross-Session Memory)
+**Priority**: MEDIUM | **Complexity**: MEDIUM
+
+The memory store holds factual notes but doesn't capture conversational context across sessions. Add a `conversation-log.jsonl` that captures key exchanges and can be summarized for future sessions.
+
+### N5 — Telemetry Analytics Dashboard
+**Priority**: LOW | **Complexity**: MEDIUM
+
+Expose telemetry data through `liku analytics` CLI command — show success rates, most-used tools, common failure patterns, reflection effectiveness. Data already collected in `~/.liku/telemetry/logs/`.
+
+### N6 — Multi-Provider Reflection
+**Priority**: LOW | **Complexity**: HIGH
+
+Use a different AI provider for reflection than the one that produced the original failure. This avoids the "asking the same model to find its own mistakes" problem. Requires provider orchestration changes in `ai-service.js`.

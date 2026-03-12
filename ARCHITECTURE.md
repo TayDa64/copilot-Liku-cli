@@ -78,6 +78,78 @@ The modularization work is gated by focused characterization tests in addition t
 
 This allows internal seams to move without changing the external contract seen by the CLI, Electron runtime, or agent adapters.
 
+## Cognitive Layer Architecture
+
+The cognitive layer sits above the AI service and provides learning, memory, tool generation, and context management. All state is persisted under `~/.liku/`.
+
+### Home Directory (`src/shared/liku-home.js`)
+
+```
+~/.liku/
+├── memory/
+│   └── notes.json          # Agentic memory (A-MEM)
+├── skills/
+│   ├── index.json           # Skill metadata + usage stats
+│   └── *.md                 # Skill definitions
+├── tools/
+│   ├── registry.json        # Tool metadata + approval status
+│   ├── dynamic/             # Approved/executable tool scripts
+│   └── proposed/            # Quarantined proposals (not executable)
+├── telemetry/
+│   └── logs/                # Structured JSONL telemetry
+└── preferences.json         # User preferences (migrated from ~/.liku-cli/)
+```
+
+### Agentic Memory (`src/main/memory/memory-store.js`)
+
+CRUD store for structured notes with Zettelkasten-style linking. Each note has `type`, `keywords`, `tags`, and `links` attributes. `getRelevantNotes(query, limit)` selects notes by keyword overlap score and injects up to 2000 BPE tokens into the system prompt as `## Working Memory`.
+
+### Semantic Skill Router (`src/main/memory/skill-router.js`)
+
+Loads skill files from `~/.liku/skills/`, selects the top 3 matching skills by word-boundary keyword scoring, and injects up to 1500 BPE tokens as `## Relevant Skills`. Stale index entries (pointing to deleted files) are pruned on every `loadIndex()` call.
+
+### RLVR Telemetry (`src/main/telemetry/`)
+
+- **`telemetry-writer.js`**: Structured JSONL logger with rotation at 10MB. Schema: `{ task, phase, outcome, context, timestamp }`.
+- **`reflection-trigger.js`**: Fires reflection when consecutive failures ≥ 3 or session failures ≥ 5. Bounded at `MAX_REFLECTION_ITERATIONS = 2`. Session failure count decays by 1 on success.
+
+### Dynamic Tool System (`src/main/tools/`)
+
+- **`tool-validator.js`**: Static analysis — rejects code matching 16 banned patterns (`require(`, `process.`, `fs.`, etc.) and scripts over 10KB.
+- **`tool-registry.js`**: CRUD for tool metadata. Proposal flow: `proposeTool()` → quarantine in `proposed/` → `promoteTool()` moves to `dynamic/` → executable. `rejectTool()` deletes and logs negative reward.
+- **`sandbox.js`**: Forks `sandbox-worker.js` as a separate Node.js process via `child_process.fork()`. Worker env stripped to `{ NODE_ENV: 'sandbox', PATH }`. Parent sets 5.5s timeout with `SIGKILL`. Returns a Promise.
+- **`sandbox-worker.js`**: Receives tool code via IPC, executes in `vm.createContext` with allowlisted globals (`JSON`, `Math`, `Date`, `Array`, `Object`, `String`, `Number`, `Boolean`, `RegExp`, `Map`, `Set`, `Promise`). Args are `Object.freeze`-d. Results sent back via IPC.
+- **`hook-runner.js`**: Invokes `.github/hooks/` security scripts (PreToolUse/PostToolUse). Fails closed on errors.
+
+### Token Counting (`src/shared/token-counter.js`)
+
+BPE tokenizer using `js-tiktoken` (cl100k_base encoding, compatible with GPT-4o/o1). Exports `countTokens(text)` → number and `truncateToTokenBudget(text, maxTokens)` → string. Lazy-loaded singleton encoder.
+
+### Message Builder (`src/main/ai-service/message-builder.js`)
+
+Assembles the message array for API calls. Accepts explicit `skillsContext` and `memoryContext` parameters (injected as `## Relevant Skills` and `## Working Memory` system messages). This makes context injection testable and decoupled from global state.
+
+### AWM (Agent Workflow Memory)
+
+Extracts procedural memory from successful multi-step action sequences (≥ 3 steps). Extracted AWM notes are auto-registered as skills via `skillRouter.addSkill()`, gated by the PreToolUse hook.
+
+### Data Flow
+
+```
+User Input → ai-service.js
+  ├── memory-store.getRelevantNotes() → memoryContext
+  ├── skill-router.getRelevantSkills() → skillsContext
+  ├── message-builder.buildMessages({ skillsContext, memoryContext })
+  ├── Provider sends request → AI response
+  ├── system-automation.executeAction()
+  │     ├── hook-runner.runPreToolUse()
+  │     ├── sandbox.executeDynamicTool() [if dynamic tool]
+  │     └── hook-runner.runPostToolUse()
+  ├── telemetry-writer.writeTelemetry()
+  ├── reflection-trigger.shouldReflect() → optional reflection loop
+  └── AWM extraction (if ≥3 successful steps)
+```
+
 ## System Architecture
 
 ```

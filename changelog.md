@@ -1,4 +1,23 @@
-## Unreleased - 2026-03-11
+## Unreleased - 2026-03-12
+
+### Cognitive Layer — Phase 9: Design-Level Hardening (commit `8aefc19`)
+- **BPE Token Counting**: Added `src/shared/token-counter.js` using `js-tiktoken` (cl100k_base encoding). `countTokens(text)` and `truncateToTokenBudget(text, maxTokens)` replace character-based heuristics in memory-store and skill-router.
+- **Tool Proposal Flow**: New quarantine pipeline — `proposeTool()` writes to `~/.liku/tools/proposed/`, `promoteTool()` moves to `dynamic/` on approval, `rejectTool()` deletes and logs negative reward. `registerTool()` now delegates to `proposeTool()` for backward compatibility.
+- **CLI Proposals/Reject**: `liku tools proposals` lists pending proposals, `liku tools reject <name>` rejects with telemetry.
+- **Sandbox Process Isolation**: Replaced in-process `vm.createContext` with `child_process.fork()` to `sandbox-worker.js`. Worker runs in separate Node.js process with stripped env (`NODE_ENV: 'sandbox'`, `PATH` only). 5.5s timeout with `SIGKILL`. Even a VM escape only compromises the short-lived worker.
+- **Message Builder Explicit Context**: `buildMessages()` accepts named `skillsContext` and `memoryContext` parameters. Injected as dedicated `## Relevant Skills` and `## Working Memory` system message sections.
+- Added 22 Phase 9 tests (256 cognitive assertions total, 0 failures).
+- **Dependencies**: Added `js-tiktoken` (^1.0.20).
+
+### Cognitive Layer — Phase 8: Audit-Driven Fixes (commit `f1fa1a6`)
+- **Telemetry Schema**: `recordAutoRunOutcome` now calls `writeTelemetry({ task, phase: 'execution', outcome })` with proper structured schema instead of ad-hoc writes.
+- **Staleness Pruning**: `loadIndex()` in skill-router validates each skill file exists via `fs.existsSync` and prunes stale entries from the index.
+- **Word-Boundary Scoring**: Keyword matching in skill-router uses `new RegExp('\\b' + keyword + '\\b', 'i')` instead of substring `.includes()`, preventing false positives.
+- **AWM PreToolUse Gate**: AWM skill creation passes through `hookRunner.runPreToolUse()` before registering (previously bypassed hooks).
+- **PostToolUse Audit**: Reflection passes now invoke `runPostToolUse()` hook for audit logging.
+- **AI-Service Hook Imports**: Fixed missing `hookRunner` import in `ai-service.js` that caused runtime errors on PostToolUse calls.
+- **Trace Writer Fix**: `traceWriter.recordReflection()` accepts `{ pass, trigger, outcome }` instead of flat args.
+- Added 16 Phase 8 tests (234 cognitive assertions after Phase 8, 0 failures).
 
 ### Cognitive Layer — Phase 7: Next-Level Enhancements
 - **AWM Procedural Memory Extraction**: Successful multi-step action sequences (3+ steps) are now extracted as procedural memory notes and auto-registered as skills via `skillRouter.addSkill()`. Implements the Agent Workflow Memory (AWM) concept from the plan.
@@ -25,7 +44,7 @@
 - **Phase 3**: Dynamic Tool Generation — VM sandbox (no fs/process/require), 16 banned patterns, 5s timeout, approval gate, PreToolUse hook enforcement.
 - **Phase 4**: Semantic Skill Router — Keyword-based skill selection, 1500-token budget, max 3 skills, usage tracking.
 - **Phase 5**: Deeper Integration — Cognitive awareness in system prompt, `/memory`/`/skills`/`/tools` slash commands, telemetry wiring in preferences, policy wiring in reflection.
-- 10 new source modules, 11 modified files, 206 cognitive + 29 regression = 235 total assertions across 15 suites.
+- 10 new source modules, 11 modified files. Initial assertion count: 206 cognitive + 29 regression = 235 (now 256 + 29 = 285 after Phases 6–9).
 
 ## Unreleased - 2026-03-08
 
