@@ -1,5 +1,14 @@
 ## Unreleased - 2026-03-12
 
+### Cognitive Layer — N1-N6 Next-Stage Roadmap (commit `fde64b0`)
+- **N3 — E2E Dynamic Tool Smoke Test** (Phase 10): Full pipeline test — `proposeTool()` → quarantine → `approveTool()` → `sandbox.executeDynamicTool()` via `child_process.fork()` → verify Fibonacci(10) = 55 → `recordInvocation()` → `writeTelemetry()` → verify telemetry entry → cleanup. 17 assertions.
+- **N1-T2 — TF-IDF Skill Routing** (Phase 11): Pure JS TF-IDF implementation (`tokenize`, `termFrequency`, `inverseDocFrequency`, `tfidfVector`, `cosineSimilarity`). Combined scoring: keyword match + TF-IDF similarity (scaled ×5). Zero new dependencies. 16 assertions.
+- **N4 — Session Persistence** (Phase 12): `saveSessionNote()` on chat exit extracts recent user messages, computes top-8 keywords, writes episodic memory note via `memoryStore.addNote()`. Wired into `chat.js` finally block.
+- **N6 — Cross-Model Reflection** (Phase 13): `reflectionModelOverride` routes reflection passes to reasoning model (o1/o3-mini) instead of default chat model. New `/rmodel` slash command to set/get/clear. 12 assertions.
+- **N5 — Analytics CLI** (Phase 14): `liku analytics [--days N] [--raw] [--json]`. Reads telemetry JSONL, computes success rates, top tasks, phase breakdown, common failures.
+- **Contract test update**: Added `saveSessionNote`, `setReflectionModel`, `getReflectionModel` to expected export surface in `test-ai-service-contract.js`.
+- **Test totals**: 310 cognitive + 29 regression = **339 assertions**, 0 failures.
+
 ### Cognitive Layer — Phase 9: Design-Level Hardening (commit `8aefc19`)
 - **BPE Token Counting**: Added `src/shared/token-counter.js` using `js-tiktoken` (cl100k_base encoding). `countTokens(text)` and `truncateToTokenBudget(text, maxTokens)` replace character-based heuristics in memory-store and skill-router.
 - **Tool Proposal Flow**: New quarantine pipeline — `proposeTool()` writes to `~/.liku/tools/proposed/`, `promoteTool()` moves to `dynamic/` on approval, `rejectTool()` deletes and logs negative reward. `registerTool()` now delegates to `proposeTool()` for backward compatibility.

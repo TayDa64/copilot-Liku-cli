@@ -4,8 +4,9 @@
 - Status: active development on `main`
 - Published package version: `0.0.13`
 - Latest tagged version: `0.0.14` (2026-03-07)
-- Unreleased work: v0.0.15 Cognitive Layer (Phases 0–9, 2026-03-12)
+- Unreleased work: v0.0.15 Cognitive Layer (Phases 0–14, 2026-03-12)
 - Latest local commits:
+  - `fde64b0` - feat: implement N1-N6 next-stage roadmap
   - `8aefc19` - Phase 9: Design-level hardening (Gemini audit)
   - `f1fa1a6` - Phase 8: audit-driven fixes
   - `bc27d62` - feat: cognitive layer phases 6-7
@@ -52,7 +53,15 @@
 - Semantic Skill Router: keyword matching, usage tracking, budget control.
 - Deeper Integration: system prompt awareness, slash commands, policy wiring.
 
-**Test coverage**: 256 cognitive + 29 regression = **285 assertions**, 0 failures, 15+ suites.
+**Test coverage**: 310 cognitive + 29 regression = **339 assertions**, 0 failures, 15+ suites.
+
+### N1-N6 Next-Stage Roadmap (commit `fde64b0`)
+
+- **N3 — E2E Smoke Test** (Phase 10): Full pipeline test for dynamic tools — propose, quarantine, approve, fork-execute, verify result, telemetry audit. 17 assertions.
+- **N1-T2 — TF-IDF Skill Routing** (Phase 11): Pure JS cosine similarity scoring alongside keyword matching. Zero new dependencies. 16 assertions.
+- **N4 — Session Persistence** (Phase 12): `saveSessionNote()` writes episodic memory note on chat exit, capturing user message keywords for future retrieval.
+- **N6 — Cross-Model Reflection** (Phase 13): `/rmodel` command routes reflection passes to a reasoning model (o1/o3-mini) instead of default chat model. 12 assertions.
+- **N5 — Analytics CLI** (Phase 14): `liku analytics [--days N] [--raw]` reads telemetry JSONL and displays success rates, top tasks, phase breakdown, common failures.
 
 ### Capability-Based Model Routing (Unreleased)
 - Replaced the old vision-only model distinction with a richer capability matrix.
@@ -102,12 +111,9 @@
 - `src/shared/liku-home.js`: centralized `~/.liku/` home directory management.
 
 ## Near-Term Priorities
-1. Embedding-based skill routing (replace keyword matching with semantic similarity).
-2. Auto-registration for hook-approved tools (Phase 3c — sandbox test + hook gate).
-3. End-to-end dynamic tool smoke test (propose → approve → execute → telemetry → reflection).
-4. Persistent conversation context across sessions.
-5. Telemetry analytics CLI command (`liku analytics`).
-6. Continue shrinking `src/main/ai-service.js` while preserving the compatibility facade.
+1. Auto-registration for hook-approved tools (Phase 3c — sandbox test + hook gate).
+2. Optional Ollama embeddings for skill routing (N1-T3 — replaces TF-IDF when local model available).
+3. Continue shrinking `src/main/ai-service.js` while preserving the compatibility facade.
 
 ## Notes
 This file supersedes older "implementation complete" snapshots that described the project as an initial Electron-only deliverable. The current system is a broader CLI + automation runtime with ongoing reliability hardening.

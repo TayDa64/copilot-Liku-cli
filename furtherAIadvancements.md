@@ -1,8 +1,8 @@
 # Further AI Advancements — v0.0.15+ Implementation Plan
 
-> **Status**: Phases 0–9 COMPLETE — 2026-03-12 (commit `8aefc19`)
+> **Status**: Phases 0–9 COMPLETE, N1-N6 roadmap MOSTLY COMPLETE — 2026-03-12 (commit `fde64b0`)
 > **Prior art**: [advancingFeatures.md](advancingFeatures.md) covers vision/overlay/coordinate hardening (Phases 0–4). This document covers the **cognitive layer** that sits above that substrate.
-> **Test coverage**: 256 cognitive + 29 regression = 285 assertions, 0 failures across 15+ suites.
+> **Test coverage**: 310 cognitive + 29 regression = 339 assertions, 0 failures across 15+ suites.
 
 ---
 
@@ -662,13 +662,27 @@ Phase 0: ~/.liku/ Structure ✅
     │        │
     │        ├──▶ Phase 2: RLVR Telemetry + Reflection ✅
     │        │        │
-    │        │        └──▶ Phase 3: Dynamic Tool Generation ✅
-    │        │                 │
-    │        │                 └──▶ Phase 9: Sandbox hardening (fork), Proposal flow ✅
+    │        │        ├──▶ Phase 3: Dynamic Tool Generation ✅
+    │        │        │        │
+    │        │        │        ├──▶ Phase 9: Sandbox hardening (fork), Proposal flow ✅
+    │        │        │        │        │
+    │        │        │        │        └──▶ Phase 10 (N3): E2E smoke test ✅
+    │        │        │        │
+    │        │        │        └──▶ (future) N2: Auto-registration Phase 3c
+    │        │        │
+    │        │        └──▶ Phase 13 (N6): Cross-model reflection ✅
     │        │
-    │        └──▶ Phase 4: Semantic Skill Router ✅
-    │                 │
-    │                 └──▶ Phase 9: BPE token counting ✅
+    │        ├──▶ Phase 4: Semantic Skill Router ✅
+    │        │        │
+    │        │        ├──▶ Phase 9: BPE token counting ✅
+    │        │        │
+    │        │        ├──▶ Phase 11 (N1-T2): TF-IDF scoring ✅
+    │        │        │        │
+    │        │        │        └──▶ (future) N1-T3: Ollama embeddings
+    │        │        │
+    │        │        └──▶ Phase 12 (N4): Session persistence ✅
+    │        │
+    │        └──▶ Phase 14 (N5): Analytics CLI ✅
     │
     ├──▶ Phase 5: Deep Integration (prompts, commands, wiring) ✅
     │
@@ -775,6 +789,40 @@ All phases are complete. Phases 5–9 were implemented across commits `461ce31` 
 - [x] `message-builder.js` accepts explicit `skillsContext`/`memoryContext` params
 - [x] Dedicated `## Relevant Skills` and `## Working Memory` section headers in prompt
 
+### Phase 10 — N3: E2E Dynamic Tool Smoke Test ✅ COMPLETE (commit `fde64b0`)
+- [x] Full pipeline test: proposeTool → quarantine → approveTool → sandbox execute → verify result
+- [x] Fibonacci(10) = 55 verified through `child_process.fork()` + `vm.Script`
+- [x] Telemetry recorded and verified post-execution
+- [x] Registry `invocations` counter incremented
+- [x] 17 assertions covering every lifecycle stage
+
+### Phase 11 — N1-T2: TF-IDF Skill Routing ✅ COMPLETE (commit `fde64b0`)
+- [x] Pure JS TF-IDF: `tokenize()`, `termFrequency()`, `inverseDocFrequency()`, `tfidfVector()`, `cosineSimilarity()`
+- [x] Zero dependencies — maintains zero-native-dep constraint
+- [x] Combined scoring: `keywordScore + (tfidfSimilarity × 5)`
+- [x] Integrated into `getRelevantSkillsContext()` as Tier 2 scoring
+- [x] TF-IDF internals exported for unit testing
+- [x] 16 assertions testing tokenizer, TF, IDF, cosine, and integrated routing
+
+### Phase 12 — N4: Session Persistence ✅ COMPLETE (commit `fde64b0`)
+- [x] `saveSessionNote()` extracts user messages from recent conversation history
+- [x] Top-8 keyword extraction via frequency analysis with stop word removal
+- [x] Episodic memory note written via `memoryStore.addNote()`
+- [x] Wired into `chat.js` `finally` block — fires on exit/quit/SIGINT
+
+### Phase 13 — N6: Cross-Model Reflection ✅ COMPLETE (commit `fde64b0`)
+- [x] `reflectionModelOverride` module variable + getter/setter
+- [x] `/rmodel` slash command (set/get/clear)
+- [x] Reflection pass uses configured reasoning model instead of default
+- [x] Updated `/help` text with `/rmodel` documentation
+- [x] 12 assertions testing setter/getter/command integration
+
+### Phase 14 — N5: Analytics CLI ✅ COMPLETE (commit `fde64b0`)
+- [x] `liku analytics [--days N] [--raw] [--json]` command
+- [x] Success rate, top tasks, phase breakdown, common failures
+- [x] Registered in CLI command table
+- [x] 3 assertions testing run/showHelp exports
+
 ---
 
 ## Implementation Order (Actual)
@@ -789,6 +837,11 @@ All phases are complete. Phases 5–9 were implemented across commits `461ce31` 
 8. **Phase 7** — AWM, PostToolUse, CLI, telemetry analytics (commit `bc27d62`)
 9. **Phase 8** — Audit-driven fixes from deep gap analysis (commit `f1fa1a6`)
 10. **Phase 9** — Design-level hardening from Gemini brainstorm (commit `8aefc19`)
+11. **Phase 10** — N3: E2E dynamic tool smoke test (commit `fde64b0`)
+12. **Phase 11** — N1-T2: TF-IDF skill routing (commit `fde64b0`)
+13. **Phase 12** — N4: Session persistence (commit `fde64b0`)
+14. **Phase 13** — N6: Cross-model reflection (commit `fde64b0`)
+15. **Phase 14** — N5: Analytics CLI command (commit `fde64b0`)
 
 ---
 
@@ -802,6 +855,7 @@ They are complementary and can be developed in parallel:
 |-------|----------|-----------------|--------|
 | Perception | advancingFeatures.md | ROI capture, coordinate contract, pattern-first UIA, event watcher | In progress |
 | Cognition | **This document** | Memory, RLVR reflection, dynamic tools, skill routing, sandbox, BPE tokens | ✅ Complete |
+| Cognition N+ | **This document** (Next-Stage) | TF-IDF routing, session persistence, cross-model reflection, analytics CLI | ✅ Mostly Complete |
 
 ---
 
@@ -809,17 +863,19 @@ They are complementary and can be developed in parallel:
 
 With all 10 phases (0–9) complete, the following items represent the next evolution of the cognitive layer. These are ordered by impact and feasibility.
 
-### N1 — Embedding-Based Skill Routing
-**Priority**: HIGH | **Complexity**: MEDIUM
+### N1 — Tiered Skill Routing
+**Priority**: HIGH | **Complexity**: MEDIUM | **Status**: ✅ Tier 2 COMPLETE (commit `fde64b0`)
 
-Replace keyword-matching in `skill-router.js` with semantic similarity using lightweight embeddings. The current word-boundary regex approach works but misses synonyms and conceptual matches.
+Replace keyword-only matching in `skill-router.js` with a tiered scoring approach that progressively adds semantic capability.
 
-- **Approach**: Use `transformers.js` (ONNX Runtime) for local embedding inference, or call an embedding API (OpenAI `text-embedding-3-small`)
-- **Fallback**: Keep keyword matching as fallback when embeddings aren't available (offline mode)
-- **Metric**: Measure skill selection precision — compare keyword vs. embedding routing on a labeled test set
+- **Tier 1** (existing): Word-boundary keyword matching (+2/keyword, +1/tag, +0.5 recency). Retained as base layer.
+- **Tier 2** (✅ implemented): Pure JS TF-IDF with cosine similarity. Zero dependencies. `tokenize()` → `termFrequency()` → `inverseDocFrequency()` → `tfidfVector()` → `cosineSimilarity()`. Combined score = keyword + (TF-IDF × 5 scaling).
+- **Tier 3** (future): Optional Ollama embeddings for local semantic search. Same interface — `getRelevantSkillsContext(query, limit)` stays identical.
+
+**Decision log**: `@xenova/transformers` (80MB WASM) rejected — violates zero-native-dependency constraint. TF-IDF provides synonym-adjacent matching (shared terms score higher) without adding any dependency.
 
 ### N2 — Auto-Registration for Hook-Approved Tools (Phase 3c)
-**Priority**: MEDIUM | **Complexity**: LOW
+**Priority**: MEDIUM | **Complexity**: LOW | **Status**: ❌ NOT YET IMPLEMENTED
 
 Currently, tool proposals require manual `liku tools approve <name>`. Add an auto-registration path for tools that pass:
 1. Static validation (existing `validateToolSource()`)
@@ -829,21 +885,36 @@ Currently, tool proposals require manual `liku tools approve <name>`. Add an aut
 Auto-registered tools would have a `status: 'auto-approved'` flag and could be revoked at any time.
 
 ### N3 — End-to-End Smoke Test for Dynamic Tools
-**Priority**: MEDIUM | **Complexity**: LOW
+**Priority**: MEDIUM | **Complexity**: LOW | **Status**: ✅ COMPLETE (commit `fde64b0`)
 
-Create an integration test that exercises the full pipeline: AI proposes tool → quarantine → approve → execute → telemetry → reflection. Currently only unit-tested per component.
+Phase 10 tests exercise the full pipeline with a Fibonacci tool: `proposeTool()` → quarantine verification → `approveTool()` → promotion to `dynamic/` → `sandbox.executeDynamicTool()` via `child_process.fork()` → verify result (Fibonacci(10) = 55) → `recordInvocation()` → `writeTelemetry()` → verify telemetry entry → cleanup. **17 assertions** covering every lifecycle stage.
 
 ### N4 — Persistent Conversation Context (Cross-Session Memory)
-**Priority**: MEDIUM | **Complexity**: MEDIUM
+**Priority**: MEDIUM | **Complexity**: MEDIUM | **Status**: ✅ COMPLETE (commit `fde64b0`)
 
-The memory store holds factual notes but doesn't capture conversational context across sessions. Add a `conversation-log.jsonl` that captures key exchanges and can be summarized for future sessions.
+Implemented as `saveSessionNote()` in `ai-service.js`. On chat exit, extracts the last 20 conversation entries, filters to user messages, extracts top-8 keywords (frequency-based, with stop word removal), and writes an episodic memory note via `memoryStore.addNote({ type: 'episodic', ... })`. On next session, existing `getRelevantNotes()` picks up relevant session context.
+
+**Decision log**: Simpler approach than proposed `conversation-log.jsonl` — reuses existing memory-store infrastructure instead of adding a parallel persistence layer.
 
 ### N5 — Telemetry Analytics Dashboard
-**Priority**: LOW | **Complexity**: MEDIUM
+**Priority**: LOW | **Complexity**: MEDIUM | **Status**: ✅ COMPLETE (commit `fde64b0`)
 
-Expose telemetry data through `liku analytics` CLI command — show success rates, most-used tools, common failure patterns, reflection effectiveness. Data already collected in `~/.liku/telemetry/logs/`.
+New CLI command `liku analytics [--days N] [--raw] [--json]` at `src/cli/commands/analytics.js`. Reads JSONL telemetry for the requested date range and displays:
+- Success rate (success/total with percentage)
+- Top 10 tasks by frequency
+- Phase breakdown
+- Top 5 common failure reasons
 
-### N6 — Multi-Provider Reflection
-**Priority**: LOW | **Complexity**: HIGH
+`--raw` dumps entries as JSONL. `--json` provides machine-readable output.
 
-Use a different AI provider for reflection than the one that produced the original failure. This avoids the "asking the same model to find its own mistakes" problem. Requires provider orchestration changes in `ai-service.js`.
+### N6 — Cross-Model Reflection
+**Priority**: LOW | **Complexity**: HIGH | **Status**: ✅ COMPLETE (commit `fde64b0`)
+
+Implemented as same-provider, different-model reflection. The original plan called for multi-provider reflection, but Gemini analysis revealed the auth boundary problem: Copilot-authenticated users only have Copilot tokens, so routing reflection to OpenAI/Anthropic would require separate API keys the user may not have.
+
+**Solution**: `reflectionModelOverride` module variable in `ai-service.js`. When set (e.g., to `o3-mini`), the reflection pass in `requestWithFallback()` uses the specified reasoning model instead of the default chat model. Controlled via `/rmodel` slash command:
+- `/rmodel` — show current reflection model
+- `/rmodel o3-mini` — set reflection to reasoning model
+- `/rmodel off` — clear override (use default)
+
+**Decision log**: Cross-provider rejected in favor of cross-model. Reasoning models (o1, o3-mini) are ideal for reflection because they are better at analytical self-correction than chat-optimized models.

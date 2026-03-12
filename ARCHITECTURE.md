@@ -106,12 +106,17 @@ CRUD store for structured notes with Zettelkasten-style linking. Each note has `
 
 ### Semantic Skill Router (`src/main/memory/skill-router.js`)
 
-Loads skill files from `~/.liku/skills/`, selects the top 3 matching skills by word-boundary keyword scoring, and injects up to 1500 BPE tokens as `## Relevant Skills`. Stale index entries (pointing to deleted files) are pruned on every `loadIndex()` call.
+Loads skill files from `~/.liku/skills/`, selects the top 3 matching skills by combined scoring, and injects up to 1500 BPE tokens as `## Relevant Skills`. Stale index entries (pointing to deleted files) are pruned on every `loadIndex()` call.
+
+**Tiered scoring** (N1-T2):
+- **Tier 1**: Word-boundary keyword matching (+2/keyword, +1/tag, +0.5 recency).
+- **Tier 2**: TF-IDF cosine similarity (pure JS, zero deps). `tokenize()` → `termFrequency()` → `inverseDocFrequency()` → `tfidfVector()` → `cosineSimilarity()`. TF-IDF score scaled ×5 and added to keyword score.
+- Combined: `finalScore = keywordScore + (tfidfSimilarity × 5)`
 
 ### RLVR Telemetry (`src/main/telemetry/`)
 
 - **`telemetry-writer.js`**: Structured JSONL logger with rotation at 10MB. Schema: `{ task, phase, outcome, context, timestamp }`.
-- **`reflection-trigger.js`**: Fires reflection when consecutive failures ≥ 3 or session failures ≥ 5. Bounded at `MAX_REFLECTION_ITERATIONS = 2`. Session failure count decays by 1 on success.
+- **`reflection-trigger.js`**: Fires reflection when consecutive failures ≥ 3 or session failures ≥ 5. Bounded at `MAX_REFLECTION_ITERATIONS = 2`. Session failure count decays by 1 on success. Supports cross-model reflection — when `reflectionModelOverride` is set (via `/rmodel`), reflection passes route to a reasoning model (e.g., o3-mini) instead of the default chat model.
 
 ### Dynamic Tool System (`src/main/tools/`)
 
@@ -132,6 +137,14 @@ Assembles the message array for API calls. Accepts explicit `skillsContext` and 
 ### AWM (Agent Workflow Memory)
 
 Extracts procedural memory from successful multi-step action sequences (≥ 3 steps). Extracted AWM notes are auto-registered as skills via `skillRouter.addSkill()`, gated by the PreToolUse hook.
+
+### Session Persistence (N4)
+
+`saveSessionNote()` in `ai-service.js` fires on chat exit. Extracts user messages from recent conversation history, computes top keywords via frequency analysis (with stop word removal), and writes an episodic memory note via `memoryStore.addNote()`. On next session, `getRelevantNotes()` picks up matching session context automatically.
+
+### Analytics CLI (`src/cli/commands/analytics.js`)
+
+`liku analytics [--days N] [--raw] [--json]` reads telemetry JSONL for the requested date range and displays success rates, top tasks, phase breakdown, and common failure reasons.
 
 ### Data Flow
 
