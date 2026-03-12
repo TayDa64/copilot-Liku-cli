@@ -66,5 +66,8 @@
   ],
   "optionalDependencies": {
     "electron": "^35.7.5"
+  },
+  "dependencies": {
+    "js-tiktoken": "^1.0.21"
   }
 }

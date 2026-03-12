@@ -24,6 +24,7 @@ function ensureLikuStructure() {
     'memory/notes',     // Phase 1: Agentic memory
     'skills',           // Phase 4: Skill router
     'tools/dynamic',    // Phase 3: Dynamic tool sandbox
+    'tools/proposed',   // Phase 3b: Staging for AI-proposed tools (quarantine)
     'telemetry/logs',   // Phase 2: RLVR telemetry
     'traces'            // Agent trace writer
   ];

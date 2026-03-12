@@ -12,12 +12,13 @@
  *
  * Hard caps:
  *  - Maximum skills per query: 3 (configurable via `limit`)
- *  - Maximum total token budget: 1500 characters (rough proxy for tokens)
+ *  - Maximum total token budget: 1500 BPE tokens (cl100k_base encoding)
  */
 
 const fs = require('fs');
 const path = require('path');
 const { LIKU_HOME } = require('../../shared/liku-home');
+const { countTokens, truncateToTokenBudget } = require('../../shared/token-counter');
 
 const SKILLS_DIR = path.join(LIKU_HOME, 'skills');
 const INDEX_FILE = path.join(SKILLS_DIR, 'index.json');
@@ -125,7 +126,7 @@ function getRelevantSkillsContext(userMessage, limit) {
   if (scored.length === 0) return '';
 
   // Load skill content up to TOKEN_BUDGET
-  let totalLen = 0;
+  let totalTokens = 0;
   const sections = [];
 
   for (const { id, entry } of scored) {
@@ -133,10 +134,10 @@ function getRelevantSkillsContext(userMessage, limit) {
     try {
       if (!fs.existsSync(skillPath)) continue;
       const content = fs.readFileSync(skillPath, 'utf-8');
-      const trimmed = content.slice(0, TOKEN_BUDGET - totalLen);
-      if (trimmed.length === 0) break;
+      const trimmed = truncateToTokenBudget(content, TOKEN_BUDGET - totalTokens);
+      if (!trimmed) break;
       sections.push(`### Skill: ${id}\n${trimmed}`);
-      totalLen += trimmed.length;
+      totalTokens += countTokens(trimmed);
 
       // Record usage
       entry.lastUsed = new Date().toISOString();
@@ -144,7 +145,7 @@ function getRelevantSkillsContext(userMessage, limit) {
     } catch (err) {
       console.warn(`[SkillRouter] Failed to load skill ${id}:`, err.message);
     }
-    if (totalLen >= TOKEN_BUDGET) break;
+    if (totalTokens >= TOKEN_BUDGET) break;
   }
 
   // Persist usage stats

@@ -1175,29 +1175,27 @@ async function sendMessage(userMessage, options = {}) {
     ...parsedTags.extraSystemMessages
   ];
 
-  // Inject relevant skills into system prompt (Phase 4 — Semantic Skill Router)
+  // Fetch relevant skills (Phase 4 — Semantic Skill Router)
+  let skillsContextText = '';
   try {
-    const skillsContext = skillRouter.getRelevantSkillsContext(enhancedMessage);
-    if (skillsContext) {
-      baseExtraSystemMessages.push(skillsContext);
-    }
+    skillsContextText = skillRouter.getRelevantSkillsContext(enhancedMessage) || '';
   } catch (err) {
     console.warn('[AI] Skill router error (non-fatal):', err.message);
   }
 
-  // Inject relevant memory notes (Phase 1 — Agentic Memory)
+  // Fetch relevant memory notes (Phase 1 — Agentic Memory)
+  let memoryContextText = '';
   try {
-    const memoryContext = memoryStore.getMemoryContext(enhancedMessage);
-    if (memoryContext) {
-      baseExtraSystemMessages.push(memoryContext);
-    }
+    memoryContextText = memoryStore.getMemoryContext(enhancedMessage) || '';
   } catch (err) {
     console.warn('[AI] Memory store error (non-fatal):', err.message);
   }
 
-  // Build messages with optional visual context
+  // Build messages with explicit skills/memory context params
   const messages = await buildMessages(enhancedMessage, includeVisualContext, {
-    extraSystemMessages: baseExtraSystemMessages
+    extraSystemMessages: baseExtraSystemMessages,
+    skillsContext: skillsContextText,
+    memoryContext: memoryContextText
   });
 
   try {

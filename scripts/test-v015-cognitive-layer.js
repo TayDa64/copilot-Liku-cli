@@ -283,7 +283,7 @@ const evalCode = 'eval("alert(1)")';
 const evalResult = toolValidator.validateToolSource(evalCode);
 assert(evalResult.valid === false, 'eval() code fails validation');
 
-// Sandbox execution
+// Sandbox execution (async — child_process.fork returns a Promise)
 assert(typeof sandbox.executeDynamicTool === 'function', 'executeDynamicTool is a function');
 
 // Write a test tool and execute it
@@ -292,17 +292,24 @@ if (!fs.existsSync(testToolDir)) fs.mkdirSync(testToolDir, { recursive: true });
 const testToolPath = path.join(testToolDir, 'test-add.js');
 fs.writeFileSync(testToolPath, 'result = args.a + args.b;');
 
-const execResult = sandbox.executeDynamicTool(testToolPath, { a: 3, b: 7 });
-assert(execResult.success === true, 'Sandbox executes safe tool successfully');
-assert(execResult.result === 10, 'Sandbox returns correct result');
+// Async sandbox tests — run after sync tests complete
+async function runAsyncSandboxTests() {
+  const execResult = await sandbox.executeDynamicTool(testToolPath, { a: 3, b: 7 });
+  assert(execResult.success === true, 'Sandbox executes safe tool successfully');
+  assert(execResult.result === 10, 'Sandbox returns correct result');
 
-// Test timeout protection
-const infiniteToolPath = path.join(testToolDir, 'test-infinite.js');
-fs.writeFileSync(infiniteToolPath, 'while(true) {}');
-const timeoutResult = sandbox.executeDynamicTool(infiniteToolPath, {});
-assert(timeoutResult.success === false, 'Infinite loop tool fails');
-assert(timeoutResult.error.includes('timed out') || timeoutResult.error.includes('timeout'),
-  'Timeout error message is descriptive');
+  // Test timeout protection
+  const infiniteToolPath = path.join(testToolDir, 'test-infinite.js');
+  fs.writeFileSync(infiniteToolPath, 'while(true) {}');
+  const timeoutResult = await sandbox.executeDynamicTool(infiniteToolPath, {});
+  assert(timeoutResult.success === false, 'Infinite loop tool fails');
+  assert(timeoutResult.error && (timeoutResult.error.includes('timed out') || timeoutResult.error.includes('timeout') || timeoutResult.error.includes('Timeout')),
+    'Timeout error message is descriptive');
+
+  // Cleanup test tool files
+  try { fs.unlinkSync(testToolPath); } catch {}
+  try { fs.unlinkSync(infiniteToolPath); } catch {}
+}
 
 // Tool registry
 assert(typeof toolRegistry.registerTool === 'function', 'registerTool is a function');
@@ -344,9 +351,7 @@ assert(toolRegistry.lookupTool('test-calculator').entry.approved === false, 'Too
 toolRegistry.unregisterTool('test-calculator', true);
 assert(toolRegistry.lookupTool('test-calculator') === null, 'Tool was unregistered');
 
-// Clean up test tool files
-try { fs.unlinkSync(testToolPath); } catch {}
-try { fs.unlinkSync(infiniteToolPath); } catch {}
+// NOTE: test tool file cleanup happens in runAsyncSandboxTests() to avoid race
 
 // ═══════════════════════════════════════════════════════════
 //  Phase 2b: Reflection Loop Wiring
@@ -697,6 +702,108 @@ console.log('\n--- Phase 8: Audit-Driven Fixes ---\n');
 }
 
 // ═══════════════════════════════════════════════════════════
+//  Phase 9 — Design-Level Hardening (Gemini brainstorm items)
+// ═══════════════════════════════════════════════════════════
+console.log('\n--- Phase 9: Design-Level Hardening ---\n');
+
+// 9a. Token counter module — BPE tokenization
+{
+  const tc = require(path.join(__dirname, '..', 'src', 'shared', 'token-counter'));
+  assert(typeof tc.countTokens === 'function', 'token-counter exports countTokens()');
+  assert(typeof tc.truncateToTokenBudget === 'function', 'token-counter exports truncateToTokenBudget()');
+  assert(tc.countTokens('hello world') > 0, 'countTokens returns positive number');
+  assert(tc.countTokens('hello world') === 2, 'countTokens("hello world") = 2 BPE tokens');
+  const longText = 'word '.repeat(100);
+  const truncated = tc.truncateToTokenBudget(longText, 10);
+  assert(tc.countTokens(truncated) <= 10, 'truncateToTokenBudget respects budget');
+}
+
+// 9b. memory-store uses token counting (not character heuristics)
+{
+  const msSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'memory', 'memory-store.js'), 'utf8');
+  assert(msSrc.includes("require('../../shared/token-counter')"), 'memory-store imports token-counter');
+  assert(msSrc.includes('countTokens('), 'memory-store calls countTokens()');
+}
+
+// 9c. skill-router uses token counting (not character heuristics)
+{
+  const srSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'memory', 'skill-router.js'), 'utf8');
+  assert(srSrc.includes("require('../../shared/token-counter')"), 'skill-router imports token-counter');
+  assert(srSrc.includes('truncateToTokenBudget('), 'skill-router calls truncateToTokenBudget()');
+}
+
+// 9d. Proposal flow — proposeTool / promoteTool / rejectTool / listProposals
+{
+  const reg = require(path.join(__dirname, '..', 'src', 'main', 'tools', 'tool-registry'));
+  assert(typeof reg.proposeTool === 'function', 'tool-registry exports proposeTool()');
+  assert(typeof reg.promoteTool === 'function', 'tool-registry exports promoteTool()');
+  assert(typeof reg.rejectTool === 'function', 'tool-registry exports rejectTool()');
+  assert(typeof reg.listProposals === 'function', 'tool-registry exports listProposals()');
+  assert(typeof reg.PROPOSED_DIR === 'string', 'tool-registry exports PROPOSED_DIR path');
+  assert(reg.PROPOSED_DIR.endsWith('proposed'), 'PROPOSED_DIR ends with "proposed"');
+}
+
+// 9e. liku-home includes tools/proposed directory
+{
+  const lhSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'shared', 'liku-home.js'), 'utf8');
+  assert(lhSrc.includes("'tools/proposed'"), 'liku-home creates tools/proposed dir');
+}
+
+// 9f. Sandbox uses child_process.fork (process-level isolation)
+{
+  const sbSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'tools', 'sandbox.js'), 'utf8');
+  assert(sbSrc.includes("require('child_process')"), 'sandbox imports child_process');
+  assert(sbSrc.includes('fork('), 'sandbox uses fork() for isolation');
+  assert(!sbSrc.includes('vm.createContext'), 'sandbox does NOT use in-process vm.createContext');
+}
+
+// 9g. sandbox-worker.js exists and uses IPC
+{
+  const workerPath = path.join(__dirname, '..', 'src', 'main', 'tools', 'sandbox-worker.js');
+  assert(fs.existsSync(workerPath), 'sandbox-worker.js exists');
+  const wSrc = fs.readFileSync(workerPath, 'utf8');
+  assert(wSrc.includes("process.on('message'"), 'worker listens on IPC message');
+  assert(wSrc.includes("process.send("), 'worker sends result via IPC');
+}
+
+// 9h. message-builder accepts skillsContext/memoryContext params
+{
+  const mbSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'ai-service', 'message-builder.js'), 'utf8');
+  assert(mbSrc.includes('skillsContext'), 'message-builder has skillsContext param');
+  assert(mbSrc.includes('memoryContext'), 'message-builder has memoryContext param');
+  assert(mbSrc.includes('## Relevant Skills'), 'message-builder uses dedicated skills header');
+  assert(mbSrc.includes('## Working Memory'), 'message-builder uses dedicated memory header');
+}
+
+// 9i. ai-service passes skills/memory as named params
+{
+  const aiSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'ai-service.js'), 'utf8');
+  assert(aiSrc.includes('skillsContext: skillsContextText'), 'ai-service passes skillsContext explicitly');
+  assert(aiSrc.includes('memoryContext: memoryContextText'), 'ai-service passes memoryContext explicitly');
+}
+
+// 9j. CLI tools command supports proposals/reject subcommands
+{
+  const toolsCLI = fs.readFileSync(path.join(__dirname, '..', 'src', 'cli', 'commands', 'tools.js'), 'utf8');
+  assert(toolsCLI.includes("case 'proposals':"), 'tools CLI has proposals subcommand');
+  assert(toolsCLI.includes("case 'reject':"), 'tools CLI has reject subcommand');
+  assert(toolsCLI.includes('listProposals'), 'tools CLI calls listProposals');
+  assert(toolsCLI.includes('rejectTool'), 'tools CLI calls rejectTool');
+}
+
+// 9k. sandbox executeDynamicTool is now awaited (async)
+{
+  const saSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'system-automation.js'), 'utf8');
+  assert(saSrc.includes('await sandbox.executeDynamicTool'), 'system-automation awaits sandbox.executeDynamicTool');
+}
+
+// 9l. sandbox drops env vars for security
+{
+  const sbSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'tools', 'sandbox.js'), 'utf8');
+  assert(sbSrc.includes("NODE_ENV: 'sandbox'"), 'sandbox worker runs with minimal env');
+}
+
+// ═══════════════════════════════════════════════════════════
 //  Integration — AI Service still loads
 // ═══════════════════════════════════════════════════════════
 console.log('\n--- Integration: AI Service Module ---\n');
@@ -706,19 +813,24 @@ assert(typeof aiService.getStatus === 'function', 'getStatus still exported');
 assert(typeof aiService.handleCommand === 'function', 'handleCommand still exported');
 
 // ═══════════════════════════════════════════════════════════
-//  Summary
+//  Summary (after async sandbox tests complete)
 // ═══════════════════════════════════════════════════════════
-console.log(`\n========================================`);
-console.log(`  v0.0.15 Cognitive Layer Test Summary`);
-console.log(`========================================`);
-console.log(`  Total:  ${passed + failed}`);
-console.log(`  Passed: ${passed}`);
-console.log(`  Failed: ${failed}`);
-console.log(`========================================\n`);
+runAsyncSandboxTests().then(() => {
+  console.log(`\n========================================`);
+  console.log(`  v0.0.15 Cognitive Layer Test Summary`);
+  console.log(`========================================`);
+  console.log(`  Total:  ${passed + failed}`);
+  console.log(`  Passed: ${passed}`);
+  console.log(`  Failed: ${failed}`);
+  console.log(`========================================\n`);
 
-if (failed > 0) {
-  console.log('❌ Some tests failed!\n');
+  if (failed > 0) {
+    console.log('❌ Some tests failed!\n');
+    process.exit(1);
+  } else {
+    console.log('✅ All tests passed!\n');
+  }
+}).catch((err) => {
+  console.error('Async test error:', err);
   process.exit(1);
-} else {
-  console.log('✅ All tests passed!\n');
-}
+});

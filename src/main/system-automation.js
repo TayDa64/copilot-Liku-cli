@@ -2226,7 +2226,7 @@ async function executeAction(action) {
           throw new Error(`Dynamic tool '${action.toolName}' denied by PreToolUse hook: ${hookResult.reason}`);
         }
         console.log(`[AUTOMATION] Executing dynamic tool: ${action.toolName}`);
-        const execResult = sandbox.executeDynamicTool(lookup.absolutePath, action.args || {});
+        const execResult = await sandbox.executeDynamicTool(lookup.absolutePath, action.args || {});
         toolRegistry.recordInvocation(action.toolName);
         // PostToolUse hook — audit-log.ps1 for execution audit trail
         try {

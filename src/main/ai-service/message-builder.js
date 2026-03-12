@@ -16,7 +16,7 @@ function createMessageBuilder(dependencies) {
 
   async function buildMessages(userMessage, includeVisual = false, options = {}) {
     const messages = [{ role: 'system', content: systemPrompt }];
-    const { extraSystemMessages = [] } = options || {};
+    const { extraSystemMessages = [], skillsContext = '', memoryContext = '' } = options || {};
 
     try {
       let prefText = '';
@@ -41,6 +41,20 @@ function createMessageBuilder(dependencies) {
             messages.push({ role: 'system', content: msg.trim() });
           }
         }
+      }
+    } catch {}
+
+    // Inject skills context with a dedicated section header for model clarity
+    try {
+      if (typeof skillsContext === 'string' && skillsContext.trim()) {
+        messages.push({ role: 'system', content: `## Relevant Skills\n${skillsContext.trim()}` });
+      }
+    } catch {}
+
+    // Inject memory context with a dedicated section header for model clarity
+    try {
+      if (typeof memoryContext === 'string' && memoryContext.trim()) {
+        messages.push({ role: 'system', content: `## Working Memory\n${memoryContext.trim()}` });
       }
     } catch {}
 

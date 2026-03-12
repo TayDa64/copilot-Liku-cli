@@ -11,13 +11,14 @@
  *   - addNote(noteData) → after completed interactions
  *   - updateNote(id, updates) → memory evolution
  *
- * Token budget: hard cap on injected memory context (default 2000 chars).
+ * Token budget: hard cap on injected memory context (default 2000 BPE tokens).
  */
 
 const fs = require('fs');
 const path = require('path');
 const { LIKU_HOME } = require('../../shared/liku-home');
 const linker = require('./memory-linker');
+const { countTokens, truncateToTokenBudget } = require('../../shared/token-counter');
 
 const MEMORY_DIR = path.join(LIKU_HOME, 'memory');
 const NOTES_DIR = path.join(MEMORY_DIR, 'notes');
@@ -314,14 +315,15 @@ function getMemoryContext(query, limit) {
   const notes = getRelevantNotes(query, limit);
   if (notes.length === 0) return '';
 
-  let totalLen = 0;
+  let totalTokens = 0;
   const sections = [];
 
   for (const note of notes) {
     const entry = `[${note.type}] ${note.content}`;
-    if (totalLen + entry.length > MEMORY_TOKEN_BUDGET) break;
+    const entryTokens = countTokens(entry);
+    if (totalTokens + entryTokens > MEMORY_TOKEN_BUDGET) break;
     sections.push(entry);
-    totalLen += entry.length;
+    totalTokens += entryTokens;
   }
 
   if (sections.length === 0) return '';
