@@ -96,11 +96,12 @@ function getInspectService() {
 // GitHub Copilot OAuth Configuration
 const COPILOT_CLIENT_ID = 'Iv1.b507a08c87ecfe98';
 const GITHUB_API_HOST = 'api.github.com';
-const COPILOT_CHAT_HOST = 'copilot-proxy.githubusercontent.com';
-const COPILOT_ALT_CHAT_HOST = 'api.githubcopilot.com';
+const COPILOT_CHAT_HOST = 'api.individual.githubcopilot.com';
+const COPILOT_ALT_CHAT_HOST = 'copilot-proxy.githubusercontent.com';
 const COPILOT_TOKEN_PATH = '/copilot_internal/v2/token';
 const COPILOT_CHAT_PATH = '/chat/completions';
 let preferredCopilotChatHost = COPILOT_CHAT_HOST;
+let sessionApiHost = null; // Populated from session token endpoints.api
 
 // Current configuration
 const providerRegistry = createProviderRegistry(process.env);
@@ -234,7 +235,8 @@ async function discoverCopilotModels(force = false) {
     force,
     loadCopilotTokenIfNeeded,
     exchangeForCopilotSession,
-    getCopilotSessionToken: () => apiKeys.copilotSession
+    getCopilotSessionToken: () => apiKeys.copilotSession,
+    getSessionApiHost: () => sessionApiHost
   });
 }
 
@@ -404,11 +406,12 @@ function prevalidateActionTarget(action) {
     return { success: true };
   }
 
-  if (!uiWatcher || !uiWatcher.isPolling || typeof uiWatcher.getElementAtPoint !== 'function') {
+  const watcher = getUIWatcher();
+  if (!watcher || !watcher.isPolling || typeof watcher.getElementAtPoint !== 'function') {
     return { success: true };
   }
 
-  const liveElement = uiWatcher.getElementAtPoint(action.x, action.y);
+  const liveElement = watcher.getElementAtPoint(action.x, action.y);
   if (!liveElement) {
     return {
       success: false,
@@ -659,6 +662,17 @@ async function exchangeForCopilotSession() {
             return reject(new Error('Copilot session token missing from response'));
           }
           apiKeys.copilotSession = token;
+
+          // Use the API host from the session response if available
+          if (result.endpoints && result.endpoints.api) {
+            try {
+              const apiUrl = new URL(result.endpoints.api);
+              sessionApiHost = apiUrl.hostname;
+              preferredCopilotChatHost = sessionApiHost;
+              console.log(`[Copilot] Using session API host: ${sessionApiHost}`);
+            } catch { /* ignore malformed URL */ }
+          }
+
           resolve(token);
         } catch (error) {
           reject(new Error(`Failed to parse Copilot session response: ${error.message}`));
@@ -743,8 +757,6 @@ async function callCopilot(messages, modelOverride = null, requestOptions = {}) 
       if (toolsEnabledForModel) {
         payload.tools = getToolDefinitions();
         payload.tool_choice = requestOptions?.tool_choice || 'auto';
-      } else {
-        payload.tool_choice = 'none';
       }
 
       return JSON.stringify(payload);
@@ -865,7 +877,7 @@ async function callCopilot(messages, modelOverride = null, requestOptions = {}) 
       });
     };
 
-    const primaryHost = preferredCopilotChatHost;
+    const primaryHost = sessionApiHost || preferredCopilotChatHost;
     const alternateHost = primaryHost === COPILOT_CHAT_HOST ? COPILOT_ALT_CHAT_HOST : COPILOT_CHAT_HOST;
 
     tryEndpoint(primaryHost, '', modelId)
@@ -876,7 +888,7 @@ async function callCopilot(messages, modelOverride = null, requestOptions = {}) 
       .catch(async (err) => {
         console.log('[Copilot] Primary endpoint failed:', err.message);
 
-        const unsupportedModel = /unsupported_api_for_model|not accessible via the \/chat\/completions endpoint|not available/i.test(err.message || '');
+        const unsupportedModel = /unsupported_api_for_model|not accessible via the \/chat\/completions endpoint|not available|not supported|model_not_supported/i.test(err.message || '');
         if (unsupportedModel) {
           return reject(new Error(`Selected Copilot model '${modelName}' is not available on the chat endpoint. Choose a different model.`));
         }
@@ -1261,7 +1273,9 @@ async function sendMessage(userMessage, options = {}) {
         const forcedMessages = await buildMessages(enforcementPrompt, includeVisualContext, {
           extraSystemMessages: baseExtraSystemMessages
         });
-        const forced = await providerOrchestrator.callProvider('copilot', forcedMessages, effectiveModel);
+        const forcedRaw = await providerOrchestrator.callProvider('copilot', forcedMessages, effectiveModel);
+        const forced = (forcedRaw && typeof forcedRaw === 'object' && typeof forcedRaw.content === 'string')
+          ? forcedRaw.content : forcedRaw;
         if (forced && hasActions(forced)) {
           response = forced;
         }
@@ -1328,7 +1342,11 @@ async function sendMessage(userMessage, options = {}) {
             // Call the same provider/model we already used for the first response.
             const regenerated = await providerOrchestrator.callProvider(usedProvider, regenMessages, effectiveModel);
 
-            currentResponse = regenerated || currentResponse;
+            // callProvider returns an object for copilot ({ content, ... }) or a string for others.
+            const regenText = (regenerated && typeof regenerated === 'object' && typeof regenerated.content === 'string')
+              ? regenerated.content
+              : (typeof regenerated === 'string' ? regenerated : null);
+            currentResponse = regenText || currentResponse;
             currentParsed = parseActions(currentResponse) || { actions: [] };
             attempt++;
           }
@@ -2056,14 +2074,21 @@ function extractRequestedAppName(text) {
   const normalized = text.replace(/\s+/g, ' ').trim();
   if (!normalized) return null;
 
-  const m = normalized.match(/\b(open|launch|start|run)\b\s+(?:the\s+)?(.+?)\s+\b(app|application|program)\b/i);
+  // Reject when the sentence is about interacting with web content, not launching an app
+  const webContentRe = /\b(website|web\s*site|link|results|search\s*results|page|tab|url|button|menu|element)\b/i;
+
+  const m = normalized.match(/\b(open|launch|start|run)\b\s+(?:the\s+)?(.+?)\s+\b(app|application|program|software)\b/i);
   if (m && m[2]) {
-    return m[2].trim();
+    const candidate = m[2].trim();
+    if (webContentRe.test(candidate)) return null;
+    return candidate;
   }
 
-  const short = normalized.match(/\b(open|launch|start|run)\b\s+(.+)/i);
+  const short = normalized.match(/\b(open|launch|start|run)\b\s+(?:the\s+)?(.+)/i);
   if (short && short[2] && short[2].length <= 48 && !/https?:\/\//i.test(short[2])) {
-    return short[2].trim();
+    const candidate = short[2].trim();
+    if (webContentRe.test(candidate)) return null;
+    return candidate;
   }
 
   return null;
@@ -2079,7 +2104,7 @@ function buildProcessCandidatesFromAppName(appName) {
 
   // Known app mappings.
   const known = [
-    { re: /\bmpc\s*3\b/i, names: ['mpc3', 'mpc'] },
+    { re: /\bmpc\s*(3|beats)\b/i, names: ['mpc3', 'mpc', 'mpc beats'] },
     { re: /visual\s+studio\s+code|\bvscode\b/i, names: ['code'] },
     { re: /microsoft\s+edge/i, names: ['msedge'] },
     { re: /google\s+chrome/i, names: ['chrome'] },
@@ -2355,11 +2380,167 @@ function looksLikeBrowserTitle(title) {
   return t.includes('edge') || t.includes('chrome') || t.includes('firefox') || t.includes('youtube');
 }
 
+/**
+ * Smart browser click resolution.
+ *
+ * When a coordinate-based click targets a browser window and the AI's context
+ * (thought/reason) contains a recognisable URL or link text, this function
+ * replaces the imprecise coordinate click with a deterministic strategy:
+ *
+ *  Strategy 1 — Address-bar navigation (URL detected)
+ *    Ctrl+L → type URL → Enter.  100 % reliable when the target URL is known.
+ *
+ *  Strategy 2 — UIA element lookup (link text detected, no URL)
+ *    findElementByText → click element center.  Uses Windows UI Automation
+ *    accessibility tree for pixel-perfect targeting.
+ *
+ *  Strategy 3 — Ctrl+F find-on-page refinement (fallback)
+ *    Ctrl+F → type text → Enter → Escape.  Scrolls the matching text into
+ *    the viewport, then performs the original coordinate click (now more
+ *    likely to land on the element).
+ *
+ * @param {Object}  action        The click action (must have x, y, reason)
+ * @param {Object}  actionData    Full actionData (thought available)
+ * @param {number}  windowHandle  The last known target window handle
+ * @param {Function} [actionExecutor]  Optional custom executor
+ * @returns {Promise<{handled:boolean, result?:Object}>}
+ */
+async function trySmartBrowserClick(action, actionData, windowHandle, actionExecutor) {
+  // Only applies to left-click with reason text
+  if (action.type !== 'click' || action.x === undefined || action.button === 'right') {
+    return { handled: false };
+  }
+
+  const reason = String(action.reason || '');
+  const thought = String(actionData?.thought || '');
+  const combinedContext = `${thought} ${reason}`;
+
+  // Quick heuristic: reason should mention a link / navigate / open context
+  const isLinkClick = /\blink\b|\bnav\b|\bwebsite\b|\bopen\b|\bhref\b|\burl\b/i.test(combinedContext);
+  if (!isLinkClick) return { handled: false };
+
+  // Determine if target window is a browser
+  let isBrowserTarget = false;
+  if (windowHandle) {
+    try {
+      const fgInfo = await systemAutomation.getForegroundWindowInfo();
+      if (fgInfo?.success) {
+        isBrowserTarget = isBrowserProcessName(fgInfo.processName) || looksLikeBrowserTitle(fgInfo.title);
+      }
+    } catch { /* ignore */ }
+  }
+  if (!isBrowserTarget) {
+    // Also check watcher cache
+    const watcher = getUIWatcher();
+    if (watcher && watcher.cache?.activeWindow) {
+      const aw = watcher.cache.activeWindow;
+      isBrowserTarget = isBrowserProcessName(aw.processName) || looksLikeBrowserTitle(aw.title);
+    }
+  }
+  if (!isBrowserTarget) return { handled: false };
+
+  const exec = async (a) => (actionExecutor ? actionExecutor(a) : systemAutomation.executeAction(a));
+
+  // ---------- Strategy 1: URL detected → address-bar navigation ----------
+  const urlMatch = combinedContext.match(/https?:\/\/[^\s"'<>)]+/i);
+  if (urlMatch) {
+    let url = urlMatch[0].replace(/[.,;:!?)]+$/, ''); // strip trailing punctuation
+    console.log(`[AI-SERVICE] Smart browser click → address-bar navigation: ${url}`);
+
+    await systemAutomation.focusWindow(windowHandle);
+    await new Promise(r => setTimeout(r, 200));
+
+    // Ctrl+L → select address bar
+    await exec({ type: 'key', key: 'ctrl+l', reason: 'Focus address bar' });
+    await new Promise(r => setTimeout(r, 350));
+
+    // Type URL
+    await exec({ type: 'type', text: url });
+    await new Promise(r => setTimeout(r, 200));
+
+    // Enter
+    await exec({ type: 'key', key: 'enter', reason: 'Navigate to URL' });
+
+    return {
+      handled: true,
+      result: {
+        success: true,
+        action: 'click',
+        message: `Smart browser navigation to ${url} (address bar)`,
+        strategy: 'address-bar',
+        originalCoords: { x: action.x, y: action.y }
+      }
+    };
+  }
+
+  // ---------- Strategy 2: link text → UIA element lookup ----------
+  const textMatch = reason.match(/['"]([^'"]{3,80})['"]/);
+  if (textMatch) {
+    const linkText = textMatch[1];
+    console.log(`[AI-SERVICE] Smart browser click → UIA lookup: "${linkText}"`);
+    try {
+      const found = await systemAutomation.findElementByText(linkText, { controlType: '' });
+      if (found?.element?.Bounds) {
+        const { CenterX, CenterY } = found.element.Bounds;
+        console.log(`[AI-SERVICE] UIA found "${linkText}" at (${CenterX}, ${CenterY})`);
+        await systemAutomation.focusWindow(windowHandle);
+        await new Promise(r => setTimeout(r, 150));
+        const clickResult = await exec({ type: 'click', x: CenterX, y: CenterY });
+        return {
+          handled: true,
+          result: {
+            success: clickResult.success !== false,
+            action: 'click',
+            message: `Clicked "${linkText}" via UIA at (${CenterX}, ${CenterY})`,
+            strategy: 'uia-element',
+            originalCoords: { x: action.x, y: action.y },
+            resolvedCoords: { x: CenterX, y: CenterY }
+          }
+        };
+      }
+    } catch (e) {
+      console.log(`[AI-SERVICE] UIA lookup failed: ${e.message}`);
+    }
+  }
+
+  // ---------- Strategy 3: Ctrl+F find on page, then coordinate click ----------
+  const searchTextMatch = reason.match(/['"]([^'"]{3,60})['"]/);
+  if (searchTextMatch) {
+    const searchText = searchTextMatch[1];
+    console.log(`[AI-SERVICE] Smart browser click → Ctrl+F refinement: "${searchText}"`);
+
+    await systemAutomation.focusWindow(windowHandle);
+    await new Promise(r => setTimeout(r, 200));
+
+    // Open find bar
+    await exec({ type: 'key', key: 'ctrl+f', reason: 'Open find bar' });
+    await new Promise(r => setTimeout(r, 400));
+
+    // Type search text (this scrolls matching text into viewport)
+    await exec({ type: 'type', text: searchText });
+    await new Promise(r => setTimeout(r, 500));
+
+    // Close find bar to restore normal interaction
+    await exec({ type: 'key', key: 'escape', reason: 'Close find bar' });
+    await new Promise(r => setTimeout(r, 300));
+
+    // Now proceed with original coordinate click (text is now in viewport)
+    // Fall through to let the caller execute the original coordinate click
+    console.log(`[AI-SERVICE] Ctrl+F scrolled text into view, proceeding with coordinate click`);
+  }
+
+  return { handled: false };
+}
+
 function actionsLikelyBrowserSession(actions) {
   if (!Array.isArray(actions) || actions.length === 0) return false;
   return actions.some((a) => {
     const type = String(a?.type || '').toLowerCase();
-    if (type === 'run_command') return true;
+    // run_command only indicates a browser session when the command targets a browser
+    if (type === 'run_command') {
+      const cmd = String(a?.command || '').toLowerCase();
+      return /\b(msedge|chrome|firefox|brave|vivaldi|opera|microsoft-edge:)\b/i.test(cmd);
+    }
     if ((type === 'bring_window_to_front' || type === 'focus_window') && (isBrowserProcessName(a?.processName) || looksLikeBrowserTitle(a?.title))) return true;
     if ((type === 'type' || type === 'key') && /ctrl\+l|youtube|https?:\/\//i.test(String(a?.text || a?.key || ''))) return true;
     return false;
@@ -2559,6 +2740,12 @@ function rewriteActionsForReliability(actions, context = {}) {
   if (!Array.isArray(actions) || actions.length === 0) return actions;
 
   const userMessage = typeof context.userMessage === 'string' ? context.userMessage : '';
+
+  // ── Redundant-search elimination ──────────────────────────────
+  // If the plan contains a Google search URL followed by direct URL navigation,
+  // the search is redundant — strip it and go straight to the destination.
+  actions = eliminateRedundantSearch(actions);
+
   const strategySelection = applyNonVisualWebStrategies(actions, { userMessage });
   if (strategySelection.actions !== actions) {
     updateBrowserSessionState({
@@ -2603,6 +2790,28 @@ function rewriteActionsForReliability(actions, context = {}) {
   }
 
   if (requestedAppName && !requestedUrl) {
+    // If the AI's plan already targets a browser window, preserve it — the model
+    // is interacting with an open browser, not trying to launch a new application.
+    if (actionsLikelyBrowserSession(actions)) {
+      return actions;
+    }
+
+    // If the AI chose run_command to launch an app, the Start menu approach is
+    // more reliable (handles special chars like #, elevation, detached processes, etc.).
+    // Only preserve run_command if it's clearly a *discovery* command (Get-ChildItem,
+    // Test-Path, if exist, Get-Process, etc.) — anything else gets rewritten.
+    const discoveryRe = /\b(Get-ChildItem|Test-Path|Get-Process|Get-Item|Resolve-Path|Where-Object|Select-Object|dir\b|if\s+exist)\b/i;
+    const onlyRunCommands = actions.every((a) => a?.type === 'run_command' || a?.type === 'wait');
+    const hasNonDiscoveryCommand = actions.some((a) => {
+      if (a?.type !== 'run_command') return false;
+      const cmd = String(a?.command || '');
+      return !discoveryRe.test(cmd);
+    });
+    if (onlyRunCommands && hasNonDiscoveryCommand) {
+      console.log(`[AI-SERVICE] Rewriting run_command app launch to Start menu approach for "${requestedAppName}"`);
+      return buildOpenApplicationActions(requestedAppName);
+    }
+
     const lowSignalTypes = new Set(['bring_window_to_front', 'focus_window', 'key', 'type', 'wait', 'screenshot']);
     const lowSignal = actions.every((a) => lowSignalTypes.has(a?.type));
     const screenshotFirst = actions[0]?.type === 'screenshot';
@@ -2705,6 +2914,62 @@ function rewriteActionsForReliability(actions, context = {}) {
   }
 
   return actions;
+}
+
+/**
+ * Detect and eliminate redundant Google search steps when the same plan
+ * also contains a direct URL navigation. Example anti-pattern:
+ *   type "https://www.google.com/search?q=apple.com" → enter → wait →
+ *   ctrl+l → type "https://www.apple.com" → enter
+ * The search adds ~6 unnecessary steps. Strip them, keep the direct navigation.
+ */
+function eliminateRedundantSearch(actions) {
+  if (!Array.isArray(actions) || actions.length < 6) return actions;
+
+  // Find indices of `type` actions that contain a Google search URL
+  const googleSearchIndices = [];
+  // Find indices of `type` actions that contain a direct destination URL (not Google)
+  const directUrlIndices = [];
+
+  for (let i = 0; i < actions.length; i++) {
+    const a = actions[i];
+    if (a?.type !== 'type' || typeof a?.text !== 'string') continue;
+    const text = a.text.trim();
+    if (/^https?:\/\/(www\.)?google\.[a-z.]+\/search/i.test(text) ||
+        /^https?:\/\/(www\.)?google\.[a-z.]+.*[?&]q=/i.test(text)) {
+      googleSearchIndices.push(i);
+    } else if (/^https?:\/\//i.test(text) && !/google\./i.test(text)) {
+      directUrlIndices.push(i);
+    }
+  }
+
+  // Only optimize when there's both a search AND a later direct URL
+  if (googleSearchIndices.length === 0 || directUrlIndices.length === 0) return actions;
+  const firstSearch = googleSearchIndices[0];
+  const lastDirect = directUrlIndices[directUrlIndices.length - 1];
+  if (lastDirect <= firstSearch) return actions;
+
+  // Find the ctrl+l that precedes the direct URL (the "focus address bar" step)
+  let ctrlLBeforeDirect = -1;
+  for (let i = lastDirect - 1; i >= 0; i--) {
+    if (actions[i]?.type === 'key' && /^ctrl\+l$/i.test(String(actions[i]?.key || '').trim())) {
+      ctrlLBeforeDirect = i;
+      break;
+    }
+    // Don't look back past the search section
+    if (i <= firstSearch) break;
+  }
+  if (ctrlLBeforeDirect < 0) return actions;
+
+  // Strip everything from the search type action to just before the ctrl+l for the direct URL.
+  // Keep: actions before the search, the ctrl+l + direct URL navigation, and anything after.
+  const before = actions.slice(0, firstSearch);
+  const after = actions.slice(ctrlLBeforeDirect);
+
+  // Remove any leading waits from 'after' since the search wait is no longer needed
+  // (the ctrl+l itself handles focus)
+  console.log(`[AI-SERVICE] Eliminated redundant Google search (${ctrlLBeforeDirect - firstSearch} steps stripped)`);
+  return [...before, ...after];
 }
 
 const POST_ACTION_VERIFY_MAX_RETRIES = 2;
@@ -3394,8 +3659,9 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
         break;
       }
 
-      if (uiWatcher && uiWatcher.isPolling) {
-        const elementAtPoint = uiWatcher.getElementAtPoint(action.x, action.y);
+      const watcher = getUIWatcher();
+      if (watcher && watcher.isPolling) {
+        const elementAtPoint = watcher.getElementAtPoint(action.x, action.y);
         if (elementAtPoint && elementAtPoint.windowHandle) {
           lastTargetWindowHandle = elementAtPoint.windowHandle;
           // Found an element with a known window handle
@@ -3413,6 +3679,24 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
       console.log(`[AI-SERVICE] Re-focusing last target window ${lastTargetWindowHandle} before ${action.type}`);
       await systemAutomation.focusWindow(lastTargetWindowHandle);
       await new Promise(r => setTimeout(r, 125));
+    }
+
+    // Smart browser click: when clicking in a browser, try URL navigation or UIA before
+    // falling back to imprecise coordinate clicks estimated from screenshots.
+    if (action.type === 'click' && action.x !== undefined && lastTargetWindowHandle) {
+      const smart = await trySmartBrowserClick(action, actionData, lastTargetWindowHandle, actionExecutor);
+      if (smart.handled) {
+        const smartResult = smart.result;
+        smartResult.reason = action.reason || '';
+        smartResult.safety = safety;
+        results.push(smartResult);
+        if (onAction) onAction(smartResult, i, actionData.actions.length);
+        if (!smartResult.success && !action.continue_on_error) {
+          console.log(`[AI-SERVICE] Smart browser click failed at action ${i}`);
+          break;
+        }
+        continue;
+      }
     }
 
     const result = await (actionExecutor ? actionExecutor(action) : systemAutomation.executeAction(action));
@@ -3501,6 +3785,19 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
       // AWM — Agent Workflow Memory: extract reusable procedures from successful multi-step sequences
       const MIN_STEPS_FOR_PROCEDURE = 3;
       if (outcomeLabel === 'success' && actionSummary.length >= MIN_STEPS_FOR_PROCEDURE) {
+        // Quality gate: skip saving skills that are just roundabout URL navigation
+        // (e.g., Google search → wait → navigate to destination URL).
+        const hasGoogleSearchStep = actionSummary.some(a =>
+          a.type === 'type' && typeof a.text === 'string' &&
+          /google\.[a-z.]+\/search|google\.[a-z.]+.*[?&]q=/i.test(a.text)
+        );
+        const hasDirectUrlStep = actionSummary.some(a =>
+          a.type === 'type' && typeof a.text === 'string' &&
+          /^https?:\/\//i.test(a.text.trim()) && !/google\./i.test(a.text)
+        );
+        if (hasGoogleSearchStep && hasDirectUrlStep) {
+          console.log('[AI-SERVICE] AWM: Skipping skill extraction — redundant search-then-navigate pattern');
+        } else {
         try {
           const stepDescriptions = actionSummary.map((a, i) =>
             `${i + 1}. ${a.type}${a.text ? `: "${a.text}"` : ''}${a.key ? `: ${a.key}` : ''}`
@@ -3537,6 +3834,7 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
         } catch (awmErr) {
           console.warn('[AI-SERVICE] AWM extraction error (non-fatal):', awmErr.message);
         }
+        } // end quality gate else
       }
 
       // Evaluate for reflection trigger (RLVR feedback loop) — bounded to MAX_REFLECTION_ITERATIONS
@@ -3689,8 +3987,9 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
         break;
       }
 
-      if (uiWatcher && uiWatcher.isPolling) {
-        const elementAtPoint = uiWatcher.getElementAtPoint(action.x, action.y);
+      const watcherResume = getUIWatcher();
+      if (watcherResume && watcherResume.isPolling) {
+        const elementAtPoint = watcherResume.getElementAtPoint(action.x, action.y);
         if (elementAtPoint && elementAtPoint.windowHandle) {
           lastTargetWindowHandle = elementAtPoint.windowHandle;
           console.log(`[AI-SERVICE] (resume) Auto-focusing window handle ${elementAtPoint.windowHandle} for click at (${action.x}, ${action.y})`);
@@ -3704,6 +4003,21 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
       console.log(`[AI-SERVICE] (resume) Re-focusing last target window ${lastTargetWindowHandle} before ${action.type}`);
       await systemAutomation.focusWindow(lastTargetWindowHandle);
       await new Promise(r => setTimeout(r, 125));
+    }
+
+    // Smart browser click: same as main loop — try URL navigation / UIA before coordinate click.
+    if (action.type === 'click' && action.x !== undefined && lastTargetWindowHandle) {
+      const resumeActionData = { thought: pending.thought, verification: pending.verification };
+      const smart = await trySmartBrowserClick(action, resumeActionData, lastTargetWindowHandle, actionExecutor);
+      if (smart.handled) {
+        const smartResult = smart.result;
+        smartResult.reason = action.reason || '';
+        smartResult.userConfirmed = i === 0;
+        results.push(smartResult);
+        if (onAction) onAction(smartResult, pending.actionIndex + i, pending.actionIndex + pending.remainingActions.length);
+        if (!smartResult.success && !action.continue_on_error) break;
+        continue;
+      }
     }
     
     // Execute action (user confirmed, skip safety for first action)

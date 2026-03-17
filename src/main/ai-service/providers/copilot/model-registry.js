@@ -13,7 +13,10 @@ const DEFAULT_CAPABILITIES = Object.freeze({
 });
 
 const LEGACY_MODEL_ALIASES = Object.freeze({
-  'gpt-5.4': 'gpt-4o'
+  'gpt-5.4': 'gpt-4o',
+  'o1': 'gpt-4o',
+  'o1-mini': 'gpt-4o-mini',
+  'o3-mini': 'gpt-4o-mini'
 });
 
 function withCapabilities(overrides = {}) {
@@ -25,19 +28,31 @@ function withCapabilities(overrides = {}) {
 const COPILOT_MODELS = {
   'claude-sonnet-4.5': {
     name: 'Claude Sonnet 4.5',
-    id: 'claude-sonnet-4.5-20250929',
+    id: 'claude-sonnet-4.5',
     vision: true,
     capabilities: withCapabilities({ chat: true, tools: true, vision: true, automation: true, planning: true })
   },
   'claude-sonnet-4': {
     name: 'Claude Sonnet 4',
-    id: 'claude-sonnet-4-20250514',
+    id: 'claude-sonnet-4',
+    vision: true,
+    capabilities: withCapabilities({ chat: true, tools: true, vision: true, automation: true, planning: true })
+  },
+  'claude-sonnet-4.6': {
+    name: 'Claude Sonnet 4.6',
+    id: 'claude-sonnet-4.6',
     vision: true,
     capabilities: withCapabilities({ chat: true, tools: true, vision: true, automation: true, planning: true })
   },
   'claude-opus-4.5': {
     name: 'Claude Opus 4.5',
     id: 'claude-opus-4.5',
+    vision: true,
+    capabilities: withCapabilities({ chat: true, tools: true, vision: true, automation: true, planning: true })
+  },
+  'claude-opus-4.6': {
+    name: 'Claude Opus 4.6',
+    id: 'claude-opus-4.6',
     vision: true,
     capabilities: withCapabilities({ chat: true, tools: true, vision: true, automation: true, planning: true })
   },
@@ -65,23 +80,29 @@ const COPILOT_MODELS = {
     vision: true,
     capabilities: withCapabilities({ chat: true, tools: true, vision: true, automation: true, planning: true })
   },
-  'o1': {
-    name: 'o1',
-    id: 'o1',
-    vision: false,
-    capabilities: withCapabilities({ chat: true, reasoning: true, planning: true })
+  'gpt-5.1': {
+    name: 'GPT-5.1',
+    id: 'gpt-5.1',
+    vision: true,
+    capabilities: withCapabilities({ chat: true, tools: true, vision: true, automation: true, planning: true })
   },
-  'o1-mini': {
-    name: 'o1 Mini',
-    id: 'o1-mini',
-    vision: false,
-    capabilities: withCapabilities({ chat: true, reasoning: true, planning: true })
+  'gpt-5.2': {
+    name: 'GPT-5.2',
+    id: 'gpt-5.2',
+    vision: true,
+    capabilities: withCapabilities({ chat: true, tools: true, vision: true, automation: true, planning: true })
   },
-  'o3-mini': {
-    name: 'o3 Mini',
-    id: 'o3-mini',
-    vision: false,
-    capabilities: withCapabilities({ chat: true, reasoning: true, planning: true })
+  'gpt-5-mini': {
+    name: 'GPT-5 Mini',
+    id: 'gpt-5-mini',
+    vision: true,
+    capabilities: withCapabilities({ chat: true, tools: true, vision: true, automation: true, planning: true })
+  },
+  'gemini-2.5-pro': {
+    name: 'Gemini 2.5 Pro',
+    id: 'gemini-2.5-pro',
+    vision: true,
+    capabilities: withCapabilities({ chat: true, tools: true, vision: true, reasoning: true, planning: true })
   }
 };
 
@@ -408,7 +429,7 @@ function createCopilotModelRegistry({ likuHome, modelPrefFile, runtimeStateFile,
       });
   }
 
-  async function discoverCopilotModels({ force = false, loadCopilotTokenIfNeeded, exchangeForCopilotSession, getCopilotSessionToken }) {
+  async function discoverCopilotModels({ force = false, loadCopilotTokenIfNeeded, exchangeForCopilotSession, getCopilotSessionToken, getSessionApiHost }) {
     if (copilotModelDiscoveryAttempted && !force) return getCopilotModels();
     copilotModelDiscoveryAttempted = true;
 
@@ -433,9 +454,11 @@ function createCopilotModelRegistry({ likuHome, modelPrefFile, runtimeStateFile,
       'Copilot-Integration-Id': 'vscode-chat'
     };
 
+    const dynamicHost = typeof getSessionApiHost === 'function' ? getSessionApiHost() : null;
     const candidates = [
-      { host: 'api.githubcopilot.com', path: '/models' },
-      { host: 'copilot-proxy.githubusercontent.com', path: '/v1/models' }
+      ...(dynamicHost ? [{ host: dynamicHost, path: '/models' }] : []),
+      { host: 'api.individual.githubcopilot.com', path: '/models' },
+      { host: 'api.githubcopilot.com', path: '/models' }
     ];
 
     for (const endpoint of candidates) {

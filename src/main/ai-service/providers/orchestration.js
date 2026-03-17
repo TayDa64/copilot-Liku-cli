@@ -243,9 +243,12 @@ function createProviderOrchestrator(dependencies) {
       } catch (error) {
         if (!primaryError) {
           primaryError = error;
+          console.warn(`[AI] Provider ${provider} failed: ${error.message}`);
+        } else {
+          // Secondary fallback failures are less relevant — log at debug level
+          console.log(`[AI] Fallback provider ${provider} also unavailable`);
         }
         lastError = error;
-        console.warn(`[AI] Provider ${provider} failed: ${error.message}`);
       }
     }
 

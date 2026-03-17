@@ -329,21 +329,49 @@ function formatResponseHeader(resp) {
   return `[${provider}${runtimeModel}${requestedSuffix}]`;
 }
 
+async function autoCapture(ai) {
+  try {
+    const { screenshot } = require('../../main/ui-automation/screenshot');
+    const result = await screenshot({ memory: true, base64: true, metric: 'sha256' });
+    if (result && result.success && result.base64) {
+      ai.addVisualContext({
+        dataURL: `data:image/png;base64,${result.base64}`,
+        width: 0, height: 0, scope: 'screen', timestamp: Date.now()
+      });
+      info('Auto-captured screenshot for visual context.');
+      return true;
+    }
+    warn('Screenshot capture returned no data.');
+  } catch (e) {
+    warn(`Auto-screenshot failed: ${e.message}. Use /capture manually.`);
+  }
+  return false;
+}
+
 async function executeActionBatchWithSafeguards(ai, actionData, rl, userMessage, options = {}) {
   const enablePopupRecipes = !!options.enablePopupRecipes;
   let pendingSafety = null;
+  let screenshotCaptured = false;
   const execResult = await ai.executeActions(
     actionData,
     (result, idx, total) => {
       const prefix = dim(`[${idx + 1}/${total}]`);
       if (result.success) {
         console.log(`${prefix} ${result.action || result.type || 'action'}: ${dim(result.message || 'ok')}`);
+        // Surface stdout from run_command so user can see diagnostic output
+        if (result.stdout && result.stdout.trim()) {
+          const lines = result.stdout.trim().split('\n');
+          const display = lines.length > 8 ? lines.slice(0, 8).join('\n') + `\n... (${lines.length - 8} more lines)` : lines.join('\n');
+          console.log(dim(display));
+        }
       } else {
-        console.log(`${prefix} ${result.action || result.type || 'action'}: ${dim('failed')} ${result.error || ''}`);
+        const failDetail = result.error || result.message || result.stderr || '';
+        console.log(`${prefix} ${result.action || result.type || 'action'}: ${dim('failed')} ${failDetail}`);
       }
     },
     async () => {
-      warn('AI requested a screenshot. Use /capture to add visual context, then ask again.');
+      const ok = await autoCapture(ai);
+      if (ok) screenshotCaptured = true;
     },
     {
       onRequireConfirmation: (safety) => {
@@ -355,7 +383,7 @@ async function executeActionBatchWithSafeguards(ai, actionData, rl, userMessage,
   );
 
   if (!execResult.pendingConfirmation) {
-    return execResult;
+    return { ...execResult, screenshotCaptured };
   }
 
   const safety = pendingSafety;
@@ -377,19 +405,26 @@ async function executeActionBatchWithSafeguards(ai, actionData, rl, userMessage,
         const prefix = dim(`[${idx + 1}/${total}]`);
         if (result.success) {
           console.log(`${prefix} ${result.action || result.type || 'action'}: ${dim(result.message || 'ok')}`);
+          if (result.stdout && result.stdout.trim()) {
+            const lines = result.stdout.trim().split('\n');
+            const display = lines.length > 8 ? lines.slice(0, 8).join('\n') + `\n... (${lines.length - 8} more lines)` : lines.join('\n');
+            console.log(dim(display));
+          }
         } else {
-          console.log(`${prefix} ${result.action || result.type || 'action'}: ${dim('failed')} ${result.error || ''}`);
+          const failDetail = result.error || result.message || result.stderr || '';
+          console.log(`${prefix} ${result.action || result.type || 'action'}: ${dim('failed')} ${failDetail}`);
         }
       },
       async () => {
-        warn('AI requested a screenshot. Use /capture to add visual context, then ask again.');
+        const ok = await autoCapture(ai);
+        if (ok) screenshotCaptured = true;
       },
       {
         userMessage,
         enablePopupRecipes
       }
     );
-    return resumed;
+    return { ...resumed, screenshotCaptured };
   }
 
   if (execResult.pendingActionId) {
@@ -848,6 +883,97 @@ async function runChatLoop(ai, options) {
 
     if (!execResult?.success) {
       error(execResult.error || 'One or more actions failed');
+    }
+
+    // ===== VISION AUTO-CONTINUATION =====
+    // If the AI requested a screenshot during its action sequence AND we captured it,
+    // automatically send a follow-up message so the AI can analyze the capture and
+    // continue (e.g., click on a search result it can now "see").
+    const MAX_VISION_CONTINUATIONS = 3;
+    if (execResult?.screenshotCaptured && execResult?.success) {
+      let visionContinuations = 0;
+      let lastClickCoords = null; // Track repeated coordinate clicks
+
+      while (visionContinuations < MAX_VISION_CONTINUATIONS) {
+        visionContinuations++;
+        info(`Vision continuation ${visionContinuations}/${MAX_VISION_CONTINUATIONS}: analyzing screenshot...`);
+
+        // Detect stale repeated clicks — if the AI keeps clicking the same spot, the
+        // coordinate estimate is likely wrong. Guide it toward keyboard strategies.
+        let staleClickHint = '';
+        if (lastClickCoords && visionContinuations > 1) {
+          staleClickHint = `\n\nIMPORTANT: Your previous click at (${lastClickCoords.x}, ${lastClickCoords.y}) did not navigate the page. The coordinate click likely missed the target. DO NOT click the same coordinates again. Instead, use one of these strategies:\n1. If you can see the target URL (e.g., https://www.apple.com), navigate via the address bar: Ctrl+L → type the URL → Enter\n2. Use Ctrl+F to find the link text on the page, then close find bar and try clicking\n3. Try different coordinates (offset by 10-20 pixels from your previous attempt)`;
+        }
+
+        const continuationPrompt = visionContinuations === 1
+          ? `I've captured a screenshot of the current screen state after your actions completed. Please analyze it and continue with the next steps to accomplish the original goal. The screenshot is included as visual context.${staleClickHint}`
+          : `Here is an updated screenshot. Continue with the next steps.${staleClickHint}`;
+
+        const contResp = await ai.sendMessage(continuationPrompt, {
+          includeVisualContext: true,
+          model,
+          extraSystemMessages: [`Original user request: ${effectiveUserMessage}`]
+        });
+
+        if (!contResp.success) {
+          error(contResp.error || 'Vision continuation failed');
+          break;
+        }
+
+        console.log(`\n${dim(formatResponseHeader(contResp))}\n${contResp.message}\n`);
+
+        const contActionData = ai.parseActions(contResp.message);
+        const contHasActions = !!(contActionData && Array.isArray(contActionData.actions) && contActionData.actions.length > 0);
+
+        if (!contHasActions) {
+          // AI responded with text only — task is likely complete or AI is reporting results.
+          break;
+        }
+
+        if (!isLikelyAutomationInput(effectiveUserMessage)) break;
+
+        if (typeof ai.preflightActions === 'function') {
+          const rewritten = ai.preflightActions(contActionData, { userMessage: effectiveUserMessage });
+          if (rewritten && rewritten !== contActionData) {
+            info('Adjusted continuation plan for reliability.');
+          }
+        }
+
+        info(`Vision continuation: executing ${contActionData.actions.length} step(s).`);
+
+        // Track the first coordinate click in this continuation for stale-click detection
+        const clickAction = contActionData.actions.find(a => a.type === 'click' && a.x !== undefined);
+        if (clickAction) {
+          if (lastClickCoords && clickAction.x === lastClickCoords.x && clickAction.y === lastClickCoords.y) {
+            // Same coordinates as last time — the smart browser click interceptor in
+            // ai-service should handle this, but log for visibility.
+            info(`Repeated click at (${clickAction.x}, ${clickAction.y}) — smart browser click may intercept.`);
+          }
+          lastClickCoords = { x: clickAction.x, y: clickAction.y };
+        }
+
+        const contExecResult = await executeActionBatchWithSafeguards(
+          ai,
+          contActionData,
+          rl,
+          effectiveUserMessage,
+          { enablePopupRecipes: popupRecipesEnabled }
+        );
+
+        if (contExecResult?.cancelled) break;
+
+        if (!contExecResult?.success) {
+          error(contExecResult?.error || 'Continuation actions failed');
+          break;
+        }
+
+        // If the continuation itself requested another screenshot, loop again
+        if (!contExecResult?.screenshotCaptured) break;
+      }
+
+      if (visionContinuations >= MAX_VISION_CONTINUATIONS) {
+        info('Reached max vision continuations. Returning to prompt.');
+      }
     }
   }
 

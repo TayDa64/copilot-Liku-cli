@@ -70,10 +70,10 @@ Additionally, **Agent Workflow Memory** (Wang et al., [arXiv:2409.07429](https:/
 
 Everything below references actual files/exports as of commit 9b81cad. No proposed changes target files that do not exist.
 
-### Current Filesystem Layout (`~/.liku-cli/`)
+### Current Filesystem Layout (`~/.liku/`)
 
 ```
-~/.liku-cli/
+~/.liku/
 ├── preferences.json          # App policies, action/negative policies, execution mode
 ├── conversation-history.json # Flat array of {role, content} pairs
 ├── copilot-token.json        # OAuth credentials
@@ -92,7 +92,7 @@ Everything below references actual files/exports as of commit 9b81cad. No propos
 | System prompt | `src/main/ai-service/system-prompt.js` | Exports `SYSTEM_PROMPT`, `getPlatformContext()` |
 | Provider orchestration | `src/main/ai-service/providers/orchestration.js` | `createProviderOrchestrator()` → `requestWithFallback()`, `resolveEffectiveCopilotModel()` |
 | Model registry | `src/main/ai-service/providers/copilot/model-registry.js` | `COPILOT_MODELS` with `capabilities` (chat/tools/vision/reasoning/completion/automation/planning) |
-| Tool definitions | `src/main/ai-service/providers/copilot/tools.js` | `LIKU_TOOLS` (13 tool functions), `toolCallsToActions()` |
+| Tool definitions | `src/main/ai-service/providers/copilot/tools.js` | `LIKU_TOOLS` (12 tool functions), `toolCallsToActions()` |
 | Conversation history | `src/main/ai-service/conversation-history.js` | `createConversationHistoryStore()` — in-memory + disk sync |
 | Message builder | `src/main/ai-service/message-builder.js` | Builds provider-specific payloads, attaches visual frames for vision models |
 | Policy enforcement | `src/main/ai-service/policy-enforcement.js` | `checkActionPolicies()`, `checkNegativePolicies()` |
@@ -102,7 +102,7 @@ Everything below references actual files/exports as of commit 9b81cad. No propos
 ### Current Preferences System
 
 - File: `src/main/preferences.js`
-- Home: `~/.liku-cli/` (constant `LIKU_HOME`)
+- Home: `~/.liku/` (constant `LIKU_HOME`, migrated from `~/.liku-cli/`)
 - Schema: `{ version, updatedAt, appPolicies: { [processName]: { executionMode, stats, actionPolicies[], negativePolicies[] } } }`
 - Already supports: auto-run demotion after 2 consecutive failures (`recordAutoRunOutcome()`), per-process action/negative policies, system-context injection into prompts (`getPreferencesSystemContext()`, `getPreferencesSystemContextForApp()`)
 
@@ -134,7 +134,7 @@ Everything below references actual files/exports as of commit 9b81cad. No propos
 
 Models `o1`, `o1-mini`, `o3-mini` in the registry have `capabilities.reasoning: true` and do **not** support `temperature`, `top_p`, or `top_k` parameters. The Copilot API returns `400 Bad Request` if these are passed. The current `getModelCapabilities()` function in `orchestration.js` already detects reasoning models via the `capabilities` field and a regex fallback (`/^o(1|3)/i`).
 
-**No `PHASE_PARAMS` object exists today.** The brainstorm proposes adding one; implementation must strip generation parameters for reasoning models.
+**`PHASE_PARAMS` now exists** in `src/main/ai-service/providers/phase-params.js` with per-phase temperature/top_p settings (execution: 0.1/0.1, planning: 0.4/0.6, reflection: 0.7/0.8). Implementation strips generation parameters for reasoning models.
 
 ---
 

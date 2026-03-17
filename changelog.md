@@ -1,3 +1,11 @@
+## v0.0.14 — 2026-03-17
+
+### App Launch Robustness & Window Awareness Planning
+- **Broadened run_command→Start-menu rewrite guard**: Inverted from allowlisting specific commands (`Start-Process|Invoke-Item`) to blocklisting discovery commands (`Get-ChildItem|Test-Path|if exist`). Now catches `cmd /c start`, `Start-Process`, `& 'path'`, `cmd.exe /c`, and any future AI-invented shell launch patterns — all rewritten to reliable Win→type→Enter Start menu approach.
+- **Fixed "Command failed: undefined" message bug**: When `stderr` is empty and `error` is undefined in `system-automation.js`, the error message now falls back to showing the exit code instead of "undefined".
+- **New tests**: `cmd /c start` rewrite assertion, discovery command preservation assertion (67 total → 69 assertions, 0 failures).
+- **Implementation plan created**: `PLAN-v0.0.14-window-awareness.md` — comprehensive 5-phase plan for multi-window and floating panel awareness covering window metadata enrichment, AI topology awareness, expanded app vocabulary, topmost window detection, and splash screen handling.
+
 ## Unreleased - 2026-03-12
 
 ### Cognitive Layer — N1-N6 Next-Stage Roadmap (commit `fde64b0`)

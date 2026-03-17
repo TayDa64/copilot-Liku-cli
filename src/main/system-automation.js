@@ -212,6 +212,7 @@ async function click(x, y, button = 'left') {
   const script = `
 Add-Type -TypeDefinition @"
 using System;
+using System.Text;
 using System.Runtime.InteropServices;
 
 public class ClickThrough {
@@ -560,7 +561,7 @@ async function resolveWindowHandle(action = {}) {
   }
 
   const buildResolverScript = ({ includeTitle = true } = {}) => `
-$ErrorActionPreference = 'Stop'
+$ErrorActionPreference = 'Continue'
 $ProgressPreference = 'SilentlyContinue'
 
 Add-Type @'
@@ -627,7 +628,10 @@ foreach ($hwnd in [WindowResolver]::windows) {
   try {
     const tryParseHandle = async (scriptText) => {
       const result = await executePowerShellScript(scriptText, 8000);
-      if (!result || result.failed) return null;
+      if (!result || result.failed) {
+        console.warn(`[AUTOMATION] resolveWindowHandle script failed:`, result?.error || result?.stderr || 'unknown');
+        return null;
+      }
       const parsed = Number(String(result.stdout || '').trim());
       return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
     };
@@ -642,8 +646,57 @@ foreach ($hwnd in [WindowResolver]::windows) {
       if (hwnd) return hwnd;
     }
 
+    // Get-Process fallback: avoids Add-Type C# compilation which can fail on some machines
+    if (processName || title) {
+      const getProcessScript = title
+        ? `$ErrorActionPreference='Continue'; $ProgressPreference='SilentlyContinue'
+$procs = Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 -and $_.MainWindowTitle }
+$titleSearch = '${title}'.ToLower()
+$procSearch = '${processName}'.ToLower() -replace '\\.exe$',''
+foreach ($p in $procs) {
+  $t = $p.MainWindowTitle.ToLower()
+  $n = $p.ProcessName.ToLower()
+  if ($titleSearch -and -not $t.Contains($titleSearch)) { continue }
+  if ($procSearch -and $n -ne $procSearch) { continue }
+  $p.MainWindowHandle.ToInt64(); exit
+}
+if ($procSearch) {
+  foreach ($p in $procs) {
+    $n = $p.ProcessName.ToLower()
+    if ($n -eq $procSearch) { $p.MainWindowHandle.ToInt64(); exit }
+  }
+}`
+        : `$ErrorActionPreference='Continue'; $ProgressPreference='SilentlyContinue'
+$procSearch = '${processName}'.ToLower() -replace '\\.exe$',''
+Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 -and $_.ProcessName.ToLower() -eq $procSearch } | Select-Object -First 1 | ForEach-Object { $_.MainWindowHandle.ToInt64() }`;
+      hwnd = await tryParseHandle(getProcessScript);
+      if (hwnd) {
+        console.log(`[AUTOMATION] resolveWindowHandle found window via Get-Process fallback: ${hwnd}`);
+        return hwnd;
+      }
+    }
+
+    // Fallback: try the ui-automation window manager if available
+    try {
+      const windowManager = require('./ui-automation/window/manager');
+      if (typeof windowManager.findWindows === 'function') {
+        const criteria = {};
+        if (title) criteria.title = titleValue;
+        if (processName) criteria.processName = String(action.processName || '').trim();
+        const windows = await windowManager.findWindows(criteria);
+        if (Array.isArray(windows) && windows.length > 0 && windows[0].hwnd) {
+          console.log(`[AUTOMATION] resolveWindowHandle fallback found window via ui-automation: ${windows[0].hwnd}`);
+          return windows[0].hwnd;
+        }
+      }
+    } catch (fallbackErr) {
+      console.warn(`[AUTOMATION] resolveWindowHandle ui-automation fallback failed:`, fallbackErr.message);
+    }
+
+    console.warn(`[AUTOMATION] resolveWindowHandle: no window found for title="${title}" process="${processName}" class="${className}"`);
     return null;
-  } catch {
+  } catch (err) {
+    console.warn(`[AUTOMATION] resolveWindowHandle error:`, err.message);
     return null;
   }
 }
@@ -2004,10 +2057,19 @@ async function executeAction(action) {
 
     let processName = null;
     if (title.includes('edge')) processName = 'msedge';
-    else if (title.includes('visual studio code') || title.includes('vs code')) processName = 'code';
+    else if (title.includes('visual studio code') || title.includes('vs code') || title.includes('vscode')) processName = 'code';
     else if (title.includes('chrome')) processName = 'chrome';
     else if (title.includes('firefox')) processName = 'firefox';
-    else if (title.includes('explorer')) processName = 'explorer';
+    else if (title.includes('explorer') || title.includes('file manager')) processName = 'explorer';
+    else if (title.includes('notepad++')) processName = 'notepad++';
+    else if (title.includes('notepad')) processName = 'notepad';
+    else if (title.includes('terminal') || title.includes('powershell')) processName = 'WindowsTerminal';
+    else if (title.includes('cmd') || title.includes('command prompt')) processName = 'cmd';
+    else if (title.includes('spotify')) processName = 'Spotify';
+    else if (title.includes('slack')) processName = 'slack';
+    else if (title.includes('discord')) processName = 'Discord';
+    else if (title.includes('teams')) processName = 'ms-teams';
+    else if (title.includes('outlook')) processName = 'olk';
 
     if (!processName) return a;
     return { ...a, processName };
@@ -2102,14 +2164,16 @@ async function executeAction(action) {
         };
         result.message = cmdResult.success 
           ? `Command completed (exit ${cmdResult.exitCode})`
-          : `Command failed: ${cmdResult.stderr || cmdResult.error}`;
+          : `Command failed: ${cmdResult.stderr || cmdResult.error || `exit code ${cmdResult.exitCode}`}`;
         break;
 
       case ACTION_TYPES.FOCUS_WINDOW:
       case ACTION_TYPES.BRING_WINDOW_TO_FRONT: {
-        const hwnd = await resolveWindowHandle(withInferredProcessName(action));
+        const enriched = withInferredProcessName(action);
+        const hwnd = await resolveWindowHandle(enriched);
         if (!hwnd) {
-          throw new Error('Window not found. Provide hwnd/windowHandle or title/processName/className.');
+          const hint = enriched.title || enriched.processName || 'unknown';
+          throw new Error(`Window "${hint}" not found. Make sure the application is running and visible.`);
         }
         await focusWindow(hwnd);
         result.message = `Brought window ${hwnd} to front`;
@@ -2419,7 +2483,8 @@ function parseAIActions(aiResponse) {
   }
   
   // Try to find inline JSON object with actions array
-  const inlineMatch = aiResponse.match(/\{[\s\S]*"actions"[\s\S]*\}/);
+  const responseStr = typeof aiResponse === 'string' ? aiResponse : String(aiResponse || '');
+  const inlineMatch = responseStr.match(/\{[\s\S]*"actions"[\s\S]*\}/);
   if (inlineMatch) {
     try {
       return normalizeActionBlock(JSON.parse(inlineMatch[0]));
@@ -2430,7 +2495,7 @@ function parseAIActions(aiResponse) {
   
   // Fallback: extract actions from natural language descriptions
   // This handles cases where AI says "I'll click X at (500, 300)" without JSON
-  const nlActions = parseNaturalLanguageActions(aiResponse);
+  const nlActions = parseNaturalLanguageActions(responseStr);
   if (nlActions && nlActions.actions.length > 0) {
     console.log('[AUTOMATION] Extracted', nlActions.actions.length, 'action(s) from natural language');
     return normalizeActionBlock(nlActions);
