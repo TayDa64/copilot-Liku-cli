@@ -63,7 +63,12 @@ console.log('\n--- Phase 4: Semantic Skill Router ---\n');
 const skillRouter = require('../src/main/memory/skill-router');
 
 assert(typeof skillRouter.getRelevantSkillsContext === 'function', 'getRelevantSkillsContext is a function');
+assert(typeof skillRouter.getRelevantSkillsSelection === 'function', 'getRelevantSkillsSelection is a function');
 assert(typeof skillRouter.addSkill === 'function', 'addSkill is a function');
+assert(typeof skillRouter.upsertLearnedSkill === 'function', 'upsertLearnedSkill is a function');
+assert(typeof skillRouter.recordSkillOutcome === 'function', 'recordSkillOutcome is a function');
+assert(typeof skillRouter.applyReflectionSkillUpdate === 'function', 'applyReflectionSkillUpdate is a function');
+assert(typeof skillRouter.extractHost === 'function', 'extractHost is a function');
 assert(typeof skillRouter.removeSkill === 'function', 'removeSkill is a function');
 assert(typeof skillRouter.listSkills === 'function', 'listSkills is a function');
 
@@ -95,6 +100,62 @@ assert(noMatch === '', 'Non-matching query returns empty string');
 skillRouter.removeSkill('test-nav-tabs');
 const afterRemove = skillRouter.listSkills();
 assert(afterRemove['test-nav-tabs'] === undefined, 'Skill was removed from index');
+
+// Candidate skills should not inject until they have repeated grounded success
+const learnedOne = skillRouter.upsertLearnedSkill({
+  idHint: 'test-learned-skill',
+  keywords: ['edge', 'browser', 'apple'],
+  tags: ['awm', 'browser'],
+  scope: { processNames: ['msedge'] },
+  content: '# Open Apple in Edge\n\n1. key: ctrl+t\n2. key: ctrl+l\n3. type: "https://www.apple.com"\n4. key: enter'
+});
+assert(learnedOne.entry.status === 'candidate', 'First grounded success creates candidate skill');
+const candidateSelection = skillRouter.getRelevantSkillsSelection('open apple in edge', {
+  currentProcessName: 'msedge'
+});
+assert(!candidateSelection.ids.includes(learnedOne.id), 'Candidate skill is not injected yet');
+
+const learnedTwo = skillRouter.upsertLearnedSkill({
+  idHint: 'test-learned-skill',
+  keywords: ['edge', 'browser', 'apple'],
+  tags: ['awm', 'browser'],
+  scope: { processNames: ['msedge'] },
+  content: '# Open Apple in Edge\n\n1. key: ctrl+t\n2. key: ctrl+l\n3. type: "https://www.apple.com"\n4. key: enter'
+});
+assert(learnedTwo.entry.status === 'promoted', 'Repeated grounded success promotes candidate skill');
+
+const promotedSelection = skillRouter.getRelevantSkillsSelection('open apple in edge', {
+  currentProcessName: 'msedge',
+  currentWindowTitle: 'Apple - Microsoft Edge',
+  currentUrlHost: 'https://www.apple.com'
+});
+assert(promotedSelection.text.includes('Open Apple in Edge'), 'Promoted learned skill is injected after promotion');
+assert(promotedSelection.ids.includes(learnedTwo.id), 'Promoted skill id is included in selection');
+
+skillRouter.addSkill('test-generic-browser', {
+  keywords: ['edge', 'browser', 'apple'],
+  tags: ['browser'],
+  content: '# Generic Browser Skill\n\nUse the browser carefully.'
+});
+const scopedSelection = skillRouter.getRelevantSkillsSelection('open apple in edge browser', {
+  currentProcessName: 'msedge',
+  currentWindowTitle: 'Apple - Microsoft Edge',
+  currentUrlHost: 'apple.com',
+  limit: 1
+});
+assert(scopedSelection.ids[0] === learnedTwo.id, 'Process-scoped promoted skill outranks generic match when process aligns');
+
+const failureOne = skillRouter.recordSkillOutcome([learnedTwo.id], 'failure', { currentProcessName: 'msedge' });
+assert(failureOne.quarantined.length === 0, 'Single failure does not quarantine promoted skill');
+const failureTwo = skillRouter.recordSkillOutcome([learnedTwo.id], 'failure', { currentProcessName: 'msedge' });
+assert(failureTwo.quarantined.includes(learnedTwo.id), 'Two grounded failures quarantine promoted skill');
+assert(skillRouter.getRelevantSkillsSelection('open apple in edge', { currentProcessName: 'msedge' }).ids.includes(learnedTwo.id) === false, 'Quarantined skill is no longer injected');
+
+skillRouter.removeSkill('test-learned-skill');
+skillRouter.removeSkill('test-generic-browser');
+const afterLifecycleCleanup = skillRouter.listSkills();
+assert(afterLifecycleCleanup['test-learned-skill'] === undefined, 'Learned lifecycle skill was removed from index');
+assert(afterLifecycleCleanup['test-generic-browser'] === undefined, 'Generic comparison skill was removed from index');
 
 // ═══════════════════════════════════════════════════════════
 //  Phase 1 — Agentic Memory (Memory Store + Linker)
@@ -238,6 +299,26 @@ assert(eval2.reason.includes('consecutive'), 'Reason mentions consecutive failur
 const prompt = reflection.buildReflectionPrompt(eval2.failures);
 assert(prompt.includes('Reflection Agent'), 'Reflection prompt mentions agent role');
 assert(prompt.includes('rootCause'), 'Reflection prompt requests rootCause');
+
+skillRouter.addSkill('test-reflection-skill', {
+  keywords: ['submit', 'button'],
+  tags: ['automation'],
+  content: '# Reflection target skill\n\nUse the submit button.'
+});
+const directReflectionUpdate = reflection.applyReflectionResult(JSON.stringify({
+  rootCause: 'Skill should be suppressed after repeated mismatches',
+  recommendation: 'skill_update',
+  details: {
+    skillId: 'test-reflection-skill',
+    skillAction: 'quarantine',
+    keywords: ['reflection-test'],
+    domains: ['example.com']
+  }
+}));
+assert(directReflectionUpdate.applied === true, 'Reflection can directly mutate a named skill');
+assert(directReflectionUpdate.action === 'skill_quarantine', 'Reflection direct mutation quarantines skill');
+assert(skillRouter.listSkills()['test-reflection-skill'].status === 'quarantined', 'Named skill status updated by reflection');
+skillRouter.removeSkill('test-reflection-skill');
 
 // Test reflection result application
 const reflResult = reflection.applyReflectionResult(JSON.stringify({
@@ -574,7 +655,7 @@ const aiServiceSourceP7 = fs.readFileSync(path.join(__dirname, '..', 'src', 'mai
 assert(aiServiceSourceP7.includes('MIN_STEPS_FOR_PROCEDURE'), 'AWM: MIN_STEPS_FOR_PROCEDURE constant defined');
 assert(aiServiceSourceP7.includes("type: 'procedural'"), 'AWM: procedural memory note written on success');
 assert(aiServiceSourceP7.includes("tags: ['procedure', 'awm', 'success']"), 'AWM: procedure notes tagged with awm');
-assert(aiServiceSourceP7.includes('skillRouter.addSkill(skillId'), 'AWM: auto-registers as skill');
+assert(aiServiceSourceP7.includes('skillRouter.upsertLearnedSkill({'), 'AWM: auto-registers as lifecycle-managed skill');
 assert(aiServiceSourceP7.includes("awm-extraction"), 'AWM: source type is awm-extraction');
 
 // == PostToolUse hook ==

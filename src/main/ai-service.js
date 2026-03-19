@@ -91,6 +91,16 @@ function getInspectService() {
   return inspectService;
 }
 
+let lastSkillSelection = {
+  ids: [],
+  query: '',
+  currentProcessName: null,
+  currentWindowTitle: null,
+  currentWindowKind: null,
+  currentUrlHost: null,
+  selectedAt: 0
+};
+
 // ===== CONFIGURATION =====
 
 // GitHub Copilot OAuth Configuration
@@ -1189,10 +1199,52 @@ async function sendMessage(userMessage, options = {}) {
 
   // Fetch relevant skills (Phase 4 — Semantic Skill Router)
   let skillsContextText = '';
+  let selectedSkillIds = [];
+  let currentProcessName = null;
+  let currentWindowTitle = null;
+  let currentWindowKind = null;
+  let currentUrlHost = null;
   try {
-    skillsContextText = skillRouter.getRelevantSkillsContext(enhancedMessage) || '';
+    const fg = await systemAutomation.getForegroundWindowInfo();
+    if (fg && fg.success && fg.processName) {
+      currentProcessName = fg.processName;
+      currentWindowTitle = fg.title || null;
+      currentWindowKind = fg.windowKind || null;
+    }
+  } catch {}
+  try {
+    currentUrlHost = skillRouter.extractHost(getBrowserSessionState().url || '');
+  } catch {}
+  try {
+    const skillSelection = skillRouter.getRelevantSkillsSelection(enhancedMessage, {
+      currentProcessName,
+      currentWindowTitle,
+      currentWindowKind,
+      currentUrlHost,
+      limit: 3
+    });
+    skillsContextText = skillSelection.text || '';
+    selectedSkillIds = Array.isArray(skillSelection.ids) ? skillSelection.ids : [];
+    lastSkillSelection = {
+      ids: selectedSkillIds,
+      query: enhancedMessage,
+      currentProcessName,
+      currentWindowTitle,
+      currentWindowKind,
+      currentUrlHost,
+      selectedAt: Date.now()
+    };
   } catch (err) {
     console.warn('[AI] Skill router error (non-fatal):', err.message);
+    lastSkillSelection = {
+      ids: [],
+      query: enhancedMessage,
+      currentProcessName,
+      currentWindowTitle,
+      currentWindowKind,
+      currentUrlHost,
+      selectedAt: Date.now()
+    };
   }
 
   // Fetch relevant memory notes (Phase 1 — Agentic Memory)
@@ -3822,13 +3874,23 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
             if (hookGate.denied) {
               console.log(`[AI-SERVICE] AWM: Skill creation denied by PreToolUse hook: ${hookGate.reason}`);
             } else {
-              const skillId = `awm-${Date.now().toString(36)}`;
-              skillRouter.addSkill(skillId, {
+              const learnedSkill = skillRouter.upsertLearnedSkill({
+                idHint: `awm-${Date.now().toString(36)}`,
                 keywords: procedureKeywords,
                 tags: ['awm', 'auto-generated'],
+                scope: {
+                  processNames: [postVerification?.foreground?.processName || ''].filter(Boolean),
+                  windowTitles: [postVerification?.foreground?.title || ''].filter(Boolean),
+                  kind: postVerification?.foreground?.windowKind || null,
+                  domains: [skillRouter.extractHost(getBrowserSessionState().url || '') || ''].filter(Boolean)
+                },
                 content: `# ${actionData.thought}\n\n${procedureContent}\n\n_Auto-extracted from successful execution on ${new Date().toISOString()}_`
               });
-              console.log(`[AI-SERVICE] AWM: Extracted procedure as skill "${skillId}" (${actionSummary.length} steps)`);
+              if (learnedSkill.promoted) {
+                console.log(`[AI-SERVICE] AWM: Promoted learned skill "${learnedSkill.id}" (${actionSummary.length} steps)`);
+              } else {
+                console.log(`[AI-SERVICE] AWM: Learned candidate skill "${learnedSkill.id}" awaiting another grounded success`);
+              }
             }
           }
         } catch (awmErr) {
@@ -3846,7 +3908,17 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
           phase: 'execution',
           outcome: 'failure',
           actions: actionSummary,
-          context: { error, failedCount: failedActions.length, totalCount: results.length }
+          context: {
+            error,
+            failedCount: failedActions.length,
+            totalCount: results.length,
+            selectedSkillIds: lastSkillSelection.ids,
+            currentProcessName: postVerification?.foreground?.processName || lastSkillSelection.currentProcessName || null,
+            currentWindowTitle: postVerification?.foreground?.title || lastSkillSelection.currentWindowTitle || null,
+            currentWindowKind: postVerification?.foreground?.windowKind || lastSkillSelection.currentWindowKind || null,
+            currentUrlHost: skillRouter.extractHost(getBrowserSessionState().url || '') || lastSkillSelection.currentUrlHost || null,
+            runningPids: Array.isArray(postVerification?.runningPids) ? postVerification.runningPids : []
+          }
         });
 
         while (evaluation.shouldReflect && reflectionIteration < MAX_REFLECTION_ITERATIONS) {
@@ -3888,13 +3960,36 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
               phase: 'reflection',
               outcome: 'failure',
               actions: actionSummary,
-              context: { error, reflectionIteration }
+              context: {
+                error,
+                reflectionIteration,
+                selectedSkillIds: lastSkillSelection.ids,
+                currentProcessName: postVerification?.foreground?.processName || lastSkillSelection.currentProcessName || null,
+                currentWindowTitle: postVerification?.foreground?.title || lastSkillSelection.currentWindowTitle || null,
+                currentWindowKind: postVerification?.foreground?.windowKind || lastSkillSelection.currentWindowKind || null,
+                currentUrlHost: skillRouter.extractHost(getBrowserSessionState().url || '') || lastSkillSelection.currentUrlHost || null,
+                runningPids: Array.isArray(postVerification?.runningPids) ? postVerification.runningPids : []
+              }
             });
           }
         }
 
         if (reflectionIteration >= MAX_REFLECTION_ITERATIONS && !reflectionApplied?.applied) {
           console.warn(`[AI-SERVICE] Reflection exhausted after ${MAX_REFLECTION_ITERATIONS} iterations without resolution`);
+        }
+      }
+
+      if (Array.isArray(lastSkillSelection.ids) && lastSkillSelection.ids.length > 0) {
+        const skillOutcome = skillRouter.recordSkillOutcome(lastSkillSelection.ids, outcomeLabel, {
+          currentProcessName: postVerification?.foreground?.processName || lastSkillSelection.currentProcessName || null,
+          currentWindowTitle: postVerification?.foreground?.title || lastSkillSelection.currentWindowTitle || null,
+          currentWindowKind: postVerification?.foreground?.windowKind || lastSkillSelection.currentWindowKind || null,
+          currentUrlHost: skillRouter.extractHost(getBrowserSessionState().url || '') || lastSkillSelection.currentUrlHost || null,
+          runningPids: Array.isArray(postVerification?.runningPids) ? postVerification.runningPids : [],
+          query: userMessage || actionData.thought || ''
+        });
+        if (Array.isArray(skillOutcome.quarantined) && skillOutcome.quarantined.length > 0) {
+          console.warn(`[AI-SERVICE] Quarantined stale skills after grounded failures: ${skillOutcome.quarantined.join(', ')}`);
         }
       }
     } catch (cogErr) {

@@ -19,6 +19,7 @@
 const telemetryWriter = require('./telemetry-writer');
 const memoryStore = require('../memory/memory-store');
 const { mergeAppPolicy } = require('../preferences');
+const skillRouter = require('../memory/skill-router');
 
 const CONSECUTIVE_FAIL_THRESHOLD = 2;
 const SESSION_FAIL_THRESHOLD = 3;
@@ -89,7 +90,10 @@ function buildReflectionPrompt(failures) {
     const verifier = f.verifier
       ? `  verifier: exit=${f.verifier.exitCode}, stderr="${f.verifier.stderr || ''}"`
       : '  verifier: none';
-    return `Failure ${i + 1}:\n  task: ${f.task}\n  phase: ${f.phase}\n${actions}\n${verifier}`;
+    const context = f.context && Object.keys(f.context).length
+      ? `\n  context: ${JSON.stringify(f.context)}`
+      : '';
+    return `Failure ${i + 1}:\n  task: ${f.task}\n  phase: ${f.phase}\n${actions}\n${verifier}${context}`;
   }).join('\n\n');
 
   return `You are the Reflection Agent for Liku CLI. Analyze these recent failures and respond with ONLY a JSON object:
@@ -102,8 +106,12 @@ Respond with exactly this JSON structure:
   "recommendation": "skill_update" | "negative_policy" | "memory_note" | "no_action",
   "details": {
     "skillId": "optional — ID of skill to update or create",
+    "skillAction": "optional — quarantine | promote | annotate",
     "policyRule": "optional — negative policy rule to add",
     "noteContent": "optional — memory note content to record",
+    "processNames": ["optional", "process names"],
+    "windowTitles": ["optional", "window titles"],
+    "domains": ["optional", "domains"],
     "keywords": ["optional", "keywords"]
   }
 }`;
@@ -142,9 +150,13 @@ function applyReflectionResult(reflectionResponse) {
       }
 
       case 'skill_update': {
-        // Skill updates are deferred — we record the intent as a memory note
-        // with type 'procedural' so the skill router can pick it up
         if (result.details) {
+          const skillUpdate = skillRouter.applyReflectionSkillUpdate(result.details, result.rootCause || '');
+          if (skillUpdate.applied) {
+            return skillUpdate;
+          }
+
+          // Fallback to noting the intent if the named skill cannot be updated directly.
           memoryStore.addNote({
             type: 'procedural',
             content: result.details.noteContent || `Skill update needed: ${result.rootCause}`,

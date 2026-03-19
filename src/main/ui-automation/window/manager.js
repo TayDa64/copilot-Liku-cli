@@ -26,9 +26,18 @@ public class WinAPI {
     [DllImport("user32.dll")] public static extern int GetClassName(IntPtr hWnd, StringBuilder name, int count);
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+  [DllImport("user32.dll", EntryPoint = "GetWindowLongPtr", SetLastError = true)] public static extern IntPtr GetWindowLongPtr64(IntPtr hWnd, int nIndex);
+  [DllImport("user32.dll", EntryPoint = "GetWindowLong", SetLastError = true)] public static extern IntPtr GetWindowLongPtr32(IntPtr hWnd, int nIndex);
+  [DllImport("user32.dll")] public static extern IntPtr GetWindow(IntPtr hWnd, uint uCmd);
+  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool IsZoomed(IntPtr hWnd);
     
     [StructLayout(LayoutKind.Sequential)]
     public struct RECT { public int Left, Top, Right, Bottom; }
+
+    public static IntPtr GetStyle(IntPtr handle, int index) {
+      return IntPtr.Size == 8 ? GetWindowLongPtr64(handle, index) : GetWindowLongPtr32(handle, index);
+    }
 }
 '@
 
@@ -47,11 +56,30 @@ $proc = Get-Process -Id $procId -ErrorAction SilentlyContinue
 $rect = New-Object WinAPI+RECT
 [void][WinAPI]::GetWindowRect($hwnd, [ref]$rect)
 
+$GWL_EXSTYLE = -20
+$GW_OWNER = 4
+$WS_EX_TOPMOST = 0x00000008
+$WS_EX_TOOLWINDOW = 0x00000080
+$exStyle = [int64][WinAPI]::GetStyle($hwnd, $GWL_EXSTYLE)
+$owner = [WinAPI]::GetWindow($hwnd, $GW_OWNER)
+$ownerHwnd = if ($owner -eq [IntPtr]::Zero) { 0 } else { [int64]$owner }
+$isTopmost = (($exStyle -band $WS_EX_TOPMOST) -ne 0)
+$isToolWindow = (($exStyle -band $WS_EX_TOOLWINDOW) -ne 0)
+$isMinimized = [WinAPI]::IsIconic($hwnd)
+$isMaximized = [WinAPI]::IsZoomed($hwnd)
+$windowKind = if ($ownerHwnd -ne 0 -and $isToolWindow) { 'palette' } elseif ($ownerHwnd -ne 0) { 'owned' } else { 'main' }
+
 @{
     hwnd = $hwnd.ToInt64()
     title = $titleSB.ToString()
     className = $classSB.ToString()
     processName = if ($proc) { $proc.ProcessName } else { "" }
+  ownerHwnd = $ownerHwnd
+  isTopmost = $isTopmost
+  isToolWindow = $isToolWindow
+  isMinimized = $isMinimized
+  isMaximized = $isMaximized
+  windowKind = $windowKind
     bounds = @{ x = $rect.Left; y = $rect.Top; width = $rect.Right - $rect.Left; height = $rect.Bottom - $rect.Top }
 } | ConvertTo-Json -Compress
 `;
@@ -94,6 +122,11 @@ public class WindowFinder {
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+  [DllImport("user32.dll", EntryPoint = "GetWindowLongPtr", SetLastError = true)] public static extern IntPtr GetWindowLongPtr64(IntPtr hWnd, int nIndex);
+  [DllImport("user32.dll", EntryPoint = "GetWindowLong", SetLastError = true)] public static extern IntPtr GetWindowLongPtr32(IntPtr hWnd, int nIndex);
+  [DllImport("user32.dll")] public static extern IntPtr GetWindow(IntPtr hWnd, uint uCmd);
+  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool IsZoomed(IntPtr hWnd);
     
     [StructLayout(LayoutKind.Sequential)]
     public struct RECT { public int Left, Top, Right, Bottom; }
@@ -106,11 +139,19 @@ public class WindowFinder {
         windows.Clear();
         EnumWindows((h, l) => { if (IsWindowVisible(h)) windows.Add(h); return true; }, IntPtr.Zero);
     }
+
+    public static IntPtr GetStyle(IntPtr handle, int index) {
+      return IntPtr.Size == 8 ? GetWindowLongPtr64(handle, index) : GetWindowLongPtr32(handle, index);
+    }
 }
 '@
 
 [WindowFinder]::Find()
 $results = @()
+  $GWL_EXSTYLE = -20
+  $GW_OWNER = 4
+  $WS_EX_TOPMOST = 0x00000008
+  $WS_EX_TOOLWINDOW = 0x00000080
 
 foreach ($hwnd in [WindowFinder]::windows) {
     $titleSB = New-Object System.Text.StringBuilder 256
@@ -134,12 +175,26 @@ foreach ($hwnd in [WindowFinder]::windows) {
     
     $rect = New-Object WindowFinder+RECT
     [void][WindowFinder]::GetWindowRect($hwnd, [ref]$rect)
+    $exStyle = [int64][WindowFinder]::GetStyle($hwnd, $GWL_EXSTYLE)
+    $owner = [WindowFinder]::GetWindow($hwnd, $GW_OWNER)
+    $ownerHwnd = if ($owner -eq [IntPtr]::Zero) { 0 } else { [int64]$owner }
+    $isTopmost = (($exStyle -band $WS_EX_TOPMOST) -ne 0)
+    $isToolWindow = (($exStyle -band $WS_EX_TOOLWINDOW) -ne 0)
+    $isMinimized = [WindowFinder]::IsIconic($hwnd)
+    $isMaximized = [WindowFinder]::IsZoomed($hwnd)
+    $windowKind = if ($ownerHwnd -ne 0 -and $isToolWindow) { 'palette' } elseif ($ownerHwnd -ne 0) { 'owned' } else { 'main' }
     
     $results += @{
         hwnd = $hwnd.ToInt64()
         title = $t
         className = $c
         processName = $pn
+      ownerHwnd = $ownerHwnd
+      isTopmost = $isTopmost
+      isToolWindow = $isToolWindow
+      isMinimized = $isMinimized
+      isMaximized = $isMaximized
+      windowKind = $windowKind
         bounds = @{ x = $rect.Left; y = $rect.Top; width = $rect.Right - $rect.Left; height = $rect.Bottom - $rect.Top }
     }
 }

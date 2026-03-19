@@ -1867,6 +1867,21 @@ public class ForegroundInfo {
   [DllImport("user32.dll")]
   public static extern IntPtr GetForegroundWindow();
 
+  [DllImport("user32.dll", EntryPoint = "GetWindowLongPtr", SetLastError = true)]
+  public static extern IntPtr GetWindowLongPtr64(IntPtr hWnd, int nIndex);
+
+  [DllImport("user32.dll", EntryPoint = "GetWindowLong", SetLastError = true)]
+  public static extern IntPtr GetWindowLongPtr32(IntPtr hWnd, int nIndex);
+
+  [DllImport("user32.dll")]
+  public static extern IntPtr GetWindow(IntPtr hWnd, uint uCmd);
+
+  [DllImport("user32.dll")]
+  public static extern bool IsIconic(IntPtr hWnd);
+
+  [DllImport("user32.dll")]
+  public static extern bool IsZoomed(IntPtr hWnd);
+
   [DllImport("user32.dll", SetLastError = true)]
   public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
 
@@ -1877,6 +1892,10 @@ public class ForegroundInfo {
     StringBuilder sb = new StringBuilder(512);
     GetWindowText(handle, sb, sb.Capacity);
     return sb.ToString();
+  }
+
+  public static IntPtr GetStyle(IntPtr handle, int index) {
+    return IntPtr.Size == 8 ? GetWindowLongPtr64(handle, index) : GetWindowLongPtr32(handle, index);
   }
 }
 "@
@@ -1899,12 +1918,32 @@ try {
   $procName = ''
 }
 
+$GWL_EXSTYLE = -20
+$GW_OWNER = 4
+$WS_EX_TOPMOST = 0x00000008
+$WS_EX_TOOLWINDOW = 0x00000080
+
+$exStyle = [int64][ForegroundInfo]::GetStyle($hwnd, $GWL_EXSTYLE)
+$owner = [ForegroundInfo]::GetWindow($hwnd, $GW_OWNER)
+$ownerHwnd = if ($owner -eq [IntPtr]::Zero) { 0 } else { [int64]$owner }
+$isTopmost = (($exStyle -band $WS_EX_TOPMOST) -ne 0)
+$isToolWindow = (($exStyle -band $WS_EX_TOOLWINDOW) -ne 0)
+$isMinimized = [ForegroundInfo]::IsIconic($hwnd)
+$isMaximized = [ForegroundInfo]::IsZoomed($hwnd)
+$windowKind = if ($ownerHwnd -ne 0 -and $isToolWindow) { 'palette' } elseif ($ownerHwnd -ne 0) { 'owned' } else { 'main' }
+
 $obj = [PSCustomObject]@{
   success = $true
   hwnd = $hwnd.ToInt64()
   pid = [int]$targetPid
   processName = $procName
   title = $title
+  ownerHwnd = $ownerHwnd
+  isTopmost = $isTopmost
+  isToolWindow = $isToolWindow
+  isMinimized = $isMinimized
+  isMaximized = $isMaximized
+  windowKind = $windowKind
 }
 $obj | ConvertTo-Json -Compress
 `;

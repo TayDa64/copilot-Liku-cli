@@ -116,6 +116,7 @@ Liku perceives your workspace through a dual-mode interaction layer.
 - **Passive Mode:** Fully click-through, remaining dormant until needed.
 - **Dot-Grid Targeting:** When the agent needs to target a specific point, it generates a coordinate grid (Coarse ~100px or Fine ~25px) using alphanumeric labels (e.g., `A1`, `C3.21`).
 - **Live UI Inspection:** Uses native accessibility trees (Windows UI Automation) to highlight and "lock onto" buttons, menus, and text fields in real-time.
+- **Window Topology Tags:** Live UI context distinguishes main windows, owned dialogs, floating palettes, and topmost windows with tags like `[MAIN]`, `[OWNED]`, `[PALETTE]`, and `[TOPMOST]`.
 - **Event-Driven Updates:** The UI watcher uses a 4-state machine (POLLING → EVENT_MODE → FALLBACK) to stream live focus, structure, and property changes with automatic health monitoring.
 
 ### Global Shortcuts (Overlay)
@@ -138,13 +139,13 @@ The Liku agent includes a full cognitive stack that gives it persistent memory, 
 Structured notes with Zettelkasten-style linking, keyword relevance scoring, and token-budgeted context injection. Memory is automatically injected into the system prompt and pruned via LRU when the note count exceeds 500.
 
 ### Semantic Skill Router
-Keyword + TF-IDF based skill selection with cosine similarity scoring. Up to 3 skills injected per turn within a 1500-token budget. Skills can be manually managed (`liku skills`) or auto-generated from successful multi-step action sequences (AWM procedural memory extraction).
+Keyword + TF-IDF based skill selection with cosine similarity scoring, plus grounded runtime scoping from the active process, window title, and browser host. Up to 3 skills are injected per turn within a 1500-token budget. Auto-learned AWM skills follow a lifecycle: `candidate` after first grounded success, `promoted` after repeated grounded success, and `quarantined` after repeated grounded failure so stale procedures stop biasing future plans.
 
 ### Dynamic Tool Generation
 Users or the agent can propose new tools at runtime. Proposed tools go through a quarantine pipeline (`proposeTool()` → review → `approveTool()`) before becoming available. Approved tools execute in a sandboxed `child_process.fork()` worker with a stripped environment, 5.5s timeout, and 16 banned code patterns.
 
 ### RLVR Telemetry & Reflection
-Structured telemetry tracks task outcomes, phase breakdowns, and failure reasons. Consecutive or session failure thresholds trigger a reflection pass that can be routed to a reasoning model (o1/o3-mini) via `/rmodel`. Telemetry JSONL files rotate at 10MB.
+Structured telemetry tracks task outcomes, phase breakdowns, failure reasons, and grounded execution evidence such as running PIDs. Consecutive or session failure thresholds trigger a reflection pass that can be routed to a reasoning model (o1/o3-mini) via `/rmodel`. Reflection can directly maintain named skills, including quarantining stale ones instead of only writing notes. Telemetry JSONL files rotate at 10MB.
 
 ## 🤖 Multi-Agent System
 

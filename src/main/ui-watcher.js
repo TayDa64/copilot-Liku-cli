@@ -17,6 +17,7 @@ const path = require('path');
 const fs = require('fs');
 const EventEmitter = require('events');
 const { getSharedUIAHost } = require('./ui-automation/core/uia-host');
+const windowManager = require('./ui-automation/window/manager');
 
 // Watcher mode state machine
 const MODE = {
@@ -52,6 +53,7 @@ class UIWatcher extends EventEmitter {
     this.cache = {
       elements: [],
       activeWindow: null,
+      windowTopology: {},
       lastUpdate: 0,
       updateCount: 0
     };
@@ -139,6 +141,7 @@ class UIWatcher extends EventEmitter {
       
       // Get UI elements (focused window only for performance)
       const elements = await this.detectElements(activeWindow);
+      const windowTopology = await this.getWindowTopology(activeWindow, elements);
       
       // Calculate diff
       const diff = this.calculateDiff(elements);
@@ -148,6 +151,7 @@ class UIWatcher extends EventEmitter {
       this.cache = {
         elements,
         activeWindow,
+        windowTopology,
         lastUpdate: Date.now(),
         updateCount: this.cache.updateCount + 1
       };
@@ -200,7 +204,16 @@ public class ActiveWindow {
     [DllImport("user32.dll")] public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
     [DllImport("user32.dll")] public static extern int GetWindowThreadProcessId(IntPtr hWnd, out int processId);
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+  [DllImport("user32.dll", EntryPoint = "GetWindowLongPtr", SetLastError = true)] public static extern IntPtr GetWindowLongPtr64(IntPtr hWnd, int nIndex);
+  [DllImport("user32.dll", EntryPoint = "GetWindowLong", SetLastError = true)] public static extern IntPtr GetWindowLongPtr32(IntPtr hWnd, int nIndex);
+  [DllImport("user32.dll")] public static extern IntPtr GetWindow(IntPtr hWnd, uint uCmd);
+  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool IsZoomed(IntPtr hWnd);
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+
+  public static IntPtr GetStyle(IntPtr handle, int index) {
+    return IntPtr.Size == 8 ? GetWindowLongPtr64(handle, index) : GetWindowLongPtr32(handle, index);
+  }
 }
 "@
 $hwnd = [ActiveWindow]::GetForegroundWindow()
@@ -211,11 +224,29 @@ $processId = 0
 $rect = New-Object ActiveWindow+RECT
 [ActiveWindow]::GetWindowRect($hwnd, [ref]$rect) | Out-Null
 $proc = Get-Process -Id $processId -ErrorAction SilentlyContinue
+$GWL_EXSTYLE = -20
+$GW_OWNER = 4
+$WS_EX_TOPMOST = 0x00000008
+$WS_EX_TOOLWINDOW = 0x00000080
+$exStyle = [int64][ActiveWindow]::GetStyle($hwnd, $GWL_EXSTYLE)
+$owner = [ActiveWindow]::GetWindow($hwnd, $GW_OWNER)
+$ownerHwnd = if ($owner -eq [IntPtr]::Zero) { 0 } else { [int64]$owner }
+$isTopmost = (($exStyle -band $WS_EX_TOPMOST) -ne 0)
+$isToolWindow = (($exStyle -band $WS_EX_TOOLWINDOW) -ne 0)
+$isMinimized = [ActiveWindow]::IsIconic($hwnd)
+$isMaximized = [ActiveWindow]::IsZoomed($hwnd)
+$windowKind = if ($ownerHwnd -ne 0 -and $isToolWindow) { 'palette' } elseif ($ownerHwnd -ne 0) { 'owned' } else { 'main' }
 @{
     hwnd = [long]$hwnd
     title = $sb.ToString()
     processId = $processId
     processName = if($proc){$proc.ProcessName}else{""}
+  ownerHwnd = $ownerHwnd
+  isTopmost = $isTopmost
+  isToolWindow = $isToolWindow
+  isMinimized = $isMinimized
+  isMaximized = $isMaximized
+  windowKind = $windowKind
     bounds = @{ x = $rect.Left; y = $rect.Top; width = $rect.Right - $rect.Left; height = $rect.Bottom - $rect.Top }
 } | ConvertTo-Json -Compress
 `;
@@ -250,6 +281,43 @@ $proc = Get-Process -Id $processId -ErrorAction SilentlyContinue
         }
       );
     });
+  }
+
+  async getWindowTopology(activeWindow, elements = []) {
+    try {
+      if (!activeWindow?.processName) return {};
+      const windows = await windowManager.findWindows({
+        processName: activeWindow.processName,
+        includeUntitled: true
+      });
+      const handleSet = new Set(
+        (elements || [])
+          .map((el) => Number(el?.windowHandle || 0))
+          .filter((value) => Number.isFinite(value) && value > 0)
+      );
+      handleSet.add(Number(activeWindow.hwnd || 0));
+      const topology = {};
+      for (const win of windows) {
+        const hwnd = Number(win?.hwnd || 0);
+        if (!hwnd || (handleSet.size > 0 && !handleSet.has(hwnd))) continue;
+        topology[hwnd] = win;
+      }
+      return topology;
+    } catch {
+      return {};
+    }
+  }
+
+  formatWindowTags(windowInfo = {}) {
+    const tags = [];
+    const kind = String(windowInfo.windowKind || '').toLowerCase();
+    if (kind === 'main') tags.push('MAIN');
+    else if (kind === 'palette') tags.push('PALETTE');
+    else if (kind === 'owned') tags.push('OWNED');
+    if (windowInfo.isTopmost) tags.push('TOPMOST');
+    if (windowInfo.isMinimized) tags.push('MIN');
+    if (windowInfo.isMaximized) tags.push('MAX');
+    return tags.length ? ` [${tags.join('] [')}]` : '';
   }
   
   /**
@@ -444,7 +512,7 @@ $results | ConvertTo-Json -Depth 4 -Compress
       return null;
     }
     
-    const { elements, activeWindow, lastUpdate } = this.cache;
+    const { elements, activeWindow, windowTopology, lastUpdate } = this.cache;
     const age = Date.now() - lastUpdate;
     
     // Redaction: if the focused window belongs to a sensitive process,
@@ -457,7 +525,7 @@ $results | ConvertTo-Json -Depth 4 -Compress
     
     if (activeWindow) {
       const title = redacted ? '[REDACTED — sensitive application]' : (activeWindow.title || 'Unknown');
-      context += `**Focused Window**: ${title} (${activeWindow.processName})\n`;
+      context += `**Focused Window**: ${title} (${activeWindow.processName})${this.formatWindowTags(activeWindow)}\n`;
       context += `**Cursor**: (${activeWindow.bounds.x}, ${activeWindow.bounds.y}) ${activeWindow.bounds.width}x${activeWindow.bounds.height}\n\n`;
     }
     
@@ -483,7 +551,9 @@ $results | ConvertTo-Json -Depth 4 -Compress
       
       // Handle Window headers
       if (el.type === 'Window') {
-        context += `\n[WIN] **Window**: "${name}" (Handle: ${el.windowHandle || 0})\n`;
+        const topo = windowTopology?.[Number(el.windowHandle || 0)] || {};
+        const ownerText = topo.ownerHwnd ? ` owner:${topo.ownerHwnd}` : '';
+        context += `\n[WIN] **Window**: "${name}" (Handle: ${el.windowHandle || 0})${this.formatWindowTags(topo)}${ownerText}\n`;
         listed++;
         continue;
       }
