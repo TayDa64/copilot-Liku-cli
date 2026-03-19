@@ -173,11 +173,33 @@ function askQuestion(rl, prompt) {
   return new Promise(resolve => rl.question(prompt, resolve));
 }
 
+async function readScriptedInputs() {
+  const chunks = [];
+  for await (const chunk of process.stdin) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+  }
+  const text = Buffer.concat(chunks).toString('utf8');
+  return text
+    .split(/\r?\n/)
+    .map((line) => line.replace(/\r/g, ''));
+}
+
+async function promptForInput(session, prompt) {
+  if (Array.isArray(session.scriptedInputs)) {
+    if (prompt) process.stdout.write(prompt);
+    const next = session.scriptedInputs.length > 0 ? session.scriptedInputs.shift() : 'exit';
+    process.stdout.write(`${next}\n`);
+    return next;
+  }
+  return askQuestion(session.rl, prompt);
+}
+
 function createReadline() {
+  const interactiveTerminal = !!process.stdin.isTTY && !!process.stdout.isTTY;
   return readline.createInterface({
     input: process.stdin,
     output: process.stdout,
-    terminal: true
+    terminal: interactiveTerminal
   });
 }
 
@@ -348,7 +370,7 @@ async function autoCapture(ai) {
   return false;
 }
 
-async function executeActionBatchWithSafeguards(ai, actionData, rl, userMessage, options = {}) {
+async function executeActionBatchWithSafeguards(ai, actionData, session, userMessage, options = {}) {
   const enablePopupRecipes = !!options.enablePopupRecipes;
   let pendingSafety = null;
   let screenshotCaptured = false;
@@ -396,7 +418,7 @@ async function executeActionBatchWithSafeguards(ai, actionData, rl, userMessage,
     warn('Confirmation required for a pending action.');
   }
 
-  const ans = (await askQuestion(rl, highlight('Execute anyway? (y/N) '))).trim().toLowerCase();
+  const ans = (await promptForInput(session, highlight('Execute anyway? (y/N) '))).trim().toLowerCase();
   if (ans === 'y' || ans === 'yes') {
     const actionId = execResult.pendingActionId;
     if (actionId) ai.confirmPendingAction(actionId);
@@ -448,7 +470,9 @@ async function runChatLoop(ai, options) {
 
   let lastNonTrivialUserMessage = '';
 
-  let rl = createReadline();
+  const scriptedInputs = Array.isArray(options.scriptedInputs) ? [...options.scriptedInputs] : null;
+  let rl = scriptedInputs ? null : createReadline();
+  const session = { rl, scriptedInputs };
 
   console.log(`\n${bold('Liku Chat')} ${dim('(type /help for commands, exit to quit)')}`);
   info(`execute=${executeMode}${model ? `, model=${model}` : ''}`);
@@ -456,11 +480,14 @@ async function runChatLoop(ai, options) {
   while (true) {
     let line = '';
     try {
-      line = (await askQuestion(rl, highlight('> '))).trim();
+      line = (await promptForInput(session, highlight('> '))).trim();
     } catch (e) {
       // If readline gets into a bad state (e.g., raw mode interruption), recover.
-      try { rl.close(); } catch {}
-      rl = createReadline();
+      if (!session.scriptedInputs) {
+        try { rl.close(); } catch {}
+        rl = createReadline();
+        session.rl = rl;
+      }
       warn(`Input error; recovered prompt (${e.message})`);
       continue;
     }
@@ -713,7 +740,7 @@ async function runChatLoop(ai, options) {
 
       if (!shouldExecute) {
       while (true) {
-        const ans = (await askQuestion(rl, highlight(`Run ${actionData.actions.length} action(s)? (y/N/a/d/c) `)))
+        const ans = (await promptForInput(session, highlight(`Run ${actionData.actions.length} action(s)? (y/N/a/d/c) `)))
           .trim()
           .toLowerCase();
 
@@ -756,7 +783,7 @@ async function runChatLoop(ai, options) {
             continue;
           }
 
-          const correction = (await askQuestion(rl, highlight('What should I learn for this app? ')))
+          const correction = (await promptForInput(session, highlight('What should I learn for this app? ')))
             .trim();
           if (!correction) {
             info('Cancelled.');
@@ -839,7 +866,7 @@ async function runChatLoop(ai, options) {
     execResult = await executeActionBatchWithSafeguards(
       ai,
       actionData,
-      rl,
+      session,
       effectiveUserMessage,
       { enablePopupRecipes: popupRecipesEnabled }
     );
@@ -955,7 +982,7 @@ async function runChatLoop(ai, options) {
         const contExecResult = await executeActionBatchWithSafeguards(
           ai,
           contActionData,
-          rl,
+          session,
           effectiveUserMessage,
           { enablePopupRecipes: popupRecipesEnabled }
         );
@@ -977,7 +1004,7 @@ async function runChatLoop(ai, options) {
     }
   }
 
-  rl.close();
+  if (rl) rl.close();
 }
 
 async function run(args, flags) {
@@ -1011,7 +1038,8 @@ async function run(args, flags) {
   }
 
   try {
-    await runChatLoop(ai, flags);
+    const scriptedInputs = !process.stdin.isTTY ? await readScriptedInputs() : null;
+    await runChatLoop(ai, { ...flags, scriptedInputs });
   } finally {
     // N4: Save session summary as episodic memory note on exit
     try {
