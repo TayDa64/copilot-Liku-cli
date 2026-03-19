@@ -153,6 +153,33 @@ function listCapabilities(modelEntry = {}) {
     .sort();
 }
 
+function inferPremiumMultiplier(modelId = '') {
+  const id = String(modelId || '').toLowerCase();
+  if (!id) return 1;
+  // Repository truth as of now: all actively supported chat-facing models are 1x.
+  return 1;
+}
+
+function inferRecommendationTags(modelId = '') {
+  const id = String(modelId || '').toLowerCase();
+  const tags = [];
+  if (!id) return tags;
+
+  if (/(mini|haiku|flash|fast)/i.test(id) || id === 'gpt-4o' || id === 'gpt-4o-mini') {
+    tags.push('budget');
+  }
+
+  if (/^gpt-5(\.|-|$)/.test(id)) {
+    tags.push('latest-gpt');
+  }
+
+  if (id === 'gpt-4o') {
+    tags.push('default');
+  }
+
+  return tags;
+}
+
 function categorizeModel(modelEntry = {}) {
   const capabilities = modelEntry.capabilities || DEFAULT_CAPABILITIES;
   if (capabilities.completion) {
@@ -414,6 +441,8 @@ function createCopilotModelRegistry({ likuHome, modelPrefFile, runtimeStateFile,
           vision: !!value.vision,
           capabilities: { ...(value.capabilities || inferCapabilities(value.id || key, { vision: value.vision })) },
           capabilityList: listCapabilities(value),
+            premiumMultiplier: inferPremiumMultiplier(value.id || key),
+            recommendationTags: inferRecommendationTags(value.id || key),
           category: category.key,
           categoryLabel: category.label,
           selectable: category.selectable,
@@ -573,5 +602,7 @@ function createCopilotModelRegistry({ likuHome, modelPrefFile, runtimeStateFile,
 
 module.exports = {
   COPILOT_MODELS,
-  createCopilotModelRegistry
+  createCopilotModelRegistry,
+  inferPremiumMultiplier,
+  inferRecommendationTags
 };

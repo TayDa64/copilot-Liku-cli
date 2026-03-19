@@ -166,7 +166,7 @@ function isLikelyAutomationInput(text) {
   }
 
   // Lightweight intent signals for actual executable tasks.
-  return /(open|launch|search|play|click|type|press|scroll|drag|close|minimize|restore|focus|bring|navigate|go to|run|execute|find|select|choose|pick)/i.test(t);
+  return /(open|launch|search|play|click|type|press|scroll|drag|close|minimize|restore|focus|bring|navigate|go to|run|execute|find|select|choose|pick|screenshot|screen shot|capture)/i.test(t);
 }
 
 function askQuestion(rl, prompt) {
@@ -241,8 +241,12 @@ async function interactiveSelectModel(models) {
       const capabilities = Array.isArray(m.capabilityList) && m.capabilityList.length
         ? dim(` [${m.capabilityList.join(', ')}]`)
         : '';
+      const multiplier = m.premiumMultiplier ? dim(` [${m.premiumMultiplier}x]`) : '';
+      const recommendations = Array.isArray(m.recommendationTags) && m.recommendationTags.length
+        ? dim(` [${m.recommendationTags.join(', ')}]`)
+        : '';
       const current = m.current ? dim(' (current)') : '';
-      stdout.write(`${cursor} ${m.id} - ${m.name}${capabilities}${current}\n`);
+      stdout.write(`${cursor} ${m.id} - ${m.name}${capabilities}${multiplier}${recommendations}${current}\n`);
       renderedLines += 1;
     }
   };

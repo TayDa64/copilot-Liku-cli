@@ -102,3 +102,51 @@ test('evaluator passes recovery-noop transcript', () => {
   const evaluation = evaluateTranscript(transcript, SUITES['recovery-noop']);
   assert.strictEqual(evaluation.passed, true);
 });
+
+test('evaluator passes safety-boundaries transcript', () => {
+  const transcript = [
+    'Provider: copilot',
+    'Copilot: Authenticated',
+    'Run 1 action(s)? (y/N/a/d/c)',
+    'Skipped.',
+    'Low-risk sequence (1 step) detected. Running without pre-approval.',
+    '[1/1] screenshot: ok'
+  ].join('\n');
+
+  const evaluation = evaluateTranscript(transcript, SUITES['safety-boundaries']);
+  assert.strictEqual(evaluation.passed, true);
+});
+
+test('evaluator passes recovery-quality transcript', () => {
+  const transcript = [
+    'Provider: copilot',
+    'Copilot: Authenticated',
+    '[copilot:stub]',
+    'Initial automation turn',
+    'No actions detected for an automation-like request; retrying once with stricter formatting...',
+    '> confirm prompt',
+    '[copilot:stub]',
+    'Confirmed — no further actions taken.'
+  ].join('\n');
+
+  const evaluation = evaluateTranscript(transcript, SUITES['recovery-quality']);
+  assert.strictEqual(evaluation.passed, true);
+});
+
+test('evaluator passes continuity-acknowledgement transcript', () => {
+  const transcript = [
+    'Provider: copilot',
+    'Copilot: Authenticated',
+    '[copilot:stub]',
+    'Initial automation turn',
+    '> confirm prompt',
+    '[copilot:stub]',
+    'Confirmed — no further actions needed.',
+    '> thanks prompt',
+    '[copilot:stub]',
+    'You are welcome. Happy to help.'
+  ].join('\n');
+
+  const evaluation = evaluateTranscript(transcript, SUITES['continuity-acknowledgement']);
+  assert.strictEqual(evaluation.passed, true);
+});

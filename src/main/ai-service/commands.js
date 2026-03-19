@@ -52,7 +52,41 @@ function createCommandHandler(dependencies) {
     if (caps.tools) labels.push('tools');
     if (caps.vision) labels.push('vision');
     if (caps.reasoning) labels.push('reasoning');
-    return labels.length ? ` [${labels.join(', ')}]` : '';
+    const sections = [];
+    if (labels.length) sections.push(`[${labels.join(', ')}]`);
+    if (model.premiumMultiplier) sections.push(`[${model.premiumMultiplier}x]`);
+    if (Array.isArray(model.recommendationTags) && model.recommendationTags.length) {
+      sections.push(`[${model.recommendationTags.join(', ')}]`);
+    }
+    return sections.length ? ` ${sections.join(' ')}` : '';
+  }
+
+  function scoreGptModel(model) {
+    const id = String(model?.id || '').toLowerCase();
+    const match = id.match(/^gpt-(\d+)(?:\.(\d+))?/);
+    if (!match) return Number.NEGATIVE_INFINITY;
+    const major = Number(match[1] || 0);
+    const minor = Number(match[2] || 0);
+    const miniPenalty = id.includes('mini') ? -0.1 : 0;
+    return major * 100 + minor + miniPenalty;
+  }
+
+  function resolveModelShortcut(requested, models) {
+    const normalized = String(requested || '').trim().toLowerCase();
+    const selectable = models.filter((model) => model.selectable !== false);
+    if (!normalized) return null;
+
+    if (['cheap', 'budget', 'free', 'older', 'vision-cheap', 'cheap-vision'].includes(normalized)) {
+      return selectable.find((model) => Array.isArray(model.recommendationTags) && model.recommendationTags.includes('budget')) || null;
+    }
+
+    if (['latest-gpt', 'newest-gpt', 'gpt-latest'].includes(normalized)) {
+      return selectable
+        .filter((model) => /^gpt-/i.test(model.id || ''))
+        .sort((left, right) => scoreGptModel(right) - scoreGptModel(left))[0] || null;
+    }
+
+    return null;
   }
 
   function formatGroupedModelList(models) {
@@ -157,6 +191,7 @@ function createCommandHandler(dependencies) {
 
       case '/model':
         if (parts.length > 1) {
+          const models = getDisplayModels();
           let requested = null;
           if (parts[1] === '--set') {
             requested = parts.slice(2).join(' ');
@@ -171,19 +206,20 @@ function createCommandHandler(dependencies) {
             requested = parts.slice(1).join(' ');
           }
 
-          const model = slashCommandHelpers.normalizeModelKey(requested);
+          const shortcutModel = resolveModelShortcut(requested, models);
+          const model = shortcutModel?.id || slashCommandHelpers.normalizeModelKey(requested);
           if (setCopilotModel(model)) {
             const modelInfo = modelRegistry()[model];
             return {
               type: 'system',
-              message: `Switched to ${modelInfo.name}${modelInfo.vision ? ' (supports vision)' : ''}`
+              message: `Switched to ${modelInfo.name}${modelInfo.vision ? ' (supports vision)' : ''}${shortcutModel ? ` via ${String(requested).trim().toLowerCase()} alias` : ''}`
             };
           }
 
-          const available = formatGroupedModelList(getDisplayModels());
+          const available = formatGroupedModelList(models);
           return {
             type: 'error',
-            message: `Unknown model. Available models:\n${available}`
+            message: `Unknown model. Available models:\n${available}\n\nShortcuts: /model cheap, /model latest-gpt`
           };
         }
 
@@ -193,7 +229,7 @@ function createCommandHandler(dependencies) {
         const active = modelRegistry()[currentModel];
         return {
           type: 'info',
-          message: `Current model: ${active?.name || currentModel}\n\nAvailable models:\n${list}\n\nUse /model <id> to switch (you can also paste "id - display name")`
+          message: `Current model: ${active?.name || currentModel}\n\nAvailable models:\n${list}\n\nUse /model <id> to switch (you can also paste "id - display name"). Shortcuts: /model cheap, /model latest-gpt`
         };
 
       case '/status': {

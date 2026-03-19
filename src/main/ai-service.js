@@ -2808,11 +2808,28 @@ function rewriteActionsForReliability(actions, context = {}) {
     return strategySelection.actions;
   }
 
-  // If the AI is already using the Simple Browser command palette flow, keep it,
-  // but ensure we focus VS Code first (models often forget this).
+  const requestedUrl = extractFirstUrlFromText(userMessage);
+  const explicitBrowser = extractExplicitBrowserTarget(userMessage);
+  const explicitlyMentionsRealBrowser = /\b(edge|microsoft\s+edge|chrome|google\s+chrome|firefox)\b/i.test(userMessage);
+
   const alreadySimpleBrowser = actions.some(
     (a) => typeof a?.text === 'string' && /simple\s+browser\s*:\s*show/i.test(a.text)
   );
+  if (alreadySimpleBrowser && requestedUrl && ((explicitBrowser?.browser && explicitBrowser.browser !== 'vscode') || explicitlyMentionsRealBrowser)) {
+    const browserTarget = explicitBrowser?.browser && explicitBrowser.browser !== 'vscode'
+      ? explicitBrowser
+      : { browser: /firefox/i.test(userMessage) ? 'firefox' : /chrome/i.test(userMessage) ? 'chrome' : 'edge', channel: 'stable' };
+    updateBrowserSessionState({
+      url: requestedUrl,
+      goalStatus: 'in_progress',
+      lastStrategy: 'rewrite-simple-browser-to-explicit-browser',
+      lastUserIntent: userMessage.trim().slice(0, 300)
+    });
+    return buildBrowserOpenUrlActions(browserTarget, requestedUrl);
+  }
+
+  // If the AI is already using the Simple Browser command palette flow, keep it,
+  // but ensure we focus VS Code first (models often forget this).
   if (alreadySimpleBrowser) {
     return prependVsCodeFocusIfMissing(actions);
   }
@@ -2820,7 +2837,6 @@ function rewriteActionsForReliability(actions, context = {}) {
   // Intent-aware rewrite: if the USER asked to open a URL in VS Code integrated browser,
   // run the full deterministic Simple Browser flow even if the model tries incremental steps.
   const requestedAppName = extractRequestedAppName(userMessage);
-  const requestedUrl = extractFirstUrlFromText(userMessage);
   const youtubeSearchIntent = inferYouTubeSearchIntent(userMessage);
 
   if (youtubeSearchIntent?.browser?.browser && !requestedUrl) {
@@ -2877,7 +2893,6 @@ function rewriteActionsForReliability(actions, context = {}) {
     }
   }
 
-  const explicitBrowser = extractExplicitBrowserTarget(userMessage);
   if (explicitBrowser?.browser && explicitBrowser.browser !== 'vscode') {
     // If the model is going to use keyboard input for a specific browser, ensure focus.
     actions = prependBrowserFocusIfMissing(actions, explicitBrowser);
@@ -4275,6 +4290,7 @@ module.exports = {
   parseActions,
   hasActions,
   preflightActions,
+  rewriteActionsForReliability,
   // Teach UX
   parsePreferenceCorrection,
   executeActions,
