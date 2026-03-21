@@ -15,6 +15,8 @@ function createCommandHandler(dependencies) {
     logoutCopilot,
     modelRegistry,
     resetBrowserSessionState,
+    clearSessionIntentState,
+    getSessionIntentState,
     setApiKey,
     setCopilotModel,
     setProvider,
@@ -133,8 +135,34 @@ function createCommandHandler(dependencies) {
         historyStore.clearConversationHistory();
         clearVisualContext();
         resetBrowserSessionState();
+        if (typeof clearSessionIntentState === 'function') {
+          clearSessionIntentState();
+        }
         historyStore.saveConversationHistory();
-        return { type: 'system', message: 'Conversation, visual context, and browser session state cleared.' };
+        return { type: 'system', message: 'Conversation, visual context, browser session state, and session intent state cleared.' };
+
+      case '/state': {
+        if (parts[1] === 'clear') {
+          if (typeof clearSessionIntentState === 'function') {
+            clearSessionIntentState();
+          }
+          return { type: 'system', message: 'Session intent state cleared.' };
+        }
+        if (typeof getSessionIntentState === 'function') {
+          const state = getSessionIntentState();
+          const lines = [];
+          if (state.currentRepo?.repoName) lines.push(`Current repo: ${state.currentRepo.repoName}`);
+          if (state.downstreamRepoIntent?.repoName) lines.push(`Downstream repo intent: ${state.downstreamRepoIntent.repoName}`);
+          if (Array.isArray(state.forgoneFeatures) && state.forgoneFeatures.length > 0) {
+            lines.push(`Forgone features: ${state.forgoneFeatures.map((entry) => entry.feature).join(', ')}`);
+          }
+          if (Array.isArray(state.explicitCorrections) && state.explicitCorrections.length > 0) {
+            lines.push(`Recent corrections: ${state.explicitCorrections.slice(-3).map((entry) => entry.text).join(' | ')}`);
+          }
+          return { type: 'info', message: lines.join('\n') || 'No session intent state recorded.' };
+        }
+        return { type: 'info', message: 'Session intent state is unavailable.' };
+      }
 
       case '/vision':
         if (parts[1] === 'on') {
@@ -254,6 +282,7 @@ function createCommandHandler(dependencies) {
 /provider [name] - Get/set AI provider (copilot, openai, anthropic, ollama)
 /setkey <provider> <key> - Set API key
 /status - Show authentication status
+/state [clear] - Show or clear session intent constraints
 /clear - Clear conversation history
 /vision [on|off] - Manage visual context
 /capture - Capture screen for AI analysis

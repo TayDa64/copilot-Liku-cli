@@ -45,6 +45,7 @@ class UIWatcher extends EventEmitter {
       focusedWindowOnly: options.focusedWindowOnly ?? false, // scan all visible windows by default
       maxElements: options.maxElements || 300,        // increased limit for desktop scan
       minConfidence: options.minConfidence || 0.3,    // filter low-confidence elements
+      quiet: options.quiet ?? false,
       enabled: false,
       ...options
     };
@@ -90,7 +91,9 @@ class UIWatcher extends EventEmitter {
   start() {
     if (this.isPolling) return;
     
-    console.log('[UI-WATCHER] Starting continuous monitoring (interval:', this.options.pollInterval, 'ms)');
+    if (!this.options.quiet) {
+      console.log('[UI-WATCHER] Starting continuous monitoring (interval:', this.options.pollInterval, 'ms)');
+    }
     this.isPolling = true;
     this.options.enabled = true;
     
@@ -113,7 +116,9 @@ class UIWatcher extends EventEmitter {
   stop() {
     if (!this.isPolling) return;
     
-    console.log('[UI-WATCHER] Stopping monitoring');
+    if (!this.options.quiet) {
+      console.log('[UI-WATCHER] Stopping monitoring');
+    }
     this.isPolling = false;
     this.options.enabled = false;
     
@@ -927,6 +932,11 @@ let instance = null;
 function getUIWatcher(options) {
   if (!instance) {
     instance = new UIWatcher(options);
+  } else if (options && typeof options === 'object') {
+    instance.options = {
+      ...instance.options,
+      ...options
+    };
   }
   return instance;
 }

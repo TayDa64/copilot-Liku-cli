@@ -16,7 +16,7 @@ function createMessageBuilder(dependencies) {
 
   async function buildMessages(userMessage, includeVisual = false, options = {}) {
     const messages = [{ role: 'system', content: systemPrompt }];
-    const { extraSystemMessages = [], skillsContext = '', memoryContext = '' } = options || {};
+    const { extraSystemMessages = [], skillsContext = '', memoryContext = '', sessionIntentContext = '' } = options || {};
 
     try {
       let prefText = '';
@@ -55,6 +55,12 @@ function createMessageBuilder(dependencies) {
     try {
       if (typeof memoryContext === 'string' && memoryContext.trim()) {
         messages.push({ role: 'system', content: `## Working Memory\n${memoryContext.trim()}` });
+      }
+    } catch {}
+
+    try {
+      if (typeof sessionIntentContext === 'string' && sessionIntentContext.trim()) {
+        messages.push({ role: 'system', content: `## Session Constraints\n${sessionIntentContext.trim()}` });
       }
     } catch {}
 
@@ -106,9 +112,11 @@ function createMessageBuilder(dependencies) {
         const uiContext = watcher.getContextForAI();
         if (uiContext && uiContext.trim()) {
           liveUIContextText = `\n\n---\n🔴 **LIVE UI STATE** (auto-refreshed every 400ms - TRUST THIS DATA!)\n${uiContext}\n---`;
-          console.log('[AI] Including live UI context from watcher (', uiContext.split('\n').length, 'lines)');
+          if (process.env.LIKU_CHAT_TRANSCRIPT_QUIET !== '1') {
+            console.log('[AI] Including live UI context from watcher (', uiContext.split('\n').length, 'lines)');
+          }
         }
-      } else {
+      } else if (process.env.LIKU_CHAT_TRANSCRIPT_QUIET !== '1') {
         console.log('[AI] UI Watcher not available or not running (watcher:', !!watcher, ', polling:', watcher?.isPolling, ')');
       }
     } catch (error) {

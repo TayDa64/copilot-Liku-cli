@@ -157,6 +157,25 @@ What they cover:
 - policy and preference-parser helpers
 - browser/session/history/UI-context seams
 
+### Inline Proof Harness
+
+Use the inline proof runner for real chat-path regressions that need transcript-level proof rather than module-only characterization:
+
+```bash
+npm run proof:inline -- --list-suites
+npm run proof:inline -- --suite repo-boundary-clarification
+npm run proof:inline -- --suite forgone-feature-suppression --models cheap,latest-gpt
+npm run proof:inline:summary -- --suite repo-boundary-clarification --days 7
+node scripts/test-chat-inline-proof-evaluator.js
+```
+
+What this covers:
+
+- live transcript proof for repo-boundary corrections and forgone-feature suppression
+- model-bucket comparison using `cheap` and `latest-gpt`
+- JSONL summary of recent pass/fail trends by suite and model
+- evaluator characterization for transcript expectations without needing a live model run
+
 ### Manual Checks for Model Selection
 
 When changing model-selection UX or Copilot routing, add these checks:

@@ -7,6 +7,24 @@ const readline = require('readline');
 const { success, error, info, warn, highlight, dim, bold } = require('../util/output');
 const systemAutomation = require('../../main/system-automation');
 const preferences = require('../../main/preferences');
+const {
+  getLogLevel: getUiAutomationLogLevel,
+  resetLogSettings: resetUiAutomationLogSettings,
+  setLogLevel: setUiAutomationLogLevel
+} = require('../../main/ui-automation/core/helpers');
+
+function isInteractiveTranscript() {
+  return !!process.stdin.isTTY && !!process.stdout.isTTY;
+}
+
+function formatWatcherStatus(watcher) {
+  if (!watcher) return 'UI Watcher: unavailable';
+  const status = watcher.isPolling ? 'polling' : 'inactive';
+  const interval = Number.isFinite(Number(watcher.options?.pollInterval))
+    ? ` ${Number(watcher.options.pollInterval)}ms`
+    : '';
+  return `UI Watcher: ${status}${interval}`;
+}
 
 function extractPlanMacro(text) {
   const requested = /\(plan\)/i.test(String(text || ''));
@@ -184,7 +202,7 @@ async function readScriptedInputs() {
     .map((line) => line.replace(/\r/g, ''));
 }
 
-async function promptForInput(session, prompt) {
+async function promptForInput(session, prompt, options = {}) {
   if (Array.isArray(session.scriptedInputs)) {
     if (prompt) process.stdout.write(prompt);
     const next = session.scriptedInputs.length > 0 ? session.scriptedInputs.shift() : 'exit';
@@ -328,6 +346,7 @@ ${highlight('Usage:')}
 ${highlight('In-chat commands:')}
   /help       Show AI-service help
   /status     Show auth/provider/model status
+  /state      Show or clear session intent constraints
   /login      Authenticate with GitHub Copilot
   /model      Interactive model picker (↑/↓ + Enter) or set directly (e.g. /model gpt-4o)
   /sequence   Toggle guided step-by-step execution (on by default)
@@ -355,6 +374,58 @@ function formatResponseHeader(resp) {
   return `[${provider}${runtimeModel}${requestedSuffix}]`;
 }
 
+function printTranscriptBlock(lines = []) {
+  console.log(lines.map((line) => String(line ?? '')).join('\n'));
+}
+
+function printAssistantMessage(resp) {
+  printTranscriptBlock([
+    '',
+    dim(formatResponseHeader(resp)),
+    resp.message || '',
+    ''
+  ]);
+}
+
+function printPlanMessage(result) {
+  printTranscriptBlock([
+    '',
+    dim('[planner]'),
+    formatPlanOnlyResult(result),
+    ''
+  ]);
+}
+
+function printActionProgress(result, idx, total) {
+  const prefix = dim(`[${idx + 1}/${total}]`);
+  if (result.success) {
+    console.log(`${prefix} ${result.action || result.type || 'action'}: ${dim(result.message || 'ok')}`);
+    if (result.stdout && result.stdout.trim()) {
+      const lines = result.stdout.trim().split('\n');
+      const display = lines.length > 8 ? lines.slice(0, 8).join('\n') + `\n... (${lines.length - 8} more lines)` : lines.join('\n');
+      console.log(dim(display));
+    }
+    return;
+  }
+
+  const failDetail = result.error || result.message || result.stderr || '';
+  console.log(`${prefix} ${result.action || result.type || 'action'}: ${dim('failed')} ${failDetail}`);
+}
+
+function printCommandResult(cmdResult) {
+  if (cmdResult?.type === 'error') {
+    error(cmdResult.message);
+    return;
+  }
+  if (cmdResult?.type === 'system') {
+    success(cmdResult.message);
+    return;
+  }
+  if (cmdResult?.message) {
+    console.log(cmdResult.message);
+  }
+}
+
 async function autoCapture(ai) {
   try {
     const { screenshot } = require('../../main/ui-automation/screenshot');
@@ -380,21 +451,7 @@ async function executeActionBatchWithSafeguards(ai, actionData, session, userMes
   let screenshotCaptured = false;
   const execResult = await ai.executeActions(
     actionData,
-    (result, idx, total) => {
-      const prefix = dim(`[${idx + 1}/${total}]`);
-      if (result.success) {
-        console.log(`${prefix} ${result.action || result.type || 'action'}: ${dim(result.message || 'ok')}`);
-        // Surface stdout from run_command so user can see diagnostic output
-        if (result.stdout && result.stdout.trim()) {
-          const lines = result.stdout.trim().split('\n');
-          const display = lines.length > 8 ? lines.slice(0, 8).join('\n') + `\n... (${lines.length - 8} more lines)` : lines.join('\n');
-          console.log(dim(display));
-        }
-      } else {
-        const failDetail = result.error || result.message || result.stderr || '';
-        console.log(`${prefix} ${result.action || result.type || 'action'}: ${dim('failed')} ${failDetail}`);
-      }
-    },
+    (result, idx, total) => printActionProgress(result, idx, total),
     async () => {
       const ok = await autoCapture(ai);
       if (ok) screenshotCaptured = true;
@@ -427,20 +484,7 @@ async function executeActionBatchWithSafeguards(ai, actionData, session, userMes
     const actionId = execResult.pendingActionId;
     if (actionId) ai.confirmPendingAction(actionId);
     const resumed = await ai.resumeAfterConfirmation(
-      (result, idx, total) => {
-        const prefix = dim(`[${idx + 1}/${total}]`);
-        if (result.success) {
-          console.log(`${prefix} ${result.action || result.type || 'action'}: ${dim(result.message || 'ok')}`);
-          if (result.stdout && result.stdout.trim()) {
-            const lines = result.stdout.trim().split('\n');
-            const display = lines.length > 8 ? lines.slice(0, 8).join('\n') + `\n... (${lines.length - 8} more lines)` : lines.join('\n');
-            console.log(dim(display));
-          }
-        } else {
-          const failDetail = result.error || result.message || result.stderr || '';
-          console.log(`${prefix} ${result.action || result.type || 'action'}: ${dim('failed')} ${failDetail}`);
-        }
-      },
+      (result, idx, total) => printActionProgress(result, idx, total),
       async () => {
         const ok = await autoCapture(ai);
         if (ok) screenshotCaptured = true;
@@ -560,42 +604,36 @@ async function runChatLoop(ai, options) {
           const canInteractive = !!process.stdin.isTTY && typeof process.stdin.setRawMode === 'function';
           if (!canInteractive) {
             const cmdResult = await Promise.resolve(ai.handleCommand('/model'));
-            if (cmdResult?.type === 'error') error(cmdResult.message);
-            else if (cmdResult?.type === 'system') success(cmdResult.message);
-            else if (cmdResult?.message) console.log(cmdResult.message);
+            printCommandResult(cmdResult);
             continue;
           }
-
-          // Stop readline while we take over raw-mode input.
-          try { rl.close(); } catch {}
 
           let chosen;
           let pickerError = null;
           try {
+            if (rl) {
+              try { rl.close(); } catch {}
+            }
             chosen = await interactiveSelectModel(models);
           } catch (e) {
             pickerError = e;
           } finally {
-            // ALWAYS restore chat prompt; otherwise the chat loop can terminate.
             rl = createReadline();
+            session.rl = rl;
           }
 
           if (pickerError) {
             warn(`Interactive picker failed: ${pickerError.message}`);
             // fall back to normal /model output
             const cmdResult = await Promise.resolve(ai.handleCommand('/model'));
-            if (cmdResult?.type === 'error') error(cmdResult.message);
-            else if (cmdResult?.type === 'system') success(cmdResult.message);
-            else if (cmdResult?.message) console.log(cmdResult.message);
+            printCommandResult(cmdResult);
             continue;
           }
 
           // Non-interactive session (piped input): fall back to standard /model output.
           if (chosen === undefined) {
             const cmdResult = await Promise.resolve(ai.handleCommand('/model'));
-            if (cmdResult?.type === 'error') error(cmdResult.message);
-            else if (cmdResult?.type === 'system') success(cmdResult.message);
-            else if (cmdResult?.message) console.log(cmdResult.message);
+            printCommandResult(cmdResult);
             continue;
           }
 
@@ -605,9 +643,7 @@ async function runChatLoop(ai, options) {
           }
 
           const cmdResult = await Promise.resolve(ai.handleCommand(`/model ${chosen.id}`));
-          if (cmdResult?.type === 'error') error(cmdResult.message);
-          else if (cmdResult?.type === 'system') success(cmdResult.message);
-          else if (cmdResult?.message) console.log(cmdResult.message);
+          printCommandResult(cmdResult);
           continue;
         } catch (e) {
           warn(`Interactive picker failed: ${e.message}`);
@@ -621,13 +657,7 @@ async function runChatLoop(ai, options) {
           warn('Unknown command. Try /help');
           continue;
         }
-        if (cmdResult.type === 'error') {
-          error(cmdResult.message);
-        } else if (cmdResult.type === 'system') {
-          success(cmdResult.message);
-        } else {
-          console.log(cmdResult.message);
-        }
+        printCommandResult(cmdResult);
       } catch (e) {
         error(e.message);
       }
@@ -646,7 +676,7 @@ async function runChatLoop(ai, options) {
           error(planResult.error || 'Planning mode failed');
           continue;
         }
-        console.log(`\n${dim('[planner]')}\n${formatPlanOnlyResult(planResult.result)}\n`);
+        printPlanMessage(planResult.result);
         continue;
       } catch (planError) {
         warn(`Planning mode unavailable, falling back to standard chat: ${planError.message}`);
@@ -671,7 +701,7 @@ async function runChatLoop(ai, options) {
     if (resp.routingNote) {
       info(resp.routingNote);
     }
-    console.log(`\n${dim(formatResponseHeader(resp))}\n${resp.message}\n`);
+    printAssistantMessage(resp);
 
     let actionData = ai.parseActions(resp.message);
     let hasActions = !!(actionData && Array.isArray(actionData.actions) && actionData.actions.length > 0);
@@ -832,7 +862,7 @@ async function runChatLoop(ai, options) {
             break;
           }
 
-          console.log(`\n${dim(formatResponseHeader(resp))}\n${resp.message}\n`);
+          printAssistantMessage(resp);
           actionData = ai.parseActions(resp.message);
           hasActions = !!(actionData && Array.isArray(actionData.actions) && actionData.actions.length > 0);
           if (!hasActions) {
@@ -951,7 +981,7 @@ async function runChatLoop(ai, options) {
           break;
         }
 
-        console.log(`\n${dim(formatResponseHeader(contResp))}\n${contResp.message}\n`);
+        printAssistantMessage(contResp);
 
         const contActionData = ai.parseActions(contResp.message);
         const contHasActions = !!(contActionData && Array.isArray(contActionData.actions) && contActionData.actions.length > 0);
@@ -1006,6 +1036,7 @@ async function runChatLoop(ai, options) {
         info('Reached max vision continuations. Returning to prompt.');
       }
     }
+
   }
 
   if (rl) rl.close();
@@ -1017,13 +1048,27 @@ async function run(args, flags) {
     return { success: true };
   }
 
+  const interactiveTranscript = isInteractiveTranscript();
+  const previousTranscriptQuiet = process.env.LIKU_CHAT_TRANSCRIPT_QUIET;
+  const previousUiAutomationLogLevel = getUiAutomationLogLevel();
+
+  if (interactiveTranscript) {
+    process.env.LIKU_CHAT_TRANSCRIPT_QUIET = '1';
+    setUiAutomationLogLevel('warn');
+  }
+
   const ai = require('../../main/ai-service');
   const { getUIWatcher } = require('../../main/ui-watcher');
   let watcher = null;
   let watcherStartedByChat = false;
 
   try {
-    watcher = getUIWatcher({ pollInterval: 400, focusedWindowOnly: false, enabled: true });
+    watcher = getUIWatcher({
+      pollInterval: 400,
+      focusedWindowOnly: false,
+      enabled: true,
+      quiet: interactiveTranscript
+    });
     if (!watcher.isPolling) {
       watcher.start();
       watcherStartedByChat = true;
@@ -1031,7 +1076,11 @@ async function run(args, flags) {
     if (typeof ai.setUIWatcher === 'function') {
       ai.setUIWatcher(watcher);
     }
-    info(`UI Watcher: ${watcher.isPolling ? 'polling' : 'inactive'}`);
+    if (interactiveTranscript) {
+      console.log(dim(formatWatcherStatus(watcher)));
+    } else {
+      info(`UI Watcher: ${watcher.isPolling ? 'polling' : 'inactive'}`);
+    }
   } catch (e) {
     warn(`UI Watcher unavailable: ${e.message}`);
   }
@@ -1053,6 +1102,16 @@ async function run(args, flags) {
     } catch {}
     if (watcher && watcherStartedByChat) {
       try { watcher.stop(); } catch {}
+    }
+    if (interactiveTranscript) {
+      if (previousTranscriptQuiet === undefined) {
+        delete process.env.LIKU_CHAT_TRANSCRIPT_QUIET;
+      } else {
+        process.env.LIKU_CHAT_TRANSCRIPT_QUIET = previousTranscriptQuiet;
+      }
+      setUiAutomationLogLevel(previousUiAutomationLogLevel);
+    } else {
+      resetUiAutomationLogSettings();
     }
   }
 

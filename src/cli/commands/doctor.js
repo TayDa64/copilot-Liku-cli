@@ -5,6 +5,7 @@
 
 const path = require('path');
 const { success, error, info, highlight, dim } = require('../util/output');
+const { resolveProjectIdentity, validateProjectIdentity } = require('../../shared/project-identity');
 
 const PROJECT_ROOT = path.resolve(__dirname, '../../..');
 const UI_MODULE = path.resolve(__dirname, '../../main/ui-automation');
@@ -894,10 +895,17 @@ async function run(args, options) {
 
   const generatedAt = new Date().toISOString();
 
+  const projectIdentity = resolveProjectIdentity({ cwd: process.cwd() });
+  const projectGuard = validateProjectIdentity({
+    cwd: process.cwd(),
+    expectedProjectRoot: options.project,
+    expectedRepo: options.repo
+  });
+
   const envInfo = {
     name: pkg.name,
     version: pkg.version,
-    projectRoot: PROJECT_ROOT,
+    projectRoot: projectIdentity.projectRoot,
     cwd: process.cwd(),
     node: process.version,
     platform: process.platform,
@@ -964,6 +972,8 @@ async function run(args, options) {
     checks,
     checksSummary,
     env: envInfo,
+    repoIdentity: projectIdentity,
+    projectGuard,
     request: requestText ? { text: requestText, hints: requestHints } : null,
     uiState: {
       activeWindow,
@@ -1000,9 +1010,19 @@ async function run(args, options) {
     console.log(`${highlight('Resolved root:')} ${envInfo.projectRoot}`);
     console.log(`${highlight('Node:')} ${envInfo.node} (${envInfo.platform}/${envInfo.arch})`);
     console.log(`${highlight('CWD:')} ${envInfo.cwd}`);
+    console.log(`${highlight('Repo:')} ${projectIdentity.repoName}`);
+    if (projectIdentity.gitRemote) {
+      console.log(`${highlight('Remote:')} ${projectIdentity.gitRemote}`);
+    }
 
     console.log(`${highlight('Schema:')} ${DOCTOR_SCHEMA_VERSION}`);
     console.log(`${highlight('OK:')} ${ok ? 'true' : 'false'} ${dim(`(pass=${checksSummary.pass} warn=${checksSummary.warn} fail=${checksSummary.fail})`)}`);
+    if (!projectGuard.ok) {
+      console.log(`${highlight('Project guard:')} fail`);
+      projectGuard.errors.forEach((entry) => console.log(`  - ${entry}`));
+    } else if (projectGuard.expected.projectRoot || projectGuard.expected.repo) {
+      console.log(`${highlight('Project guard:')} pass`);
+    }
 
     console.log(`\n${highlight('Active window:')}`);
     if (activeWindow) {

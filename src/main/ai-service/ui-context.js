@@ -8,7 +8,9 @@ const SEMANTIC_DOM_MAX_AGE_MS = 5000;
 
 function setUIWatcher(watcher) {
   uiWatcher = watcher;
-  console.log('[AI-SERVICE] UI Watcher connected');
+  if (process.env.LIKU_CHAT_TRANSCRIPT_QUIET !== '1') {
+    console.log('[AI-SERVICE] UI Watcher connected');
+  }
 }
 
 function getUIWatcher() {

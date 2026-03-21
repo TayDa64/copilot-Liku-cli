@@ -25,12 +25,14 @@ const EXPECTED_EXPORTS = [
   'getModelMetadata',
   'getPendingAction',
   'getReflectionModel',
+  'getSessionIntentState',
   'getStatus',
   'getToolDefinitions',
   'getUIWatcher',
   'gridToPixels',
   'handleCommand',
   'hasActions',
+  'ingestUserIntentState',
   'loadCopilotToken',
   'memoryStore',
   'parseActions',
@@ -38,6 +40,7 @@ const EXPECTED_EXPORTS = [
   'preflightActions',
   'rejectPendingAction',
   'resumeAfterConfirmation',
+  'rewriteActionsForReliability',
   'saveSessionNote',
   'sendMessage',
   'setApiKey',
@@ -76,6 +79,16 @@ function testAsync(name, fn) {
       console.error(error.stack || error.message);
       process.exitCode = 1;
     });
+}
+
+function scoreGptModel(model) {
+  const id = String(model?.id || '').toLowerCase();
+  const match = id.match(/^gpt-(\d+)(?:\.(\d+))?/);
+  if (!match) return Number.NEGATIVE_INFINITY;
+  const major = Number(match[1] || 0);
+  const minor = Number(match[2] || 0);
+  const miniPenalty = id.includes('mini') ? -0.1 : 0;
+  return major * 100 + minor + miniPenalty;
 }
 
 test('export surface remains stable', () => {
@@ -122,6 +135,30 @@ testAsync('handleCommand status response shape remains stable', async () => {
   assert.strictEqual(typeof result.message, 'string');
   assert.ok(result.message.includes('Provider:'));
   assert.ok(result.message.includes('History:'));
+});
+
+testAsync('handleCommand model shortcuts resolve through the live ai-service path', async () => {
+  const originalModel = aiService.getCurrentCopilotModel();
+  const selectableModels = aiService.getCopilotModels().filter((model) => model.selectable !== false);
+  const cheapModel = selectableModels.find((model) => Array.isArray(model.recommendationTags) && model.recommendationTags.includes('budget'));
+  const latestGptModel = selectableModels
+    .filter((model) => /^gpt-/i.test(model.id || ''))
+    .sort((left, right) => scoreGptModel(right) - scoreGptModel(left))[0];
+
+  assert.ok(cheapModel, 'expected a budget model shortcut target');
+  assert.ok(latestGptModel, 'expected a latest GPT shortcut target');
+
+  try {
+    const cheapResult = await aiService.handleCommand('/model cheap');
+    assert.strictEqual(cheapResult.type, 'system');
+    assert.strictEqual(aiService.getCurrentCopilotModel(), cheapModel.id);
+
+    const latestResult = await aiService.handleCommand('/model latest-gpt');
+    assert.strictEqual(latestResult.type, 'system');
+    assert.strictEqual(aiService.getCurrentCopilotModel(), latestGptModel.id);
+  } finally {
+    aiService.setCopilotModel(originalModel);
+  }
 });
 
 test('tool schema remains stable enough for function-calling', () => {

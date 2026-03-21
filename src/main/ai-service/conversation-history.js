@@ -9,7 +9,9 @@ function createConversationHistoryStore({ historyFile, likuHome, maxHistory }) {
         const data = JSON.parse(fs.readFileSync(historyFile, 'utf-8'));
         if (Array.isArray(data)) {
           conversationHistory = data.slice(-maxHistory * 2);
-          console.log(`[AI] Restored ${conversationHistory.length} history entries from disk`);
+          if (process.env.LIKU_CHAT_TRANSCRIPT_QUIET !== '1') {
+            console.log(`[AI] Restored ${conversationHistory.length} history entries from disk`);
+          }
         }
       }
     } catch (error) {

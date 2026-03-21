@@ -11,6 +11,17 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+
+function isQuietChatTranscript() {
+  return process.env.LIKU_CHAT_TRANSCRIPT_QUIET === '1';
+}
+
+function chatDebugLog(...args) {
+  if (!isQuietChatTranscript()) {
+    console.log(...args);
+  }
+}
+
 // `ai-service` is used by the Electron app *and* by the CLI.
 // When running in CLI-only mode, Electron may not be available.
 let shell;
@@ -19,7 +30,7 @@ try {
 } catch {
   shell = {
     openExternal: async (url) => {
-      console.log('[AI] Open this URL in your browser:', url);
+      chatDebugLog('[AI] Open this URL in your browser:', url);
       return true;
     }
   };
@@ -59,6 +70,13 @@ const {
   resetBrowserSessionState,
   updateBrowserSessionState
 } = require('./ai-service/browser-session-state');
+const {
+  clearSessionIntentState,
+  formatSessionIntentContext,
+  formatSessionIntentSummary,
+  getSessionIntentState,
+  ingestUserIntentState
+} = require('./session-intent-state');
 const {
   clearSemanticDOMSnapshot,
   getSemanticDOMContextText,
@@ -349,6 +367,8 @@ const commandHandler = createCommandHandler({
   },
   modelRegistry,
   resetBrowserSessionState,
+  clearSessionIntentState,
+  getSessionIntentState,
   setApiKey,
   setCopilotModel,
   setProvider,
@@ -470,7 +490,7 @@ function loadCopilotToken() {
         const dir = path.dirname(TOKEN_FILE);
         if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
         fs.copyFileSync(legacyPath, TOKEN_FILE);
-        console.log('[COPILOT] Migrated token from legacy path');
+        chatDebugLog('[COPILOT] Migrated token from legacy path');
       }
     }
 
@@ -478,7 +498,7 @@ function loadCopilotToken() {
       const data = JSON.parse(fs.readFileSync(TOKEN_FILE, 'utf8'));
       if (data.access_token) {
         apiKeys.copilot = data.access_token;
-        console.log('[COPILOT] Loaded saved token');
+        chatDebugLog('[COPILOT] Loaded saved token');
         return true;
       }
     }
@@ -501,7 +521,7 @@ function saveCopilotToken(token) {
       access_token: token, 
       saved_at: new Date().toISOString() 
     }), { mode: 0o600 });
-    console.log('[COPILOT] Token saved');
+    chatDebugLog('[COPILOT] Token saved');
   } catch (e) {
     console.error('[COPILOT] Failed to save token:', e.message);
   }
@@ -538,7 +558,7 @@ function startCopilotOAuth() {
         try {
           const result = JSON.parse(body);
           if (result.device_code && result.user_code) {
-            console.log('[COPILOT] OAuth started. User code:', result.user_code);
+            chatDebugLog('[COPILOT] OAuth started. User code:', result.user_code);
             oauthInProgress = true;
             
             // Open browser for user to authorize
@@ -679,7 +699,7 @@ async function exchangeForCopilotSession() {
               const apiUrl = new URL(result.endpoints.api);
               sessionApiHost = apiUrl.hostname;
               preferredCopilotChatHost = sessionApiHost;
-              console.log(`[Copilot] Using session API host: ${sessionApiHost}`);
+              chatDebugLog(`[Copilot] Using session API host: ${sessionApiHost}`);
             } catch { /* ignore malformed URL */ }
           }
 
@@ -736,10 +756,10 @@ async function callCopilot(messages, modelOverride = null, requestOptions = {}) 
       return preferredKey;
     };
 
-    console.log(`[Copilot] Vision request: ${hasVision}, Model: ${modelId} (key=${modelKey})`);
+    chatDebugLog(`[Copilot] Vision request: ${hasVision}, Model: ${modelId} (key=${modelKey})`);
     const toolsEnabledForModel = enableTools && supportsCopilotCapability(activeModelKey, 'tools');
     if (enableTools && !toolsEnabledForModel) {
-      console.log(`[Copilot] Model ${activeModelKey} does not advertise tool support; sending plain chat request.`);
+      chatDebugLog(`[Copilot] Model ${activeModelKey} does not advertise tool support; sending plain chat request.`);
     }
 
     const isReasoningModel = supportsCopilotCapability(activeModelKey, 'reasoning');
@@ -791,7 +811,7 @@ async function callCopilot(messages, modelOverride = null, requestOptions = {}) 
 
       if (hasVision) {
         headers['Copilot-Vision-Request'] = 'true';
-        console.log('[Copilot] Added Copilot-Vision-Request header');
+        chatDebugLog('[Copilot] Added Copilot-Vision-Request header');
       }
 
       const options = {
@@ -802,14 +822,14 @@ async function callCopilot(messages, modelOverride = null, requestOptions = {}) 
         timeout: 30000
       };
 
-      console.log(`[Copilot] Calling ${hostname}${options.path} with model ${selectedModelId}...`);
+      chatDebugLog(`[Copilot] Calling ${hostname}${options.path} with model ${selectedModelId}...`);
 
       return new Promise((resolveReq, rejectReq) => {
         const req = https.request(options, (res) => {
           let body = '';
           res.on('data', chunk => body += chunk);
           res.on('end', () => {
-            console.log('[Copilot] API response status:', res.statusCode);
+            chatDebugLog('[Copilot] API response status:', res.statusCode);
             
             if (res.statusCode === 401) {
               // Session token expired, clear it
@@ -842,7 +862,7 @@ async function callCopilot(messages, modelOverride = null, requestOptions = {}) 
                     endpointHost: hostname,
                     actualModelId: selectedModelId
                   });
-                  console.log(`[Copilot] Received ${parsed.toolCalls.length} tool_calls, converted to action block`);
+                  chatDebugLog(`[Copilot] Received ${parsed.toolCalls.length} tool_calls, converted to action block`);
                   resolveReq({
                     content: '```json\n' + actionBlock + '\n```',
                     effectiveModel: runtimeModelKey,
@@ -896,7 +916,7 @@ async function callCopilot(messages, modelOverride = null, requestOptions = {}) 
         resolve(result);
       })
       .catch(async (err) => {
-        console.log('[Copilot] Primary endpoint failed:', err.message);
+        chatDebugLog('[Copilot] Primary endpoint failed:', err.message);
 
         const unsupportedModel = /unsupported_api_for_model|not accessible via the \/chat\/completions endpoint|not available|not supported|model_not_supported/i.test(err.message || '');
         if (unsupportedModel) {
@@ -916,12 +936,12 @@ async function callCopilot(messages, modelOverride = null, requestOptions = {}) 
         
         // Try alternate endpoint
         try {
-          console.log('[Copilot] Trying alternate endpoint...');
+          chatDebugLog('[Copilot] Trying alternate endpoint...');
           const result = await tryEndpoint(alternateHost, '', modelId);
           preferredCopilotChatHost = alternateHost;
           resolve(result);
         } catch (altErr) {
-          console.log('[Copilot] Alternate endpoint also failed:', altErr.message);
+          chatDebugLog('[Copilot] Alternate endpoint also failed:', altErr.message);
           
           // Return user-friendly error messages
           if (err.message.includes('ACCESS_DENIED')) {
@@ -1255,11 +1275,20 @@ async function sendMessage(userMessage, options = {}) {
     console.warn('[AI] Memory store error (non-fatal):', err.message);
   }
 
+  let sessionIntentContextText = '';
+  try {
+    ingestUserIntentState(enhancedMessage, { cwd: process.cwd() });
+    sessionIntentContextText = formatSessionIntentContext(getSessionIntentState({ cwd: process.cwd() })) || '';
+  } catch (err) {
+    console.warn('[AI] Session intent state error (non-fatal):', err.message);
+  }
+
   // Build messages with explicit skills/memory context params
   const messages = await buildMessages(enhancedMessage, includeVisualContext, {
     extraSystemMessages: baseExtraSystemMessages,
     skillsContext: skillsContextText,
-    memoryContext: memoryContextText
+    memoryContext: memoryContextText,
+    sessionIntentContext: sessionIntentContextText
   });
 
   try {
@@ -1283,7 +1312,7 @@ async function sendMessage(userMessage, options = {}) {
     
     while (shouldAutoContinueResponse(fullResponse, hasActions(fullResponse)) && continuationCount < maxContinuations) {
       continuationCount++;
-      console.log(`[AI] Response appears truncated, continuing (${continuationCount}/${maxContinuations})...`);
+      chatDebugLog(`[AI] Response appears truncated, continuing (${continuationCount}/${maxContinuations})...`);
       
       // Add partial response to history temporarily
       historyStore.pushConversationEntry({ role: 'assistant', content: fullResponse });
@@ -1315,7 +1344,7 @@ async function sendMessage(userMessage, options = {}) {
       looksLikeAutomationRequest(enhancedMessage) &&
       !hasActions(response)
     ) {
-      console.log('[AI] No actions detected for an automation-like request; retrying once with stricter formatting...');
+      chatDebugLog('[AI] No actions detected for an automation-like request; retrying once with stricter formatting...');
       const enforcementPrompt =
         'You must respond ONLY with a JSON code block (```json ... ```).\n' +
         'Return an object with keys: thought, actions, verification.\n' +
@@ -1454,6 +1483,11 @@ const {
 function handleCommand(command) {
   const parts = slashCommandHelpers.tokenize(String(command || '').trim());
   const cmd = (parts[0] || '').toLowerCase();
+  const delegatedCommandResult = commandHandler.handleCommand(command);
+
+  if (delegatedCommandResult) {
+    return delegatedCommandResult;
+  }
 
   switch (cmd) {
     case '/provider':
@@ -1478,8 +1512,9 @@ function handleCommand(command) {
       historyStore.clearConversationHistory();
       clearVisualContext();
       resetBrowserSessionState();
+      clearSessionIntentState({ cwd: process.cwd() });
       historyStore.saveConversationHistory();
-      return { type: 'system', message: 'Conversation, visual context, and browser session state cleared.' };
+      return { type: 'system', message: 'Conversation, visual context, browser session state, and session intent state cleared.' };
 
     case '/vision':
       if (parts[1] === 'on') {
@@ -1616,6 +1651,16 @@ function handleCommand(command) {
         message: `Provider: ${status.provider}\nConfigured model: ${status.configuredModelName} (${status.configuredModel})\nRequested model: ${status.requestedModel}\nRuntime model: ${runtimeModelLabel}${status.runtimeModel ? ` (${status.runtimeModel})` : ''}\nRuntime endpoint: ${runtimeHostLabel}\nCopilot: ${status.hasCopilotKey ? 'Authenticated' : 'Not authenticated'}\nOpenAI: ${status.hasOpenAIKey ? 'Key set' : 'No key'}\nAnthropic: ${status.hasAnthropicKey ? 'Key set' : 'No key'}\nHistory: ${status.historyLength} messages\nVisual: ${status.visualContextCount} captures`
       };
 
+    case '/state':
+      if (parts[1] === 'clear') {
+        clearSessionIntentState({ cwd: process.cwd() });
+        return { type: 'system', message: 'Session intent state cleared.' };
+      }
+      return {
+        type: 'info',
+        message: formatSessionIntentSummary(getSessionIntentState({ cwd: process.cwd() }))
+      };
+
     case '/memory': {
       if (parts[1] === 'clear') {
         const notesMap = memoryStore.listNotes();
@@ -1708,6 +1753,7 @@ function handleCommand(command) {
 /provider [name] - Get/set AI provider (copilot, openai, anthropic, ollama)
 /setkey <provider> <key> - Set API key
 /status - Show authentication status
+/state [clear] - Show or clear session intent constraints
 /clear - Clear conversation history
 /vision [on|off] - Manage visual context
 /capture - Capture screen for AI analysis
@@ -4318,6 +4364,8 @@ module.exports = {
   // Cognitive layer (v0.0.15)
   memoryStore,
   skillRouter,
+  getSessionIntentState,
+  ingestUserIntentState,
   // Session persistence (N4)
   saveSessionNote,
   // Cross-model reflection (N6)

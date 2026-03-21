@@ -8,6 +8,7 @@ const { LIKU_HOME, ensureLikuStructure } = require(path.join(__dirname, '..', 's
 const REPO_ROOT = path.join(__dirname, '..');
 const PROOF_TRACE_DIR = path.join(LIKU_HOME, 'traces', 'chat-inline-proof');
 const PROOF_RESULT_LOG = path.join(LIKU_HOME, 'telemetry', 'logs', 'chat-inline-proof-results.jsonl');
+const MODEL_SHORTCUTS = new Set(['cheap', 'budget', 'free', 'older', 'vision-cheap', 'cheap-vision', 'latest-gpt', 'newest-gpt', 'gpt-latest']);
 
 const SUITES = {
   'status-basic-chat': {
@@ -121,7 +122,8 @@ const SUITES = {
       {
         name: 'risky close plan triggers confirmation prompt',
         scope: 'transcript',
-        include: [/Run \d+ action\(s\)\? \(y\/N\/a\/d\/c\)/i]
+        include: [/Run \d+ action\(s\)\? \(y\/N\/a\/d\/c\)/i],
+        count: { pattern: /Run \d+ action\(s\)\? \(y\/N\/a\/d\/c\)/i, exactly: 1 }
       },
       {
         name: 'declined risky action is skipped',
@@ -154,7 +156,8 @@ const SUITES = {
       {
         name: 'recovery path retries with stricter formatting',
         scope: 'transcript',
-        include: [/No actions detected for an automation-like request; retrying once with stricter formatting/i]
+        include: [/No actions detected for an automation-like request; retrying once with stricter formatting/i],
+        count: { pattern: /No actions detected for an automation-like request; retrying once with stricter formatting/i, exactly: 1 }
       },
       {
         name: 'final recovery turn is concise and action-free',
@@ -190,7 +193,60 @@ const SUITES = {
         name: 'acknowledgement turn stays conversational',
         turn: 3,
         include: [/(welcome|glad|any time|happy to help|perfect)/i],
-        exclude: [/"actions"\s*:/i, /```json/i, /screenshot/i]
+        exclude: [/"actions"\s*:/i, /```json/i, /screenshot/i, /confirmed/i]
+      }
+    ]
+  },
+  'repo-boundary-clarification': {
+    description: 'Verifies that explicit repo corrections persist and the assistant asks for an explicit repo or window switch before MUSE-specific work.',
+    executeMode: 'false',
+    prompts: [
+      '/clear',
+      'MUSE is a different repo, this is copilot-liku-cli.',
+      '/state',
+      'What is the safest next step if I want to work on MUSE without mixing repos or windows? Reply briefly.',
+      'exit'
+    ],
+    expectations: [
+      {
+        name: 'state command shows repo boundary context',
+        scope: 'transcript',
+        include: [/Current repo:\s+copilot-liku-cli/i, /Downstream repo intent:\s+muse/i]
+      },
+      {
+        name: 'repo correction is acknowledged against the current repo',
+        turn: 1,
+        include: [/(understood|got it|noted|different repo|separate repo)/i, /copilot-liku-cli/i]
+      },
+      {
+        name: 'follow-up requires an explicit repo or window switch',
+        turn: 2,
+        include: [/(switch|confirm|open|move)/i, /(repo|window|workspace)/i, /muse/i],
+        exclude: [/(we should|let'?s|go ahead and|next step is to)\s+(edit|patch|implement|change).{0,60}\bmuse\b/i]
+      }
+    ]
+  },
+  'forgone-feature-suppression': {
+    description: 'Verifies that forgone features persist in session intent state and stay out of scope until explicitly re-enabled.',
+    executeMode: 'false',
+    prompts: [
+      '/clear',
+      'I have forgone the implementation of: terminal-liku ui.',
+      '/state',
+      'Should terminal-liku ui be part of the plan right now? Reply briefly.',
+      'exit'
+    ],
+    expectations: [
+      {
+        name: 'state command shows forgone feature',
+        scope: 'transcript',
+        include: [/Forgone features:\s+terminal-liku ui/i]
+      },
+      {
+        name: 'follow-up keeps the forgone feature out of scope',
+        turn: 2,
+        include: [/(no|not right now|keep it out|should not)/i, /(forgone|re-?enable|explicitly re-enable|until you re-enable)/i],
+        exclude: [/(we should|let'?s|go ahead and|next step is to).{0,40}(implement|build|revive|restore).{0,40}(terminal-liku ui|terminal ui|hud)/i]
       }
     ]
   }
@@ -204,8 +260,46 @@ function getArgValue(flagName) {
   return null;
 }
 
+function getArgValues(flagName) {
+  const value = getArgValue(flagName);
+  if (!value) return [];
+  return String(value)
+    .split(',')
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
 function hasFlag(flagName) {
   return process.argv.includes(flagName);
+}
+
+function normalizeRequestedModel(value) {
+  const normalized = String(value || '').trim();
+  return normalized || null;
+}
+
+function parseRequestedModels() {
+  const requested = [];
+  const single = normalizeRequestedModel(getArgValue('--model'));
+  if (single) requested.push(single);
+  for (const value of getArgValues('--models')) {
+    const normalized = normalizeRequestedModel(value);
+    if (normalized) requested.push(normalized);
+  }
+  return [...new Set(requested)];
+}
+
+function buildRequestedModelLabel(requestedModel) {
+  return requestedModel || 'default';
+}
+
+function buildProofInput(suite, requestedModel) {
+  const prompts = [];
+  if (requestedModel) {
+    prompts.push(`/model ${requestedModel}`);
+  }
+  prompts.push(...suite.prompts);
+  return `${prompts.join('\n')}\n`;
 }
 
 function ensureProofPaths() {
@@ -269,11 +363,15 @@ function buildCommand({ useGlobal, executeMode }) {
   };
 }
 
-function renderSuiteHeader(name, suite, useGlobal) {
+function renderSuiteHeader(name, suite, useGlobal, requestedModel) {
   console.log('========================================');
   console.log(` Inline Chat Proof: ${name}`);
   console.log('========================================');
   console.log(`Mode: ${useGlobal ? 'global liku command' : 'local workspace CLI'}`);
+  if (requestedModel) {
+    const shortcutSuffix = MODEL_SHORTCUTS.has(String(requestedModel).trim().toLowerCase()) ? ' (shortcut)' : '';
+    console.log(`Requested model: ${requestedModel}${shortcutSuffix}`);
+  }
   console.log(`Goal: ${suite.description}`);
   console.log('');
 }
@@ -325,16 +423,38 @@ function evaluateTranscript(transcript, suite) {
       : assistantTurns[Math.max(0, Number(expectation.turn || 1) - 1)] || '';
     const includePatterns = Array.isArray(expectation.include) ? expectation.include : [];
     const excludePatterns = Array.isArray(expectation.exclude) ? expectation.exclude : [];
+    const countChecks = Array.isArray(expectation.count)
+      ? expectation.count.filter(Boolean)
+      : (expectation.count ? [expectation.count] : []);
 
     const missing = includePatterns.filter((pattern) => !pattern.test(targetText));
     const forbidden = excludePatterns.filter((pattern) => pattern.test(targetText));
-    const passed = missing.length === 0 && forbidden.length === 0;
+    const countFailures = [];
+
+    for (const check of countChecks) {
+      if (!check.pattern) continue;
+      const flags = check.pattern.flags.includes('g') ? check.pattern.flags : `${check.pattern.flags}g`;
+      const matchCount = (targetText.match(new RegExp(check.pattern.source, flags)) || []).length;
+      if (Number.isFinite(check.exactly) && matchCount !== check.exactly) {
+        countFailures.push(`${check.pattern} expected exactly ${check.exactly}, got ${matchCount}`);
+        continue;
+      }
+      if (Number.isFinite(check.min) && matchCount < check.min) {
+        countFailures.push(`${check.pattern} expected at least ${check.min}, got ${matchCount}`);
+      }
+      if (Number.isFinite(check.max) && matchCount > check.max) {
+        countFailures.push(`${check.pattern} expected at most ${check.max}, got ${matchCount}`);
+      }
+    }
+
+    const passed = missing.length === 0 && forbidden.length === 0 && countFailures.length === 0;
 
     results.push({
       name: expectation.name,
       passed,
       missing,
       forbidden,
+      countFailures,
       turn: expectation.turn || null
     });
   }
@@ -361,19 +481,47 @@ function printEvaluation(evaluation) {
     if (result.forbidden.length > 0) {
       console.log(`  Forbidden: ${result.forbidden.map((pattern) => pattern.toString()).join(', ')}`);
     }
+    if (result.countFailures.length > 0) {
+      console.log(`  Count: ${result.countFailures.join('; ')}`);
+    }
   }
+}
+
+function extractObservedModelHeaders(transcript) {
+  const lines = String(transcript || '').split(/\r?\n/);
+  const runtimeModels = [];
+  const requestedModels = [];
+  const providers = [];
+
+  for (const line of lines) {
+    const match = String(line || '').trim().match(/^\[([^:\]]+)(?::([^\]\s]+))?(?: via ([^\]]+))?\]$/);
+    if (!match) continue;
+    const provider = match[1] || null;
+    const runtimeModel = match[2] || null;
+    const requestedModel = match[3] || runtimeModel || null;
+    if (provider && !providers.includes(provider)) providers.push(provider);
+    if (runtimeModel && !runtimeModels.includes(runtimeModel)) runtimeModels.push(runtimeModel);
+    if (requestedModel && !requestedModels.includes(requestedModel)) requestedModels.push(requestedModel);
+  }
+
+  return {
+    providers,
+    runtimeModels,
+    requestedModels
+  };
 }
 
 function sanitizeName(name) {
   return String(name || 'suite').replace(/[^a-z0-9._-]+/gi, '-').toLowerCase();
 }
 
-function persistRunResult({ suiteName, suite, useGlobal, evaluation, exitCode, transcript }) {
+function persistRunResult({ suiteName, suite, useGlobal, evaluation, exitCode, transcript, requestedModel }) {
   ensureProofPaths();
   const timestamp = new Date().toISOString();
   const stamp = timestamp.replace(/[:.]/g, '-');
   const tracePath = path.join(PROOF_TRACE_DIR, `${stamp}-${sanitizeName(suiteName)}.log`);
   fs.writeFileSync(tracePath, transcript, 'utf8');
+  const observedModels = extractObservedModelHeaders(transcript);
 
   const payload = {
     timestamp,
@@ -381,6 +529,10 @@ function persistRunResult({ suiteName, suite, useGlobal, evaluation, exitCode, t
     description: suite.description,
     mode: useGlobal ? 'global' : 'local',
     executeMode: suite.executeMode || 'false',
+    requestedModel: buildRequestedModelLabel(requestedModel),
+    observedRuntimeModels: observedModels.runtimeModels,
+    observedRequestedModels: observedModels.requestedModels,
+    providers: observedModels.providers,
     passed: exitCode === 0 && evaluation.passed,
     exitCode,
     failures: evaluation.results
@@ -388,7 +540,8 @@ function persistRunResult({ suiteName, suite, useGlobal, evaluation, exitCode, t
       .map((result) => ({
         name: result.name,
         missing: result.missing.map((pattern) => pattern.toString()),
-        forbidden: result.forbidden.map((pattern) => pattern.toString())
+        forbidden: result.forbidden.map((pattern) => pattern.toString()),
+        countFailures: result.countFailures
       })),
     tracePath
   };
@@ -397,9 +550,9 @@ function persistRunResult({ suiteName, suite, useGlobal, evaluation, exitCode, t
   console.log(`Saved proof result: ${tracePath}`);
 }
 
-async function runSuite(name, suite, useGlobal) {
+async function runSuite(name, suite, useGlobal, requestedModel) {
   const command = buildCommand({ useGlobal, executeMode: suite.executeMode || 'false' });
-  renderSuiteHeader(name, suite, useGlobal);
+  renderSuiteHeader(name, suite, useGlobal, requestedModel);
 
   const child = spawn(command.file, command.args, {
     cwd: REPO_ROOT,
@@ -419,7 +572,7 @@ async function runSuite(name, suite, useGlobal) {
     process.stdout.write(text);
   });
 
-  const payload = `${suite.prompts.join('\n')}\n`;
+  const payload = buildProofInput(suite, requestedModel);
   child.stdin.write(payload);
   child.stdin.end();
 
@@ -427,7 +580,7 @@ async function runSuite(name, suite, useGlobal) {
   const evaluation = evaluateTranscript(transcript, suite);
   printEvaluation(evaluation);
   if (!hasFlag('--no-save')) {
-    persistRunResult({ suiteName: name, suite, useGlobal, evaluation, exitCode, transcript });
+    persistRunResult({ suiteName: name, suite, useGlobal, evaluation, exitCode, transcript, requestedModel });
   }
 
   if (exitCode !== 0) {
@@ -446,6 +599,7 @@ async function main() {
   const runAll = hasFlag('--all');
   const suiteName = getArgValue('--suite') || 'direct-navigation';
   const useGlobal = hasFlag('--global');
+  const requestedModels = parseRequestedModels();
 
   const suiteEntries = runAll
     ? Object.entries(SUITES)
@@ -458,9 +612,12 @@ async function main() {
   }
 
   let allPassed = true;
-  for (const [name, suite] of suiteEntries) {
-    const passed = await runSuite(name, suite, useGlobal);
-    allPassed = allPassed && passed;
+  const modelEntries = requestedModels.length > 0 ? requestedModels : [null];
+  for (const requestedModel of modelEntries) {
+    for (const [name, suite] of suiteEntries) {
+      const passed = await runSuite(name, suite, useGlobal, requestedModel);
+      allPassed = allPassed && passed;
+    }
   }
 
   if (!allPassed) {
@@ -478,5 +635,9 @@ if (require.main === module) {
 module.exports = {
   SUITES,
   evaluateTranscript,
-  extractAssistantTurns
+  extractAssistantTurns,
+  extractObservedModelHeaders,
+  buildProofInput,
+  buildRequestedModelLabel,
+  parseRequestedModels
 };

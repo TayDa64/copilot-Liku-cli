@@ -21,6 +21,7 @@
 
 const path = require('path');
 const fs = require('fs');
+const { validateProjectIdentity } = require('../shared/project-identity');
 
 // Resolve paths relative to CLI location
 const CLI_DIR = __dirname;
@@ -86,6 +87,8 @@ ${highlight('OPTIONS:')}
   --version, -v    Show version
   --json           Output results as JSON (for scripting)
   --quiet, -q      Suppress non-essential output
+  --project <dir>  Require command to run within the expected project root
+  --repo <name>    Require detected repo identity to match the expected name
 
 ${highlight('EXAMPLES:')}
   ${dim('# Start the visual agent')}
@@ -213,6 +216,32 @@ async function executeCommand(name, cmdArgs, flags, options) {
   if (!fs.existsSync(cmdPath)) {
     error(`Command module not found: ${cmdPath}`);
     process.exit(1);
+  }
+
+  if (options.project || options.repo) {
+    const validation = validateProjectIdentity({
+      cwd: process.cwd(),
+      expectedProjectRoot: options.project,
+      expectedRepo: options.repo
+    });
+    if (!validation.ok) {
+      const payload = {
+        success: false,
+        error: 'PROJECT_GUARD_MISMATCH',
+        expected: validation.expected,
+        detected: validation.detected,
+        details: validation.errors
+      };
+      if (flags.json) {
+        console.log(JSON.stringify(payload, null, 2));
+      } else {
+        error('Project guard mismatch');
+        validation.errors.forEach((entry) => console.log(`- ${entry}`));
+        console.log(`Detected root: ${validation.detected.projectRoot}`);
+        console.log(`Detected repo: ${validation.detected.repoName}`);
+      }
+      process.exit(1);
+    }
   }
 
   try {

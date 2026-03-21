@@ -32,6 +32,14 @@ let currentProvider = 'copilot';
 let currentCopilotModel = 'gpt-4o';
 let clearedVisual = false;
 let resetBrowser = false;
+let clearedSessionIntent = false;
+
+const sessionIntentState = {
+  currentRepo: { repoName: 'copilot-liku-cli' },
+  downstreamRepoIntent: { repoName: 'muse-ai' },
+  forgoneFeatures: [{ feature: 'terminal-liku ui' }],
+  explicitCorrections: [{ text: 'MUSE is a different repo, this is copilot-liku-cli.' }]
+};
 
 const handler = createCommandHandler({
   aiProviders: { copilot: {}, openai: {}, anthropic: {}, ollama: {} },
@@ -84,6 +92,7 @@ const handler = createCommandHandler({
   ]),
   getCurrentCopilotModel: () => currentCopilotModel,
   getCurrentProvider: () => currentProvider,
+  getSessionIntentState: () => sessionIntentState,
   getStatus: () => ({
     provider: currentProvider,
     configuredModel: 'gpt-4o',
@@ -111,6 +120,9 @@ const handler = createCommandHandler({
   }),
   resetBrowserSessionState: () => {
     resetBrowser = true;
+  },
+  clearSessionIntentState: () => {
+    clearedSessionIntent = true;
   },
   setApiKey: () => true,
   setCopilotModel: (model) => {
@@ -157,6 +169,23 @@ test('clear command resets history and visual state', () => {
   assert.strictEqual(historyStore.saved, true);
   assert.strictEqual(clearedVisual, true);
   assert.strictEqual(resetBrowser, true);
+  assert.strictEqual(clearedSessionIntent, true);
+  assert.ok(result.message.includes('session intent state'));
+});
+
+test('state command reports current repo and forgone features', () => {
+  const result = handler.handleCommand('/state');
+  assert.strictEqual(result.type, 'info');
+  assert.ok(result.message.includes('Current repo: copilot-liku-cli'));
+  assert.ok(result.message.includes('Downstream repo intent: muse-ai'));
+  assert.ok(result.message.includes('Forgone features: terminal-liku ui'));
+});
+
+test('state clear command clears session intent state', () => {
+  clearedSessionIntent = false;
+  const result = handler.handleCommand('/state clear');
+  assert.strictEqual(result.type, 'system');
+  assert.strictEqual(clearedSessionIntent, true);
 });
 
 test('model command uses normalized model keys', () => {
