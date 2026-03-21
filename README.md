@@ -20,10 +20,10 @@ We're bringing the power of GitHub Copilot coding agent directly to your termina
 - **Unified Intelligence:** Combines terminal-native development with visual-spatial awareness.
 - **Ultra-Thin Overlay:** A transparent Electron layer for high-performance UI element detection and interaction.
 - **Multi-Agent Orchestration:** A trigger-based **Supervisor / Researcher / Architect / Builder / Verifier / Diagnostician / Vision Operator** system for complex tasks.
-- **21 CLI Commands:** A comprehensive set of automation, diagnostics, and cognitive tools available from any shell — no Electron required.
+- **Headless Command Surface:** Automation, diagnostics, and cognitive tooling available from any shell — no Electron required.
 - **Cognitive Layer:** Agentic memory (A-MEM), semantic skill routing, dynamic tool generation, RLVR telemetry, and reflective self-improvement.
 - **Event-Driven UI Watcher:** Real-time UI state tracking via Windows UI Automation events with automatic polling fallback.
-- **Defensive AI Architecture:** Engineered for minimal footprint ($< 300$MB memory) and zero-intrusion workflows.
+- **Defensive AI Architecture:** Prioritizes secure execution, bounded automation, and low-intrusion workflows.
 
 ## 🛠️ The Liku CLI (`liku`)
 
@@ -57,13 +57,17 @@ Key capabilities:
 - Browser continuity tracked with explicit session state (`url`, `title`, `goalStatus`, `lastStrategy`).
 - Non-action acknowledgements/chit-chat filtered to prevent accidental action execution.
 
+Terminal chat accepts `--model <copilotModelKey>` and `--execute prompt|true|false`. Inside the loop it also exposes chat-specific controls such as `/sequence` and `/recipes`, plus the `(plan)` macro for supervisor-backed planning.
+
 ### CLI Commands
+
+The top-level dispatcher in `src/cli/liku.js` currently exposes 20 explicit commands, plus bare `liku` as an alias for `liku start`.
 
 | Command | Usage | Description |
 | :--- | :--- | :--- |
 | `start` | `liku start` | Launch the Electron agent with overlay. |
 | `doctor` | `liku doctor` | Diagnostics: version, environment, active window, targeting hints. |
-| `chat` | `liku chat [--model <key>]` | Interactive AI chat in the terminal (headless). |
+| `chat` | `liku chat [--model <key>] [--execute prompt\|true\|false]` | Interactive AI chat in the terminal (headless). |
 | `click` | `liku click "Submit" --double` | Click UI element by text or coordinates. |
 | `find` | `liku find "Save" --type Button` | Locate elements using native UI Automation. |
 | `type` | `liku type "Hello World"` | Input string at the current cursor position. |
@@ -79,7 +83,7 @@ Key capabilities:
 | `repl` | `liku repl` | Launch an interactive automation shell. |
 | `memory` | `liku memory list\|show\|search\|stats` | Manage agent memory notes. |
 | `skills` | `liku skills list\|search\|show` | Manage the semantic skill library. |
-| `tools` | `liku tools list\|approve\|revoke` | Manage dynamic tool registry and proposals. |
+| `tools` | `liku tools list\|proposals\|show\|approve\|reject\|revoke` | Manage dynamic tool registry and proposals. |
 | `analytics` | `liku analytics [--days N] [--raw]` | View telemetry analytics and success rates. |
 
 ### Power User Examples
@@ -142,7 +146,7 @@ Structured notes with Zettelkasten-style linking, keyword relevance scoring, and
 Keyword + TF-IDF based skill selection with cosine similarity scoring, plus grounded runtime scoping from the active process, window title, and browser host. Up to 3 skills are injected per turn within a 1500-token budget. Auto-learned AWM skills follow a lifecycle: `candidate` after first grounded success, `promoted` after repeated grounded success, and `quarantined` after repeated grounded failure so stale procedures stop biasing future plans.
 
 ### Dynamic Tool Generation
-Users or the agent can propose new tools at runtime. Proposed tools go through a quarantine pipeline (`proposeTool()` → review → `approveTool()`) before becoming available. Approved tools execute in a sandboxed `child_process.fork()` worker with a stripped environment, 5.5s timeout, and 16 banned code patterns.
+Users or the agent can propose new tools at runtime. Proposed tools go through a quarantine pipeline (`proposeTool()` → review → `approveTool()`) before becoming available. Approved tools execute in a sandboxed `child_process.fork()` worker with a stripped environment, a 5s execution timeout plus IPC grace, and 16 statically banned code patterns.
 
 ### RLVR Telemetry & Reflection
 Structured telemetry tracks task outcomes, phase breakdowns, failure reasons, and grounded execution evidence such as running PIDs. Consecutive or session failure thresholds trigger a reflection pass that can be routed to a reasoning model (o1/o3-mini) via `/rmodel`. Reflection can directly maintain named skills, including quarantining stale ones instead of only writing notes. Telemetry JSONL files rotate at 10MB.
@@ -161,27 +165,48 @@ The Liku Edition moves beyond single-turn responses with a trigger-based team of
 
 The hook layer enforces role boundaries at runtime. Read-only roles are prevented from mutating files, and evidence-based stop hooks require structured outputs before subagents can finish. See [docs/AGENT_ORCHESTRATION.md](docs/AGENT_ORCHESTRATION.md) for the full routing and hook contract.
 
-### Chat Slash Commands
+### Chat Commands
+
+Shared chat commands available through `ai-service.handleCommand()` in both Electron chat and `liku chat`:
 
 | Command | Description |
 | :--- | :--- |
-| `/orchestrate <task>` | Start full multi-agent workflow. |
-| `/research <query>` | Execute deep workspace/web research. |
-| `/build <spec>` | Generate implementation from a spec. |
-| `/verify <target>` | Run validation checks on a feature or UI. |
+| `/help` | Show command help. |
+| `/login` / `/logout` | Authenticate with GitHub Copilot or clear the stored session. |
 | `/model [key]` | Show grouped Copilot model inventory or switch models. |
-| `/provider` | Show or switch AI provider (Copilot/OpenAI/Anthropic/Ollama). |
-| `/rmodel [key]` | Set/get/clear the reflection model override (reasoning models). |
-| `/agentic` | Toggle **Autonomous Mode** (AI actions without confirmation). |
+| `/provider [name]` | Show or switch AI provider (`copilot`, `openai`, `anthropic`, `ollama`). |
+| `/setkey <provider> <key>` | Set an API key for a provider. |
+| `/status` | Show provider, configured/requested/runtime model metadata, and capture counts. |
+| `/state [clear]` | Show or clear session-intent state. |
+| `/clear` | Clear conversation history, visual context, browser session state, and session-intent state. |
+| `/vision [on\|off]` | Inspect or clear visual context usage. |
+| `/capture` | Capture the current screen into visual context. |
+| `/memory [search <query>\|clear]` | Inspect or clear long-term memory notes. |
+| `/skills` | List learned skills. |
+| `/tools [approve\|revoke <name>]` | Inspect or manage dynamic tools. |
+| `/rmodel [model\|off]` | Set or clear the reflection-model override. |
+
+Terminal-chat-only controls handled directly in `src/cli/commands/chat.js`:
+
+| Command | Description |
+| :--- | :--- |
+| `/sequence [on\|off]` | Toggle guided step-by-step execution. |
 | `/recipes [on\|off]` | Toggle bounded popup follow-up recipes. |
-| `/login` | Authenticate with GitHub. |
-| `/status` | Show configured/requested/runtime model metadata and live inventory. |
-| `/capture` | Capture current screen state. |
-| `/vision [on\|off]` | Toggle visual context injection. |
-| `/sequence` | Start a multi-step action sequence. |
-| `/memory` | Manage agent memory from chat. |
-| `/skills` | Browse the skill library from chat. |
-| `/tools` | Manage dynamic tools from chat. |
+| `(plan) ...` | Route the prompt to the multi-agent supervisor in plan-only mode. |
+
+Electron-chat-only orchestration controls handled in `src/main/index.js`:
+
+| Command | Description |
+| :--- | :--- |
+| `/agentic` or `/agent` | Toggle automatic action execution in the overlay chat loop. |
+| `/orchestrate <task>` | Run the full multi-agent orchestrator. |
+| `/research <query>` | Run the researcher workflow. |
+| `/build <spec>` | Run the builder workflow. |
+| `/verify <target>` | Run the verifier workflow. |
+| `/agents` or `/agent-status` | Show multi-agent system status. |
+| `/agent-reset` | Reset the multi-agent system state. |
+
+The Electron chat loop also contains an experimental `/produce <prompt>` path that is wired through `src/main/index.js` but is not part of the core CLI documentation surface.
 
 ### Runtime Enforcement
 
@@ -305,7 +330,7 @@ GitHub Copilot-Liku CLI is built on a "Defensive AI" architecture — minimal fo
 
 | Layer | Description |
 | :--- | :--- |
-| **CLI** | 21 headless commands via `src/cli/liku.js` (CJS, no Electron required) |
+| **CLI** | Top-level command dispatcher in `src/cli/liku.js` plus headless command modules under `src/cli/commands/` |
 | **.NET UIA Host** | Persistent JSONL process for Windows UI Automation (thread-safe, event streaming) |
 | **UI Watcher** | 4-state machine: POLLING ↔ EVENT_MODE ↔ FALLBACK with health checks |
 | **Overlay** | Transparent Electron window with grid, inspect regions, and click-through passthrough |
@@ -336,27 +361,21 @@ Extracted seams under `src/main/ai-service/`:
 | `response-heuristics.js` | Response quality scoring |
 | `slash-command-helpers.js` | Slash command utilities |
 
-### Performance Benchmarks
-
-- **Memory Footprint**: $< 300$MB steady-state (~150MB baseline).
-- **CPU Usage**: $< 0.5\%$ idle; $< 2\%$ in selection mode.
-- **Startup Latency**: $< 3$ seconds from launch to functional state.
-- **Package Size**: ~196 KB (npm tarball).
-
 ### Security & Isolation
 
 - **Hardened Electron Environment**: Uses `contextIsolation` and `sandbox` modes to prevent prototype pollution.
 - **Content Security Policy (CSP)**: Strict headers to disable unauthorized external resources.
 - **Isolated Preload Bridges**: Secure IPC routing where renderers only have access to necessary system APIs.
-- **Sandboxed Dynamic Tools**: Dynamic tools execute in isolated `child_process.fork()` workers with stripped environment and kill timeout.
+- **Sandboxed Dynamic Tools**: Dynamic tools execute in isolated `child_process.fork()` workers with stripped environment, a 5-second timeout, and static source validation before execution.
 - **PreToolUse Hook Enforcement**: Security gate blocks dangerous patterns and enforces role-based file access.
 - **No bundled secrets**: API keys read from environment variables only; tokens stored in `~/.liku/`.
+- **Telemetry Rotation**: RLVR telemetry writes daily JSONL logs under `~/.liku/telemetry/logs/` and rotates files at 10 MB.
 
 ### Project Structure
 
 ```
 src/
-├── cli/                    # CLI entrypoint and 21 command modules
+├── cli/                    # CLI entrypoint and command modules
 │   ├── liku.js             # Main CLI dispatcher with COMMANDS registry
 │   ├── commands/           # Individual command implementations
 │   └── util/               # CLI utilities
@@ -407,4 +426,4 @@ We're excited to have you join us early in the Copilot CLI journey.
 
 This is an early-stage preview, and we're building quickly. Expect frequent updates — please keep your client up to date for the latest features and fixes!
 
-Your insights are invaluable! Open an issue in this repo, join Discussions, and run `/feedback` from the CLI to submit a confidential feedback survey!
+Your insights are invaluable. Open an issue in this repo with the command, model, platform, and verification steps needed to reproduce what you saw.
