@@ -284,7 +284,18 @@ node scripts/test-v015-cognitive-layer.js
 
 # Hook artifact enforcement proof
 node scripts/test-hook-artifacts.js
+
+# Inline proof harness
+npm run proof:inline -- --list-suites
+npm run proof:inline -- --suite repo-boundary-clarification --models cheap,latest-gpt
+npm run proof:inline -- --suite forgone-feature-suppression --models cheap,latest-gpt
+
+# Proof history hygiene
+npm run proof:inline:summary -- --suite repo-boundary-clarification --cohort phase3-postfix
+npm run proof:inline:summary -- --suite forgone-feature-suppression --cohort phase3-postfix
 ```
+
+The inline proof summary supports cohort filtering so older pre-fix runs do not get mixed with the corrected Phase 3 stale-state results. Use `--cohort phase3-postfix` when you want summaries scoped to the post-fix model-shortcut behavior only.
 
 ## 🛠️ Technical Architecture
 
