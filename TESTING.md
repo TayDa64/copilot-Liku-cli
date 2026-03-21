@@ -166,6 +166,7 @@ npm run proof:inline -- --list-suites
 npm run proof:inline -- --suite repo-boundary-clarification
 npm run proof:inline -- --suite forgone-feature-suppression --models cheap,latest-gpt
 npm run proof:inline:summary -- --suite repo-boundary-clarification --days 7
+npm run proof:inline:summary -- --suite repo-boundary-clarification --cohort phase3-postfix
 node scripts/test-chat-inline-proof-evaluator.js
 ```
 
@@ -174,6 +175,7 @@ What this covers:
 - live transcript proof for repo-boundary corrections and forgone-feature suppression
 - model-bucket comparison using `cheap` and `latest-gpt`
 - JSONL summary of recent pass/fail trends by suite and model
+- cohort filtering to separate pre-fix history from post-fix Phase 3 runs
 - evaluator characterization for transcript expectations without needing a live model run
 
 ### Manual Checks for Model Selection

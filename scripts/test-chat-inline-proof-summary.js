@@ -6,7 +6,9 @@ const os = require('os');
 const path = require('path');
 
 const {
+  PHASE3_POSTFIX_STARTED_AT,
   parseProofEntries,
+  resolveEntryCohort,
   resolveEntryModel,
   summarizeProofEntries,
   buildTrend,
@@ -40,6 +42,11 @@ test('resolveEntryModel prefers requested model bucket', () => {
   assert.strictEqual(resolveEntryModel({}), 'default');
 });
 
+test('resolveEntryCohort separates pre-fix and post-fix Phase 3 runs', () => {
+  assert.strictEqual(resolveEntryCohort({ timestamp: '2026-03-21T05:10:42.757Z' }), 'pre-phase3-postfix');
+  assert.strictEqual(resolveEntryCohort({ timestamp: PHASE3_POSTFIX_STARTED_AT }), 'phase3-postfix');
+});
+
 test('summarizeProofEntries groups by suite and model with trends', () => {
   const entries = [
     { timestamp: '2026-03-20T00:00:00.000Z', suite: 'direct-navigation', requestedModel: 'cheap', passed: true, observedRuntimeModels: ['gpt-4o-mini'] },
@@ -53,6 +60,7 @@ test('summarizeProofEntries groups by suite and model with trends', () => {
   assert.strictEqual(summary.totals.passed, 3);
   assert(summary.bySuite.some((row) => row.key === 'direct-navigation' && row.trend === 'PFP'));
   assert(summary.byModel.some((row) => row.key === 'cheap' && row.trend === 'PF'));
+  assert(summary.byCohort.some((row) => row.key === 'pre-phase3-postfix'));
   assert(summary.bySuiteModel.some((row) => row.suite === 'direct-navigation' && row.model === 'latest-gpt' && row.passRate === 100));
 });
 
@@ -62,6 +70,8 @@ test('passesFilter respects suite model mode and time filters', () => {
   assert.strictEqual(passesFilter(entry, { suite: 'other' }), false);
   assert.strictEqual(passesFilter(entry, { model: 'cheap' }), false);
   assert.strictEqual(passesFilter(entry, { mode: 'global' }), false);
+  assert.strictEqual(passesFilter({ timestamp: PHASE3_POSTFIX_STARTED_AT }, { cohort: 'phase3-postfix' }), true);
+  assert.strictEqual(passesFilter({ timestamp: '2026-03-21T05:10:42.757Z' }, { cohort: 'phase3-postfix' }), false);
   assert.strictEqual(passesFilter(entry, { since: Date.parse('2026-03-21T00:00:00.000Z') }), false);
 });
 
