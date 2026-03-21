@@ -2167,6 +2167,167 @@ function normalizeUrlCandidate(text) {
   return null;
 }
 
+function normalizeIntentForRecovery(text) {
+  return String(text || '')
+    .toLowerCase()
+    .replace(/\bcontinue\b/g, ' ')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function isExplicitSearchIntent(text) {
+  return /\b(search|google|look up|lookup|find out|status|latest|current|news|results?)\b/i.test(String(text || ''));
+}
+
+function extractSearchTermsFromUrl(url) {
+  try {
+    const parsed = new URL(String(url || ''));
+    const parts = `${parsed.hostname} ${parsed.pathname}`
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, ' ')
+      .split(/\s+/)
+      .filter((value) => value.length >= 2 && !['https', 'http', 'www', 'com', 'net', 'org'].includes(value));
+    return Array.from(new Set(parts)).slice(0, 6);
+  } catch {
+    return [];
+  }
+}
+
+function buildBrowserRecoverySearchQuery(userMessage, attemptedUrls = []) {
+  const userTerms = String(userMessage || '')
+    .toLowerCase()
+    .replace(/https?:\/\/[^\s]+/g, ' ')
+    .replace(/\b(in|on|with|using|via|browser|edge|chrome|firefox|tab|window|navigate|navigation|open|go|to|continue|retry|please|find|way)\b/g, ' ')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .split(/\s+/)
+    .filter((value) => value.length >= 2);
+  const urlTerms = attemptedUrls.flatMap(extractSearchTermsFromUrl);
+  const terms = Array.from(new Set([...userTerms, ...urlTerms])).slice(0, 8);
+  if (terms.length === 0) return 'official site current status';
+  const suffix = terms.includes('status') || terms.includes('latest') || terms.includes('current')
+    ? []
+    : ['official', 'status'];
+  return [...terms, ...suffix].join(' ').trim();
+}
+
+function buildGoogleSearchUrl(query) {
+  return `https://www.google.com/search?q=${encodeURIComponent(String(query || '').trim())}`;
+}
+
+function looksLikeSearchResultsPage(state = {}) {
+  const url = String(state.url || '').toLowerCase();
+  const title = String(state.title || '').toLowerCase();
+  return /google\.[a-z.]+\/search\?q=/.test(url)
+    || /\bgoogle\s+search\b/.test(title)
+    || /\bsearch results\b/.test(title);
+}
+
+function looksLikeBrowserErrorPage(state = {}) {
+  const url = String(state.url || '').toLowerCase();
+  const title = String(state.title || '').toLowerCase();
+  const combined = `${url} ${title}`;
+  return /\/404\b/.test(url)
+    || /\b404\b/.test(title)
+    || /err_[a-z_]+/.test(combined)
+    || /dns[_\s-]?probe|name[_\s-]?not[_\s-]?resolved/.test(combined)
+    || /site can.?t be reached|can.?t reach this page|not found|page not found/.test(combined)
+    || String(state.goalStatus || '').toLowerCase() === 'needs_discovery';
+}
+
+function getBrowserRecoverySnapshot(userMessage = '') {
+  const state = getBrowserSessionState();
+  const goalStatus = String(state.goalStatus || 'unknown').toLowerCase();
+  const recoveryMode = String(state.recoveryMode || 'direct').toLowerCase();
+  const navigationAttemptCount = Number(state.navigationAttemptCount || 0);
+  const searchResultsPage = looksLikeSearchResultsPage(state);
+  const errorPage = looksLikeBrowserErrorPage(state);
+
+  let phase = 'direct-navigation';
+  if (goalStatus === 'achieved') {
+    phase = 'achieved';
+  } else if (searchResultsPage || recoveryMode === 'searching') {
+    phase = 'result-selection';
+  } else if (errorPage || recoveryMode === 'search') {
+    phase = 'discovery-search';
+  } else if (navigationAttemptCount >= 2 && !isExplicitSearchIntent(userMessage)) {
+    phase = 'discovery-search';
+  }
+
+  let directive = '';
+  if (phase === 'discovery-search') {
+    directive = [
+      'BROWSER RECOVERY DIRECTIVE: The current browser state indicates direct navigation is not resolving the goal.',
+      'Do not guess another destination URL and do not retry the same failed URL.',
+      'Switch to discovery: open the Google recovery search if results are not already visible, then capture or inspect the results page.'
+    ].join(' ');
+  } else if (phase === 'result-selection') {
+    directive = [
+      'BROWSER RECOVERY DIRECTIVE: You are in result-selection mode on a search results page.',
+      'Do not guess another URL from memory.',
+      'Use visible evidence from the screenshot, live UI, or semantic DOM to select a result.',
+      'Prefer click_element with concrete result text; only navigate directly if the destination URL is visibly present in the current context.'
+    ].join(' ');
+  } else if (phase === 'achieved') {
+    directive = 'BROWSER RECOVERY DIRECTIVE: The browser goal appears satisfied. Do not propose more navigation unless the user asks for another step.';
+  }
+
+  return {
+    phase,
+    directive,
+    state,
+    searchResultsPage,
+    errorPage,
+    navigationAttemptCount
+  };
+}
+
+function buildBrowserSearchActions(target, query) {
+  const normalizedQuery = String(query || '').trim();
+  const searchUrl = buildGoogleSearchUrl(normalizedQuery);
+  return buildBrowserOpenUrlActions(target, searchUrl, { searchQuery: '' }).concat([
+    { type: 'screenshot', reason: `Capture Google results for ${normalizedQuery}` }
+  ]);
+}
+
+function planContainsGoogleSearch(actions) {
+  return Array.isArray(actions) && actions.some((action) =>
+    action?.type === 'type' && typeof action?.text === 'string' && /google\.[a-z.]+\/search/i.test(action.text)
+  );
+}
+
+function planContainsDirectUrl(actions) {
+  return Array.isArray(actions) && actions.some((action) => {
+    if (action?.type !== 'type' || typeof action?.text !== 'string') return false;
+    const candidate = normalizeUrlCandidate(action.text);
+    return !!(candidate && !/google\.[a-z.]+\/search/i.test(candidate));
+  });
+}
+
+function maybeBuildBrowserRecoverySearchFallback(actions, userMessage) {
+  const state = getBrowserSessionState();
+  const currentIntent = normalizeIntentForRecovery(userMessage);
+  const sameIntent = currentIntent && currentIntent === normalizeIntentForRecovery(state.lastUserIntent || '');
+  const recoveryReady = sameIntent && (Number(state.navigationAttemptCount || 0) >= 2 || state.recoveryMode === 'search');
+  if (!recoveryReady) return null;
+  if (isExplicitSearchIntent(userMessage)) return null;
+  if (planContainsGoogleSearch(actions)) return null;
+  if (!planContainsDirectUrl(actions)) return null;
+
+  const explicitBrowser = extractExplicitBrowserTarget(userMessage) || { browser: 'edge', channel: 'stable' };
+  const recoveryQuery = state.recoveryQuery || buildBrowserRecoverySearchQuery(userMessage, state.attemptedUrls || []);
+  if (!recoveryQuery) return null;
+
+  updateBrowserSessionState({
+    recoveryMode: 'searching',
+    recoveryQuery,
+    goalStatus: 'searching',
+    lastStrategy: 'recovery-google-search',
+    lastUserIntent: String(userMessage || '').trim().slice(0, 300)
+  });
+  return buildBrowserSearchActions(explicitBrowser, recoveryQuery);
+}
+
 function extractRequestedAppName(text) {
   if (!text || typeof text !== 'string') return null;
   const normalized = text.replace(/\s+/g, ' ').trim();
@@ -2672,9 +2833,13 @@ function updateBrowserSessionAfterExecution(actionData, executionSummary = {}) {
   const actions = Array.isArray(actionData?.actions) ? actionData.actions : [];
   if (!actionsLikelyBrowserSession(actions)) return;
 
+  const previousState = getBrowserSessionState();
   const patch = {};
-  if (typeof executionSummary.userMessage === 'string' && executionSummary.userMessage.trim()) {
-    patch.lastUserIntent = executionSummary.userMessage.trim().slice(0, 300);
+  const currentIntent = typeof executionSummary.userMessage === 'string' && executionSummary.userMessage.trim()
+    ? executionSummary.userMessage.trim().slice(0, 300)
+    : null;
+  if (currentIntent) {
+    patch.lastUserIntent = currentIntent;
   }
 
   const urlFromActions = extractUrlFromActions(actions);
@@ -2686,7 +2851,42 @@ function updateBrowserSessionAfterExecution(actionData, executionSummary = {}) {
     patch.title = fg.title;
   }
 
+  const navigationUrl = urlFromActions;
+  const previousIntent = normalizeIntentForRecovery(previousState.lastUserIntent || '');
+  const sameIntent = !!(currentIntent && previousIntent && normalizeIntentForRecovery(currentIntent) === previousIntent);
+  if (navigationUrl) {
+    const isSearchUrl = /google\.[a-z.]+\/search/i.test(navigationUrl);
+    patch.lastAttemptedUrl = navigationUrl;
+    if (isSearchUrl) {
+      patch.recoveryMode = executionSummary.success ? 'searching' : 'search';
+    } else {
+      const attemptedUrls = sameIntent ? [...(Array.isArray(previousState.attemptedUrls) ? previousState.attemptedUrls : [])] : [];
+      attemptedUrls.push(navigationUrl);
+      patch.attemptedUrls = Array.from(new Set(attemptedUrls)).slice(-6);
+      patch.navigationAttemptCount = sameIntent ? Number(previousState.navigationAttemptCount || 0) + 1 : 1;
+
+      if (!isExplicitSearchIntent(currentIntent || '') && Number(patch.navigationAttemptCount || 0) >= 2) {
+        patch.recoveryMode = 'search';
+        patch.recoveryQuery = buildBrowserRecoverySearchQuery(currentIntent || '', patch.attemptedUrls || []);
+      } else if (!sameIntent) {
+        patch.recoveryMode = 'direct';
+        patch.recoveryQuery = null;
+      }
+    }
+  } else if (!sameIntent && currentIntent) {
+    patch.lastAttemptedUrl = null;
+    patch.attemptedUrls = [];
+    patch.navigationAttemptCount = 0;
+    patch.recoveryMode = 'direct';
+    patch.recoveryQuery = null;
+  }
+
   patch.goalStatus = executionSummary.success ? 'achieved' : 'needs_attention';
+  if (patch.recoveryMode === 'search') {
+    patch.goalStatus = 'needs_discovery';
+  } else if (patch.recoveryMode === 'searching') {
+    patch.goalStatus = 'searching';
+  }
   updateBrowserSessionState(patch);
 }
 
@@ -2843,6 +3043,11 @@ function rewriteActionsForReliability(actions, context = {}) {
   // If the plan contains a Google search URL followed by direct URL navigation,
   // the search is redundant — strip it and go straight to the destination.
   actions = eliminateRedundantSearch(actions);
+
+  const recoveryFallback = maybeBuildBrowserRecoverySearchFallback(actions, userMessage);
+  if (recoveryFallback) {
+    return recoveryFallback;
+  }
 
   const strategySelection = applyNonVisualWebStrategies(actions, { userMessage });
   if (strategySelection.actions !== actions) {
@@ -4337,6 +4542,7 @@ module.exports = {
   hasActions,
   preflightActions,
   rewriteActionsForReliability,
+  getBrowserRecoverySnapshot,
   // Teach UX
   parsePreferenceCorrection,
   executeActions,

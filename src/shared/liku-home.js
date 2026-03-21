@@ -11,8 +11,8 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-const LIKU_HOME = path.join(os.homedir(), '.liku');
-const LIKU_HOME_OLD = path.join(os.homedir(), '.liku-cli');
+const LIKU_HOME = path.resolve(process.env.LIKU_HOME_OVERRIDE || path.join(os.homedir(), '.liku'));
+const LIKU_HOME_OLD = path.resolve(process.env.LIKU_HOME_OLD_OVERRIDE || path.join(os.homedir(), '.liku-cli'));
 
 /**
  * Ensure the full ~/.liku/ directory tree exists.

@@ -20,16 +20,31 @@ function test(name, fn) {
 }
 
 test('browser session state updates and resets', () => {
-  updateBrowserSessionState({ url: 'https://example.com', goalStatus: 'achieved' });
+  updateBrowserSessionState({
+    url: 'https://example.com',
+    goalStatus: 'achieved',
+    attemptedUrls: ['https://example.com', 'https://example.org'],
+    navigationAttemptCount: 2,
+    recoveryMode: 'search',
+    recoveryQuery: 'example official status'
+  });
   let state = getBrowserSessionState();
   assert.strictEqual(state.url, 'https://example.com');
   assert.strictEqual(state.goalStatus, 'achieved');
+  assert.deepStrictEqual(state.attemptedUrls, ['https://example.com', 'https://example.org']);
+  assert.strictEqual(state.navigationAttemptCount, 2);
+  assert.strictEqual(state.recoveryMode, 'search');
+  assert.strictEqual(state.recoveryQuery, 'example official status');
   assert.ok(state.lastUpdated);
 
   resetBrowserSessionState();
   state = getBrowserSessionState();
   assert.strictEqual(state.url, null);
   assert.strictEqual(state.goalStatus, 'unknown');
+  assert.deepStrictEqual(state.attemptedUrls, []);
+  assert.strictEqual(state.navigationAttemptCount, 0);
+  assert.strictEqual(state.recoveryMode, 'direct');
+  assert.strictEqual(state.recoveryQuery, null);
   assert.ok(state.lastUpdated);
 });
 

@@ -102,59 +102,93 @@ const afterRemove = skillRouter.listSkills();
 assert(afterRemove['test-nav-tabs'] === undefined, 'Skill was removed from index');
 
 // Candidate skills should not inject until they have repeated grounded success
+for (const staleSkillId of Object.keys(skillRouter.listSkills())) {
+  if (staleSkillId === 'test-generic-browser' || staleSkillId.startsWith('test-learned-skill')) {
+    skillRouter.removeSkill(staleSkillId);
+  }
+}
+
 const learnedOne = skillRouter.upsertLearnedSkill({
   idHint: 'test-learned-skill',
-  keywords: ['edge', 'browser', 'apple'],
+  keywords: ['likuvariantedge', 'likuvariantbrowser', 'likuvariantapple'],
   tags: ['awm', 'browser'],
-  scope: { processNames: ['msedge'] },
+  scope: {
+    processNames: ['likuvariantprocess'],
+    windowTitles: ['Liku Variant Window'],
+    domains: ['variant.example.test']
+  },
   content: '# Open Apple in Edge\n\n1. key: ctrl+t\n2. key: ctrl+l\n3. type: "https://www.apple.com"\n4. key: enter'
 });
 assert(learnedOne.entry.status === 'candidate', 'First grounded success creates candidate skill');
-const candidateSelection = skillRouter.getRelevantSkillsSelection('open apple in edge', {
-  currentProcessName: 'msedge'
+const candidateSelection = skillRouter.getRelevantSkillsSelection('open likuvariantapple in likuvariantedge', {
+  currentProcessName: 'likuvariantprocess',
+  currentWindowTitle: 'Liku Variant Window',
+  currentUrlHost: 'variant.example.test'
 });
 assert(!candidateSelection.ids.includes(learnedOne.id), 'Candidate skill is not injected yet');
 
 const learnedTwo = skillRouter.upsertLearnedSkill({
   idHint: 'test-learned-skill',
-  keywords: ['edge', 'browser', 'apple'],
+  keywords: ['likuvariantedge', 'likuvariantbrowser', 'likuvariantapple'],
   tags: ['awm', 'browser'],
-  scope: { processNames: ['msedge'] },
+  scope: {
+    processNames: ['likuvariantprocess'],
+    windowTitles: ['Liku Variant Window'],
+    domains: ['variant.example.test']
+  },
   content: '# Open Apple in Edge\n\n1. key: ctrl+t\n2. key: ctrl+l\n3. type: "https://www.apple.com"\n4. key: enter'
 });
 assert(learnedTwo.entry.status === 'promoted', 'Repeated grounded success promotes candidate skill');
 
-const promotedSelection = skillRouter.getRelevantSkillsSelection('open apple in edge', {
-  currentProcessName: 'msedge',
-  currentWindowTitle: 'Apple - Microsoft Edge',
-  currentUrlHost: 'https://www.apple.com'
+const promotedSelection = skillRouter.getRelevantSkillsSelection('open likuvariantapple in likuvariantedge', {
+  currentProcessName: 'likuvariantprocess',
+  currentWindowTitle: 'Liku Variant Window',
+  currentUrlHost: 'variant.example.test'
 });
 assert(promotedSelection.text.includes('Open Apple in Edge'), 'Promoted learned skill is injected after promotion');
 assert(promotedSelection.ids.includes(learnedTwo.id), 'Promoted skill id is included in selection');
 
+const learnedSibling = skillRouter.upsertLearnedSkill({
+  idHint: 'test-learned-skill',
+  keywords: ['likuvariantedge', 'likuvariantbrowser', 'likuvariantapple'],
+  tags: ['awm', 'browser'],
+  scope: {
+    processNames: ['likuvariantprocess'],
+    windowTitles: ['Liku Variant Window'],
+    domains: ['variant-alt.example.test']
+  },
+  verification: 'Apple support page is open',
+  content: '# Open Apple in Edge\n\n1. key: ctrl+t\n2. key: ctrl+l\n3. type: "https://support.apple.com"\n4. key: enter'
+});
+assert(learnedSibling.id !== learnedTwo.id, 'Different scoped workflow creates a sibling learned skill variant');
+assert(learnedSibling.entry.familySignature === learnedTwo.entry.familySignature, 'Sibling learned skills share a family signature');
+assert(learnedSibling.entry.variantSignature !== learnedTwo.entry.variantSignature, 'Sibling learned skills keep distinct variant signatures');
+
 skillRouter.addSkill('test-generic-browser', {
-  keywords: ['edge', 'browser', 'apple'],
+  keywords: ['likuvariantedge', 'likuvariantbrowser', 'likuvariantapple'],
   tags: ['browser'],
   content: '# Generic Browser Skill\n\nUse the browser carefully.'
 });
-const scopedSelection = skillRouter.getRelevantSkillsSelection('open apple in edge browser', {
-  currentProcessName: 'msedge',
-  currentWindowTitle: 'Apple - Microsoft Edge',
-  currentUrlHost: 'apple.com',
+const scopedSelection = skillRouter.getRelevantSkillsSelection('open likuvariantapple in likuvariantedge browser', {
+  currentProcessName: 'likuvariantprocess',
+  currentWindowTitle: 'Liku Variant Window',
+  currentUrlHost: 'variant.example.test',
   limit: 1
 });
 assert(scopedSelection.ids[0] === learnedTwo.id, 'Process-scoped promoted skill outranks generic match when process aligns');
 
-const failureOne = skillRouter.recordSkillOutcome([learnedTwo.id], 'failure', { currentProcessName: 'msedge' });
+const failureOne = skillRouter.recordSkillOutcome([learnedTwo.id], 'failure', { currentProcessName: 'likuvariantprocess' });
 assert(failureOne.quarantined.length === 0, 'Single failure does not quarantine promoted skill');
-const failureTwo = skillRouter.recordSkillOutcome([learnedTwo.id], 'failure', { currentProcessName: 'msedge' });
+const failureTwo = skillRouter.recordSkillOutcome([learnedTwo.id], 'failure', { currentProcessName: 'likuvariantprocess' });
 assert(failureTwo.quarantined.includes(learnedTwo.id), 'Two grounded failures quarantine promoted skill');
-assert(skillRouter.getRelevantSkillsSelection('open apple in edge', { currentProcessName: 'msedge' }).ids.includes(learnedTwo.id) === false, 'Quarantined skill is no longer injected');
+assert(skillRouter.getRelevantSkillsSelection('open likuvariantapple in likuvariantedge', { currentProcessName: 'likuvariantprocess' }).ids.includes(learnedTwo.id) === false, 'Quarantined skill is no longer injected');
 
 skillRouter.removeSkill('test-learned-skill');
+skillRouter.removeSkill(learnedSibling.id);
 skillRouter.removeSkill('test-generic-browser');
 const afterLifecycleCleanup = skillRouter.listSkills();
 assert(afterLifecycleCleanup['test-learned-skill'] === undefined, 'Learned lifecycle skill was removed from index');
+assert(afterLifecycleCleanup[learnedSibling.id] === undefined, 'Learned sibling variant was removed from index');
 assert(afterLifecycleCleanup['test-generic-browser'] === undefined, 'Generic comparison skill was removed from index');
 
 // ═══════════════════════════════════════════════════════════

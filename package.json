@@ -10,6 +10,7 @@
     "start": "node scripts/start.js",
     "test": "node scripts/test-grid.js",
     "test:ui": "node scripts/test-ui-automation-baseline.js",
+    "test:skills:inline": "node scripts/test-skill-inline-smoothness.js",
     "proof:inline": "node scripts/run-chat-inline-proof.js",
     "proof:inline:summary": "node scripts/summarize-chat-inline-proof.js",
     "smoke:shortcuts": "node scripts/smoke-shortcuts.js",

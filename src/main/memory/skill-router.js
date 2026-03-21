@@ -30,6 +30,7 @@ const DEFAULT_LIMIT = 3;
 const TOKEN_BUDGET = 1500;
 const PROMOTION_SUCCESS_THRESHOLD = 2;
 const QUARANTINE_FAILURE_THRESHOLD = 2;
+const GENERIC_SKILL_TAGS = new Set(['awm', 'auto-generated', 'reflection', 'success', 'failure']);
 
 function extractHost(value) {
   const text = String(value || '').trim();
@@ -68,6 +69,7 @@ function normalizeSkillEntry(id, entry = {}) {
   normalized.file = normalized.file || `${id}.md`;
   normalized.keywords = normalizeArray(normalized.keywords);
   normalized.tags = normalizeArray(normalized.tags);
+  normalized.verificationHints = normalizeArray(normalized.verificationHints);
   normalized.scope = normalizeScope(normalized.scope);
   normalized.origin = normalized.origin || (id.startsWith('awm-') ? 'awm' : 'legacy');
   normalized.successCount = Number.isFinite(Number(normalized.successCount)) ? Number(normalized.successCount) : 0;
@@ -77,7 +79,12 @@ function normalizeSkillEntry(id, entry = {}) {
   normalized.createdAt = normalized.createdAt || new Date().toISOString();
   normalized.updatedAt = normalized.updatedAt || normalized.createdAt;
   normalized.lastOutcome = normalized.lastOutcome || null;
-  normalized.signature = normalized.signature || null;
+  normalized.familySignature = normalized.familySignature || null;
+  normalized.variantSignature = normalized.variantSignature || normalized.signature || null;
+  normalized.signature = normalized.variantSignature || normalized.signature || null;
+  if (!normalized.familySignature && normalized.origin === 'awm' && normalized.signature) {
+    normalized.familySignature = normalized.signature;
+  }
 
   if (!normalized.status) {
     normalized.status = normalized.origin === 'awm' ? 'promoted' : 'manual';
@@ -100,12 +107,109 @@ function isInjectableSkill(entry) {
 }
 
 function buildLearnedSkillSignature({ keywords = [], tags = [], content = '' } = {}) {
-  const keywordPart = normalizeArray(keywords).map((value) => value.toLowerCase()).sort().slice(0, 8).join('|');
-  const tagPart = normalizeArray(tags).map((value) => value.toLowerCase()).sort().slice(0, 6).join('|');
-  const actionPart = Array.from(String(content || '').matchAll(/^\d+\.\s+([a-z_]+)/gmi))
+  return buildSkillVariantSignature({ keywords, tags, content });
+}
+
+function extractActionSignature(content = '') {
+  return Array.from(String(content || '').matchAll(/^\d+\.\s+([a-z_]+)/gmi))
     .map((match) => match[1].toLowerCase())
     .join('>');
+}
+
+function extractIntentHints(text = '') {
+  const normalized = String(text || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter((value) => value.length >= 3);
+  return Array.from(new Set(normalized)).slice(0, 8);
+}
+
+function extractProcedureHeading(content = '') {
+  const text = String(content || '');
+  const markdownHeading = text.match(/^#\s+(.+)$/m);
+  if (markdownHeading?.[1]) return markdownHeading[1].trim();
+  const procedureHeading = text.match(/^Procedure:\s*(.+)$/mi);
+  return procedureHeading?.[1] ? procedureHeading[1].trim() : '';
+}
+
+function buildScopeSignature(scope) {
+  const normalizedScope = normalizeScope(scope);
+  if (!normalizedScope) return '';
+  const processPart = (normalizedScope.processNames || []).join('|');
+  const titlePart = (normalizedScope.windowTitles || []).map((value) => value.toLowerCase()).join('|');
+  const domainPart = (normalizedScope.domains || []).join('|');
+  const kindPart = normalizedScope.kind || '';
+  return [processPart, titlePart, domainPart, kindPart].join('::');
+}
+
+function buildSkillFamilySignature({ keywords = [], tags = [], content = '', verification = '' } = {}) {
+  const keywordPart = normalizeArray(keywords).map((value) => value.toLowerCase()).sort().slice(0, 8).join('|');
+  const tagPart = normalizeArray(tags)
+    .map((value) => value.toLowerCase())
+    .filter((value) => !GENERIC_SKILL_TAGS.has(value))
+    .sort()
+    .slice(0, 6)
+    .join('|');
+  const actionPart = extractActionSignature(content);
   return [keywordPart, tagPart, actionPart].join('::');
+}
+
+function buildSkillVariantSignature({ familySignature, keywords = [], tags = [], content = '', scope, verification = '' } = {}) {
+  const resolvedFamilySignature = familySignature || buildSkillFamilySignature({ keywords, tags, content, verification });
+  const verificationPart = extractIntentHints(verification).join('|');
+  const scopePart = buildScopeSignature(scope);
+  return [resolvedFamilySignature, verificationPart, scopePart].join('::');
+}
+
+function createVariantId(index, idHint) {
+  const baseId = String(idHint || `awm-${Date.now().toString(36)}`).trim() || `awm-${Date.now().toString(36)}`;
+  if (!index[baseId]) return baseId;
+  let suffix = 2;
+  while (index[`${baseId}-v${suffix}`]) suffix += 1;
+  return `${baseId}-v${suffix}`;
+}
+
+function scoreVariantSpecificity(entry, options = {}) {
+  let score = 0;
+  const status = String(entry?.status || '').toLowerCase();
+  const scope = entry?.scope;
+  const matchedSignals = getMatchedScopeSignals(entry, options);
+
+  if (entry?.origin === 'awm' && status === 'promoted') score += 1.5;
+  if (!scope) return { score, matchedSignals };
+
+  if (matchedSignals >= 1) score += 2.5;
+  if (matchedSignals >= 2) score += 2;
+  if (matchedSignals >= 3) score += 1;
+  return { score, matchedSignals };
+}
+
+function getMatchedScopeSignals(entry, options = {}) {
+  const currentProcessName = String(options.currentProcessName || '').trim().toLowerCase();
+  const currentWindowTitle = String(options.currentWindowTitle || '').trim().toLowerCase();
+  const currentWindowKind = String(options.currentWindowKind || '').trim().toLowerCase();
+  const currentUrlHost = extractHost(options.currentUrlHost || options.currentUrl || '');
+  const scope = entry?.scope;
+  if (!scope) return 0;
+
+  let matchedSignals = 0;
+  if (currentProcessName && Array.isArray(scope.processNames) && scope.processNames.some((value) => currentProcessName === value || currentProcessName.includes(value) || value.includes(currentProcessName))) {
+    matchedSignals += 1;
+  }
+  if (currentWindowTitle && Array.isArray(scope.windowTitles) && scope.windowTitles.some((value) => {
+    const normalizedValue = String(value || '').trim().toLowerCase();
+    return normalizedValue && (currentWindowTitle.includes(normalizedValue) || normalizedValue.includes(currentWindowTitle));
+  })) {
+    matchedSignals += 1;
+  }
+  if (currentWindowKind && scope.kind && currentWindowKind === scope.kind) {
+    matchedSignals += 1;
+  }
+  if (currentUrlHost && Array.isArray(scope.domains) && scope.domains.some((value) => currentUrlHost === value || currentUrlHost.endsWith(`.${value}`) || value.endsWith(`.${currentUrlHost}`))) {
+    matchedSignals += 1;
+  }
+  return matchedSignals;
 }
 
 function getScopeScore(entry, options = {}) {
@@ -352,11 +456,26 @@ function getRelevantSkillsSelection(userMessage, options = {}) {
         currentUrlHost: options.currentUrlHost,
         query: userMessage
       });
-      const score = keywordScore + semanticScore + scopeScore;
-      return { id, entry, score, keywordScore, semanticScore, scopeScore };
+      const variantSpecificity = scoreVariantSpecificity(entry, {
+        currentProcessName: options.currentProcessName,
+        currentWindowTitle: options.currentWindowTitle,
+        currentWindowKind: options.currentWindowKind,
+        currentUrlHost: options.currentUrlHost,
+        currentUrl: options.currentUrl
+      });
+      const variantSpecificityScore = variantSpecificity.score;
+      const matchedScopeSignals = variantSpecificity.matchedSignals;
+      const score = keywordScore + semanticScore + scopeScore + variantSpecificityScore;
+      return { id, entry, score, keywordScore, semanticScore, scopeScore, variantSpecificityScore, matchedScopeSignals };
     })
     .filter((value) => value && value.score > 0)
-    .sort((a, b) => b.score - a.score)
+    .sort((a, b) =>
+      (b.matchedScopeSignals - a.matchedScopeSignals)
+      || (b.score - a.score)
+      || (b.variantSpecificityScore - a.variantSpecificityScore)
+      || (b.scopeScore - a.scopeScore)
+      || (b.keywordScore - a.keywordScore)
+    )
     .slice(0, limit);
 
   if (scored.length === 0) return { text: '', ids: [], matches: [] };
@@ -408,17 +527,29 @@ function getRelevantSkillsContext(userMessage, limit) {
 /**
  * Register a skill in the index.
  */
-function addSkill(id, { file, keywords, tags, content, status, origin, scope, signature }) {
+function addSkill(id, { file, keywords, tags, content, status, origin, scope, signature, familySignature, variantSignature, verificationHints }) {
   const index = loadIndex();
   const now = new Date().toISOString();
+  const resolvedFamilySignature = familySignature || (origin === 'awm' ? buildSkillFamilySignature({ keywords, tags, content, verification: (verificationHints || []).join(' ') }) : null);
+  const resolvedVariantSignature = variantSignature || signature || (origin === 'awm' ? buildSkillVariantSignature({
+    familySignature: resolvedFamilySignature,
+    keywords,
+    tags,
+    content,
+    scope,
+    verification: (verificationHints || []).join(' ')
+  }) : null);
   const normalized = normalizeSkillEntry(id, {
     file: file || `${id}.md`,
     keywords,
     tags,
+    verificationHints,
     status,
     origin,
     scope,
-    signature,
+    familySignature: resolvedFamilySignature,
+    variantSignature: resolvedVariantSignature,
+    signature: resolvedVariantSignature,
     createdAt: now,
     updatedAt: now
   });
@@ -435,33 +566,46 @@ function addSkill(id, { file, keywords, tags, content, status, origin, scope, si
   return index[id];
 }
 
-function upsertLearnedSkill({ idHint, keywords, tags, content, scope, signature }) {
+function upsertLearnedSkill({ idHint, keywords, tags, content, scope, signature, verification }) {
   const index = loadIndex();
   const now = new Date().toISOString();
   const normalizedKeywords = normalizeArray(keywords);
   const normalizedTags = normalizeArray(tags);
+  const normalizedVerificationHints = extractIntentHints(verification);
   const normalizedScope = normalizeScope(scope);
-  const learnedSignature = signature || buildLearnedSkillSignature({
+  const familySignature = buildSkillFamilySignature({
     keywords: normalizedKeywords,
     tags: normalizedTags,
-    content
+    content,
+    verification
+  });
+  const learnedSignature = signature || buildSkillVariantSignature({
+    familySignature,
+    keywords: normalizedKeywords,
+    tags: normalizedTags,
+    content,
+    scope: normalizedScope,
+    verification
   });
 
   const existingId = Object.keys(index).find((id) => {
     const entry = index[id];
-    return entry.origin === 'awm' && entry.signature && entry.signature === learnedSignature;
+    return entry.origin === 'awm' && (entry.variantSignature || entry.signature) && (entry.variantSignature || entry.signature) === learnedSignature;
   });
 
-  const skillId = existingId || idHint || `awm-${Date.now().toString(36)}`;
+  const skillId = existingId || createVariantId(index, idHint);
   const entry = existingId
     ? normalizeSkillEntry(skillId, index[skillId])
     : normalizeSkillEntry(skillId, {
         file: `${skillId}.md`,
         keywords: normalizedKeywords,
         tags: normalizedTags,
+        verificationHints: normalizedVerificationHints,
         origin: 'awm',
         status: 'candidate',
         scope: normalizedScope,
+        familySignature,
+        variantSignature: learnedSignature,
         signature: learnedSignature,
         createdAt: now,
         updatedAt: now
@@ -469,8 +613,11 @@ function upsertLearnedSkill({ idHint, keywords, tags, content, scope, signature 
 
   entry.keywords = normalizeArray([...entry.keywords, ...normalizedKeywords]);
   entry.tags = normalizeArray([...entry.tags, ...normalizedTags, 'awm', 'auto-generated']);
+  entry.verificationHints = normalizeArray([...(entry.verificationHints || []), ...normalizedVerificationHints]);
   entry.scope = normalizedScope || entry.scope || null;
   entry.origin = 'awm';
+  entry.familySignature = familySignature;
+  entry.variantSignature = learnedSignature;
   entry.signature = learnedSignature;
   entry.successCount += 1;
   entry.consecutiveFailures = 0;
@@ -653,6 +800,8 @@ module.exports = {
   removeSkill,
   listSkills,
   buildLearnedSkillSignature,
+  buildSkillFamilySignature,
+  buildSkillVariantSignature,
   extractHost,
   // TF-IDF internals (exported for testing)
   tokenize,

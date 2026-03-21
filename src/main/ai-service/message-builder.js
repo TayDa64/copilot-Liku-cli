@@ -74,6 +74,11 @@ function createMessageBuilder(dependencies) {
           `- goalStatus: ${state.goalStatus || 'unknown'}`,
           `- lastStrategy: ${state.lastStrategy || 'none'}`,
           `- lastUserIntent: ${state.lastUserIntent || 'none'}`,
+          `- lastAttemptedUrl: ${state.lastAttemptedUrl || 'none'}`,
+          `- attemptedUrls: ${Array.isArray(state.attemptedUrls) && state.attemptedUrls.length ? state.attemptedUrls.join(', ') : 'none'}`,
+          `- navigationAttemptCount: ${Number.isFinite(Number(state.navigationAttemptCount)) ? Number(state.navigationAttemptCount) : 0}`,
+          `- recoveryMode: ${state.recoveryMode || 'direct'}`,
+          `- recoveryQuery: ${state.recoveryQuery || 'none'}`,
           '- Rule: If goalStatus is achieved and user intent is acknowledgement/chit-chat, do not propose actions or screenshots.'
         ].join('\n');
         messages.push({ role: 'system', content: continuity });

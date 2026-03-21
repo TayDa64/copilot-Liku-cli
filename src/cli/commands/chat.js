@@ -954,6 +954,7 @@ async function runChatLoop(ai, options) {
     if (execResult?.screenshotCaptured && execResult?.success) {
       let visionContinuations = 0;
       let lastClickCoords = null; // Track repeated coordinate clicks
+      let lastRecoveryPhase = null;
 
       while (visionContinuations < MAX_VISION_CONTINUATIONS) {
         visionContinuations++;
@@ -970,10 +971,21 @@ async function runChatLoop(ai, options) {
           ? `I've captured a screenshot of the current screen state after your actions completed. Please analyze it and continue with the next steps to accomplish the original goal. The screenshot is included as visual context.${staleClickHint}`
           : `Here is an updated screenshot. Continue with the next steps.${staleClickHint}`;
 
+        const continuationSystemMessages = [`Original user request: ${effectiveUserMessage}`];
+        if (typeof ai.getBrowserRecoverySnapshot === 'function') {
+          const recovery = ai.getBrowserRecoverySnapshot(effectiveUserMessage);
+          if (recovery?.directive) {
+            continuationSystemMessages.push(recovery.directive);
+          }
+          if (recovery?.phase) {
+            lastRecoveryPhase = recovery.phase;
+          }
+        }
+
         const contResp = await ai.sendMessage(continuationPrompt, {
           includeVisualContext: true,
           model,
-          extraSystemMessages: [`Original user request: ${effectiveUserMessage}`]
+          extraSystemMessages: continuationSystemMessages
         });
 
         if (!contResp.success) {
@@ -1034,6 +1046,11 @@ async function runChatLoop(ai, options) {
 
       if (visionContinuations >= MAX_VISION_CONTINUATIONS) {
         info('Reached max vision continuations. Returning to prompt.');
+        if (lastRecoveryPhase === 'result-selection') {
+          info('Browser recovery stopped in result-selection mode. The next step should be choosing a visible search result, not guessing another URL.');
+        } else if (lastRecoveryPhase === 'discovery-search') {
+          info('Browser recovery stopped in discovery mode. The next step should be loading and inspecting a search results page.');
+        }
       }
     }
 

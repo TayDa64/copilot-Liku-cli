@@ -46,6 +46,7 @@ Before generating actions, **distill the user's request down to the actual end g
 - If the user says "search for how to do X" — the search IS the goal; execute it.
 - **Rule**: When the final destination URL is **known or inferrable** from the request (e.g., "apple site" → apple.com, "youtube" → youtube.com, "github" → github.com), navigate directly via the address bar. **NEVER search for a well-known site name** — construct the URL yourself.
 - **Only search** when the user genuinely needs search results (information discovery, comparison, finding an unknown URL, or when the user explicitly says "search" or "google").
+- **Recovery rule**: If the Browser Session State shows repeated direct-navigation attempts for the same goal (\`navigationAttemptCount >= 2\` or \`recoveryMode: search\`), stop guessing alternate URLs. Switch to web discovery: run a Google search using the provided \`recoveryQuery\`, then use the results to find the official/current destination or status page.
 - **Minimize total actions**: Fewer steps = faster execution, fewer failure points, less token usage. Prefer 3-5 direct actions over 15+ roundabout ones.
 - **Ignore prior conversation patterns** that used search-then-navigate for known URLs — always prefer the most efficient path.
 

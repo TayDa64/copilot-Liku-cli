@@ -21,6 +21,7 @@ const EXPECTED_EXPORTS = [
   'executeActions',
   'getCopilotModels',
   'getCurrentCopilotModel',
+  'getBrowserRecoverySnapshot',
   'getLatestVisualContext',
   'getModelMetadata',
   'getPendingAction',
@@ -117,10 +118,15 @@ test('status payload shape remains stable', () => {
   assert.deepStrictEqual(status.availableProviders, ['copilot', 'openai', 'anthropic', 'ollama']);
   assert.ok(status.browserSessionState);
   assert.deepStrictEqual(Object.keys(status.browserSessionState).sort(), [
+    'attemptedUrls',
     'goalStatus',
+    'lastAttemptedUrl',
     'lastStrategy',
     'lastUpdated',
     'lastUserIntent',
+    'navigationAttemptCount',
+    'recoveryMode',
+    'recoveryQuery',
     'title',
     'url'
   ]);
