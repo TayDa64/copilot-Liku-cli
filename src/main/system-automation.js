@@ -2009,15 +2009,7 @@ $procs = Get-Process -ErrorAction SilentlyContinue |
       Name='sortKey'; Expression={ try { $_.StartTime.Ticks } catch { 0 } }
     } |
   Sort-Object sortKey -Descending |
-  Select-Object -First 15 -Property @{
-      Name='pid'; Expression={ [int]$_.Id }
-    }, @{
-      Name='processName'; Expression={ [string]$_.ProcessName }
-    }, @{
-      Name='mainWindowTitle'; Expression={ [string]$_.MainWindowTitle }
-    }, @{
-      Name='startTime'; Expression={ try { $_.StartTime.ToString('o') } catch { '' } }
-    }
+    Select-Object -First 15 -Property pid, processName, mainWindowTitle, startTime
 
 if (-not $procs) {
   '[]'

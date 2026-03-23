@@ -187,6 +187,55 @@ function isLikelyAutomationInput(text) {
   return /(open|launch|search|play|click|type|press|scroll|drag|close|minimize|restore|focus|bring|navigate|go to|run|execute|find|select|choose|pick|screenshot|screen shot|capture)/i.test(t);
 }
 
+function isLikelyObservationInput(text) {
+  const t = String(text || '').trim().toLowerCase();
+  if (!t) return false;
+
+  return /(what do you see|what can you see|tell me what you see|describe( what)? you see|describe the (screen|window|app)|what controls|what can you use|what is visible|what's visible|enumerate.*controls|which controls)/i.test(t);
+}
+
+function shouldAutoCaptureObservationAfterActions(userMessage, actions, execResult) {
+  if (!isLikelyObservationInput(userMessage)) return false;
+  if (!Array.isArray(actions) || actions.length === 0) return false;
+  if (execResult?.cancelled || execResult?.screenshotCaptured) return false;
+  if (actions.some((action) => action?.type === 'screenshot')) return false;
+
+  const hasWindowActivation = actions.some((action) =>
+    action?.type === 'focus_window'
+    || action?.type === 'bring_window_to_front'
+    || action?.type === 'restore_window'
+  );
+  const hasLaunchVerification = actions.some((action) => !!action?.verifyTarget);
+  return hasWindowActivation || hasLaunchVerification;
+}
+
+async function waitForFreshObservationContext(ai, execResult) {
+  const focusVerification = execResult?.focusVerification || null;
+  if (focusVerification?.applicable && !focusVerification?.verified) {
+    warn('Focus drifted away from the target window after execution; skipping automatic observation continuation.');
+    return false;
+  }
+
+  const watcher = typeof ai?.getUIWatcher === 'function' ? ai.getUIWatcher() : null;
+  if (!watcher || !watcher.isPolling || typeof watcher.waitForFreshState !== 'function') {
+    return true;
+  }
+
+  const expectedWindowHandle = Number(focusVerification?.expectedWindowHandle || 0);
+  const timeoutMs = Math.max(1200, Number(watcher.options?.pollInterval || 400) * 4);
+  const freshState = await watcher.waitForFreshState({
+    targetHwnd: expectedWindowHandle || undefined,
+    sinceTs: Date.now(),
+    timeoutMs
+  });
+
+  if (!freshState?.fresh) {
+    warn('UI watcher did not produce a fresh focused-window update before observation; using screenshot context with potentially stale Live UI State.');
+  }
+
+  return true;
+}
+
 function askQuestion(rl, prompt) {
   return new Promise(resolve => rl.question(prompt, resolve));
 }
@@ -426,19 +475,25 @@ function printCommandResult(cmdResult) {
   }
 }
 
-async function autoCapture(ai) {
+async function autoCapture(ai, options = {}) {
+  const captureScope = options.scope === 'active-window' ? 'window' : 'screen';
   try {
-    const { screenshot } = require('../../main/ui-automation/screenshot');
-    const result = await screenshot({ memory: true, base64: true, metric: 'sha256' });
+    const { screenshot, screenshotActiveWindow } = require('../../main/ui-automation/screenshot');
+    const capture = captureScope === 'window' ? screenshotActiveWindow : screenshot;
+    const result = await capture({ memory: true, base64: true, metric: 'sha256' });
     if (result && result.success && result.base64) {
       ai.addVisualContext({
         dataURL: `data:image/png;base64,${result.base64}`,
-        width: 0, height: 0, scope: 'screen', timestamp: Date.now()
+        width: 0, height: 0, scope: captureScope, timestamp: Date.now()
       });
-      info('Auto-captured screenshot for visual context.');
+      info(captureScope === 'window'
+        ? 'Auto-captured active window for visual context.'
+        : 'Auto-captured screenshot for visual context.');
       return true;
     }
-    warn('Screenshot capture returned no data.');
+    warn(captureScope === 'window'
+      ? 'Active-window screenshot capture returned no data.'
+      : 'Screenshot capture returned no data.');
   } catch (e) {
     warn(`Auto-screenshot failed: ${e.message}. Use /capture manually.`);
   }
@@ -944,6 +999,16 @@ async function runChatLoop(ai, options) {
 
     if (!execResult?.success) {
       error(execResult.error || 'One or more actions failed');
+    }
+
+    if (execResult?.success && shouldAutoCaptureObservationAfterActions(effectiveUserMessage, actionData?.actions, execResult)) {
+      const readyForObservation = await waitForFreshObservationContext(ai, execResult);
+      if (readyForObservation) {
+        const captured = await autoCapture(ai, { scope: 'active-window' });
+        if (captured) {
+          execResult.screenshotCaptured = true;
+        }
+      }
     }
 
     // ===== VISION AUTO-CONTINUATION =====

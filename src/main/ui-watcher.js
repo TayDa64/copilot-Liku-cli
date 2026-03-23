@@ -27,6 +27,8 @@ const MODE = {
   FALLBACK: 'FALLBACK'       // polling after event failure, auto-retry after 30s
 };
 
+const UI_STATE_STALE_MS = 1600;
+
 // Sensitive process denylist — when the active window belongs to one of these,
 // omit element names/text from AI context to prevent prompt leakage.
 const REDACTED_PROCESSES = new Set([
@@ -527,6 +529,9 @@ $results | ConvertTo-Json -Depth 4 -Compress
     
     // Build context string with window hierarchy
     let context = `\n## Live UI State (${age}ms ago)\n`;
+    if (age > UI_STATE_STALE_MS) {
+      context += `**Freshness**: stale UI snapshot. Wait for a fresh watcher update or capture the active window before making precise observation claims.\n`;
+    }
     
     if (activeWindow) {
       const title = redacted ? '[REDACTED — sensitive application]' : (activeWindow.title || 'Unknown');
@@ -643,6 +648,104 @@ $results | ConvertTo-Json -Depth 4 -Compress
     });
     
     return containing[0];
+  }
+
+  /**
+   * Return a lightweight snapshot describing how much actionable UIA signal
+   * is available for the current active window.
+   */
+  getCapabilitySnapshot() {
+    const activeWindow = this.cache.activeWindow || null;
+    const elements = Array.isArray(this.cache.elements) ? this.cache.elements : [];
+    const activeHwnd = Number(activeWindow?.hwnd || 0);
+    const scopedElements = activeHwnd > 0
+      ? elements.filter((el) => Number(el?.windowHandle || 0) === activeHwnd)
+      : elements;
+
+    const interactiveTypes = new Set([
+      'Button', 'Edit', 'ComboBox', 'CheckBox', 'RadioButton', 'MenuItem', 'ListItem', 'TabItem', 'Hyperlink', 'TreeItem'
+    ]);
+
+    const interactiveElements = scopedElements.filter((el) => interactiveTypes.has(String(el?.type || '')));
+    const namedInteractiveElements = interactiveElements.filter((el) => {
+      const name = String(el?.name || el?.automationId || '').trim();
+      return !!name && name !== '[unnamed]';
+    });
+
+    return {
+      activeWindow,
+      totalElementCount: elements.length,
+      activeWindowElementCount: scopedElements.length,
+      interactiveElementCount: interactiveElements.length,
+      namedInteractiveElementCount: namedInteractiveElements.length,
+      ageMs: this.cache.lastUpdate ? Math.max(0, Date.now() - this.cache.lastUpdate) : Number.POSITIVE_INFINITY,
+      lastUpdate: this.cache.lastUpdate || 0,
+      isPolling: this.isPolling
+    };
+  }
+
+  /**
+   * Wait until the watcher emits a fresh state update, optionally scoped to a
+   * specific active window handle.
+   */
+  waitForFreshState(options = {}) {
+    const targetHwnd = Number(options.targetHwnd || 0);
+    const sinceTs = Number(options.sinceTs || 0);
+    const timeoutMs = Math.max(0, Number(options.timeoutMs || 0)) || Math.max(1200, Number(this.options.pollInterval || 400) * 4);
+
+    const matchesCurrentState = () => {
+      const lastUpdate = Number(this.cache.lastUpdate || 0);
+      const activeHwnd = Number(this.cache.activeWindow?.hwnd || 0);
+      if (lastUpdate <= sinceTs) return false;
+      if (targetHwnd > 0 && activeHwnd !== targetHwnd) return false;
+      return true;
+    };
+
+    if (matchesCurrentState()) {
+      return Promise.resolve({
+        fresh: true,
+        timedOut: false,
+        immediate: true,
+        activeWindow: this.cache.activeWindow || null,
+        lastUpdate: Number(this.cache.lastUpdate || 0)
+      });
+    }
+
+    return new Promise((resolve) => {
+      let settled = false;
+      let timer = null;
+
+      const finish = (result) => {
+        if (settled) return;
+        settled = true;
+        try { this.off('poll-complete', onUpdate); } catch {}
+        if (timer) clearTimeout(timer);
+        resolve(result);
+      };
+
+      const onUpdate = () => {
+        if (!matchesCurrentState()) return;
+        finish({
+          fresh: true,
+          timedOut: false,
+          immediate: false,
+          activeWindow: this.cache.activeWindow || null,
+          lastUpdate: Number(this.cache.lastUpdate || 0)
+        });
+      };
+
+      timer = setTimeout(() => {
+        finish({
+          fresh: false,
+          timedOut: true,
+          immediate: false,
+          activeWindow: this.cache.activeWindow || null,
+          lastUpdate: Number(this.cache.lastUpdate || 0)
+        });
+      }, timeoutMs);
+
+      this.on('poll-complete', onUpdate);
+    });
   }
   
   /**

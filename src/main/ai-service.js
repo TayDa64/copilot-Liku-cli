@@ -2353,7 +2353,88 @@ function extractRequestedAppName(text) {
   return null;
 }
 
-function buildProcessCandidatesFromAppName(appName) {
+const DEFAULT_VERIFY_POPUP_KEYWORDS = [
+  'license', 'activation', 'signin', 'login', 'update', 'setup', 'installer', 'warning', 'permission', 'eula', 'project', 'new project', 'open project', 'workspace'
+];
+
+const APP_NAME_PROFILES = [
+  {
+    displayName: 'TradingView',
+    launchQuery: 'TradingView',
+    aliases: ['tradingview', 'trading view', 'tradeingview', 'tradeing view'],
+    processNames: ['tradingview'],
+    titleHints: ['TradingView'],
+    popupKeywords: ['signin', 'login', 'update', 'workspace', 'chart']
+  },
+  {
+    displayName: 'Visual Studio Code',
+    launchQuery: 'Visual Studio Code',
+    aliases: ['visual studio code', 'vs code', 'vscode', 'code'],
+    processNames: ['code'],
+    titleHints: ['Visual Studio Code', 'VS Code']
+  },
+  {
+    displayName: 'Microsoft Edge',
+    launchQuery: 'Microsoft Edge',
+    aliases: ['microsoft edge', 'edge'],
+    processNames: ['msedge'],
+    titleHints: ['Microsoft Edge', 'Edge']
+  },
+  {
+    displayName: 'Google Chrome',
+    launchQuery: 'Google Chrome',
+    aliases: ['google chrome', 'chrome'],
+    processNames: ['chrome'],
+    titleHints: ['Google Chrome', 'Chrome']
+  },
+  {
+    displayName: 'Mozilla Firefox',
+    launchQuery: 'Firefox',
+    aliases: ['mozilla firefox', 'firefox'],
+    processNames: ['firefox'],
+    titleHints: ['Mozilla Firefox', 'Firefox']
+  },
+  {
+    displayName: 'Microsoft Teams',
+    launchQuery: 'Microsoft Teams',
+    aliases: ['microsoft teams', 'teams', 'ms teams'],
+    processNames: ['ms-teams', 'teams'],
+    titleHints: ['Microsoft Teams', 'Teams']
+  }
+];
+
+function normalizeAppIdentityText(value) {
+  return normalizeTextForMatch(value).replace(/\s+/g, '');
+}
+
+function boundedEditDistance(left, right, maxDistance = 2) {
+  const a = String(left || '');
+  const b = String(right || '');
+  if (a === b) return 0;
+  if (!a || !b) return Math.max(a.length, b.length);
+  if (Math.abs(a.length - b.length) > maxDistance) return maxDistance + 1;
+
+  let previous = Array.from({ length: b.length + 1 }, (_, index) => index);
+  for (let i = 0; i < a.length; i++) {
+    const current = [i + 1];
+    let rowMin = current[0];
+    for (let j = 0; j < b.length; j++) {
+      const cost = a[i] === b[j] ? 0 : 1;
+      const value = Math.min(
+        previous[j + 1] + 1,
+        current[j] + 1,
+        previous[j] + cost
+      );
+      current.push(value);
+      rowMin = Math.min(rowMin, value);
+    }
+    if (rowMin > maxDistance) return maxDistance + 1;
+    previous = current;
+  }
+  return previous[b.length];
+}
+
+function buildBasicProcessCandidates(appName) {
   const raw = String(appName || '').trim();
   if (!raw) return [];
   const lower = raw.toLowerCase();
@@ -2361,24 +2442,10 @@ function buildProcessCandidatesFromAppName(appName) {
   const tokens = lower.split(/[^a-z0-9]+/).filter(Boolean);
   const candidates = new Set();
 
-  // Known app mappings.
-  const known = [
-    { re: /\bmpc\s*(3|beats)\b/i, names: ['mpc3', 'mpc', 'mpc beats'] },
-    { re: /visual\s+studio\s+code|\bvscode\b/i, names: ['code'] },
-    { re: /microsoft\s+edge/i, names: ['msedge'] },
-    { re: /google\s+chrome/i, names: ['chrome'] },
-    { re: /mozilla\s+firefox|\bfirefox\b/i, names: ['firefox'] }
-  ];
-  for (const row of known) {
-    if (row.re.test(lower)) {
-      row.names.forEach(n => candidates.add(n));
-    }
-  }
-
   if (compact.length >= 2) candidates.add(compact);
   if (tokens.length) {
-    tokens.forEach(t => {
-      if (t.length >= 2) candidates.add(t);
+    tokens.forEach((token) => {
+      if (token.length >= 2) candidates.add(token);
     });
     if (tokens.length >= 2) {
       candidates.add(tokens.join(''));
@@ -2388,31 +2455,116 @@ function buildProcessCandidatesFromAppName(appName) {
   return Array.from(candidates).slice(0, 6);
 }
 
-function buildTitleHintsFromAppName(appName) {
+function buildBasicTitleHints(appName) {
   const raw = String(appName || '').trim();
   if (!raw) return [];
   const compact = raw.replace(/\s+/g, '');
-  const hints = [raw, compact].filter(Boolean);
-  return Array.from(new Set(hints));
+  return Array.from(new Set([raw, compact].filter(Boolean)));
+}
+
+function resolveNormalizedAppIdentity(appName) {
+  const requestedName = String(appName || '').trim();
+  if (!requestedName) return null;
+
+  const requestedCompact = normalizeAppIdentityText(requestedName);
+  let bestProfile = null;
+  let bestScore = Number.NEGATIVE_INFINITY;
+  let matchedBy = 'raw';
+
+  for (const profile of APP_NAME_PROFILES) {
+    const aliases = [profile.displayName, profile.launchQuery, ...(profile.aliases || []), ...(profile.processNames || []), ...(profile.titleHints || [])]
+      .map((value) => String(value || '').trim())
+      .filter(Boolean);
+
+    for (const alias of aliases) {
+      const aliasCompact = normalizeAppIdentityText(alias);
+      if (!aliasCompact) continue;
+
+      let score = Number.NEGATIVE_INFINITY;
+      let localMatchedBy = 'none';
+      if (requestedCompact === aliasCompact) {
+        score = 100;
+        localMatchedBy = 'exact';
+      } else if (requestedCompact.length >= 5 && aliasCompact.includes(requestedCompact)) {
+        score = 90;
+        localMatchedBy = 'substring';
+      } else if (aliasCompact.length >= 5 && requestedCompact.includes(aliasCompact)) {
+        score = 88;
+        localMatchedBy = 'superstring';
+      } else if (requestedCompact.length >= 6 && Math.abs(requestedCompact.length - aliasCompact.length) <= 2) {
+        const distance = boundedEditDistance(requestedCompact, aliasCompact, 2);
+        if (distance <= 2) {
+          score = 70 - distance;
+          localMatchedBy = 'fuzzy';
+        }
+      }
+
+      if (score > bestScore) {
+        bestScore = score;
+        bestProfile = profile;
+        matchedBy = localMatchedBy;
+      }
+    }
+  }
+
+  const displayName = bestProfile?.displayName || requestedName;
+  const launchQuery = bestProfile?.launchQuery || displayName;
+  const processNames = Array.from(new Set([
+    ...(bestProfile?.processNames || []),
+    ...buildBasicProcessCandidates(displayName),
+    ...buildBasicProcessCandidates(requestedName)
+  ].map((value) => String(value || '').trim().toLowerCase()).filter(Boolean)));
+  const titleHints = Array.from(new Set([
+    ...(bestProfile?.titleHints || []),
+    ...buildBasicTitleHints(displayName),
+    ...buildBasicTitleHints(requestedName)
+  ].map((value) => String(value || '').trim()).filter(Boolean)));
+  const popupKeywords = Array.from(new Set([
+    ...DEFAULT_VERIFY_POPUP_KEYWORDS,
+    ...(bestProfile?.popupKeywords || [])
+  ].map((value) => String(value || '').trim().toLowerCase()).filter(Boolean)));
+
+  return {
+    requestedName,
+    appName: displayName,
+    launchQuery,
+    matchedBy,
+    processNames,
+    titleHints,
+    popupKeywords
+  };
+}
+
+function buildProcessCandidatesFromAppName(appName) {
+  return resolveNormalizedAppIdentity(appName)?.processNames || [];
+}
+
+function buildTitleHintsFromAppName(appName) {
+  return resolveNormalizedAppIdentity(appName)?.titleHints || [];
 }
 
 function buildVerifyTargetHintFromAppName(appName) {
+  const identity = resolveNormalizedAppIdentity(appName);
   return {
-    appName,
-    processNames: buildProcessCandidatesFromAppName(appName),
-    titleHints: buildTitleHintsFromAppName(appName),
-    popupKeywords: ['license', 'activation', 'signin', 'login', 'update', 'setup', 'installer', 'warning', 'permission', 'eula', 'project', 'new project', 'open project', 'workspace']
+    appName: identity?.appName || String(appName || '').trim(),
+    requestedAppName: identity?.requestedName || String(appName || '').trim(),
+    normalizedAppName: identity?.appName || String(appName || '').trim(),
+    launchQuery: identity?.launchQuery || String(appName || '').trim(),
+    processNames: identity?.processNames || [],
+    titleHints: identity?.titleHints || [],
+    popupKeywords: identity?.popupKeywords || [...DEFAULT_VERIFY_POPUP_KEYWORDS]
   };
 }
 
 function buildOpenApplicationActions(appName) {
   const verifyTarget = buildVerifyTargetHintFromAppName(appName);
+  const launchQuery = verifyTarget.launchQuery || verifyTarget.appName || String(appName || '').trim();
   return [
     { type: 'key', key: 'win', reason: 'Open Start menu', verifyTarget },
     { type: 'wait', ms: 220 },
-    { type: 'type', text: appName, reason: `Search for ${appName}` },
+    { type: 'type', text: launchQuery, reason: `Search for ${launchQuery}` },
     { type: 'wait', ms: 140 },
-    { type: 'key', key: 'enter', reason: `Launch ${appName}`, verifyTarget },
+    { type: 'key', key: 'enter', reason: `Launch ${launchQuery}`, verifyTarget },
     { type: 'wait', ms: 2200 }
   ];
 }
@@ -3295,6 +3447,8 @@ const POST_ACTION_VERIFY_SETTLE_MS = 900;
 const POST_ACTION_VERIFY_POLL_INTERVAL_MS = 450;
 const POST_ACTION_VERIFY_MAX_POLL_CYCLES = 8;
 const POPUP_RECIPE_MAX_ACTIONS = 6;
+const FOCUS_VERIFY_SETTLE_MS = 250;
+const FOCUS_VERIFY_MAX_RETRIES = 2;
 
 function sleepMs(ms) {
   return new Promise(resolve => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
@@ -3316,6 +3470,8 @@ function inferLaunchVerificationTarget(actionData, userMessage = '') {
 
   const target = {
     appName: extractRequestedAppName(userMessage) || null,
+    requestedAppName: null,
+    launchQuery: null,
     processNames: [],
     titleHints: [],
     popupKeywords: []
@@ -3324,6 +3480,12 @@ function inferLaunchVerificationTarget(actionData, userMessage = '') {
   if (explicitHint) {
     if (typeof explicitHint.appName === 'string' && explicitHint.appName.trim()) {
       target.appName = explicitHint.appName.trim();
+    }
+    if (typeof explicitHint.requestedAppName === 'string' && explicitHint.requestedAppName.trim()) {
+      target.requestedAppName = explicitHint.requestedAppName.trim();
+    }
+    if (typeof explicitHint.launchQuery === 'string' && explicitHint.launchQuery.trim()) {
+      target.launchQuery = explicitHint.launchQuery.trim();
     }
     if (Array.isArray(explicitHint.processNames)) {
       target.processNames.push(...explicitHint.processNames.map(v => String(v || '').trim()).filter(Boolean));
@@ -3361,8 +3523,15 @@ function inferLaunchVerificationTarget(actionData, userMessage = '') {
   }
 
   if (target.appName) {
-    target.processNames.push(...buildProcessCandidatesFromAppName(target.appName));
-    target.titleHints.push(...buildTitleHintsFromAppName(target.appName));
+    const normalizedIdentity = resolveNormalizedAppIdentity(target.appName);
+    if (normalizedIdentity) {
+      target.requestedAppName = target.requestedAppName || normalizedIdentity.requestedName;
+      target.appName = normalizedIdentity.appName;
+      target.launchQuery = target.launchQuery || normalizedIdentity.launchQuery;
+      target.processNames.push(...normalizedIdentity.processNames);
+      target.titleHints.push(...normalizedIdentity.titleHints);
+      target.popupKeywords.push(...normalizedIdentity.popupKeywords);
+    }
   }
 
   target.processNames = Array.from(new Set(target.processNames.map(v => v.toLowerCase())));
@@ -3480,7 +3649,7 @@ function buildPostLaunchSelfHealPlans(target, runtime = {}) {
 
   // Only relaunch when no matching process appears to be running.
   if (target.appName && !hasRunningCandidates) {
-    plans.push(buildOpenApplicationActions(target.appName));
+    plans.push(buildOpenApplicationActions(target.launchQuery || target.appName));
   }
 
   return plans;
@@ -3553,6 +3722,84 @@ async function pollForegroundForTarget(target, maxCycles = POST_ACTION_VERIFY_MA
     cyclesUsed: cycles,
     foreground,
     evalResult
+  };
+}
+
+async function verifyForegroundFocus(expectedWindowHandle, options = {}) {
+  const expectedHwnd = Number(expectedWindowHandle || 0);
+  if (!expectedHwnd) {
+    return {
+      applicable: false,
+      verified: true,
+      drifted: false,
+      attempts: 0,
+      expectedWindowHandle: 0,
+      attemptedRestore: false,
+      attemptedRefocus: false,
+      foreground: null,
+      reason: 'no-expected-window'
+    };
+  }
+
+  const recoveryTarget = options.recoveryTarget && typeof options.recoveryTarget === 'object'
+    ? options.recoveryTarget
+    : null;
+
+  let foreground = await systemAutomation.getForegroundWindowInfo();
+  if (Number(foreground?.hwnd || 0) === expectedHwnd) {
+    return {
+      applicable: true,
+      verified: true,
+      drifted: false,
+      attempts: 0,
+      expectedWindowHandle: expectedHwnd,
+      attemptedRestore: false,
+      attemptedRefocus: false,
+      foreground,
+      reason: 'foreground-matched'
+    };
+  }
+
+  let attemptedRestore = false;
+  for (let attempt = 1; attempt <= FOCUS_VERIFY_MAX_RETRIES; attempt++) {
+    if (recoveryTarget && (recoveryTarget.title || recoveryTarget.processName)) {
+      attemptedRestore = true;
+      await systemAutomation.executeAction({
+        type: 'restore_window',
+        title: recoveryTarget.title || undefined,
+        processName: recoveryTarget.processName || undefined,
+        continue_on_error: true,
+        reason: 'Focus verification self-heal: restore target window'
+      });
+    }
+    await systemAutomation.focusWindow(expectedHwnd);
+    await sleepMs(FOCUS_VERIFY_SETTLE_MS + (attempt * 75));
+    foreground = await systemAutomation.getForegroundWindowInfo();
+    if (Number(foreground?.hwnd || 0) === expectedHwnd) {
+      return {
+        applicable: true,
+        verified: true,
+        drifted: true,
+        attempts: attempt,
+        expectedWindowHandle: expectedHwnd,
+        attemptedRestore,
+        attemptedRefocus: true,
+        foreground,
+        reason: 'refocused-target-window'
+      };
+    }
+  }
+
+  return {
+    applicable: true,
+    verified: false,
+    drifted: true,
+    attempts: FOCUS_VERIFY_MAX_RETRIES,
+    expectedWindowHandle: expectedHwnd,
+    attemptedRestore,
+    attemptedRefocus: true,
+    foreground,
+    reason: 'focus-drift-persisted'
   };
 }
 
@@ -3883,6 +4130,7 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
   let screenshotRequested = false;
   let pendingConfirmation = false;
   let lastTargetWindowHandle = null;
+  let focusRecoveryTarget = null;
   let postVerification = { applicable: false, verified: true, healed: false, attempts: 0 };
 
   for (let i = 0; i < actionData.actions.length; i++) {
@@ -3895,8 +4143,19 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
         const hwnd = await systemAutomation.resolveWindowHandle(action);
         if (hwnd) {
           lastTargetWindowHandle = hwnd;
+          focusRecoveryTarget = {
+            title: action.title || undefined,
+            processName: action.processName || undefined
+          };
         }
       } catch {}
+    }
+
+    if (action.type === 'restore_window') {
+      focusRecoveryTarget = {
+        title: action.title || undefined,
+        processName: action.processName || undefined
+      };
     }
     
     // Handle screenshot requests specially
@@ -4053,8 +4312,22 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
 
   let success = !pendingConfirmation && results.every(r => r.success);
   let error = null;
+  let focusVerification = {
+    applicable: false,
+    verified: true,
+    drifted: false,
+    attempts: 0,
+    expectedWindowHandle: Number(lastTargetWindowHandle || 0) || 0
+  };
 
   if (success && !pendingConfirmation) {
+    focusVerification = await verifyForegroundFocus(lastTargetWindowHandle, {
+      recoveryTarget: focusRecoveryTarget
+    });
+    if (focusVerification.applicable && !focusVerification.verified) {
+      success = false;
+      error = 'Focus verification could not keep the target window in the foreground';
+    }
     postVerification = await verifyAndSelfHealPostActions(actionData, {
       userMessage,
       actionExecutor,
@@ -4140,13 +4413,25 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
             if (hookGate.denied) {
               console.log(`[AI-SERVICE] AWM: Skill creation denied by PreToolUse hook: ${hookGate.reason}`);
             } else {
+              const normalizedSkillApp = resolveNormalizedAppIdentity(
+                postVerification?.target?.appName
+                || postVerification?.target?.requestedAppName
+                || extractRequestedAppName(userMessage || actionData.thought || '')
+                || ''
+              );
               const learnedSkill = skillRouter.upsertLearnedSkill({
                 idHint: `awm-${Date.now().toString(36)}`,
                 keywords: procedureKeywords,
                 tags: ['awm', 'auto-generated'],
                 scope: {
-                  processNames: [postVerification?.foreground?.processName || ''].filter(Boolean),
-                  windowTitles: [postVerification?.foreground?.title || ''].filter(Boolean),
+                  processNames: Array.from(new Set([
+                    postVerification?.foreground?.processName || '',
+                    ...((normalizedSkillApp?.processNames) || [])
+                  ].filter(Boolean))),
+                  windowTitles: Array.from(new Set([
+                    postVerification?.foreground?.title || '',
+                    ...((normalizedSkillApp?.titleHints) || [])
+                  ].filter(Boolean))),
                   kind: postVerification?.foreground?.windowKind || null,
                   domains: [skillRouter.extractHost(getBrowserSessionState().url || '') || ''].filter(Boolean)
                 },
@@ -4270,6 +4555,7 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
     results,
     error,
     screenshotRequested,
+    focusVerification,
     postVerification,
     postVerificationFailed: !!(postVerification.applicable && !postVerification.verified),
     pendingConfirmation,
@@ -4307,6 +4593,7 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
   const results = [...pending.completedResults];
   let screenshotRequested = false;
   let lastTargetWindowHandle = null;
+  let focusRecoveryTarget = null;
   let postVerification = { applicable: false, verified: true, healed: false, attempts: 0 };
   
   // Execute the confirmed action and remaining actions
@@ -4318,8 +4605,19 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
         const hwnd = await systemAutomation.resolveWindowHandle(action);
         if (hwnd) {
           lastTargetWindowHandle = hwnd;
+          focusRecoveryTarget = {
+            title: action.title || undefined,
+            processName: action.processName || undefined
+          };
         }
       } catch {}
+    }
+
+    if (action.type === 'restore_window') {
+      focusRecoveryTarget = {
+        title: action.title || undefined,
+        processName: action.processName || undefined
+      };
     }
     
     if (action.type === 'screenshot') {
@@ -4415,8 +4713,22 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
 
   let success = results.every(r => r.success);
   let error = null;
+  let focusVerification = {
+    applicable: false,
+    verified: true,
+    drifted: false,
+    attempts: 0,
+    expectedWindowHandle: Number(lastTargetWindowHandle || 0) || 0
+  };
 
   if (success) {
+    focusVerification = await verifyForegroundFocus(lastTargetWindowHandle, {
+      recoveryTarget: focusRecoveryTarget
+    });
+    if (focusVerification.applicable && !focusVerification.verified) {
+      success = false;
+      error = 'Focus verification could not keep the target window in the foreground';
+    }
     postVerification = await verifyAndSelfHealPostActions(
       { actions: pending.remainingActions || [] },
       { userMessage, actionExecutor, enablePopupRecipes }
@@ -4444,6 +4756,7 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
     results,
     error,
     screenshotRequested,
+    focusVerification,
     postVerification,
     postVerificationFailed: !!(postVerification.applicable && !postVerification.verified),
     userConfirmed: true

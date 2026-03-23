@@ -1,3 +1,103 @@
+const BROWSER_PROCESS_NAMES = new Set(['msedge', 'chrome', 'firefox', 'brave', 'opera', 'iexplore', 'safari']);
+const LOW_UIA_PROCESS_HINTS = new Set(['tradingview', 'electron', 'slack', 'discord', 'teams']);
+
+function classifyActiveAppCapability({ foreground, watcherSnapshot, browserState }) {
+  const processName = String(foreground?.processName || watcherSnapshot?.activeWindow?.processName || '').toLowerCase();
+  const title = String(foreground?.title || watcherSnapshot?.activeWindow?.title || '').toLowerCase();
+  const activeWindowElementCount = Number(watcherSnapshot?.activeWindowElementCount || 0);
+  const namedInteractiveElementCount = Number(watcherSnapshot?.namedInteractiveElementCount || 0);
+  const interactiveElementCount = Number(watcherSnapshot?.interactiveElementCount || 0);
+  const browserUrl = String(browserState?.url || '').trim();
+
+  if (BROWSER_PROCESS_NAMES.has(processName) || (!processName && browserUrl)) {
+    return {
+      mode: 'browser',
+      confidence: 'high',
+      rationale: 'Foreground app matches a browser process or active browser session state exists.',
+      inventory: {
+        activeWindowElementCount,
+        interactiveElementCount,
+        namedInteractiveElementCount
+      },
+      directives: [
+        'Treat this as a browser-capable surface.',
+        'Prefer browser-specific navigation and recovery rules over generic desktop-app assumptions.'
+      ],
+      responseShape: [
+        'If the user asks what controls are available, distinguish browser-native controls from generic desktop/window controls.',
+        'Do not describe desktop UIA coverage as if it were the same as webpage DOM coverage.'
+      ]
+    };
+  }
+
+  const lowUiSignal = activeWindowElementCount <= 8 && namedInteractiveElementCount <= 2;
+  const likelyLowUiaApp = LOW_UIA_PROCESS_HINTS.has(processName)
+    || /tradingview|chart|workspace|electron/i.test(title)
+    || (interactiveElementCount <= 3 && lowUiSignal);
+
+  if (likelyLowUiaApp) {
+    return {
+      mode: 'visual-first-low-uia',
+      confidence: (LOW_UIA_PROCESS_HINTS.has(processName) || /tradingview/i.test(title)) ? 'high' : 'medium',
+      rationale: 'Foreground app looks like a Chromium/Electron or otherwise low-UIA surface with sparse named controls.',
+      inventory: {
+        activeWindowElementCount,
+        interactiveElementCount,
+        namedInteractiveElementCount
+      },
+      directives: [
+        'Do not over-claim named controls from Live UI State when the active window exposes sparse UIA signal.',
+        'Prefer screenshot-grounded observation plus keyboard/window actions for this app.',
+        'If the user asks what controls are available, separate direct UIA controls from visually visible controls.'
+      ],
+      responseShape: [
+        'Answer with three buckets when relevant: direct UIA controls, reliable keyboard/window controls, and visible but screenshot-only controls.',
+        'If namedInteractiveElementCount is very low, explicitly say the visible app surface is only partially exposed to UIA.'
+      ]
+    };
+  }
+
+  if (namedInteractiveElementCount >= 5 || interactiveElementCount >= 8 || activeWindowElementCount >= 20) {
+    return {
+      mode: 'uia-rich',
+      confidence: 'medium',
+      rationale: 'Foreground app exposes a healthy amount of named or interactive UIA elements.',
+      inventory: {
+        activeWindowElementCount,
+        interactiveElementCount,
+        namedInteractiveElementCount
+      },
+      directives: [
+        'Prefer semantic UIA actions such as click_element, find_element, get_text, and set_value when applicable.',
+        'Use Live UI State as the primary control inventory before falling back to screenshot reasoning.'
+      ],
+      responseShape: [
+        'When the user asks about controls, mention the direct UIA controls first.',
+        'Prefer find_element or get_text before claiming no controls are available.'
+      ]
+    };
+  }
+
+  return {
+    mode: 'keyboard-window-first',
+    confidence: 'low',
+    rationale: 'Foreground app is not clearly browser or UIA-rich, and the current evidence is limited.',
+    inventory: {
+      activeWindowElementCount,
+      interactiveElementCount,
+      namedInteractiveElementCount
+    },
+    directives: [
+      'Prefer reliable window management and keyboard actions first.',
+      'Use screenshots for observation tasks when Live UI State is sparse or ambiguous.'
+    ],
+    responseShape: [
+      'Be explicit that direct element-level control is uncertain from current evidence.',
+      'Describe reliable keyboard/window controls separately from anything that is only visually observed.'
+    ]
+  };
+}
+
 function createMessageBuilder(dependencies) {
   const {
     getBrowserSessionState,
@@ -82,6 +182,33 @@ function createMessageBuilder(dependencies) {
           '- Rule: If goalStatus is achieved and user intent is acknowledgement/chit-chat, do not propose actions or screenshots.'
         ].join('\n');
         messages.push({ role: 'system', content: continuity });
+      }
+    } catch {}
+
+    try {
+      const watcher = getUIWatcher();
+      const browserState = getBrowserSessionState();
+      let foreground = null;
+      if (typeof getForegroundWindowInfo === 'function') {
+        foreground = await getForegroundWindowInfo();
+      }
+      const watcherSnapshot = watcher && typeof watcher.getCapabilitySnapshot === 'function'
+        ? watcher.getCapabilitySnapshot()
+        : null;
+      const capability = classifyActiveAppCapability({ foreground, watcherSnapshot, browserState });
+      if (capability) {
+        const capabilityBlock = [
+          '## Active App Capability',
+          `- mode: ${capability.mode}`,
+          `- confidence: ${capability.confidence}`,
+          `- rationale: ${capability.rationale}`,
+          `- activeWindowElementCount: ${Number(capability.inventory?.activeWindowElementCount || 0)}`,
+          `- interactiveElementCount: ${Number(capability.inventory?.interactiveElementCount || 0)}`,
+          `- namedInteractiveElementCount: ${Number(capability.inventory?.namedInteractiveElementCount || 0)}`,
+          ...(Array.isArray(capability.directives) ? capability.directives.map((line) => `- directive: ${line}`) : [])
+          ,...(Array.isArray(capability.responseShape) ? capability.responseShape.map((line) => `- answer-shape: ${line}`) : [])
+        ].join('\n');
+        messages.push({ role: 'system', content: capabilityBlock });
       }
     } catch {}
 

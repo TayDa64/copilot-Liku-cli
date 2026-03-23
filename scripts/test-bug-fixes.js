@@ -119,6 +119,113 @@ test('chat.js renders run_command actions', () => {
   assert(chatContent.includes("'💻'") || chatContent.includes('"💻"'), 'Should have terminal emoji for run_command');
 });
 
+test('chat.js auto-captures observation context after focus or launch actions', () => {
+  const chatJsPath = path.join(__dirname, '..', 'src', 'cli', 'commands', 'chat.js');
+  const fs = require('fs');
+
+  const chatContent = fs.readFileSync(chatJsPath, 'utf8');
+
+  assert(chatContent.includes('function shouldAutoCaptureObservationAfterActions'), 'Should define observation auto-capture helper');
+  assert(chatContent.includes('async function waitForFreshObservationContext'), 'Observation flow should wait for fresh watcher context');
+  assert(chatContent.includes("options.scope === 'active-window' ? 'window' : 'screen'"), 'Auto-capture should support active-window scope');
+  assert(chatContent.includes("execResult?.success && shouldAutoCaptureObservationAfterActions"), 'Successful observation flows should auto-capture after actions');
+  assert(chatContent.includes('watcher.waitForFreshState'), 'Observation flow should wait for a fresh watcher cycle before continuation');
+  assert(chatContent.includes("autoCapture(ai, { scope: 'active-window' })"), 'Observation flow should capture the active window');
+});
+
+test('system-automation preserves pid after process sorting', () => {
+  const sysAutoPath = path.join(__dirname, '..', 'src', 'main', 'system-automation.js');
+  const fs = require('fs');
+
+  const systemAutomationContent = fs.readFileSync(sysAutoPath, 'utf8');
+
+  assert(systemAutomationContent.includes('Select-Object -First 15 -Property pid, processName, mainWindowTitle, startTime'), 'Process enumeration should keep projected pid fields after sorting');
+});
+
+test('ui-watcher exposes active window capability snapshot', () => {
+  const uiWatcherPath = path.join(__dirname, '..', 'src', 'main', 'ui-watcher.js');
+  const fs = require('fs');
+
+  const uiWatcherContent = fs.readFileSync(uiWatcherPath, 'utf8');
+
+  assert(uiWatcherContent.includes('getCapabilitySnapshot()'), 'UI watcher should expose a capability snapshot helper');
+  assert(uiWatcherContent.includes('namedInteractiveElementCount'), 'Capability snapshot should report named interactive UIA density');
+  assert(uiWatcherContent.includes('waitForFreshState(options = {})'), 'UI watcher should expose a fresh-state wait helper');
+  assert(uiWatcherContent.includes('Freshness**: stale UI snapshot'), 'UI watcher AI context should warn when UI state is stale');
+});
+
+test('message-builder injects active app capability context', () => {
+  const messageBuilderPath = path.join(__dirname, '..', 'src', 'main', 'ai-service', 'message-builder.js');
+  const fs = require('fs');
+
+  const messageBuilderContent = fs.readFileSync(messageBuilderPath, 'utf8');
+
+  assert(messageBuilderContent.includes('classifyActiveAppCapability'), 'Message builder should classify active app capability');
+  assert(messageBuilderContent.includes('## Active App Capability'), 'Message builder should inject active app capability context');
+  assert(messageBuilderContent.includes('visual-first-low-uia'), 'Capability context should recognize low-UIA visual-first apps');
+  assert(messageBuilderContent.includes('uia-rich'), 'Capability context should recognize UIA-rich apps');
+  assert(messageBuilderContent.includes('namedInteractiveElementCount'), 'Capability context should include UIA inventory counts');
+  assert(messageBuilderContent.includes('answer-shape:'), 'Capability context should shape control-surface answers');
+});
+
+test('ai-service verifies focus continuity after action execution', () => {
+  const aiServicePath = path.join(__dirname, '..', 'src', 'main', 'ai-service.js');
+  const fs = require('fs');
+
+  const aiServiceContent = fs.readFileSync(aiServicePath, 'utf8');
+
+  assert(aiServiceContent.includes('async function verifyForegroundFocus'), 'ai-service should define a bounded focus verification helper');
+  assert(aiServiceContent.includes('Focus verification could not keep the target window in the foreground'), 'ai-service should surface focus verification failures clearly');
+  assert(aiServiceContent.includes('focusVerification = await verifyForegroundFocus'), 'executeActions should verify focus continuity after successful execution');
+  assert(aiServiceContent.includes('focusVerification,'), 'executeActions should return focus verification details');
+});
+
+test('rewriteActionsForReliability normalizes typoed app launches', () => {
+  const aiServicePath = path.join(__dirname, '..', 'src', 'main', 'ai-service.js');
+  const aiService = require(aiServicePath);
+
+  const rewritten = aiService.rewriteActionsForReliability([
+    { type: 'run_command', command: 'Start-Process "tradeing view"', shell: 'powershell' }
+  ], {
+    userMessage: 'open tradeing view'
+  });
+
+  assert(Array.isArray(rewritten), 'rewriteActionsForReliability should return an action array');
+  const typedAction = rewritten.find((action) => action?.type === 'type');
+  const launchAction = rewritten.find((action) => action?.type === 'key' && action?.key === 'enter');
+
+  assert(typedAction, 'Normalized app launch should include a Start menu search action');
+  assertEqual(typedAction.text, 'TradingView', 'Typoed app launch should normalize to TradingView');
+  assert(launchAction?.verifyTarget, 'Normalized app launch should include verifyTarget metadata');
+  assertEqual(launchAction.verifyTarget.appName, 'TradingView', 'verifyTarget should use the canonical app name');
+  assert(launchAction.verifyTarget.processNames.includes('tradingview'), 'verifyTarget should include canonical TradingView process hints');
+});
+
+test('ai-service normalizes app identity for learned skill scope', () => {
+  const aiServicePath = path.join(__dirname, '..', 'src', 'main', 'ai-service.js');
+  const fs = require('fs');
+
+  const aiServiceContent = fs.readFileSync(aiServicePath, 'utf8');
+
+  assert(aiServiceContent.includes('resolveNormalizedAppIdentity('), 'ai-service should define normalized app identity resolution');
+  assert(aiServiceContent.includes("'tradeing view'"), 'ai-service should recognize the TradingView typo alias');
+  assert(aiServiceContent.includes('normalizedSkillApp?.processNames'), 'Learned skill scope should include normalized process names');
+  assert(aiServiceContent.includes('normalizedSkillApp?.titleHints'), 'Learned skill scope should include normalized title hints');
+});
+
+test('system prompt explains control-surface boundaries honestly', () => {
+  const promptPath = path.join(__dirname, '..', 'src', 'main', 'ai-service', 'system-prompt.js');
+  const fs = require('fs');
+
+  const promptContent = fs.readFileSync(promptPath, 'utf8');
+
+  assert(promptContent.includes('### Control Surface Honesty Rule (CRITICAL)'), 'System prompt should define a control-surface honesty rule');
+  assert(promptContent.includes('direct UIA controls you can target semantically'), 'System prompt should distinguish direct UIA controls');
+  assert(promptContent.includes('reliable window or keyboard controls'), 'System prompt should distinguish reliable keyboard/window controls');
+  assert(promptContent.includes('visible but screenshot-only controls'), 'System prompt should distinguish screenshot-only visible controls');
+  assert(promptContent.includes('prefer \\`find_element\\` or \\`get_text\\` evidence') || promptContent.includes('prefer find_element or get_text evidence'), 'System prompt should prefer semantic reads before denying direct control');
+});
+
 // Test DANGEROUS_COMMAND_PATTERNS covers critical cases
 test('Dangerous command patterns are comprehensive', () => {
   const sysAutoPath = path.join(__dirname, '..', 'src', 'main', 'system-automation.js');

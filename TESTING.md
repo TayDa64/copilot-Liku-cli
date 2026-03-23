@@ -132,6 +132,10 @@ Why this is the default path:
 Use these when refactoring `src/main/ai-service.js` or any extracted module under `src/main/ai-service/`:
 
 ```bash
+npm run test:ai-focused
+
+# Or run the underlying focused checks individually
+node scripts/test-windows-observation-flow.js
 node scripts/test-ai-service-contract.js
 node scripts/test-ai-service-commands.js
 node scripts/test-ai-service-provider-orchestration.js
@@ -149,6 +153,7 @@ node scripts/test-ai-service-slash-command-helpers.js
 
 What they cover:
 
+- combined Windows observation-flow regression for normalized app launch, focus recovery, and watcher freshness
 - facade export and result-shape stability
 - extracted slash-command behavior
 - provider fallback and dispatch orchestration
@@ -190,8 +195,8 @@ When changing model-selection UX or Copilot routing, add these checks:
 Recommended refactor validation order:
 
 1. Run the focused seam test for the module you changed.
-2. Run `node scripts/test-ai-service-contract.js`.
-3. Run `node scripts/test-v006-features.js` and `node scripts/test-bug-fixes.js`.
+2. Run `npm run test:ai-focused`.
+3. Run `node scripts/test-v006-features.js` if your change touches older v0.0.6 behavior or broader compatibility seams.
 4. Run broader smoke tests only after the seam-level checks are green.
 
 ### Hook Enforcement Verification
