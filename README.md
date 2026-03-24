@@ -1,429 +1,471 @@
-# GitHub Copilot CLI: Liku Edition (Public Preview)
+# GitHub Copilot CLI: Liku Edition
 
 [![npm version](https://img.shields.io/npm/v/copilot-liku-cli.svg)](https://www.npmjs.com/package/copilot-liku-cli)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen.svg)](https://nodejs.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE.md)
-[![Package Size](https://img.shields.io/badge/package-~196KB-blue.svg)](https://www.npmjs.com/package/copilot-liku-cli)
 
-The power of GitHub Copilot, now with visual-spatial awareness, cognitive memory, and advanced automation.
+GitHub Copilot CLI: Liku Edition is a terminal-first AI assistant with optional Electron-based visual awareness, Windows UI automation, live UI observation, memory, skill routing, and multi-agent orchestration.
 
-GitHub Copilot-Liku CLI brings AI-powered coding assistance and UI automation directly to your terminal. This "Liku Edition" extends the standard Copilot experience with an ultra-thin Electron overlay, allowing the agent to "see" and interact with your screen through a coordinated grid system and native UI automation — plus a cognitive layer that gives the agent persistent memory, learnable skills, and reflective self-improvement.
+It can run in two main modes:
 
-See the [Liku Architecture](ARCHITECTURE.md) for the full system design.
+- **Headless terminal mode** via `liku chat`
+- **Visual Electron mode** via `liku start` or bare `liku`
 
-![Image of the splash screen for the Copilot CLI](https://github.com/user-attachments/assets/51ac25d2-c074-467a-9c88-38a8d76690e3)
+The visual overlay depends on Electron, which is installed as an optional dependency. The headless CLI surface remains usable even when the Electron visual runtime is unavailable.
 
-## 🚀 Introduction and Overview
+This repo currently emphasizes:
 
-We're bringing the power of GitHub Copilot coding agent directly to your terminal, enhanced with Liku's visual awareness. Work locally and synchronously with an AI collaborator that understands your code AND your UI state.
+- reliable desktop/browser automation
+- bounded safety checks before execution
+- strong Windows support through native UI Automation
+- persistent memory/skills under the Liku home directory
+- advisory-safe TradingView support, including explicit refusal of DOM order-entry and position-management actions
 
-- **Unified Intelligence:** Combines terminal-native development with visual-spatial awareness.
-- **Ultra-Thin Overlay:** A transparent Electron layer for high-performance UI element detection and interaction.
-- **Multi-Agent Orchestration:** A trigger-based **Supervisor / Researcher / Architect / Builder / Verifier / Diagnostician / Vision Operator** system for complex tasks.
-- **Headless Command Surface:** Automation, diagnostics, and cognitive tooling available from any shell — no Electron required.
-- **Cognitive Layer:** Agentic memory (A-MEM), semantic skill routing, dynamic tool generation, RLVR telemetry, and reflective self-improvement.
-- **Event-Driven UI Watcher:** Real-time UI state tracking via Windows UI Automation events with automatic polling fallback.
-- **Defensive AI Architecture:** Prioritizes secure execution, bounded automation, and low-intrusion workflows.
+See also:
 
-## 🛠️ The Liku CLI (`liku`)
+- [ARCHITECTURE.md](ARCHITECTURE.md)
+- [QUICKSTART.md](QUICKSTART.md)
+- [INSTALLATION.md](INSTALLATION.md)
+- [docs/AGENT_ORCHESTRATION.md](docs/AGENT_ORCHESTRATION.md)
 
-The `liku` command is your entry point for visual interaction, automation, and cognitive agent features.
+---
 
-### Launching the Agent
-```bash
-liku start
-# or simply
-liku
-```
-This launches the Electron-based visual agent including the chat interface and the transparent overlay.
+## What Liku adds
 
-> **Note:** The visual overlay requires Electron (installed automatically as an optional dependency). All headless CLI commands work without Electron.
+Compared with a plain chat CLI, Liku adds:
 
-### Terminal Chat (Headless)
-For an interactive **terminal-first** workflow (no Electron UI required):
+- **Headless command surface** for automation and diagnostics
+- **Optional visual overlay** for grid targeting and inspect workflows
+- **UI watcher** for active-window and accessibility-grounded context
+- **Visual context capture** from screenshots
+- **Memory + skills** persisted under `~/.liku/`
+- **Dynamic tool registry** with sandboxing and approval flow
+- **Reflection + telemetry** for failure-aware improvement loops
+- **Multi-agent orchestration** with supervisor / researcher / architect / builder / verifier / diagnostician / vision operator roles
 
-```bash
-liku chat
-```
+---
 
-This runs an AI chat loop that can emit and execute the same JSON actions as the overlay.
-It also supports a **Teach** flow that persists app-scoped preferences (execution mode + action/negative policies) under `~/.liku/preferences.json`.
+## Current status
 
-Key capabilities:
-- Copilot models grouped by capability: `Agentic Vision`, `Reasoning / Planning`, and `Standard Chat`.
-- Capability reroutes are surfaced back to the user instead of silently replacing the chosen model.
-- `(plan)` routes to the multi-agent supervisor in non-destructive plan-only mode.
-- Multi-block model replies are parsed across all JSON fences; the best executable plan is selected.
-- Browser continuity tracked with explicit session state (`url`, `title`, `goalStatus`, `lastStrategy`).
-- Non-action acknowledgements/chit-chat filtered to prevent accidental action execution.
+### Stable core surfaces
 
-Terminal chat accepts `--model <copilotModelKey>` and `--execute prompt|true|false`. Inside the loop it also exposes chat-specific controls such as `/sequence` and `/recipes`, plus the `(plan)` macro for supervisor-backed planning.
+- `liku` command dispatcher in `src/cli/liku.js`
+- terminal chat via `liku chat`
+- Electron app entry via `liku start`
+- Windows UI Automation integration
+- screenshot capture and visual verification helpers
+- focused AI-service regression suites
 
-### CLI Commands
+### Current safety posture
 
-The top-level dispatcher in `src/cli/liku.js` currently exposes 20 explicit commands, plus bare `liku` as an alias for `liku start`.
+Liku is designed to fail closed when confidence or safety is insufficient.
 
-| Command | Usage | Description |
-| :--- | :--- | :--- |
-| `start` | `liku start` | Launch the Electron agent with overlay. |
-| `doctor` | `liku doctor` | Diagnostics: version, environment, active window, targeting hints. |
-| `chat` | `liku chat [--model <key>] [--execute prompt\|true\|false]` | Interactive AI chat in the terminal (headless). |
-| `click` | `liku click "Submit" --double` | Click UI element by text or coordinates. |
-| `find` | `liku find "Save" --type Button` | Locate elements using native UI Automation. |
-| `type` | `liku type "Hello World"` | Input string at the current cursor position. |
-| `keys` | `liku keys ctrl+s` | Send keyboard shortcut combinations. |
-| `screenshot` | `liku screenshot [path]` | Capture the current screen state. |
-| `verify-hash` | `liku verify-hash --timeout 5000` | Poll until screenshot hash changes. |
-| `verify-stable` | `liku verify-stable --metric dhash` | Wait until visual output is stable. |
-| `window` | `liku window "VS Code"` | Focus or list application windows. |
-| `mouse` | `liku mouse 500 300` | Move the mouse to screen coordinates. |
-| `scroll` | `liku scroll down 3` | Scroll the active window or element. |
-| `drag` | `liku drag 100 200 400 500` | Drag from one point to another. |
-| `wait` | `liku wait "Loading..." --gone` | Wait for an element to appear or disappear. |
-| `repl` | `liku repl` | Launch an interactive automation shell. |
-| `memory` | `liku memory list\|show\|search\|stats` | Manage agent memory notes. |
-| `skills` | `liku skills list\|search\|show` | Manage the semantic skill library. |
-| `tools` | `liku tools list\|proposals\|show\|approve\|reject\|revoke` | Manage dynamic tool registry and proposals. |
-| `analytics` | `liku analytics [--days N] [--raw]` | View telemetry analytics and success rates. |
+Examples already enforced in code:
 
-### Power User Examples
-```bash
-# Chained automation
-liku window "Notepad" && liku type "Done!" && liku keys ctrl+s
+- high-risk and critical actions trigger confirmation flows
+- fragile TradingView key flows require post-key observation checkpoints
+- screenshot-only continuation loops are prevented in terminal chat
+- TradingView **DOM / Depth of Market** order-entry and position-management actions are **blocked by advisory-only rails** rather than executed
 
-# Coordinate precision
-liku click 500,300 --right
+---
 
-# JSON processing
-liku find "*" --json | jq '.[0].name'
+## Installation
 
-# Wait for UI state
-liku wait "Submit" --timeout 5000 && liku click "Submit"
+### Requirements
 
-# Diagnostics with targeting hints
-liku doctor --json --flow
+- Node.js **18+**
+- npm **9+**
+- Windows, macOS, or Linux
 
-# Visual stability verification
-liku screenshot --hash && liku verify-stable --stable-ms 2000
+### Platform support
 
-# Cognitive layer
-liku memory search "login flow"
-liku skills list
-liku tools proposals
-liku analytics --days 7
-```
+| Platform | Support level | Notes |
+| --- | --- | --- |
+| Windows | Best supported | Native UI Automation, event-driven watcher, .NET UIA host |
+| macOS | Partial | Accessibility permissions required |
+| Linux | Partial | AT-SPI2 recommended |
 
-## 👁️ Visual Awareness & Grid System
-
-Liku perceives your workspace through a dual-mode interaction layer.
-
-- **Passive Mode:** Fully click-through, remaining dormant until needed.
-- **Dot-Grid Targeting:** When the agent needs to target a specific point, it generates a coordinate grid (Coarse ~100px or Fine ~25px) using alphanumeric labels (e.g., `A1`, `C3.21`).
-- **Live UI Inspection:** Uses native accessibility trees (Windows UI Automation) to highlight and "lock onto" buttons, menus, and text fields in real-time.
-- **Window Topology Tags:** Live UI context distinguishes main windows, owned dialogs, floating palettes, and topmost windows with tags like `[MAIN]`, `[OWNED]`, `[PALETTE]`, and `[TOPMOST]`.
-- **Event-Driven Updates:** The UI watcher uses a 4-state machine (POLLING → EVENT_MODE → FALLBACK) to stream live focus, structure, and property changes with automatic health monitoring.
-
-### Global Shortcuts (Overlay)
-
-| Shortcut | Action |
-| :--- | :--- |
-| `Ctrl+Alt+Space` | Toggle the Chat Interface |
-| `Ctrl+Shift+O` | Toggle Overlay Visibility |
-| `Ctrl+Alt+F` | Toggle **Fine Grid** (precise targeting) |
-| `Ctrl+Alt+G` | Show all grids |
-| `Ctrl+Alt+I` | Toggle **Inspect Mode** (UI element highlighting) |
-| `Ctrl+Alt+=` / `Ctrl+Alt+-` | Zoom in / Zoom out |
-| `Ctrl+Alt+X` | Cancel current selection |
-
-## 🧠 Cognitive Layer
-
-The Liku agent includes a full cognitive stack that gives it persistent memory, learnable skills, and reflective self-improvement. All state is stored under `~/.liku/`.
-
-### Agentic Memory (A-MEM)
-Structured notes with Zettelkasten-style linking, keyword relevance scoring, and token-budgeted context injection. Memory is automatically injected into the system prompt and pruned via LRU when the note count exceeds 500.
-
-### Semantic Skill Router
-Keyword + TF-IDF based skill selection with cosine similarity scoring, plus grounded runtime scoping from the active process, window title, and browser host. Up to 3 skills are injected per turn within a 1500-token budget. Auto-learned AWM skills follow a lifecycle: `candidate` after first grounded success, `promoted` after repeated grounded success, and `quarantined` after repeated grounded failure so stale procedures stop biasing future plans.
-
-### Dynamic Tool Generation
-Users or the agent can propose new tools at runtime. Proposed tools go through a quarantine pipeline (`proposeTool()` → review → `approveTool()`) before becoming available. Approved tools execute in a sandboxed `child_process.fork()` worker with a stripped environment, a 5s execution timeout plus IPC grace, and 16 statically banned code patterns.
-
-### RLVR Telemetry & Reflection
-Structured telemetry tracks task outcomes, phase breakdowns, failure reasons, and grounded execution evidence such as running PIDs. Consecutive or session failure thresholds trigger a reflection pass that can be routed to a reasoning model (o1/o3-mini) via `/rmodel`. Reflection can directly maintain named skills, including quarantining stale ones instead of only writing notes. Telemetry JSONL files rotate at 10MB.
-
-## 🤖 Multi-Agent System
-
-The Liku Edition moves beyond single-turn responses with a trigger-based team of agents:
-
-- **Supervisor**: Routes work by trigger, delegates only, and keeps the overall plan coherent.
-- **Researcher**: Gathers codebase or documentation context when the target area is still unclear.
-- **Architect**: Checks reuse, design boundaries, and consistency before implementation starts.
-- **Builder**: Implements code only after the plan and target files are concrete.
-- **Verifier**: Runs independent validation immediately after code changes.
-- **Diagnostician**: Isolates root cause when verification fails or behavior is unclear.
-- **Vision Operator**: Interprets screenshots, overlay behavior, browser-visible state, and desktop UI evidence.
-
-The hook layer enforces role boundaries at runtime. Read-only roles are prevented from mutating files, and evidence-based stop hooks require structured outputs before subagents can finish. See [docs/AGENT_ORCHESTRATION.md](docs/AGENT_ORCHESTRATION.md) for the full routing and hook contract.
-
-### Chat Commands
-
-Shared chat commands available through `ai-service.handleCommand()` in both Electron chat and `liku chat`:
-
-| Command | Description |
-| :--- | :--- |
-| `/help` | Show command help. |
-| `/login` / `/logout` | Authenticate with GitHub Copilot or clear the stored session. |
-| `/model [key]` | Show grouped Copilot model inventory or switch models. |
-| `/provider [name]` | Show or switch AI provider (`copilot`, `openai`, `anthropic`, `ollama`). |
-| `/setkey <provider> <key>` | Set an API key for a provider. |
-| `/status` | Show provider, configured/requested/runtime model metadata, and capture counts. |
-| `/state [clear]` | Show or clear session-intent state. |
-| `/clear` | Clear conversation history, visual context, browser session state, and session-intent state. |
-| `/vision [on\|off]` | Inspect or clear visual context usage. |
-| `/capture` | Capture the current screen into visual context. |
-| `/memory [search <query>\|clear]` | Inspect or clear long-term memory notes. |
-| `/skills` | List learned skills. |
-| `/tools [approve\|revoke <name>]` | Inspect or manage dynamic tools. |
-| `/rmodel [model\|off]` | Set or clear the reflection-model override. |
-
-Terminal-chat-only controls handled directly in `src/cli/commands/chat.js`:
-
-| Command | Description |
-| :--- | :--- |
-| `/sequence [on\|off]` | Toggle guided step-by-step execution. |
-| `/recipes [on\|off]` | Toggle bounded popup follow-up recipes. |
-| `(plan) ...` | Route the prompt to the multi-agent supervisor in plan-only mode. |
-
-Electron-chat-only orchestration controls handled in `src/main/index.js`:
-
-| Command | Description |
-| :--- | :--- |
-| `/agentic` or `/agent` | Toggle automatic action execution in the overlay chat loop. |
-| `/orchestrate <task>` | Run the full multi-agent orchestrator. |
-| `/research <query>` | Run the researcher workflow. |
-| `/build <spec>` | Run the builder workflow. |
-| `/verify <target>` | Run the verifier workflow. |
-| `/agents` or `/agent-status` | Show multi-agent system status. |
-| `/agent-reset` | Reset the multi-agent system state. |
-
-The Electron chat loop also contains an experimental `/produce <prompt>` path that is wired through `src/main/index.js` but is not part of the core CLI documentation surface.
-
-### Runtime Enforcement
-
-The multi-agent layer is enforced at runtime via `.github/hooks/`:
-
-- **PreToolUse security gate** blocks file mutations for read-only roles and rejects dangerous shell patterns.
-- **PostToolUse audit log** appends structured JSONL entries for every tool invocation.
-- **SubagentStop quality gate** validates required evidence sections from role-specific artifacts under `.github/hooks/artifacts/` before allowing subagents to finish.
-- **Session start/end logging** records session boundaries.
-
-See [docs/AGENT_ORCHESTRATION.md](docs/AGENT_ORCHESTRATION.md) for the full hook and evidence contract.
-
-## 📦 Getting Started
-
-### Prerequisites
-
-- **Node.js** v18 or higher (v22 recommended)
-- **npm** v9 or higher
-
-#### Platform-Specific
-
-| Platform | UI Automation | Requirements |
-| :--- | :--- | :--- |
-| **Windows** | Full (UIA + events) | PowerShell v5.1+; [.NET 9 SDK](https://dotnet.microsoft.com/download) for building the UIA host |
-| **macOS** | Partial | Accessibility permissions required |
-| **Linux** | Partial | AT-SPI2 recommended |
-
-> **Windows UI Automation:** On `npm install`, a postinstall script automatically builds the .NET 9 UIA host binary if the .NET SDK is detected. If skipped, you can build it manually with `npm run build:uia`.
-
-### Installation
-
-#### Global Install (Recommended)
+### Global install
 
 ```bash
 npm install -g copilot-liku-cli
 ```
 
 Verify:
+
 ```bash
 liku --version
 liku --help
 ```
 
-Update:
-```bash
-npm update -g copilot-liku-cli
-```
+If you only need terminal-first chat and headless automation, this is enough to get started.
 
-#### From Source
+### From source
 
 ```bash
 git clone https://github.com/TayDa64/copilot-Liku-cli
 cd copilot-Liku-cli
 npm install
 npm link
+```
 
-# Build the .NET UIA host (Windows only)
+Start:
+
+```bash
+liku start
+# or
+npm start
+```
+
+### Windows UIA host
+
+On Windows, `npm install` runs a postinstall step that attempts to build the .NET UIA host if the **.NET 9+ SDK** is available.
+
+You can also build it manually:
+
+```bash
 npm run build:uia
 ```
 
-### Authenticate
+If .NET 9 is not available, install still succeeds, but the richer Windows UI-automation path is not built automatically.
 
-Set a GitHub personal access token with Copilot permissions:
-1. Visit [GitHub PAT Settings](https://github.com/settings/personal-access-tokens/new)
-2. Enable "Copilot Requests" permission.
-3. Export `GH_TOKEN` or `GITHUB_TOKEN` in your environment.
+---
 
-Or launch the agent and use the `/login` slash command.
+## Quick start
 
-> **Tip:** `liku chat` also supports `/login` and `/model`.
-
-## ✅ Quick Verify
+### Headless terminal chat
 
 ```bash
-# Full smoke suite
+liku chat
+```
+
+This is the most practical day-to-day workflow if you want terminal-first AI interaction without opening the Electron UI.
+
+Useful invocation options:
+
+- `liku chat --model <copilotModelKey>`
+- `liku chat --execute prompt|true|false`
+
+Useful chat commands:
+
+- `/help`
+- `/login`
+- `/model`
+- `/provider`
+- `/status`
+- `/capture`
+- `/vision on|off`
+- `/memory`
+- `/skills`
+- `/tools`
+- `/rmodel`
+- `/state`
+- `/clear`
+
+Terminal-chat-specific controls:
+
+- `/sequence on|off`
+- `/recipes on|off`
+- `(plan) ...` for plan-only orchestration routing
+
+### Visual Electron mode
+
+```bash
+liku start
+```
+
+or simply:
+
+```bash
+liku
+```
+
+This launches the Electron runtime with overlay support.
+
+### First validation steps
+
+```bash
+liku doctor
+npm run smoke:shortcuts
+npm run smoke:chat-direct
+npm run test:ui
+```
+
+If you want the most relevant current regression bundle for AI/service behavior:
+
+```bash
+npm run test:ai-focused
+```
+
+---
+
+## CLI commands
+
+The top-level CLI currently exposes these commands through `src/cli/liku.js`.
+
+| Command | Description |
+| --- | --- |
+| `start` | Start the Electron agent with overlay |
+| `doctor` | Diagnostics: version, environment, active window |
+| `chat` | Interactive AI chat in the terminal |
+| `click` | Click element by text or coordinates |
+| `find` | Find UI elements matching criteria |
+| `type` | Type text at the current cursor position |
+| `keys` | Send keyboard shortcut combinations |
+| `screenshot` | Capture a screenshot |
+| `verify-hash` | Poll until screenshot hash changes |
+| `verify-stable` | Wait until visual output is stable |
+| `window` | Focus or list windows |
+| `mouse` | Move mouse to coordinates |
+| `drag` | Drag between points |
+| `scroll` | Scroll up or down |
+| `wait` | Wait for element appearance/disappearance |
+| `repl` | Interactive automation shell |
+| `memory` | Inspect/manage memory notes |
+| `skills` | Inspect/manage skill library |
+| `tools` | Inspect/manage dynamic tool registry |
+| `analytics` | View telemetry analytics |
+
+Examples:
+
+```bash
+liku doctor --json
+liku chat --model gpt-4.1
+liku click "Submit"
+liku find "Save" --type Button
+liku keys ctrl+shift+s
+liku screenshot --memory --hash --json
+liku verify-stable --metric dhash --stable-ms 800 --timeout 15000 --interval 250 --json
+liku window "Visual Studio Code"
+```
+
+---
+
+## Visual awareness and automation model
+
+Liku uses multiple observation/control surfaces depending on what is available:
+
+- **Windows UI Automation** when semantic controls are discoverable
+- **active-window and watcher context** when semantic controls are limited
+- **screenshot capture** when visual grounding is needed
+- **grid/overlay workflows** in Electron mode
+
+### Overlay shortcuts
+
+Source of truth for these mappings is the current Electron main-process registration in `src/main/index.js`.
+
+| Shortcut | Action |
+| --- | --- |
+| `Ctrl+Alt+Space` | Toggle chat window |
+| `Ctrl+Shift+O` | Toggle overlay visibility |
+| `Ctrl+Alt+I` | Toggle inspect mode |
+| `Ctrl+Alt+F` | Toggle fine grid |
+| `Ctrl+Alt+G` | Show all grid levels |
+| `Ctrl+Alt+=` | Zoom in |
+| `Ctrl+Alt+-` | Zoom out |
+| `Ctrl+Alt+X` | Cancel current selection |
+
+---
+
+## TradingView support
+
+TradingView support is being hardened as a **professional advisory / observation** workflow, not a broker-execution workflow.
+
+### Current grounded surfaces
+
+The runtime now carries TradingView-specific grounding for:
+
+- chart/timeframe surfaces
+- alert dialogs
+- drawing tools
+- indicators / studies
+- Pine Editor
+- DOM / Depth of Market metadata
+
+### Current safety boundary
+
+Liku can reason about TradingView UI state, but it must remain advisory-safe.
+
+Specifically:
+
+- TradingView DOM order-entry actions are classified as high-risk
+- TradingView DOM flatten / reverse / cancel-all style controls are classified as critical
+- TradingView DOM order-entry and position-management actions are **blocked before execution** by advisory-only safety rails
+
+This means Liku can help observe, explain, and guide, but not place or manage DOM orders.
+
+---
+
+## Chat and agent architecture
+
+### Shared slash commands
+
+Handled through `ai-service.handleCommand()`:
+
+- `/help`
+- `/login` / `/logout`
+- `/model [key]`
+- `/provider [name]`
+- `/setkey <provider> <key>`
+- `/status`
+- `/state [clear]`
+- `/clear`
+- `/vision [on|off]`
+- `/capture`
+- `/memory [search <query>|clear]`
+- `/skills`
+- `/tools [approve|revoke <name>]`
+- `/rmodel [model|off]`
+
+### Electron-only orchestration commands
+
+Handled in `src/main/index.js`:
+
+- `/agentic` or `/agent`
+- `/orchestrate <task>`
+- `/research <query>`
+- `/build <spec>`
+- `/verify <target>`
+- `/agents` or `/agent-status`
+- `/agent-reset`
+- experimental `/produce <prompt>` path
+
+### Multi-agent roles
+
+- Supervisor
+- Researcher
+- Architect
+- Builder
+- Verifier
+- Diagnostician
+- Vision Operator
+
+Hook-based enforcement lives under `.github/hooks/` and is used to enforce role boundaries, audit tool calls, and validate subagent outputs.
+
+---
+
+## Cognitive layer
+
+The cognitive layer persists state under **`~/.liku/`**.
+
+Primary directories:
+
+```text
+~/.liku/
+├── memory/
+├── skills/
+├── tools/
+├── telemetry/
+└── preferences.json
+```
+
+Important note:
+
+- the project still contains migration support from legacy `~/.liku-cli/`
+- Electron session data still uses `~/.liku-cli/session/` to avoid Chromium lock issues
+
+### Included subsystems
+
+- **memory store** for structured notes
+- **skill router** with TF-IDF + scope-aware matching
+- **dynamic tools** with proposal/approval flow and sandbox execution
+- **telemetry + reflection** for bounded self-correction loops
+- **AWM** (Agent Workflow Memory) extraction from successful multi-step procedures
+
+---
+
+## Safety model
+
+Liku follows a fail-closed execution model.
+
+Examples of current safeguards:
+
+- destructive shortcuts such as close-window combos require explicit confirmation
+- low-confidence target interactions are elevated in risk
+- focus verification runs after action sequences
+- post-action verification checks foreground/process alignment after bounded retries
+- TradingView key workflows use observation checkpoints before follow-up typing
+- DOM trade-entry and order-management actions are blocked by policy
+
+This safety posture is intentional: if the system cannot establish enough evidence, it should stop rather than guess.
+
+---
+
+## Validation and testing
+
+### Most useful day-to-day suites
+
+```bash
+npm run test:ai-focused
+npm run test:windows-observation-flow
+npm run test:chat-actionability
+npm run test:ui
+```
+
+### Other useful scripts
+
+```bash
 npm run smoke
-
-# Individual checks
-npm run smoke:shortcuts    # Runtime + shortcut diagnostics
-npm run smoke:chat-direct  # Chat visibility (no keyboard emulation)
-npm run test:ui            # UI automation baseline
-
-# AI-service seam and compatibility checks
-node scripts/test-ai-service-contract.js
-node scripts/test-ai-service-commands.js
-node scripts/test-ai-service-provider-orchestration.js
-node scripts/test-ai-service-copilot-chat-response.js
-node scripts/test-ai-service-response-heuristics.js
-node scripts/test-ai-service-model-registry.js
-node scripts/test-ai-service-policy.js
-node scripts/test-ai-service-preference-parser.js
-node scripts/test-ai-service-provider-registry.js
-node scripts/test-ai-service-slash-command-helpers.js
-node scripts/test-ai-service-state.js
-node scripts/test-ai-service-ui-context.js
-node scripts/test-ai-service-visual-context.js
-
-# Cognitive layer tests
-node scripts/test-v015-cognitive-layer.js
-
-# Hook artifact enforcement proof
-node scripts/test-hook-artifacts.js
-
-# Inline proof harness
+npm run smoke:shortcuts
+npm run smoke:chat-direct
+npm run test:skills:inline
 npm run proof:inline -- --list-suites
-npm run proof:inline -- --suite repo-boundary-clarification --models cheap,latest-gpt
-npm run proof:inline -- --suite forgone-feature-suppression --models cheap,latest-gpt
-
-# Proof history hygiene
-npm run proof:inline:summary -- --suite repo-boundary-clarification --cohort phase3-postfix
-npm run proof:inline:summary -- --suite forgone-feature-suppression --cohort phase3-postfix
 ```
 
-The inline proof summary supports cohort filtering so older pre-fix runs do not get mixed with the corrected Phase 3 stale-state results. Use `--cohort phase3-postfix` when you want summaries scoped to the post-fix model-shortcut behavior only.
+The current focused AI bundle runs:
 
-## 🛠️ Technical Architecture
+- `scripts/test-windows-observation-flow.js`
+- `scripts/test-bug-fixes.js`
+- `scripts/test-chat-actionability.js`
+- `scripts/test-ai-service-contract.js`
+- `scripts/test-ai-service-browser-rewrite.js`
+- `scripts/test-ai-service-state.js`
 
-GitHub Copilot-Liku CLI is built on a "Defensive AI" architecture — minimal footprint, secure execution, and zero-intrusion workflows.
+---
 
-### Key Systems
+## Project structure
 
-| Layer | Description |
-| :--- | :--- |
-| **CLI** | Top-level command dispatcher in `src/cli/liku.js` plus headless command modules under `src/cli/commands/` |
-| **.NET UIA Host** | Persistent JSONL process for Windows UI Automation (thread-safe, event streaming) |
-| **UI Watcher** | 4-state machine: POLLING ↔ EVENT_MODE ↔ FALLBACK with health checks |
-| **Overlay** | Transparent Electron window with grid, inspect regions, and click-through passthrough |
-| **Agent System** | Supervisor routes to Researcher / Architect / Builder / Verifier / Diagnostician / Vision Operator |
-| **Cognitive Layer** | Memory (A-MEM), skill router (TF-IDF), dynamic tools (sandboxed), RLVR telemetry, reflection |
-| **Hook Enforcement** | PreToolUse security gate, PostToolUse audit log, SubagentStop quality gate |
-
-### AI Service Modularization
-
-`src/main/ai-service.js` remains the public compatibility facade, but the internals are split into focused modules so the CLI and Electron paths can keep a stable API while responsibilities move behind characterization tests.
-
-Extracted seams under `src/main/ai-service/`:
-
-| Module | Purpose |
-| :--- | :--- |
-| `system-prompt.js` | System prompt construction with cognitive context injection |
-| `message-builder.js` | Message assembly with explicit `skillsContext` and `memoryContext` |
-| `commands.js` | Slash command dispatch |
-| `providers/orchestration.js` | Multi-provider routing (Copilot, OpenAI, Anthropic, Ollama) |
-| `providers/copilot/` | Copilot-specific model registry and capability matrix |
-| `browser-session-state.js` | Browser continuity tracking across turns |
-| `conversation-history.js` | Conversation history management |
-| `ui-context.js` | UI state injection |
-| `visual-context.js` | Visual/screenshot context handling |
-| `actions/parse.js` | Action plan extraction from model responses |
-| `policy.js` | Policy and safety enforcement |
-| `preference-parser.js` | User preference parsing |
-| `response-heuristics.js` | Response quality scoring |
-| `slash-command-helpers.js` | Slash command utilities |
-
-### Security & Isolation
-
-- **Hardened Electron Environment**: Uses `contextIsolation` and `sandbox` modes to prevent prototype pollution.
-- **Content Security Policy (CSP)**: Strict headers to disable unauthorized external resources.
-- **Isolated Preload Bridges**: Secure IPC routing where renderers only have access to necessary system APIs.
-- **Sandboxed Dynamic Tools**: Dynamic tools execute in isolated `child_process.fork()` workers with stripped environment, a 5-second timeout, and static source validation before execution.
-- **PreToolUse Hook Enforcement**: Security gate blocks dangerous patterns and enforces role-based file access.
-- **No bundled secrets**: API keys read from environment variables only; tokens stored in `~/.liku/`.
-- **Telemetry Rotation**: RLVR telemetry writes daily JSONL logs under `~/.liku/telemetry/logs/` and rotates files at 10 MB.
-
-### Project Structure
-
-```
+```text
 src/
 ├── cli/                    # CLI entrypoint and command modules
-│   ├── liku.js             # Main CLI dispatcher with COMMANDS registry
-│   ├── commands/           # Individual command implementations
-│   └── util/               # CLI utilities
 ├── main/                   # Electron main process + AI service
-│   ├── index.js            # Electron app: overlay, chat window, IPC, shortcuts
-│   ├── ai-service.js       # Public AI compatibility facade
-│   └── ai-service/         # Extracted seams (providers, memory, skills, tools, etc.)
 ├── renderer/               # Electron renderer processes
-│   ├── chat/               # Chat window UI (HTML + JS + preload)
-│   └── overlay/            # Transparent overlay UI (HTML + JS + preload)
-├── native/                 # Native integrations
-│   ├── windows-uia/        # C# Windows UI Automation host (legacy)
-│   └── windows-uia-dotnet/ # .NET 9 Windows UIA host (active)
+├── native/                 # Native integrations, including Windows UIA hosts
 ├── shared/                 # Shared utilities
-│   ├── liku-home.js        # ~/.liku/ home directory management
-│   ├── token-counter.js    # BPE token counting (js-tiktoken)
-│   ├── grid-math.js        # Grid coordinate calculations
-│   └── inspect-types.js    # UI inspection type definitions
-└── assets/                 # Static assets (tray icon, etc.)
-scripts/                    # Test suites, smoke tests, and utilities
-.github/hooks/              # Runtime hook enforcement (security, audit, quality)
-bin/                        # Built .NET UIA host binary (WindowsUIA.exe)
+└── assets/                 # Static assets
+
+scripts/                    # Regression tests, smoke tests, proof harnesses
+docs/                       # Architecture and orchestration docs
+.github/hooks/              # Hook-based enforcement and artifacts
 ```
 
-## 📚 Documentation
+---
 
-- **[Installation Guide](INSTALLATION.md)** — Detailed installation instructions for all platforms
-- **[Quick Start Guide](QUICKSTART.md)** — Get up and running quickly
+## Documentation
 
-<details>
-<summary>Developer docs (available in the repo, not shipped with npm)</summary>
+- [QUICKSTART.md](QUICKSTART.md)
+- [INSTALLATION.md](INSTALLATION.md)
+- [ARCHITECTURE.md](ARCHITECTURE.md)
+- [CONFIGURATION.md](CONFIGURATION.md)
+- [TESTING.md](TESTING.md)
+- [CONTRIBUTING.md](CONTRIBUTING.md)
+- [RELEASE_PROCESS.md](RELEASE_PROCESS.md)
+- [docs/AGENT_ORCHESTRATION.md](docs/AGENT_ORCHESTRATION.md)
+- [docs/INTEGRATED_TERMINAL_ARCHITECTURE.md](docs/INTEGRATED_TERMINAL_ARCHITECTURE.md)
 
-- **[Contributing Guide](CONTRIBUTING.md)** — How to contribute to the project
-- **[Publishing Guide](PUBLISHING.md)** — How to publish the package to npm
-- **[Release Process](RELEASE_PROCESS.md)** — How to create and manage releases
-- **[Architecture](ARCHITECTURE.md)** — System design and architecture
-- **[Agent Orchestration](docs/AGENT_ORCHESTRATION.md)** — Multi-agent routing, role triggers, and hook enforcement
-- **[Integrated Terminal Architecture](docs/INTEGRATED_TERMINAL_ARCHITECTURE.md)** — Terminal integration design
-- **[Configuration](CONFIGURATION.md)** — Configuration options
-- **[Testing](TESTING.md)** — Testing guide and practices
-- **[Changelog](changelog.md)** — Full version history and cognitive layer evolution
+---
 
-</details>
+## Contributing and feedback
 
-## 📢 Feedback and Participation
+If you hit a problem, include as much of the following as possible in an issue:
 
-We're excited to have you join us early in the Copilot CLI journey.
+- platform
+- Node version
+- command used
+- active model/provider
+- whether you were using Electron mode or `liku chat`
+- reproduction steps
+- expected vs actual behavior
+- any relevant `doctor --json` output
 
-This is an early-stage preview, and we're building quickly. Expect frequent updates — please keep your client up to date for the latest features and fixes!
-
-Your insights are invaluable. Open an issue in this repo with the command, model, platform, and verification steps needed to reproduce what you saw.
+Liku is evolving quickly, and the most useful bug reports are the ones tied to real runtime behavior and clear reproduction steps.
