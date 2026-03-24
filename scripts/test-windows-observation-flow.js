@@ -2,6 +2,7 @@
 
 const assert = require('assert');
 const path = require('path');
+const fs = require('fs');
 
 const aiService = require(path.join(__dirname, '..', 'src', 'main', 'ai-service.js'));
 const { UIWatcher } = require(path.join(__dirname, '..', 'src', 'main', 'ui-watcher.js'));
@@ -121,6 +122,89 @@ async function run() {
     });
   });
 
+  await testAsync('TradingView alert accelerator blocks follow-up typing when no dialog change is observed', async () => {
+    const executed = [];
+    const foregroundSequence = [
+      { success: true, hwnd: 777, title: 'TradingView', processName: 'tradingview', windowKind: 'main' },
+      { success: true, hwnd: 777, title: 'TradingView', processName: 'tradingview', windowKind: 'main' },
+      { success: true, hwnd: 777, title: 'TradingView', processName: 'tradingview', windowKind: 'main' }
+    ];
+
+    await withPatchedSystemAutomation({
+      resolveWindowHandle: async (action) => action?.processName === 'tradingview' ? 777 : 0,
+      getForegroundWindowInfo: async () => {
+        return foregroundSequence.shift() || { success: true, hwnd: 777, title: 'TradingView', processName: 'tradingview', windowKind: 'main' };
+      },
+      focusWindow: async () => ({ success: true }),
+      getRunningProcessesByNames: async () => ([{ pid: 4242, processName: 'tradingview', mainWindowTitle: 'TradingView', startTime: '2026-03-23T00:00:00Z' }])
+    }, async () => {
+      const execResult = await aiService.executeActions({
+        thought: 'Open TradingView alert dialog and type a price',
+        verification: 'TradingView should open the alert dialog',
+        actions: [
+          { type: 'focus_window', title: 'TradingView', processName: 'tradingview' },
+          { type: 'key', key: 'alt+a', reason: 'Open the Create Alert dialog' },
+          { type: 'type', text: '20.02', reason: 'Enter alert price' }
+        ]
+      }, null, null, {
+        userMessage: 'open the create alert dialog in tradingview and type 20.02',
+        actionExecutor: async (action) => {
+          executed.push(action.type);
+          return { success: true, action: action.type, message: 'executed' };
+        }
+      });
+
+      assert.strictEqual(execResult.success, false, 'Execution should stop when the alert surface never changes');
+      assert.deepStrictEqual(executed, ['focus_window', 'key'], 'Typing should not continue after an unverified alert accelerator');
+      assert.strictEqual(execResult.observationCheckpoints.length, 1, 'A post-key observation checkpoint should be recorded');
+      assert.strictEqual(execResult.observationCheckpoints[0].verified, false, 'The checkpoint should fail when no dialog change is observed');
+      assert.strictEqual(execResult.results[1].observationCheckpoint.classification, 'dialog-open', 'Alert accelerator should classify as a dialog-open checkpoint');
+      assert(/surface change/i.test(execResult.results[1].error || ''), 'Failure should explain that no TradingView surface change was confirmed');
+    });
+  });
+
+  await testAsync('TradingView alert accelerator allows typing after observed dialog transition', async () => {
+    const executed = [];
+    const foregroundSequence = [
+      { success: true, hwnd: 777, title: 'TradingView', processName: 'tradingview', windowKind: 'main' },
+      { success: true, hwnd: 889, title: 'Create Alert - TradingView', processName: 'tradingview', windowKind: 'owned' },
+      { success: true, hwnd: 889, title: 'Create Alert - TradingView', processName: 'tradingview', windowKind: 'owned' },
+      { success: true, hwnd: 889, title: 'Create Alert - TradingView', processName: 'tradingview', windowKind: 'owned' }
+    ];
+
+    await withPatchedSystemAutomation({
+      resolveWindowHandle: async (action) => action?.processName === 'tradingview' ? 777 : 0,
+      getForegroundWindowInfo: async () => {
+        return foregroundSequence.shift() || { success: true, hwnd: 889, title: 'Create Alert - TradingView', processName: 'tradingview', windowKind: 'owned' };
+      },
+      focusWindow: async () => ({ success: true }),
+      getRunningProcessesByNames: async () => ([{ pid: 4242, processName: 'tradingview', mainWindowTitle: 'TradingView', startTime: '2026-03-23T00:00:00Z' }])
+    }, async () => {
+      const execResult = await aiService.executeActions({
+        thought: 'Open TradingView alert dialog and type a price',
+        verification: 'TradingView should open the alert dialog',
+        actions: [
+          { type: 'focus_window', title: 'TradingView', processName: 'tradingview' },
+          { type: 'key', key: 'alt+a', reason: 'Open the Create Alert dialog' },
+          { type: 'type', text: '20.02', reason: 'Enter alert price' }
+        ]
+      }, null, null, {
+        userMessage: 'open the create alert dialog in tradingview and type 20.02',
+        actionExecutor: async (action) => {
+          executed.push(action.type);
+          return { success: true, action: action.type, message: 'executed' };
+        }
+      });
+
+      assert.strictEqual(execResult.success, true, 'Execution should proceed after the alert dialog is observed');
+      assert.deepStrictEqual(executed, ['focus_window', 'key', 'type'], 'Typing should continue only after the dialog transition is verified');
+      assert.strictEqual(execResult.observationCheckpoints.length, 1, 'A post-key observation checkpoint should be returned');
+      assert.strictEqual(execResult.observationCheckpoints[0].verified, true, 'The checkpoint should pass after dialog observation');
+      assert.strictEqual(execResult.observationCheckpoints[0].observedChange, true, 'Dialog observation should record a visible foreground change');
+      assert.strictEqual(execResult.observationCheckpoints[0].foreground.hwnd, 889, 'Checkpoint should retarget typing to the dialog window handle');
+    });
+  });
+
   await testAsync('watcher waitForFreshState resolves after matching foreground update', async () => {
     const watcher = new UIWatcher({ pollInterval: 50 });
     watcher.cache.activeWindow = { hwnd: 111, title: 'Old Window', processName: 'code' };
@@ -174,6 +258,156 @@ async function run() {
     const context = watcher.getContextForAI();
     assert(context.includes('Freshness'), 'Stale watcher context should include a freshness warning');
     assert(context.includes('stale UI snapshot'), 'Stale watcher context should identify stale UI state explicitly');
+  });
+
+  await testAsync('chat continuation guard forces direct observation answer after screenshot-only detour', async () => {
+    const chatPath = path.join(__dirname, '..', 'src', 'cli', 'commands', 'chat.js');
+    const chatContent = fs.readFileSync(chatPath, 'utf8');
+
+    assert(chatContent.includes('isLikelyObservationInput(effectiveUserMessage) && isScreenshotOnlyPlan(contActionData)'), 'Chat loop should detect screenshot-only observation detours');
+    assert(chatContent.includes('buildForcedObservationAnswerPrompt(effectiveUserMessage)'), 'Chat loop should request a direct answer after screenshot-only detours');
+    assert(chatContent.includes('Respond now in natural language only — no JSON action block.'), 'Forced observation prompt should require a natural-language answer');
+  });
+
+  await testAsync('screenshot module reports fallback capture mode markers', async () => {
+    const screenshotPath = path.join(__dirname, '..', 'src', 'main', 'ui-automation', 'screenshot.js');
+    const screenshotContent = fs.readFileSync(screenshotPath, 'utf8');
+
+    assert(screenshotContent.includes('window-copyfromscreen'), 'Screenshot module should include window CopyFromScreen fallback mode');
+    assert(screenshotContent.includes('screen-copyfromscreen'), 'Screenshot module should label full-screen capture mode');
+    assert(screenshotContent.includes('captureMode'), 'Screenshot module should return capture mode metadata');
+  });
+
+  await testAsync('pending confirmations survive confirm call and resume executes remaining steps', async () => {
+    aiService.clearPendingAction();
+
+    const pending = {
+      actionId: 'action-test-confirm',
+      actionIndex: 0,
+      remainingActions: [
+        { type: 'key', key: 'enter', reason: 'Confirm 5m timeframe' },
+        { type: 'wait', ms: 10 }
+      ],
+      completedResults: [],
+      thought: 'Switch TradingView timeframe to 5m',
+      verification: 'TradingView should show 5m timeframe'
+    };
+
+    aiService.setPendingAction(pending);
+    const confirmed = aiService.confirmPendingAction('action-test-confirm');
+    assert(confirmed && confirmed.confirmed, 'confirmPendingAction should preserve the pending action and mark it confirmed');
+    assert(aiService.getPendingAction(), 'Pending action should still be available for resumeAfterConfirmation');
+
+    const originalExecuteAction = aiService.systemAutomation.executeAction;
+    const originalGetForegroundWindowInfo = aiService.systemAutomation.getForegroundWindowInfo;
+    const originalFocusWindow = aiService.systemAutomation.focusWindow;
+    try {
+      aiService.systemAutomation.executeAction = async (action) => ({ success: true, action: action.type, message: 'ok' });
+      aiService.systemAutomation.getForegroundWindowInfo = async () => ({ success: true, hwnd: 777, title: 'TradingView', processName: 'tradingview', windowKind: 'main' });
+      aiService.systemAutomation.focusWindow = async () => ({ success: true });
+
+      const resumed = await aiService.resumeAfterConfirmation(null, null, {
+        userMessage: 'yes, change the timeframe selector from 1m to 5m',
+        actionExecutor: async (action) => ({ success: true, action: action.type, message: 'executed' })
+      });
+
+      assert.strictEqual(resumed.success, true, 'resumeAfterConfirmation should execute the confirmed pending actions');
+      assert.strictEqual(aiService.getPendingAction(), null, 'Pending action should clear after successful resume');
+      assert.strictEqual(resumed.results.length, 2, 'Resume should execute both the confirmed action and remaining wait');
+      assert.strictEqual(resumed.observationCheckpoints.length, 1, 'Resume should return TradingView key checkpoint metadata');
+      assert.strictEqual(resumed.observationCheckpoints[0].verified, true, 'TradingView timeframe confirm should pass its bounded settle checkpoint');
+    } finally {
+      aiService.systemAutomation.executeAction = originalExecuteAction;
+      aiService.systemAutomation.getForegroundWindowInfo = originalGetForegroundWindowInfo;
+      aiService.systemAutomation.focusWindow = originalFocusWindow;
+      aiService.clearPendingAction();
+    }
+  });
+
+  await testAsync('benign timeframe enter does not require destructive-style confirmation', async () => {
+    const safety = aiService.analyzeActionSafety(
+      { type: 'key', key: 'enter', reason: 'Confirm 5m timeframe' },
+      { text: 'Change chart timeframe to 5m', buttonText: '', nearbyText: [] }
+    );
+
+    assert.strictEqual(safety.riskLevel, aiService.ActionRiskLevel.MEDIUM, 'Benign timeframe enter should remain medium risk');
+    assert.strictEqual(safety.requiresConfirmation, false, 'Benign timeframe enter should not require extra confirmation');
+  });
+
+  await testAsync('TradingView DOM order-entry actions are elevated to high risk', async () => {
+    const safety = aiService.analyzeActionSafety(
+      { type: 'click', reason: 'Place limit order from DOM order book' },
+      { text: 'Depth of Market', nearbyText: ['Limit Buy', 'Sell Mkt', 'Quantity'] }
+    );
+
+    assert(safety.riskLevel === aiService.ActionRiskLevel.HIGH || safety.riskLevel === aiService.ActionRiskLevel.CRITICAL, 'TradingView DOM order-entry actions should be high risk or higher');
+    assert.strictEqual(safety.requiresConfirmation, true, 'TradingView DOM order-entry actions should require confirmation');
+  });
+
+  await testAsync('TradingView DOM flatten controls are treated as critical risk', async () => {
+    const safety = aiService.analyzeActionSafety(
+      { type: 'click', reason: 'Flatten the position from the DOM trading panel' },
+      { text: 'Flatten', nearbyText: ['Depth of Market', 'Reverse', 'CXL ALL'] }
+    );
+
+    assert.strictEqual(safety.riskLevel, aiService.ActionRiskLevel.CRITICAL, 'TradingView DOM flatten actions should be critical risk');
+    assert.strictEqual(safety.requiresConfirmation, true, 'TradingView DOM flatten actions should require confirmation');
+  });
+
+  await testAsync('TradingView DOM order-entry actions are blocked before execution in advisory-only mode', async () => {
+    let executed = 0;
+
+    const execResult = await aiService.executeActions({
+      thought: 'Place a DOM order in TradingView',
+      verification: 'No DOM order should be placed',
+      actions: [
+        { type: 'click', reason: 'Place a limit order in the Depth of Market order book' }
+      ]
+    }, null, null, {
+      userMessage: 'place a limit order in the TradingView DOM',
+      actionExecutor: async (action) => {
+        executed++;
+        return { success: true, action: action.type, message: 'executed' };
+      }
+    });
+
+    assert.strictEqual(executed, 0, 'Advisory-only DOM order-entry actions should be blocked before execution');
+    assert.strictEqual(execResult.success, false, 'Advisory-only DOM order-entry actions should fail closed');
+    assert.strictEqual(execResult.results[0].blockedByPolicy, true, 'Blocked DOM order-entry should be marked as policy-blocked');
+    assert(/advisory-only/i.test(execResult.results[0].error || ''), 'Blocked DOM order-entry should explain the advisory-only safety rail');
+  });
+
+  await testAsync('TradingView DOM actions remain blocked when resuming after confirmation', async () => {
+    let executed = 0;
+    aiService.clearPendingAction();
+    aiService.setPendingAction({
+      actionId: 'action-test-dom-resume',
+      actionIndex: 0,
+      confirmed: true,
+      remainingActions: [
+        { type: 'click', reason: 'Flatten the position from the DOM trading panel' }
+      ],
+      completedResults: [],
+      thought: 'Flatten the TradingView DOM position',
+      verification: 'No DOM position action should execute'
+    });
+
+    try {
+      const resumed = await aiService.resumeAfterConfirmation(null, null, {
+        userMessage: 'yes, flatten the position in the DOM',
+        actionExecutor: async (action) => {
+          executed++;
+          return { success: true, action: action.type, message: 'executed' };
+        }
+      });
+
+      assert.strictEqual(executed, 0, 'Advisory-only DOM resume actions should be blocked before execution');
+      assert.strictEqual(resumed.success, false, 'Advisory-only DOM resume actions should fail closed');
+      assert.strictEqual(resumed.results[0].blockedByPolicy, true, 'Blocked DOM resume action should be marked as policy-blocked');
+      assert(/advisory-only/i.test(resumed.results[0].error || ''), 'Blocked DOM resume action should explain the advisory-only safety rail');
+    } finally {
+      aiService.clearPendingAction();
+    }
   });
 
   console.log('\n========================================');

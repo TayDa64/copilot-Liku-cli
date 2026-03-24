@@ -184,7 +184,22 @@ function isLikelyAutomationInput(text) {
   }
 
   // Lightweight intent signals for actual executable tasks.
-  return /(open|launch|search|play|click|type|press|scroll|drag|close|minimize|restore|focus|bring|navigate|go to|run|execute|find|select|choose|pick|screenshot|screen shot|capture)/i.test(t);
+  return /(open|launch|search|play|click|type|press|scroll|drag|close|minimize|restore|focus|bring|navigate|go to|run|execute|find|select|choose|pick|set|change|switch|adjust|update|create|add|remove|alert|timeframe|indicator|watchlist|tool|draw|place|save|submit|capture|screenshot|screen shot)/i.test(t);
+}
+
+function isLikelyApprovalOrContinuationInput(text) {
+  const t = String(text || '').trim().toLowerCase();
+  if (!t) return false;
+
+  return /^(yes|y|yeah|yep|sure|ok|okay|go ahead|do it|do that|please do|continue|proceed|next)$/i.test(t);
+}
+
+function shouldExecuteDetectedActions(currentLine, executionIntent, actionData) {
+  const hasActions = !!(actionData && Array.isArray(actionData.actions) && actionData.actions.length > 0);
+  if (!hasActions) return false;
+  if (isLikelyAutomationInput(executionIntent)) return true;
+  if (isLikelyApprovalOrContinuationInput(currentLine)) return true;
+  return false;
 }
 
 function isLikelyObservationInput(text) {
@@ -192,6 +207,35 @@ function isLikelyObservationInput(text) {
   if (!t) return false;
 
   return /(what do you see|what can you see|tell me what you see|describe( what)? you see|describe the (screen|window|app)|what controls|what can you use|what is visible|what's visible|enumerate.*controls|which controls)/i.test(t);
+}
+
+function isLikelyToolInventoryInput(text) {
+  const t = String(text || '').trim().toLowerCase();
+  if (!t) return false;
+
+  return /(what tools|what controls|tools you can use|controls you can use|what do you have access|what can you use)/i.test(t);
+}
+
+function isScreenshotOnlyPlan(actionData) {
+  const actions = Array.isArray(actionData?.actions) ? actionData.actions : [];
+  if (!actions.length) return false;
+
+  const meaningful = actions.filter((action) => action?.type !== 'wait');
+  if (!meaningful.length) return false;
+  return meaningful.every((action) => action?.type === 'screenshot');
+}
+
+function buildForcedObservationAnswerPrompt(userMessage) {
+  const inventoryHint = isLikelyToolInventoryInput(userMessage)
+    ? 'For the available-tools portion, organize the answer into exactly three buckets: direct UIA controls, reliable keyboard/window controls, and visible but screenshot-only controls.'
+    : 'Answer as a direct observation of the current app/window state.';
+
+  return [
+    'You already have fresh visual context for the current target window.',
+    'Do NOT request or plan another screenshot unless the latest capture explicitly failed or the screen materially changed.',
+    'Respond now in natural language only — no JSON action block.',
+    inventoryHint
+  ].join(' ');
 }
 
 function shouldAutoCaptureObservationAfterActions(userMessage, actions, execResult) {
@@ -491,6 +535,20 @@ async function autoCapture(ai, options = {}) {
         : 'Auto-captured screenshot for visual context.');
       return true;
     }
+
+    if (captureScope === 'window') {
+      warn('Active-window screenshot capture returned no data. Falling back to full-screen capture.');
+      const fallback = await screenshot({ memory: true, base64: true, metric: 'sha256' });
+      if (fallback && fallback.success && fallback.base64) {
+        ai.addVisualContext({
+          dataURL: `data:image/png;base64,${fallback.base64}`,
+          width: 0, height: 0, scope: 'screen', timestamp: Date.now()
+        });
+        info('Fallback full-screen screenshot captured for visual context.');
+        return true;
+      }
+    }
+
     warn(captureScope === 'window'
       ? 'Active-window screenshot capture returned no data.'
       : 'Screenshot capture returned no data.');
@@ -763,7 +821,7 @@ async function runChatLoop(ai, options) {
 
     if (!hasActions) continue;
 
-    if (!isLikelyAutomationInput(executionIntent)) {
+    if (!shouldExecuteDetectedActions(line, executionIntent, actionData)) {
       info('Non-action message detected; skipping action execution.');
       continue;
     }
@@ -1065,6 +1123,28 @@ async function runChatLoop(ai, options) {
 
         if (!contHasActions) {
           // AI responded with text only — task is likely complete or AI is reporting results.
+          break;
+        }
+
+        if (isLikelyObservationInput(effectiveUserMessage) && isScreenshotOnlyPlan(contActionData)) {
+          warn('Observation continuation requested another screenshot despite fresh visual context; forcing a direct answer instead.');
+          const forcedAnswerResp = await ai.sendMessage(buildForcedObservationAnswerPrompt(effectiveUserMessage), {
+            includeVisualContext: true,
+            model,
+            extraSystemMessages: continuationSystemMessages
+          });
+
+          if (!forcedAnswerResp.success) {
+            error(forcedAnswerResp.error || 'Forced observation answer failed');
+            break;
+          }
+
+          printAssistantMessage(forcedAnswerResp);
+          const forcedActions = ai.parseActions(forcedAnswerResp.message);
+          const forcedHasActions = !!(forcedActions && Array.isArray(forcedActions.actions) && forcedActions.actions.length > 0);
+          if (forcedHasActions) {
+            warn('Forced observation answer still returned actions; stopping to avoid screenshot-only loops.');
+          }
           break;
         }
 

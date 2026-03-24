@@ -99,6 +99,165 @@ const SPECIAL_KEYS = {
   'win': '^{ESC}', // Windows key approximation
 };
 
+const WINDOWS_KEY_VK_CODES = {
+  'a': 0x41, 'b': 0x42, 'c': 0x43, 'd': 0x44, 'e': 0x45, 'f': 0x46, 'g': 0x47, 'h': 0x48,
+  'i': 0x49, 'j': 0x4A, 'k': 0x4B, 'l': 0x4C, 'm': 0x4D, 'n': 0x4E, 'o': 0x4F, 'p': 0x50,
+  'q': 0x51, 'r': 0x52, 's': 0x53, 't': 0x54, 'u': 0x55, 'v': 0x56, 'w': 0x57, 'x': 0x58,
+  'y': 0x59, 'z': 0x5A,
+  '0': 0x30, '1': 0x31, '2': 0x32, '3': 0x33, '4': 0x34, '5': 0x35, '6': 0x36, '7': 0x37, '8': 0x38, '9': 0x39,
+  'enter': 0x0D, 'return': 0x0D, 'tab': 0x09, 'escape': 0x1B, 'esc': 0x1B,
+  'space': 0x20, 'backspace': 0x08, 'delete': 0x2E, 'del': 0x2E,
+  'up': 0x26, 'down': 0x28, 'left': 0x25, 'right': 0x27,
+  'home': 0x24, 'end': 0x23, 'pageup': 0x21, 'pagedown': 0x22,
+  'f1': 0x70, 'f2': 0x71, 'f3': 0x72, 'f4': 0x73, 'f5': 0x74, 'f6': 0x75,
+  'f7': 0x76, 'f8': 0x77, 'f9': 0x78, 'f10': 0x79, 'f11': 0x7A, 'f12': 0x7B,
+};
+
+function normalizeKeyComboParts(keyCombo) {
+  return String(keyCombo || '')
+    .toLowerCase()
+    .split('+')
+    .map(k => k.trim())
+    .filter(Boolean);
+}
+
+function isTradingViewLikeWindowContext(options = {}) {
+  const targetWindow = options?.targetWindow && typeof options.targetWindow === 'object'
+    ? options.targetWindow
+    : null;
+  const verifyTarget = options?.verifyTarget && typeof options.verifyTarget === 'object'
+    ? options.verifyTarget
+    : null;
+
+  const haystack = [
+    targetWindow?.processName,
+    targetWindow?.title,
+    verifyTarget?.appName,
+    verifyTarget?.requestedAppName,
+    verifyTarget?.normalizedAppName,
+    ...(Array.isArray(verifyTarget?.processNames) ? verifyTarget.processNames : []),
+    ...(Array.isArray(verifyTarget?.titleHints) ? verifyTarget.titleHints : [])
+  ]
+    .map((value) => String(value || '').trim().toLowerCase())
+    .filter(Boolean)
+    .join(' ');
+
+  return /tradingview|trading\s+view/.test(haystack);
+}
+
+function shouldUseSendInputForKeyCombo(keyCombo, options = {}) {
+  if (process.platform !== 'win32') return false;
+
+  const parts = normalizeKeyComboParts(keyCombo);
+  if (!parts.length) return false;
+
+  const hasWinKey = parts.includes('win') || parts.includes('windows') || parts.includes('super');
+  if (hasWinKey) return true;
+
+  const hasAlt = parts.includes('alt');
+  const isEnterOnly = parts.length === 1 && ['enter', 'return'].includes(parts[0]);
+
+  if (!hasAlt && !isEnterOnly) return false;
+  return isTradingViewLikeWindowContext(options);
+}
+
+async function pressKeyWithSendInput(keyCombo, options = {}) {
+  const parts = normalizeKeyComboParts(keyCombo);
+  const includeWinKey = !!options.includeWinKey;
+  const otherKeys = parts.filter((p) => !['win', 'windows', 'super'].includes(p));
+  const hasCtrl = otherKeys.includes('ctrl') || otherKeys.includes('control');
+  const hasAlt = otherKeys.includes('alt');
+  const hasShift = otherKeys.includes('shift');
+  const mainKey = otherKeys.find(p => !['ctrl', 'control', 'alt', 'shift'].includes(p)) || '';
+  const mainKeyCode = mainKey ? (WINDOWS_KEY_VK_CODES[mainKey] || mainKey.toUpperCase().charCodeAt(0)) : 0;
+
+  if (!includeWinKey && !hasCtrl && !hasAlt && !hasShift && !mainKeyCode) {
+    throw new Error(`Invalid key combo: ${keyCombo}`);
+  }
+
+  const script = `
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+
+public class WinKeyPress {
+    [StructLayout(LayoutKind.Sequential)]
+    public struct INPUT {
+        public uint type;
+        public InputUnion U;
+    }
+
+    [StructLayout(LayoutKind.Explicit)]
+    public struct InputUnion {
+        [FieldOffset(0)] public MOUSEINPUT mi;
+        [FieldOffset(0)] public KEYBDINPUT ki;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct MOUSEINPUT {
+        public int dx, dy;
+        public uint mouseData, dwFlags, time;
+        public IntPtr dwExtraInfo;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct KEYBDINPUT {
+        public ushort wVk;
+        public ushort wScan;
+        public uint dwFlags;
+        public uint time;
+        public IntPtr dwExtraInfo;
+    }
+
+    public const uint INPUT_KEYBOARD = 1;
+    public const uint KEYEVENTF_KEYUP = 0x0002;
+    public const ushort VK_LWIN = 0x5B;
+    public const ushort VK_CONTROL = 0x11;
+    public const ushort VK_SHIFT = 0x10;
+    public const ushort VK_MENU = 0x12;
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
+
+    public static void KeyDown(ushort vk) {
+        INPUT[] inputs = new INPUT[1];
+        inputs[0].type = INPUT_KEYBOARD;
+        inputs[0].U.ki.wVk = vk;
+        inputs[0].U.ki.dwFlags = 0;
+        SendInput(1, inputs, Marshal.SizeOf(typeof(INPUT)));
+    }
+
+    public static void KeyUp(ushort vk) {
+        INPUT[] inputs = new INPUT[1];
+        inputs[0].type = INPUT_KEYBOARD;
+        inputs[0].U.ki.wVk = vk;
+        inputs[0].U.ki.dwFlags = KEYEVENTF_KEYUP;
+        SendInput(1, inputs, Marshal.SizeOf(typeof(INPUT)));
+    }
+}
+"@
+
+# Press modifiers
+${includeWinKey ? '[WinKeyPress]::KeyDown([WinKeyPress]::VK_LWIN)' : ''}
+${hasCtrl ? '[WinKeyPress]::KeyDown([WinKeyPress]::VK_CONTROL)' : ''}
+${hasAlt ? '[WinKeyPress]::KeyDown([WinKeyPress]::VK_MENU)' : ''}
+${hasShift ? '[WinKeyPress]::KeyDown([WinKeyPress]::VK_SHIFT)' : ''}
+
+# Press main key if any
+${mainKeyCode ? `[WinKeyPress]::KeyDown(${mainKeyCode})
+Start-Sleep -Milliseconds 50
+[WinKeyPress]::KeyUp(${mainKeyCode})` : 'Start-Sleep -Milliseconds 100'}
+
+# Release modifiers in reverse order
+${hasShift ? '[WinKeyPress]::KeyUp([WinKeyPress]::VK_SHIFT)' : ''}
+${hasAlt ? '[WinKeyPress]::KeyUp([WinKeyPress]::VK_MENU)' : ''}
+${hasCtrl ? '[WinKeyPress]::KeyUp([WinKeyPress]::VK_CONTROL)' : ''}
+${includeWinKey ? '[WinKeyPress]::KeyUp([WinKeyPress]::VK_LWIN)' : ''}
+`;
+
+  await executePowerShell(script);
+}
+
 /**
  * Execute a PowerShell command and return result
  */
@@ -903,118 +1062,21 @@ Add-Type -AssemblyName System.Windows.Forms
  * Press a key or key combination (e.g., "ctrl+c", "enter", "alt+tab", "win+r")
  * Now supports Windows key using SendInput with virtual key codes
  */
-async function pressKey(keyCombo) {
-  const parts = keyCombo.toLowerCase().split('+').map(k => k.trim());
+async function pressKey(keyCombo, options = {}) {
+  const parts = normalizeKeyComboParts(keyCombo);
   
   // Check if Windows key is involved - requires special handling
   const hasWinKey = parts.includes('win') || parts.includes('windows') || parts.includes('super');
   
   if (hasWinKey) {
-    // Use SendInput for Windows key combos
-    const otherKeys = parts.filter(p => p !== 'win' && p !== 'windows' && p !== 'super');
-    const hasCtrl = otherKeys.includes('ctrl') || otherKeys.includes('control');
-    const hasAlt = otherKeys.includes('alt');
-    const hasShift = otherKeys.includes('shift');
-    const mainKey = otherKeys.find(p => !['ctrl', 'control', 'alt', 'shift'].includes(p)) || '';
-    
-    // Virtual key codes for common keys
-    const vkCodes = {
-      'a': 0x41, 'b': 0x42, 'c': 0x43, 'd': 0x44, 'e': 0x45, 'f': 0x46, 'g': 0x47, 'h': 0x48,
-      'i': 0x49, 'j': 0x4A, 'k': 0x4B, 'l': 0x4C, 'm': 0x4D, 'n': 0x4E, 'o': 0x4F, 'p': 0x50,
-      'q': 0x51, 'r': 0x52, 's': 0x53, 't': 0x54, 'u': 0x55, 'v': 0x56, 'w': 0x57, 'x': 0x58,
-      'y': 0x59, 'z': 0x5A,
-      '0': 0x30, '1': 0x31, '2': 0x32, '3': 0x33, '4': 0x34, '5': 0x35, '6': 0x36, '7': 0x37, '8': 0x38, '9': 0x39,
-      'enter': 0x0D, 'return': 0x0D, 'tab': 0x09, 'escape': 0x1B, 'esc': 0x1B,
-      'space': 0x20, 'backspace': 0x08, 'delete': 0x2E, 'del': 0x2E,
-      'up': 0x26, 'down': 0x28, 'left': 0x25, 'right': 0x27,
-      'home': 0x24, 'end': 0x23, 'pageup': 0x21, 'pagedown': 0x22,
-      'f1': 0x70, 'f2': 0x71, 'f3': 0x72, 'f4': 0x73, 'f5': 0x74, 'f6': 0x75,
-      'f7': 0x76, 'f8': 0x77, 'f9': 0x78, 'f10': 0x79, 'f11': 0x7A, 'f12': 0x7B,
-    };
-    
-    const mainKeyCode = mainKey ? (vkCodes[mainKey] || mainKey.charCodeAt(0)) : 0;
-    
-    const script = `
-Add-Type -TypeDefinition @"
-using System;
-using System.Runtime.InteropServices;
-
-public class WinKeyPress {
-    [StructLayout(LayoutKind.Sequential)]
-    public struct INPUT {
-        public uint type;
-        public InputUnion U;
-    }
-
-    [StructLayout(LayoutKind.Explicit)]
-    public struct InputUnion {
-        [FieldOffset(0)] public MOUSEINPUT mi;
-        [FieldOffset(0)] public KEYBDINPUT ki;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    public struct MOUSEINPUT {
-        public int dx, dy;
-        public uint mouseData, dwFlags, time;
-        public IntPtr dwExtraInfo;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    public struct KEYBDINPUT {
-        public ushort wVk;
-        public ushort wScan;
-        public uint dwFlags;
-        public uint time;
-        public IntPtr dwExtraInfo;
-    }
-
-    public const uint INPUT_KEYBOARD = 1;
-    public const uint KEYEVENTF_KEYUP = 0x0002;
-    public const ushort VK_LWIN = 0x5B;
-    public const ushort VK_CONTROL = 0x11;
-    public const ushort VK_SHIFT = 0x10;
-    public const ushort VK_MENU = 0x12; // Alt
-
-    [DllImport("user32.dll", SetLastError = true)]
-    public static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
-
-    public static void KeyDown(ushort vk) {
-        INPUT[] inputs = new INPUT[1];
-        inputs[0].type = INPUT_KEYBOARD;
-        inputs[0].U.ki.wVk = vk;
-        inputs[0].U.ki.dwFlags = 0;
-        SendInput(1, inputs, Marshal.SizeOf(typeof(INPUT)));
-    }
-
-    public static void KeyUp(ushort vk) {
-        INPUT[] inputs = new INPUT[1];
-        inputs[0].type = INPUT_KEYBOARD;
-        inputs[0].U.ki.wVk = vk;
-        inputs[0].U.ki.dwFlags = KEYEVENTF_KEYUP;
-        SendInput(1, inputs, Marshal.SizeOf(typeof(INPUT)));
-    }
-}
-"@
-
-# Press modifiers
-[WinKeyPress]::KeyDown([WinKeyPress]::VK_LWIN)
-${hasCtrl ? '[WinKeyPress]::KeyDown([WinKeyPress]::VK_CONTROL)' : ''}
-${hasAlt ? '[WinKeyPress]::KeyDown([WinKeyPress]::VK_MENU)' : ''}
-${hasShift ? '[WinKeyPress]::KeyDown([WinKeyPress]::VK_SHIFT)' : ''}
-
-# Press main key if any
-${mainKeyCode ? `[WinKeyPress]::KeyDown(${mainKeyCode})
-Start-Sleep -Milliseconds 50
-[WinKeyPress]::KeyUp(${mainKeyCode})` : 'Start-Sleep -Milliseconds 100'}
-
-# Release modifiers in reverse order
-${hasShift ? '[WinKeyPress]::KeyUp([WinKeyPress]::VK_SHIFT)' : ''}
-${hasAlt ? '[WinKeyPress]::KeyUp([WinKeyPress]::VK_MENU)' : ''}
-${hasCtrl ? '[WinKeyPress]::KeyUp([WinKeyPress]::VK_CONTROL)' : ''}
-[WinKeyPress]::KeyUp([WinKeyPress]::VK_LWIN)
-`;
-    await executePowerShell(script);
+    await pressKeyWithSendInput(keyCombo, { includeWinKey: true });
     console.log(`[AUTOMATION] Pressed Windows key combo: ${keyCombo} (using SendInput)`);
+    return;
+  }
+
+  if (shouldUseSendInputForKeyCombo(keyCombo, options)) {
+    await pressKeyWithSendInput(keyCombo, { includeWinKey: false });
+    console.log(`[AUTOMATION] Pressed key: ${keyCombo} (SendInput TradingView-safe path)`);
     return;
   }
   
@@ -2134,7 +2196,7 @@ async function executeAction(action) {
         break;
         
       case ACTION_TYPES.KEY:
-        await pressKey(action.key);
+        await pressKey(action.key, action);
         result.message = `Pressed ${action.key}`;
         break;
         
@@ -2642,6 +2704,7 @@ module.exports = {
   typeText,
   focusWindow,
   pressKey,
+  shouldUseSendInputForKeyCombo,
   scroll,
   drag,
   sleep,

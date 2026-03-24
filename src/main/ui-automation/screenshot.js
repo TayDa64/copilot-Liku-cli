@@ -50,6 +50,7 @@ async function screenshot(options = {}) {
 Add-Type @'
 using System;
 using System.Drawing;
+using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
 
 public class WindowCapture {
@@ -58,32 +59,57 @@ public class WindowCapture {
     
     [StructLayout(LayoutKind.Sequential)]
     public struct RECT { public int Left, Top, Right, Bottom; }
-    
-    public static Bitmap Capture(IntPtr hwnd) {
+
+    public static Bitmap CapturePrintWindow(IntPtr hwnd) {
         RECT rect;
         GetWindowRect(hwnd, out rect);
         int w = rect.Right - rect.Left;
         int h = rect.Bottom - rect.Top;
         if (w <= 0 || h <= 0) return null;
-        
+
         var bmp = new Bitmap(w, h);
         using (var g = Graphics.FromImage(bmp)) {
             IntPtr hdc = g.GetHdc();
-            PrintWindow(hwnd, hdc, 2);
+        bool ok = PrintWindow(hwnd, hdc, 2);
             g.ReleaseHdc(hdc);
+        if (!ok) {
+          bmp.Dispose();
+          return null;
+        }
         }
         return bmp;
+    }
+
+    public static Bitmap CaptureFromScreen(IntPtr hwnd) {
+      RECT rect;
+      GetWindowRect(hwnd, out rect);
+      int w = rect.Right - rect.Left;
+      int h = rect.Bottom - rect.Top;
+      if (w <= 0 || h <= 0) return null;
+
+      var bmp = new Bitmap(w, h, PixelFormat.Format32bppArgb);
+      using (var g = Graphics.FromImage(bmp)) {
+        g.CopyFromScreen(rect.Left, rect.Top, 0, 0, new Size(w, h), CopyPixelOperation.SourceCopy);
+      }
+      return bmp;
     }
 }
 '@
 
 Add-Type -AssemblyName System.Drawing
-$bmp = [WindowCapture]::Capture([IntPtr]::new(${windowHwnd}))
+  $captureMode = 'window-printwindow'
+  $hwnd = [IntPtr]::new(${windowHwnd})
+  $bmp = [WindowCapture]::CapturePrintWindow($hwnd)
+  if ($bmp -eq $null) {
+    $bmp = [WindowCapture]::CaptureFromScreen($hwnd)
+    $captureMode = 'window-copyfromscreen'
+  }
 `;
   } else if (region) {
     // Capture region
     captureScript = `
 Add-Type -AssemblyName System.Drawing
+  $captureMode = 'region-copyfromscreen'
 $bmp = New-Object System.Drawing.Bitmap(${region.width}, ${region.height})
 $g = [System.Drawing.Graphics]::FromImage($bmp)
 $g.CopyFromScreen(${region.x}, ${region.y}, 0, 0, $bmp.Size)
@@ -95,6 +121,7 @@ $g.Dispose()
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
+  $captureMode = 'screen-copyfromscreen'
 $screen = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
 $bmp = New-Object System.Drawing.Bitmap($screen.Width, $screen.Height)
 $g = [System.Drawing.Graphics]::FromImage($bmp)
@@ -157,6 +184,8 @@ $base64 = [System.Convert]::ToBase64String($bytes)
 Write-Output "SCREENSHOT_BASE64:$base64"
 ` : ''}
 
+Write-Output "SCREENSHOT_CAPTURE_MODE:$captureMode"
+
 ${memory ? "" : `$path = '${(outputPath || '').replace(/\\/g, '\\\\').replace(/'/g, "''")}'\n[System.IO.File]::WriteAllBytes($path, $bytes)\nWrite-Output \"SCREENSHOT_PATH:$path\"\n`}
 `;
 
@@ -170,11 +199,13 @@ ${memory ? "" : `$path = '${(outputPath || '').replace(/\\/g, '\\\\').replace(/'
     
     const base64Match = result.stdout.match(/SCREENSHOT_BASE64:(.+)/);
     const dhashMatch = result.stdout.match(/SCREENSHOT_DHASH:([0-9A-Fa-f]{16})/);
+    const captureModeMatch = result.stdout.match(/SCREENSHOT_CAPTURE_MODE:(.+)/);
 
     const pathMatch = result.stdout.match(/SCREENSHOT_PATH:(.+)/);
     const screenshotPath = pathMatch ? pathMatch[1].trim() : outputPath;
     const base64 = base64Match ? base64Match[1].trim() : null;
     const dhash = dhashMatch ? dhashMatch[1].trim().toLowerCase() : null;
+    const captureMode = captureModeMatch ? captureModeMatch[1].trim() : null;
 
     const hash = base64
       ? crypto.createHash('sha256').update(Buffer.from(base64, 'base64')).digest('hex')
@@ -184,10 +215,10 @@ ${memory ? "" : `$path = '${(outputPath || '').replace(/\\/g, '\\\\').replace(/'
       log(`Screenshot saved to: ${screenshotPath}`);
     }
 
-    return { success: true, path: screenshotPath || null, base64, hash, dhash };
+    return { success: true, path: screenshotPath || null, base64, hash, dhash, captureMode };
   } catch (err) {
     log(`Screenshot error: ${err.message}`, 'error');
-    return { success: false, path: null, base64: null, hash: null, dhash: null };
+    return { success: false, path: null, base64: null, hash: null, dhash: null, captureMode: null };
   }
 }
 
@@ -202,7 +233,7 @@ async function screenshotActiveWindow(options = {}) {
   const activeWindow = await getActiveWindow();
   
   if (!activeWindow) {
-    return { success: false, path: null, base64: null, hash: null, dhash: null };
+    return { success: false, path: null, base64: null, hash: null, dhash: null, captureMode: null };
   }
   
   return screenshot({ ...options, windowHwnd: activeWindow.hwnd });
@@ -220,7 +251,7 @@ async function screenshotElement(criteria, options = {}) {
   const element = await findElement(criteria);
   
   if (!element || !element.bounds) {
-    return { success: false, path: null, base64: null, hash: null, dhash: null };
+    return { success: false, path: null, base64: null, hash: null, dhash: null, captureMode: null };
   }
   
   return screenshot({ ...options, region: element.bounds });

@@ -1837,8 +1837,8 @@ const DANGER_PATTERNS = [
   /\b(logout|log out|sign out|deactivate|close account|cancel subscription)\b/i,
   // System actions
   /\b(shutdown|restart|reboot|sleep|hibernate|power off)\b/i,
-  // Confirmation buttons with risk
-  /\b(confirm|yes,? delete|yes,? remove|permanently|irreversible|cannot be undone)\b/i,
+  // Confirmation text with explicitly destructive/irreversible context
+  /\b(yes,?\s*(delete|remove|reset|uninstall)|confirm\s+(delete|remove|reset|purchase|payment|transfer|subscription)|permanently|irreversible|cannot be undone)\b/i,
   // Administrative actions
   /\b(admin|administrator|root|sudo|elevated|run as)\b/i
 ];
@@ -1871,6 +1871,8 @@ function analyzeActionSafety(action, targetInfo = {}) {
     riskLevel: ActionRiskLevel.SAFE,
     warnings: [],
     requiresConfirmation: false,
+    blockExecution: false,
+    blockReason: null,
     description: '',
     timestamp: Date.now()
   };
@@ -1985,10 +1987,27 @@ function analyzeActionSafety(action, targetInfo = {}) {
     action.reason || '',
     ...(targetInfo.nearbyText || [])
   ].join(' ');
+
+  const benignEnterIntent = action?.type === 'key'
+    && /(enter|return)/i.test(String(action?.key || ''))
+    && /\b(time\s*frame|timeframe|chart|symbol|watchlist|indicator|search|open|focus|switch|selector|tab|5m|1m|15m|30m|1h|4h|1d)\b/i.test(textToCheck)
+    && !/\b(delete|remove|purchase|payment|transfer|permanent|irreversible|shutdown|restart|unsubscribe|close account)\b/i.test(textToCheck);
+
+  const tradingDomainRisk = detectTradingDomainActionRisk(textToCheck);
+  if (tradingDomainRisk) {
+    result.riskLevel = tradingDomainRisk.riskLevel;
+    result.warnings.push(tradingDomainRisk.warning);
+    result.requiresConfirmation = !!tradingDomainRisk.requiresConfirmation;
+    result.blockExecution = !!tradingDomainRisk.blockExecution;
+    result.blockReason = tradingDomainRisk.blockReason || result.blockReason;
+  }
   
   // Check for danger patterns
   for (const pattern of DANGER_PATTERNS) {
     if (pattern.test(textToCheck)) {
+      if (benignEnterIntent && /confirm/i.test(String(textToCheck.match(pattern)?.[0] || ''))) {
+        continue;
+      }
       result.riskLevel = ActionRiskLevel.HIGH;
       result.warnings.push(`Detected risky keyword: ${textToCheck.match(pattern)?.[0]}`);
       result.requiresConfirmation = true;
@@ -2095,9 +2114,12 @@ function clearPendingAction() {
  */
 function confirmPendingAction(actionId) {
   if (pendingAction && pendingAction.actionId === actionId) {
-    const action = pendingAction;
-    pendingAction = null;
-    return action;
+    pendingAction = {
+      ...pendingAction,
+      confirmed: true,
+      confirmedAt: Date.now()
+    };
+    return pendingAction;
   }
   return null;
 }
@@ -2363,8 +2385,17 @@ const APP_NAME_PROFILES = [
     launchQuery: 'TradingView',
     aliases: ['tradingview', 'trading view', 'tradeingview', 'tradeing view'],
     processNames: ['tradingview'],
-    titleHints: ['TradingView'],
-    popupKeywords: ['signin', 'login', 'update', 'workspace', 'chart']
+    titleHints: ['TradingView', 'TradingView Desktop', 'Create Alert - TradingView', 'Alerts - TradingView', 'Pine Editor', 'Depth of Market', 'Object Tree'],
+    popupKeywords: ['signin', 'login', 'update', 'workspace', 'chart', 'alert', 'create alert', 'time interval', 'interval', 'symbol search', 'indicator', 'pine editor', 'depth of market', 'dom', 'order book', 'drawing tools', 'object tree'],
+    dialogTitleHints: ['Create Alert', 'Alerts', 'Alert', 'Time Interval', 'Interval', 'Indicators', 'Symbol Search', 'Pine Editor', 'Depth of Market', 'DOM', 'Object Tree'],
+    chartKeywords: ['chart', 'timeframe', 'time frame', 'interval', 'symbol', 'watchlist', 'indicator', '5m', '15m', '1h', '4h', '1d', 'drawing', 'drawings', 'trend line', 'anchored vwap', 'volume profile', 'dom', 'order book', 'pine editor'],
+    dialogKeywords: ['alert', 'create alert', 'alerts', 'interval', 'time interval', 'indicator', 'symbol', 'pine editor', 'dom', 'depth of market', 'order book', 'object tree'],
+    drawingKeywords: ['drawing', 'drawings', 'trend line', 'ray', 'extended line', 'pitchfork', 'fibonacci', 'fib', 'brush', 'rectangle', 'ellipse', 'path', 'polyline', 'measure', 'anchored text', 'note', 'anchored vwap', 'anchored volume profile', 'fixed range volume profile', 'object tree'],
+    indicatorKeywords: ['indicator', 'indicators', 'study', 'studies', 'overlay', 'oscillator', 'anchored vwap', 'volume profile', 'fixed range volume profile', 'strategy tester'],
+    pineKeywords: ['pine', 'pine editor', 'script', 'scripts', 'add to chart', 'publish script', 'version history', 'pine logs', 'profiler', 'strategy tester'],
+    domKeywords: ['dom', 'depth of market', 'order book', 'trading panel', 'tier 2', 'level 2', 'buy mkt', 'sell mkt', 'limit order', 'stop order', 'flatten', 'reverse', 'cxl all'],
+    preferredWindowKinds: ['main', 'owned', 'palette'],
+    dialogWindowKinds: ['owned', 'palette', 'main']
   },
   {
     displayName: 'Visual Studio Code',
@@ -2523,6 +2554,33 @@ function resolveNormalizedAppIdentity(appName) {
     ...DEFAULT_VERIFY_POPUP_KEYWORDS,
     ...(bestProfile?.popupKeywords || [])
   ].map((value) => String(value || '').trim().toLowerCase()).filter(Boolean)));
+  const dialogTitleHints = Array.from(new Set([
+    ...(bestProfile?.dialogTitleHints || [])
+  ].map((value) => String(value || '').trim()).filter(Boolean)));
+  const chartKeywords = Array.from(new Set([
+    ...(bestProfile?.chartKeywords || [])
+  ].map((value) => String(value || '').trim().toLowerCase()).filter(Boolean)));
+  const dialogKeywords = Array.from(new Set([
+    ...(bestProfile?.dialogKeywords || [])
+  ].map((value) => String(value || '').trim().toLowerCase()).filter(Boolean)));
+  const drawingKeywords = Array.from(new Set([
+    ...(bestProfile?.drawingKeywords || [])
+  ].map((value) => String(value || '').trim().toLowerCase()).filter(Boolean)));
+  const indicatorKeywords = Array.from(new Set([
+    ...(bestProfile?.indicatorKeywords || [])
+  ].map((value) => String(value || '').trim().toLowerCase()).filter(Boolean)));
+  const pineKeywords = Array.from(new Set([
+    ...(bestProfile?.pineKeywords || [])
+  ].map((value) => String(value || '').trim().toLowerCase()).filter(Boolean)));
+  const domKeywords = Array.from(new Set([
+    ...(bestProfile?.domKeywords || [])
+  ].map((value) => String(value || '').trim().toLowerCase()).filter(Boolean)));
+  const preferredWindowKinds = Array.from(new Set([
+    ...(bestProfile?.preferredWindowKinds || [])
+  ].map((value) => String(value || '').trim().toLowerCase()).filter(Boolean)));
+  const dialogWindowKinds = Array.from(new Set([
+    ...(bestProfile?.dialogWindowKinds || [])
+  ].map((value) => String(value || '').trim().toLowerCase()).filter(Boolean)));
 
   return {
     requestedName,
@@ -2531,7 +2589,16 @@ function resolveNormalizedAppIdentity(appName) {
     matchedBy,
     processNames,
     titleHints,
-    popupKeywords
+    popupKeywords,
+    dialogTitleHints,
+    chartKeywords,
+    dialogKeywords,
+    drawingKeywords,
+    indicatorKeywords,
+    pineKeywords,
+    domKeywords,
+    preferredWindowKinds,
+    dialogWindowKinds
   };
 }
 
@@ -2552,7 +2619,16 @@ function buildVerifyTargetHintFromAppName(appName) {
     launchQuery: identity?.launchQuery || String(appName || '').trim(),
     processNames: identity?.processNames || [],
     titleHints: identity?.titleHints || [],
-    popupKeywords: identity?.popupKeywords || [...DEFAULT_VERIFY_POPUP_KEYWORDS]
+    popupKeywords: identity?.popupKeywords || [...DEFAULT_VERIFY_POPUP_KEYWORDS],
+    dialogTitleHints: identity?.dialogTitleHints || [],
+    chartKeywords: identity?.chartKeywords || [],
+    dialogKeywords: identity?.dialogKeywords || [],
+    drawingKeywords: identity?.drawingKeywords || [],
+    indicatorKeywords: identity?.indicatorKeywords || [],
+    pineKeywords: identity?.pineKeywords || [],
+    domKeywords: identity?.domKeywords || [],
+    preferredWindowKinds: identity?.preferredWindowKinds || [],
+    dialogWindowKinds: identity?.dialogWindowKinds || []
   };
 }
 
@@ -3449,6 +3525,9 @@ const POST_ACTION_VERIFY_MAX_POLL_CYCLES = 8;
 const POPUP_RECIPE_MAX_ACTIONS = 6;
 const FOCUS_VERIFY_SETTLE_MS = 250;
 const FOCUS_VERIFY_MAX_RETRIES = 2;
+const KEY_CHECKPOINT_SETTLE_MS = 240;
+const KEY_CHECKPOINT_TIMEOUT_MS = 1400;
+const KEY_CHECKPOINT_MAX_POLLS = 2;
 
 function sleepMs(ms) {
   return new Promise(resolve => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
@@ -3459,6 +3538,307 @@ function normalizeTextForMatch(value) {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, ' ')
     .trim();
+}
+
+function mergeUniqueKeywords(...groups) {
+  return Array.from(new Set(groups
+    .flat()
+    .map((value) => String(value || '').trim().toLowerCase())
+    .filter(Boolean)));
+}
+
+function extractKeyObservationKeywords(text = '') {
+  const normalized = normalizeTextForMatch(text);
+  if (!normalized) return [];
+
+  const keywords = [];
+  if (/\b(alert|create alert|price alert|alerts)\b/i.test(normalized)) {
+    keywords.push('alert', 'create alert', 'alerts');
+  }
+  if (/\b(time\s*frame|timeframe|time interval|interval)\b/i.test(normalized)) {
+    keywords.push('time interval', 'interval', 'timeframe');
+  }
+  if (/\b(symbol|ticker|search)\b/i.test(normalized)) {
+    keywords.push('symbol', 'symbol search', 'search');
+  }
+  if (/\b(indicator|study|studies)\b/i.test(normalized)) {
+    keywords.push('indicator', 'indicators');
+  }
+  if (/\b(draw|drawing|drawings|trend\s*line|ray|pitchfork|fibonacci|fib|brush|rectangle|ellipse|path|polyline|measure|object tree|anchored text|note)\b/i.test(normalized)) {
+    keywords.push('drawing', 'drawings', 'trend line', 'object tree');
+  }
+  if (/\b(anchored\s*vwap|vwap|volume profile|fixed range volume profile|anchored volume profile)\b/i.test(normalized)) {
+    keywords.push('anchored vwap', 'volume profile', 'fixed range volume profile');
+  }
+  if (/\b(pine|pine editor|script|add to chart|publish script|version history|pine logs|profiler)\b/i.test(normalized)) {
+    keywords.push('pine', 'pine editor', 'script', 'add to chart', 'pine logs', 'profiler');
+  }
+  if (/\b(dom|depth of market|order book|trading panel|tier\s*2|level\s*2)\b/i.test(normalized)) {
+    keywords.push('dom', 'depth of market', 'order book', 'trading panel');
+  }
+  return mergeUniqueKeywords(keywords);
+}
+
+function detectTradingDomainActionRisk(text = '') {
+  const normalized = normalizeTextForMatch(text);
+  if (!normalized) return null;
+
+  const domContext = /\b(dom|depth of market|order book|trading panel|tier\s*2|level\s*2|buy mkt|sell mkt|limit buy|limit sell|stop buy|stop sell|cxl all|placed order|modify order|flatten|reverse)\b/i.test(normalized);
+  if (!domContext) return null;
+
+  if (/\b(flatten|reverse|cxl all|cancel all orders|cancel all|close position|reverse position)\b/i.test(normalized)) {
+    return {
+      riskLevel: ActionRiskLevel.CRITICAL,
+      warning: 'TradingView DOM position/order-management action detected',
+      requiresConfirmation: true,
+      blockExecution: true,
+      blockReason: 'Advisory-only safety rail blocked a TradingView DOM position/order-management action'
+    };
+  }
+
+  if (/\b(buy mkt|sell mkt|market order|limit order|stop order|limit buy|limit sell|stop buy|stop sell|modify order|place order|qty|quantity)\b/i.test(normalized)) {
+    return {
+      riskLevel: ActionRiskLevel.HIGH,
+      warning: 'TradingView DOM order-entry action detected',
+      requiresConfirmation: true,
+      blockExecution: true,
+      blockReason: 'Advisory-only safety rail blocked a TradingView DOM order-entry action'
+    };
+  }
+
+  return null;
+}
+
+function summarizeForegroundSignature(foreground) {
+  if (!foreground || !foreground.success) return null;
+  return {
+    hwnd: Number(foreground.hwnd || 0) || 0,
+    title: String(foreground.title || '').trim(),
+    processName: String(foreground.processName || '').trim().toLowerCase(),
+    windowKind: String(foreground.windowKind || '').trim().toLowerCase(),
+    isTopmost: !!foreground.isTopmost,
+    isToolWindow: !!foreground.isToolWindow,
+    isMinimized: !!foreground.isMinimized,
+    isMaximized: !!foreground.isMaximized
+  };
+}
+
+function didForegroundObservationChange(beforeForeground, afterForeground) {
+  const before = summarizeForegroundSignature(beforeForeground);
+  const after = summarizeForegroundSignature(afterForeground);
+  if (!before || !after) return false;
+
+  return before.hwnd !== after.hwnd
+    || before.title !== after.title
+    || before.processName !== after.processName
+    || before.windowKind !== after.windowKind
+    || before.isTopmost !== after.isTopmost
+    || before.isToolWindow !== after.isToolWindow
+    || before.isMinimized !== after.isMinimized
+    || before.isMaximized !== after.isMaximized;
+}
+
+function isTradingViewTargetHint(target) {
+  if (!target || typeof target !== 'object') return false;
+  const haystack = [
+    target.appName,
+    target.requestedAppName,
+    target.normalizedAppName,
+    ...(Array.isArray(target.processNames) ? target.processNames : []),
+    ...(Array.isArray(target.titleHints) ? target.titleHints : [])
+  ]
+    .map((value) => String(value || '').trim().toLowerCase())
+    .filter(Boolean)
+    .join(' ');
+
+  return /tradingview|trading\s+view/.test(haystack);
+}
+
+function inferKeyObservationCheckpoint(action, actionData, actionIndex, options = {}) {
+  if (!action || action.type !== 'key') return null;
+
+  const key = String(action.key || '').trim().toLowerCase();
+  if (!key || (!key.includes('alt') && !/(^|\+)enter$|^enter$|^return$/i.test(key))) {
+    return null;
+  }
+
+  const actions = Array.isArray(actionData?.actions) ? actionData.actions : [];
+  const nextAction = actions[actionIndex + 1] || null;
+  const verifyTarget = action.verifyTarget && typeof action.verifyTarget === 'object'
+    ? action.verifyTarget
+    : null;
+  const inferredTarget = verifyTarget || inferLaunchVerificationTarget(actionData, options.userMessage || '');
+  const likelyTradingView = isTradingViewTargetHint(inferredTarget)
+    || /tradingview|trading\s+view/i.test(String(options.focusRecoveryTarget?.title || ''))
+    || /tradingview/i.test(String(options.focusRecoveryTarget?.processName || ''))
+    || /tradingview|trading\s+view/i.test(String(options.userMessage || ''))
+    || /tradingview|trading\s+view/i.test(String(actionData?.thought || ''))
+    || /tradingview|trading\s+view/i.test(String(actionData?.verification || ''));
+
+  if (!likelyTradingView) return null;
+
+  const textSignals = [
+    action.reason,
+    actionData?.thought,
+    actionData?.verification,
+    options.userMessage,
+    nextAction?.reason,
+    nextAction?.text
+  ].filter(Boolean).join(' ');
+  const normalizedSignals = normalizeTextForMatch(textSignals);
+
+  const alertIntent = /\b(alert|create alert|price alert|alerts)\b/i.test(normalizedSignals);
+  const timeframeIntent = /\b(time\s*frame|timeframe|time interval|interval|chart|5m|15m|30m|1h|4h|1d)\b/i.test(normalizedSignals);
+  const drawingIntent = /\b(draw|drawing|drawings|trend\s*line|ray|pitchfork|fibonacci|fib|brush|rectangle|ellipse|path|polyline|measure|object tree|anchored text|note)\b/i.test(normalizedSignals);
+  const indicatorIntent = /\b(indicator|study|studies|overlay|oscillator|anchored\s*vwap|vwap|volume profile|fixed range volume profile|anchored volume profile|strategy tester)\b/i.test(normalizedSignals);
+  const pineIntent = /\b(pine|pine editor|script|scripts|add to chart|publish script|version history|pine logs|profiler)\b/i.test(normalizedSignals);
+  const domIntent = /\b(dom|depth of market|order book|trading panel|tier\s*2|level\s*2)\b/i.test(normalizedSignals);
+  const inputSurfaceIntent = nextAction?.type === 'type';
+
+  if (!alertIntent && !timeframeIntent && !drawingIntent && !indicatorIntent && !pineIntent && !domIntent && !inputSurfaceIntent) {
+    return null;
+  }
+
+  const tradingViewTarget = buildVerifyTargetHintFromAppName('TradingView');
+  const expectedKeywords = mergeUniqueKeywords(
+    extractKeyObservationKeywords(textSignals),
+    alertIntent ? tradingViewTarget.dialogKeywords : [],
+    (timeframeIntent || drawingIntent) ? tradingViewTarget.chartKeywords : [],
+    drawingIntent ? tradingViewTarget.drawingKeywords : [],
+    indicatorIntent ? tradingViewTarget.indicatorKeywords : [],
+    pineIntent ? tradingViewTarget.pineKeywords : [],
+    domIntent ? tradingViewTarget.domKeywords : []
+  );
+  const expectedTitleHints = Array.from(new Set([
+    ...(Array.isArray(tradingViewTarget.dialogTitleHints) ? tradingViewTarget.dialogTitleHints : []),
+    ...(Array.isArray(tradingViewTarget.titleHints) ? tradingViewTarget.titleHints : [])
+  ]));
+
+  const classification = alertIntent
+    ? 'dialog-open'
+    : (pineIntent || domIntent)
+      ? 'panel-open'
+    : inputSurfaceIntent
+      ? 'input-surface-open'
+      : 'chart-state';
+
+  const requiresObservedChange = nextAction?.type === 'type' && !pineIntent && !domIntent;
+
+  return {
+    applicable: true,
+    key,
+    classification,
+    appName: 'TradingView',
+    requiresObservedChange,
+    allowWindowHandleChange: classification === 'dialog-open' || classification === 'input-surface-open',
+    timeoutMs: KEY_CHECKPOINT_TIMEOUT_MS,
+    verifyTarget: {
+      ...tradingViewTarget,
+      popupKeywords: mergeUniqueKeywords(tradingViewTarget.popupKeywords, expectedKeywords),
+      titleHints: Array.from(new Set([...(tradingViewTarget.titleHints || []), ...expectedTitleHints]))
+    },
+    expectedKeywords,
+    expectedWindowKinds: (classification === 'chart-state' || classification === 'panel-open')
+      ? (tradingViewTarget.preferredWindowKinds || ['main'])
+      : (tradingViewTarget.dialogWindowKinds || ['owned', 'palette', 'main']),
+    reason: action.reason || actionData?.verification || actionData?.thought || ''
+  };
+}
+
+async function verifyKeyObservationCheckpoint(spec, beforeForeground, options = {}) {
+  if (!spec?.applicable) {
+    return { applicable: false, verified: true, classification: null };
+  }
+
+  const watcher = getUIWatcher();
+  const expectedWindowHandle = Number(options.expectedWindowHandle || 0) || 0;
+  const beforeSignature = summarizeForegroundSignature(beforeForeground);
+  const waitTargetHwnd = spec.allowWindowHandleChange ? 0 : expectedWindowHandle;
+  let watcherFreshness = null;
+  let foreground = null;
+  let evalResult = { matched: false, matchReason: 'none', needsFollowUp: false, popupHint: null };
+  let observedChange = false;
+  let keywordMatched = false;
+  let windowKindMatched = false;
+  let titleHintMatched = false;
+
+  for (let attempt = 1; attempt <= KEY_CHECKPOINT_MAX_POLLS; attempt++) {
+    const sinceTs = Number(watcher?.cache?.lastUpdate || 0);
+    await sleepMs(KEY_CHECKPOINT_SETTLE_MS + ((attempt - 1) * 120));
+
+    if (watcher && watcher.isPolling && typeof watcher.waitForFreshState === 'function') {
+      watcherFreshness = await watcher.waitForFreshState({
+        targetHwnd: waitTargetHwnd,
+        sinceTs,
+        timeoutMs: spec.timeoutMs || KEY_CHECKPOINT_TIMEOUT_MS
+      });
+    }
+
+    foreground = await systemAutomation.getForegroundWindowInfo();
+    evalResult = evaluateForegroundAgainstTarget(foreground, spec.verifyTarget || {});
+    observedChange = didForegroundObservationChange(beforeForeground, foreground);
+
+    const titleNorm = normalizeTextForMatch(foreground?.title || '');
+    keywordMatched = (spec.expectedKeywords || []).some((keyword) => {
+      const norm = normalizeTextForMatch(keyword);
+      return norm && titleNorm.includes(norm);
+    });
+    windowKindMatched = !(spec.expectedWindowKinds || []).length
+      || (spec.expectedWindowKinds || []).includes(String(foreground?.windowKind || '').trim().toLowerCase());
+    titleHintMatched = (spec.verifyTarget?.dialogTitleHints || []).some((hint) => {
+      const norm = normalizeTextForMatch(hint);
+      return norm && titleNorm.includes(norm);
+    });
+
+    const freshObservation = !!watcherFreshness?.fresh;
+    const surfaceChangeObserved = observedChange || keywordMatched || titleHintMatched;
+    const verified = spec.requiresObservedChange
+      ? !!(foreground?.success && evalResult.matched && windowKindMatched && surfaceChangeObserved)
+      : !!(foreground?.success && evalResult.matched && windowKindMatched && (surfaceChangeObserved || freshObservation || !spec.requiresObservedChange));
+
+    if (verified) {
+      return {
+        applicable: true,
+        verified: true,
+        classification: spec.classification,
+        attempts: attempt,
+        observedChange,
+        freshObservation,
+        keywordMatched,
+        titleHintMatched,
+        windowKindMatched,
+        beforeForeground: beforeForeground || null,
+        foreground,
+        expectedWindowHandle,
+        waitTargetHwnd,
+        matchReason: evalResult.matchReason,
+        popupHint: evalResult.popupHint || null,
+        reason: spec.reason || ''
+      };
+    }
+  }
+
+  return {
+    applicable: true,
+    verified: false,
+    classification: spec.classification,
+    attempts: KEY_CHECKPOINT_MAX_POLLS,
+    observedChange,
+    freshObservation: !!watcherFreshness?.fresh,
+    keywordMatched,
+    titleHintMatched,
+    windowKindMatched,
+    beforeForeground: beforeForeground || null,
+    foreground,
+    expectedWindowHandle,
+    waitTargetHwnd,
+    matchReason: evalResult.matchReason,
+    popupHint: evalResult.popupHint || null,
+    reason: spec.reason || '',
+    error: spec.requiresObservedChange
+      ? 'Post-key observation checkpoint could not confirm a TradingView surface change before continuing'
+      : 'Post-key observation checkpoint could not confirm fresh TradingView state'
+  };
 }
 
 function inferLaunchVerificationTarget(actionData, userMessage = '') {
@@ -4132,6 +4512,7 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
   let lastTargetWindowHandle = null;
   let focusRecoveryTarget = null;
   let postVerification = { applicable: false, verified: true, healed: false, attempts: 0 };
+  const observationCheckpoints = [];
 
   for (let i = 0; i < actionData.actions.length; i++) {
     const action = actionData.actions[i];
@@ -4179,6 +4560,22 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
     // Analyze safety
     const safety = analyzeActionSafety(action, targetInfo);
     console.log(`[AI-SERVICE] Action ${i} safety: ${safety.riskLevel}`, safety.warnings);
+
+    if (safety.blockExecution) {
+      const blockedResult = {
+        success: false,
+        action: action.type,
+        error: safety.blockReason || 'Action blocked by advisory-only safety rail',
+        reason: action.reason || '',
+        safety,
+        blockedByPolicy: true
+      };
+      results.push(blockedResult);
+      if (onAction) {
+        onAction(blockedResult, i, actionData.actions.length);
+      }
+      break;
+    }
 
     // CRITICAL actions require an explicit confirmation step, even if the user clicked
     // the general "Execute" button for a batch. This prevents accidental destructive
@@ -4276,10 +4673,46 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
       }
     }
 
+    const checkpointSpec = inferKeyObservationCheckpoint(action, actionData, i, {
+      userMessage,
+      focusRecoveryTarget
+    });
+    const checkpointBeforeForeground = checkpointSpec?.applicable
+      ? await systemAutomation.getForegroundWindowInfo()
+      : null;
+
     const result = await (actionExecutor ? actionExecutor(action) : systemAutomation.executeAction(action));
     result.reason = action.reason || '';
     result.safety = safety;
     results.push(result);
+
+    if (result.success && checkpointSpec?.applicable) {
+      const observationCheckpoint = await verifyKeyObservationCheckpoint(checkpointSpec, checkpointBeforeForeground, {
+        expectedWindowHandle: lastTargetWindowHandle
+      });
+      result.observationCheckpoint = observationCheckpoint;
+      observationCheckpoints.push({
+        ...observationCheckpoint,
+        actionIndex: i,
+        key: String(action.key || '')
+      });
+
+      if (observationCheckpoint.foreground?.success) {
+        const observedHwnd = Number(observationCheckpoint.foreground.hwnd || 0) || 0;
+        if (observedHwnd) {
+          lastTargetWindowHandle = observedHwnd;
+        }
+        focusRecoveryTarget = {
+          title: observationCheckpoint.foreground.title || focusRecoveryTarget?.title || undefined,
+          processName: observationCheckpoint.foreground.processName || focusRecoveryTarget?.processName || undefined
+        };
+      }
+
+      if (!observationCheckpoint.verified) {
+        result.success = false;
+        result.error = observationCheckpoint.error;
+      }
+    }
 
     // If we just performed a step that likely changed focus, snapshot the actual foreground HWND.
     // This is especially important when uiWatcher isn't polling (can't infer windowHandle).
@@ -4555,6 +4988,7 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
     results,
     error,
     screenshotRequested,
+    observationCheckpoints,
     focusVerification,
     postVerification,
     postVerificationFailed: !!(postVerification.applicable && !postVerification.verified),
@@ -4595,6 +5029,7 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
   let lastTargetWindowHandle = null;
   let focusRecoveryTarget = null;
   let postVerification = { applicable: false, verified: true, healed: false, attempts: 0 };
+  const observationCheckpoints = [];
   
   // Execute the confirmed action and remaining actions
   for (let i = 0; i < pending.remainingActions.length; i++) {
@@ -4627,6 +5062,28 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
       }
       results.push({ success: true, action: 'screenshot', message: 'Screenshot captured' });
       continue;
+    }
+
+    const resumeSafety = analyzeActionSafety(action, {
+      text: action.reason || '',
+      buttonText: action.targetText || '',
+      nearbyText: []
+    });
+    if (resumeSafety.blockExecution) {
+      const blockedResult = {
+        success: false,
+        action: action.type,
+        error: resumeSafety.blockReason || 'Action blocked by advisory-only safety rail',
+        reason: action.reason || '',
+        userConfirmed: i === 0,
+        safety: resumeSafety,
+        blockedByPolicy: true
+      };
+      results.push(blockedResult);
+      if (onAction) {
+        onAction(blockedResult, i, pending.remainingActions.length);
+      }
+      break;
     }
 
     if ((action.type === 'click' || action.type === 'double_click' || action.type === 'right_click') && action.x !== undefined) {
@@ -4680,10 +5137,51 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
     }
     
     // Execute action (user confirmed, skip safety for first action)
+    const resumeActionData = {
+      thought: pending.thought,
+      verification: pending.verification,
+      actions: pending.remainingActions || []
+    };
+    const checkpointSpec = inferKeyObservationCheckpoint(action, resumeActionData, i, {
+      userMessage,
+      focusRecoveryTarget
+    });
+    const checkpointBeforeForeground = checkpointSpec?.applicable
+      ? await systemAutomation.getForegroundWindowInfo()
+      : null;
+
     const result = await (actionExecutor ? actionExecutor(action) : systemAutomation.executeAction(action));
     result.reason = action.reason || '';
     result.userConfirmed = i === 0; // First one was confirmed
     results.push(result);
+
+    if (result.success && checkpointSpec?.applicable) {
+      const observationCheckpoint = await verifyKeyObservationCheckpoint(checkpointSpec, checkpointBeforeForeground, {
+        expectedWindowHandle: lastTargetWindowHandle
+      });
+      result.observationCheckpoint = observationCheckpoint;
+      observationCheckpoints.push({
+        ...observationCheckpoint,
+        actionIndex: pending.actionIndex + i,
+        key: String(action.key || '')
+      });
+
+      if (observationCheckpoint.foreground?.success) {
+        const observedHwnd = Number(observationCheckpoint.foreground.hwnd || 0) || 0;
+        if (observedHwnd) {
+          lastTargetWindowHandle = observedHwnd;
+        }
+        focusRecoveryTarget = {
+          title: observationCheckpoint.foreground.title || focusRecoveryTarget?.title || undefined,
+          processName: observationCheckpoint.foreground.processName || focusRecoveryTarget?.processName || undefined
+        };
+      }
+
+      if (!observationCheckpoint.verified) {
+        result.success = false;
+        result.error = observationCheckpoint.error;
+      }
+    }
 
     if (typeof systemAutomation.getForegroundWindowHandle === 'function') {
       if (
@@ -4756,6 +5254,7 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
     results,
     error,
     screenshotRequested,
+    observationCheckpoints,
     focusVerification,
     postVerification,
     postVerificationFailed: !!(postVerification.applicable && !postVerification.verified),

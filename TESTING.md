@@ -119,6 +119,15 @@ npm run test:ui
 node scripts/test-ui-automation-baseline.js --allow-keys
 ```
 
+Recommended usage:
+
+- start with `smoke:shortcuts` when you want the fastest signal on overall runtime health
+- use `smoke:chat-direct` when you suspect chat visibility or window lifecycle issues
+- use `test:ui` when debugging automation primitives rather than AI planning behavior
+- use `--allow-keys` only when you explicitly want to validate synthetic key injection and can control the active target safely
+
+In other words: use the smoke layer to answer "does the app/runtime behave correctly end to end?" before dropping into narrower characterization tests.
+
 Why this is the default path:
 
 - Avoids accidental key injection into other focused apps (for example VS Code).
@@ -136,6 +145,8 @@ npm run test:ai-focused
 
 # Or run the underlying focused checks individually
 node scripts/test-windows-observation-flow.js
+node scripts/test-bug-fixes.js
+node scripts/test-chat-actionability.js
 node scripts/test-ai-service-contract.js
 node scripts/test-ai-service-commands.js
 node scripts/test-ai-service-provider-orchestration.js
@@ -151,9 +162,21 @@ node scripts/test-ai-service-visual-context.js
 node scripts/test-ai-service-slash-command-helpers.js
 ```
 
+How to think about this section:
+
+- `npm run test:ai-focused` is the default regression bundle for high-value AI/runtime behavior
+- the individual scripts are there when you want faster, narrower validation during refactoring
+- if a change is localized, run the most relevant individual seam test first, then rerun the bundle
+
+This is the right test layer when you are changing AI-service behavior, continuation logic, model-command handling, visual-context behavior, or other code that can regress without immediately breaking the Electron shell.
+
 What they cover:
 
 - combined Windows observation-flow regression for normalized app launch, focus recovery, and watcher freshness
+- TradingView alert-surface verification checkpoints and continuation hardening
+- TradingView DOM advisory-only rails, including blocked execution and blocked resume flows
+- screenshot fallback capture markers and direct-answer continuation guards
+- chat actionability detection for approval-style replies and alert-setting requests
 - facade export and result-shape stability
 - extracted slash-command behavior
 - provider fallback and dispatch orchestration
@@ -161,6 +184,27 @@ What they cover:
 - provider/model registry state handling
 - policy and preference-parser helpers
 - browser/session/history/UI-context seams
+
+Focused suite quick map:
+
+| Test | Primary purpose |
+| --- | --- |
+| `test-windows-observation-flow.js` | observation checkpoints, watcher freshness, TradingView continuation safety |
+| `test-bug-fixes.js` | source-level regression assertions for previously fixed behavior |
+| `test-chat-actionability.js` | verifies actionable replies and approval-style follow-ups still execute correctly |
+| `test-ai-service-contract.js` | protects exported shapes and compatibility expectations |
+| `test-ai-service-commands.js` | validates slash-command handling behavior |
+| `test-ai-service-provider-orchestration.js` | checks provider routing and orchestration seams |
+| `test-ai-service-copilot-chat-response.js` | validates Copilot response handling/parsing |
+| `test-ai-service-response-heuristics.js` | checks response scoring and heuristics |
+| `test-ai-service-provider-registry.js` | validates provider registration/state |
+| `test-ai-service-model-registry.js` | validates model registry behavior |
+| `test-ai-service-policy.js` | checks safety/policy behavior |
+| `test-ai-service-preference-parser.js` | checks preference/Teach parsing behavior |
+| `test-ai-service-state.js` | validates state/session handling |
+| `test-ai-service-ui-context.js` | validates UI-context shaping |
+| `test-ai-service-visual-context.js` | validates screenshot/visual-context handling |
+| `test-ai-service-slash-command-helpers.js` | protects helper behavior around slash-command workflows |
 
 ### Inline Proof Harness
 
@@ -196,8 +240,25 @@ Recommended refactor validation order:
 
 1. Run the focused seam test for the module you changed.
 2. Run `npm run test:ai-focused`.
-3. Run `node scripts/test-v006-features.js` if your change touches older v0.0.6 behavior or broader compatibility seams.
-4. Run broader smoke tests only after the seam-level checks are green.
+3. Run `node scripts/test-bug-fixes.js` if the change touches behavior that was previously fixed through regression coverage.
+4. Run `node scripts/test-chat-actionability.js` if the change touches action execution detection, approvals, or continuation routing in chat.
+5. Run `node scripts/test-v006-features.js` if your change touches older v0.0.6 behavior or broader compatibility seams.
+6. Run broader smoke tests only after the seam-level checks are green.
+
+This order exists to keep feedback fast: narrow tests first, bundle second, broader runtime smoke last.
+
+### When to use the manual checklist
+
+Use the manual checklist when a change affects:
+
+- tray behavior
+- overlay visibility or click-through behavior
+- hotkeys
+- chat window layout or rendering
+- multi-display behavior
+- performance characteristics
+
+Those areas often need human confirmation even when automated tests are green.
 
 ### Hook Enforcement Verification
 
