@@ -3,8 +3,10 @@ function createCommandHandler(dependencies) {
     aiProviders,
     captureVisualContext,
     clearVisualContext,
+    clearChatContinuityState,
     exchangeForCopilotSession,
     getCopilotModels,
+    getChatContinuityState,
     getCurrentCopilotModel,
     getCurrentProvider,
     getStatus,
@@ -138,15 +140,21 @@ function createCommandHandler(dependencies) {
         if (typeof clearSessionIntentState === 'function') {
           clearSessionIntentState();
         }
+        if (typeof clearChatContinuityState === 'function') {
+          clearChatContinuityState();
+        }
         historyStore.saveConversationHistory();
-        return { type: 'system', message: 'Conversation, visual context, browser session state, and session intent state cleared.' };
+        return { type: 'system', message: 'Conversation, visual context, browser session state, session intent state, and chat continuity state cleared.' };
 
       case '/state': {
         if (parts[1] === 'clear') {
           if (typeof clearSessionIntentState === 'function') {
             clearSessionIntentState();
           }
-          return { type: 'system', message: 'Session intent state cleared.' };
+          if (typeof clearChatContinuityState === 'function') {
+            clearChatContinuityState();
+          }
+          return { type: 'system', message: 'Session intent state and chat continuity state cleared.' };
         }
         if (typeof getSessionIntentState === 'function') {
           const state = getSessionIntentState();
@@ -158,6 +166,14 @@ function createCommandHandler(dependencies) {
           }
           if (Array.isArray(state.explicitCorrections) && state.explicitCorrections.length > 0) {
             lines.push(`Recent corrections: ${state.explicitCorrections.slice(-3).map((entry) => entry.text).join(' | ')}`);
+          }
+          if (typeof getChatContinuityState === 'function') {
+            const continuity = getChatContinuityState();
+            if (continuity.activeGoal) lines.push(`Active goal: ${continuity.activeGoal}`);
+            if (continuity.currentSubgoal) lines.push(`Current subgoal: ${continuity.currentSubgoal}`);
+            if (continuity.lastTurn?.actionSummary) lines.push(`Last actions: ${continuity.lastTurn.actionSummary}`);
+            if (continuity.lastTurn?.verificationStatus) lines.push(`Continuation verification: ${continuity.lastTurn.verificationStatus}`);
+            if (typeof continuity.continuationReady === 'boolean') lines.push(`Continuation ready: ${continuity.continuationReady ? 'yes' : 'no'}`);
           }
           return { type: 'info', message: lines.join('\n') || 'No session intent state recorded.' };
         }

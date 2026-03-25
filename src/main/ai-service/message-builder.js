@@ -116,7 +116,7 @@ function createMessageBuilder(dependencies) {
 
   async function buildMessages(userMessage, includeVisual = false, options = {}) {
     const messages = [{ role: 'system', content: systemPrompt }];
-    const { extraSystemMessages = [], skillsContext = '', memoryContext = '', sessionIntentContext = '' } = options || {};
+    const { extraSystemMessages = [], skillsContext = '', memoryContext = '', sessionIntentContext = '', chatContinuityContext = '' } = options || {};
 
     try {
       let prefText = '';
@@ -161,6 +161,12 @@ function createMessageBuilder(dependencies) {
     try {
       if (typeof sessionIntentContext === 'string' && sessionIntentContext.trim()) {
         messages.push({ role: 'system', content: `## Session Constraints\n${sessionIntentContext.trim()}` });
+      }
+    } catch {}
+
+    try {
+      if (typeof chatContinuityContext === 'string' && chatContinuityContext.trim()) {
+        messages.push({ role: 'system', content: `## Recent Action Continuity\n${chatContinuityContext.trim()}` });
       }
     } catch {}
 

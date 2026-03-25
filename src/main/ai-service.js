@@ -71,11 +71,15 @@ const {
   updateBrowserSessionState
 } = require('./ai-service/browser-session-state');
 const {
+  clearChatContinuityState,
+  formatChatContinuityContext,
   clearSessionIntentState,
   formatSessionIntentContext,
   formatSessionIntentSummary,
+  getChatContinuityState,
   getSessionIntentState,
-  ingestUserIntentState
+  ingestUserIntentState,
+  recordChatContinuityTurn
 } = require('./session-intent-state');
 const {
   clearSemanticDOMSnapshot,
@@ -349,8 +353,10 @@ const commandHandler = createCommandHandler({
     }
   },
   clearVisualContext,
+  clearChatContinuityState,
   exchangeForCopilotSession,
   getCopilotModels,
+  getChatContinuityState,
   getCurrentCopilotModel,
   getCurrentProvider,
   getStatus,
@@ -379,7 +385,17 @@ const commandHandler = createCommandHandler({
  * Build messages array for API call
  */
 async function buildMessages(userMessage, includeVisual = false, options = {}) {
-  return messageBuilder.buildMessages(userMessage, includeVisual, options);
+  const mergedOptions = { ...(options || {}) };
+  try {
+    const sessionState = getSessionIntentState({ cwd: process.cwd() });
+    if (!(typeof mergedOptions.sessionIntentContext === 'string' && mergedOptions.sessionIntentContext.trim())) {
+      mergedOptions.sessionIntentContext = formatSessionIntentContext(sessionState) || '';
+    }
+    if (!(typeof mergedOptions.chatContinuityContext === 'string' && mergedOptions.chatContinuityContext.trim())) {
+      mergedOptions.chatContinuityContext = formatChatContinuityContext(sessionState) || '';
+    }
+  } catch {}
+  return messageBuilder.buildMessages(userMessage, includeVisual, mergedOptions);
 }
 
 function getCopilotModelCapabilities(modelKey) {
@@ -1276,9 +1292,12 @@ async function sendMessage(userMessage, options = {}) {
   }
 
   let sessionIntentContextText = '';
+  let chatContinuityContextText = '';
   try {
     ingestUserIntentState(enhancedMessage, { cwd: process.cwd() });
-    sessionIntentContextText = formatSessionIntentContext(getSessionIntentState({ cwd: process.cwd() })) || '';
+    const sessionState = getSessionIntentState({ cwd: process.cwd() });
+    sessionIntentContextText = formatSessionIntentContext(sessionState) || '';
+    chatContinuityContextText = formatChatContinuityContext(sessionState) || '';
   } catch (err) {
     console.warn('[AI] Session intent state error (non-fatal):', err.message);
   }
@@ -1288,7 +1307,8 @@ async function sendMessage(userMessage, options = {}) {
     extraSystemMessages: baseExtraSystemMessages,
     skillsContext: skillsContextText,
     memoryContext: memoryContextText,
-    sessionIntentContext: sessionIntentContextText
+    sessionIntentContext: sessionIntentContextText,
+    chatContinuityContext: chatContinuityContextText
   });
 
   try {
@@ -1513,8 +1533,9 @@ function handleCommand(command) {
       clearVisualContext();
       resetBrowserSessionState();
       clearSessionIntentState({ cwd: process.cwd() });
+      clearChatContinuityState({ cwd: process.cwd() });
       historyStore.saveConversationHistory();
-      return { type: 'system', message: 'Conversation, visual context, browser session state, and session intent state cleared.' };
+      return { type: 'system', message: 'Conversation, visual context, browser session state, session intent state, and chat continuity state cleared.' };
 
     case '/vision':
       if (parts[1] === 'on') {
@@ -5408,8 +5429,11 @@ module.exports = {
   // Cognitive layer (v0.0.15)
   memoryStore,
   skillRouter,
+  getChatContinuityState,
   getSessionIntentState,
+  clearChatContinuityState,
   ingestUserIntentState,
+  recordChatContinuityTurn,
   // Session persistence (N4)
   saveSessionNote,
   // Cross-model reflection (N6)

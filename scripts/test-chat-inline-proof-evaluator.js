@@ -168,7 +168,7 @@ test('evaluator passes continuity-acknowledgement transcript', () => {
 
 test('evaluator passes repo-boundary clarification transcript', () => {
   const transcript = [
-    'Conversation, visual context, browser session state, and session intent state cleared.',
+    'Conversation, visual context, browser session state, session intent state, and chat continuity state cleared.',
     '> MUSE is a different repo, this is copilot-liku-cli.',
     '[copilot:stub]',
     'Understood. MUSE is a different repo and this session is in copilot-liku-cli.',
@@ -201,7 +201,7 @@ test('evaluator fails repo-boundary clarification when it skips the switch step'
 
 test('evaluator passes forgone-feature suppression transcript', () => {
   const transcript = [
-    'Conversation, visual context, browser session state, and session intent state cleared.',
+    'Conversation, visual context, browser session state, session intent state, and chat continuity state cleared.',
     '> I have forgone the implementation of: terminal-liku ui.',
     '[copilot:stub]',
     'Understood.',

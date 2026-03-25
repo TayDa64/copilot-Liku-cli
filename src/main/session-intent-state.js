@@ -7,6 +7,16 @@ const { normalizeName, resolveProjectIdentity } = require('../shared/project-ide
 const SESSION_INTENT_SCHEMA_VERSION = 'session-intent.v1';
 const SESSION_INTENT_FILE = path.join(LIKU_HOME, 'session-intent-state.json');
 
+function defaultChatContinuity() {
+  return {
+    activeGoal: null,
+    currentSubgoal: null,
+    lastTurn: null,
+    continuationReady: false,
+    degradedReason: null
+  };
+}
+
 function nowIso() {
   return new Date().toISOString();
 }
@@ -20,7 +30,136 @@ function defaultState() {
     currentRepo: null,
     downstreamRepoIntent: null,
     forgoneFeatures: [],
-    explicitCorrections: []
+    explicitCorrections: [],
+    chatContinuity: defaultChatContinuity()
+  };
+}
+
+function normalizeText(value, maxLength = 240) {
+  return String(value || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, maxLength) || null;
+}
+
+function normalizeActionTypes(actions) {
+  if (!Array.isArray(actions)) return [];
+  return actions
+    .map((action) => normalizeText(action?.type, 60))
+    .filter(Boolean)
+    .slice(0, 12);
+}
+
+function summarizeActionTypes(actionTypes) {
+  return Array.isArray(actionTypes) && actionTypes.length > 0
+    ? actionTypes.join(' -> ')
+    : 'none';
+}
+
+function deriveVerificationStatus(turnRecord = {}) {
+  if (turnRecord?.verification?.status) return normalizeText(turnRecord.verification.status, 60);
+  if (turnRecord?.cancelled) return 'cancelled';
+  if (turnRecord?.success === false) return 'failed';
+  if (turnRecord?.postVerificationFailed) return 'unverified';
+  if (turnRecord?.postVerification?.verified) return 'verified';
+  if (turnRecord?.focusVerification?.verified) return 'verified';
+  if (turnRecord?.focusVerification?.applicable && !turnRecord?.focusVerification?.verified) return 'unverified';
+  return turnRecord?.success ? 'not-applicable' : 'unknown';
+}
+
+function deriveCaptureMode(turnRecord = {}) {
+  return normalizeText(
+    turnRecord?.observationEvidence?.captureMode
+      || turnRecord?.captureMode
+      || (turnRecord?.screenshotCaptured ? 'screen' : ''),
+    60
+  );
+}
+
+function deriveCaptureTrusted(turnRecord = {}) {
+  if (typeof turnRecord?.observationEvidence?.captureTrusted === 'boolean') {
+    return turnRecord.observationEvidence.captureTrusted;
+  }
+  const captureMode = deriveCaptureMode(turnRecord);
+  if (!captureMode) return null;
+  return captureMode === 'window' || captureMode === 'region';
+}
+
+function deriveExecutionStatus(turnRecord = {}) {
+  if (turnRecord?.cancelled) return 'cancelled';
+  if (turnRecord?.success === false) return 'failed';
+  if (turnRecord?.success) return 'succeeded';
+  return 'unknown';
+}
+
+function deriveNextRecommendedStep(turnRecord = {}) {
+  if (turnRecord?.nextRecommendedStep) return normalizeText(turnRecord.nextRecommendedStep, 240);
+  if (turnRecord?.cancelled) return 'Ask whether to retry the interrupted step or choose a different path.';
+  if (turnRecord?.success === false) return 'Review the failed step and gather fresh evidence before continuing.';
+  if (turnRecord?.postVerification?.needsFollowUp) return 'Continue with the detected follow-up flow for the current app state.';
+  if (turnRecord?.screenshotCaptured) return 'Continue from the latest visual evidence and current app state.';
+  if (deriveVerificationStatus(turnRecord) === 'unverified') return 'Gather fresh evidence before claiming the requested state change is complete.';
+  return 'Continue from the current subgoal using the latest execution results.';
+}
+
+function deriveDegradedReason(normalizedTurn = {}) {
+  if (normalizedTurn.executionStatus === 'cancelled') return 'The last action batch was cancelled before completion.';
+  if (normalizedTurn.executionStatus === 'failed') return 'The last action batch did not complete successfully.';
+  if (normalizedTurn.verificationStatus === 'unverified') return 'The latest result is not fully verified yet.';
+  if (normalizedTurn.captureMode === 'screen' && normalizedTurn.captureTrusted === false) {
+    return 'Visual evidence fell back to full-screen capture instead of a trusted target-window capture.';
+  }
+  return null;
+}
+
+function normalizeTurnRecord(turnRecord = {}, previousContinuity = defaultChatContinuity()) {
+  const actionTypes = normalizeActionTypes(turnRecord.actionPlan || turnRecord.actions);
+  const executionStatus = deriveExecutionStatus(turnRecord);
+  const verificationStatus = deriveVerificationStatus(turnRecord);
+  const captureMode = deriveCaptureMode(turnRecord);
+  const captureTrusted = deriveCaptureTrusted(turnRecord);
+  const activeGoal = normalizeText(
+    turnRecord.activeGoal
+      || turnRecord.executionIntent
+      || turnRecord.userMessage
+      || previousContinuity?.activeGoal,
+    280
+  );
+  const currentSubgoal = normalizeText(
+    turnRecord.currentSubgoal
+      || turnRecord.committedSubgoal
+      || turnRecord.thought
+      || turnRecord.reasoning
+      || previousContinuity?.currentSubgoal
+      || activeGoal,
+    240
+  );
+
+  const normalizedTurn = {
+    turnId: normalizeText(turnRecord.turnId, 120) || `turn-${Date.now()}`,
+    recordedAt: normalizeText(turnRecord.recordedAt, 60) || nowIso(),
+    userMessage: normalizeText(turnRecord.userMessage, 280),
+    executionIntent: normalizeText(turnRecord.executionIntent, 280),
+    committedSubgoal: currentSubgoal,
+    thought: normalizeText(turnRecord.thought, 240),
+    actionTypes,
+    actionSummary: summarizeActionTypes(actionTypes),
+    executionStatus,
+    executedCount: Number.isFinite(Number(turnRecord.executedCount)) ? Number(turnRecord.executedCount) : actionTypes.length,
+    verificationStatus,
+    captureMode,
+    captureTrusted,
+    targetWindowHandle: Number.isFinite(Number(turnRecord.targetWindowHandle)) ? Number(turnRecord.targetWindowHandle) : null,
+    windowTitle: normalizeText(turnRecord.windowTitle, 240),
+    nextRecommendedStep: deriveNextRecommendedStep(turnRecord)
+  };
+
+  return {
+    activeGoal,
+    currentSubgoal,
+    lastTurn: normalizedTurn,
+    continuationReady: normalizedTurn.executionStatus === 'succeeded',
+    degradedReason: deriveDegradedReason(normalizedTurn)
   };
 }
 
@@ -178,6 +317,43 @@ function formatSessionIntentContext(state) {
   return lines.join('\n').trim();
 }
 
+function formatChatContinuitySummary(state) {
+  const continuity = state?.chatContinuity || state || defaultChatContinuity();
+  const lines = [];
+  if (continuity.activeGoal) lines.push(`Active goal: ${continuity.activeGoal}`);
+  if (continuity.currentSubgoal) lines.push(`Current subgoal: ${continuity.currentSubgoal}`);
+  if (continuity.lastTurn?.actionSummary) lines.push(`Last actions: ${continuity.lastTurn.actionSummary}`);
+  if (continuity.lastTurn?.executionStatus) lines.push(`Last execution: ${continuity.lastTurn.executionStatus}`);
+  if (continuity.lastTurn?.verificationStatus) lines.push(`Verification: ${continuity.lastTurn.verificationStatus}`);
+  if (typeof continuity.continuationReady === 'boolean') lines.push(`Continuation ready: ${continuity.continuationReady ? 'yes' : 'no'}`);
+  if (continuity.degradedReason) lines.push(`Continuity caution: ${continuity.degradedReason}`);
+  return lines.join('\n').trim() || 'No chat continuity recorded.';
+}
+
+function formatChatContinuityContext(state) {
+  const continuity = state?.chatContinuity || state || defaultChatContinuity();
+  const lastTurn = continuity.lastTurn || null;
+  if (!continuity.activeGoal && !lastTurn) return '';
+
+  const lines = [];
+  if (continuity.activeGoal) lines.push(`- activeGoal: ${continuity.activeGoal}`);
+  if (continuity.currentSubgoal) lines.push(`- currentSubgoal: ${continuity.currentSubgoal}`);
+  if (lastTurn?.userMessage) lines.push(`- lastUserMessage: ${lastTurn.userMessage}`);
+  if (lastTurn?.actionSummary) lines.push(`- lastExecutedActions: ${lastTurn.actionSummary}`);
+  if (lastTurn?.executionStatus) lines.push(`- lastExecutionStatus: ${lastTurn.executionStatus}`);
+  if (lastTurn?.verificationStatus) lines.push(`- lastVerificationStatus: ${lastTurn.verificationStatus}`);
+  if (lastTurn?.captureMode) lines.push(`- lastCaptureMode: ${lastTurn.captureMode}`);
+  if (typeof lastTurn?.captureTrusted === 'boolean') lines.push(`- lastCaptureTrusted: ${lastTurn.captureTrusted ? 'yes' : 'no'}`);
+  lines.push(`- continuationReady: ${continuity.continuationReady ? 'yes' : 'no'}`);
+  if (continuity.degradedReason) lines.push(`- degradedReason: ${continuity.degradedReason}`);
+  if (lastTurn?.nextRecommendedStep) lines.push(`- nextRecommendedStep: ${lastTurn.nextRecommendedStep}`);
+  lines.push('- Rule: If the user asks to continue, continue from the current subgoal and these execution facts instead of inventing a new branch.');
+  if (lastTurn?.verificationStatus && lastTurn.verificationStatus !== 'verified') {
+    lines.push('- Rule: Do not claim the requested UI change is complete unless the latest evidence verifies it.');
+  }
+  return lines.join('\n').trim();
+}
+
 function createSessionIntentStateStore(options = {}) {
   const stateFile = options.stateFile || SESSION_INTENT_FILE;
   let cachedState = null;
@@ -191,6 +367,14 @@ function createSessionIntentStateStore(options = {}) {
     };
     if (!Array.isArray(cachedState.forgoneFeatures)) cachedState.forgoneFeatures = [];
     if (!Array.isArray(cachedState.explicitCorrections)) cachedState.explicitCorrections = [];
+    if (!cachedState.chatContinuity || typeof cachedState.chatContinuity !== 'object') {
+      cachedState.chatContinuity = defaultChatContinuity();
+    } else {
+      cachedState.chatContinuity = {
+        ...defaultChatContinuity(),
+        ...cachedState.chatContinuity
+      };
+    }
     return cachedState;
   }
 
@@ -200,7 +384,11 @@ function createSessionIntentStateStore(options = {}) {
       ...nextState,
       updatedAt: nowIso(),
       forgoneFeatures: limitList(nextState.forgoneFeatures || [], 12),
-      explicitCorrections: limitList(nextState.explicitCorrections || [], 12)
+      explicitCorrections: limitList(nextState.explicitCorrections || [], 12),
+      chatContinuity: {
+        ...defaultChatContinuity(),
+        ...(nextState.chatContinuity && typeof nextState.chatContinuity === 'object' ? nextState.chatContinuity : {})
+      }
     };
     cachedState = state;
     ensureParentDir(stateFile);
@@ -232,6 +420,13 @@ function createSessionIntentStateStore(options = {}) {
   function clearState(options = {}) {
     const state = defaultState();
     syncCurrentRepo(state, options.cwd || process.cwd());
+    return saveState(state);
+  }
+
+  function clearChatContinuity(options = {}) {
+    const state = cloneState(loadState());
+    syncCurrentRepo(state, options.cwd || process.cwd());
+    state.chatContinuity = defaultChatContinuity();
     return saveState(state);
   }
 
@@ -304,10 +499,24 @@ function createSessionIntentStateStore(options = {}) {
     return saveState(state);
   }
 
+  function recordExecutedTurn(turnRecord, options = {}) {
+    const state = cloneState(loadState());
+    syncCurrentRepo(state, options.cwd || process.cwd());
+    state.chatContinuity = normalizeTurnRecord(turnRecord, state.chatContinuity);
+    return saveState(state);
+  }
+
+  function getChatContinuity(options = {}) {
+    return cloneState(getState(options).chatContinuity || defaultChatContinuity());
+  }
+
   return {
+    clearChatContinuity,
     clearState,
+    getChatContinuity,
     getState,
     ingestUserMessage,
+    recordExecutedTurn,
     saveState,
     stateFile
   };
@@ -319,9 +528,14 @@ module.exports = {
   SESSION_INTENT_FILE,
   SESSION_INTENT_SCHEMA_VERSION,
   createSessionIntentStateStore,
+  formatChatContinuityContext,
+  formatChatContinuitySummary,
   formatSessionIntentContext,
   formatSessionIntentSummary,
+  getChatContinuityState: (options) => defaultStore.getChatContinuity(options),
   getSessionIntentState: (options) => defaultStore.getState(options),
+  clearChatContinuityState: (options) => defaultStore.clearChatContinuity(options),
   clearSessionIntentState: (options) => defaultStore.clearState(options),
-  ingestUserIntentState: (message, options) => defaultStore.ingestUserMessage(message, options)
+  ingestUserIntentState: (message, options) => defaultStore.ingestUserMessage(message, options),
+  recordChatContinuityTurn: (turnRecord, options) => defaultStore.recordExecutedTurn(turnRecord, options)
 };

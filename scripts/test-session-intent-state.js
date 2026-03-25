@@ -6,6 +6,8 @@ const os = require('os');
 const path = require('path');
 
 const {
+  formatChatContinuityContext,
+  formatChatContinuitySummary,
   createSessionIntentStateStore,
   formatSessionIntentContext,
   formatSessionIntentSummary
@@ -59,7 +61,19 @@ test('session intent formatters emit compact system and summary views', () => {
     currentRepo: { repoName: 'copilot-liku-cli', projectRoot: 'C:/dev/copilot-Liku-cli' },
     downstreamRepoIntent: { repoName: 'muse-ai' },
     forgoneFeatures: [{ feature: 'terminal-liku ui' }],
-    explicitCorrections: [{ text: 'MUSE is a different repo, this is copilot-liku-cli.' }]
+    explicitCorrections: [{ text: 'MUSE is a different repo, this is copilot-liku-cli.' }],
+    chatContinuity: {
+      activeGoal: 'Produce a confident synthesis of ticker LUNR in TradingView',
+      currentSubgoal: 'Inspect the current chart state',
+      continuationReady: true,
+      degradedReason: null,
+      lastTurn: {
+        actionSummary: 'focus_window -> screenshot',
+        executionStatus: 'succeeded',
+        verificationStatus: 'verified',
+        nextRecommendedStep: 'Continue from the latest chart evidence.'
+      }
+    }
   };
 
   const context = formatSessionIntentContext(state);
@@ -70,4 +84,46 @@ test('session intent formatters emit compact system and summary views', () => {
   const summary = formatSessionIntentSummary(state);
   assert.ok(summary.includes('Current repo: copilot-liku-cli'));
   assert.ok(summary.includes('Forgone features: terminal-liku ui'));
+
+  const continuityContext = formatChatContinuityContext(state);
+  assert.ok(continuityContext.includes('activeGoal: Produce a confident synthesis'));
+  assert.ok(continuityContext.includes('lastExecutedActions: focus_window -> screenshot'));
+  assert.ok(continuityContext.includes('continuationReady: yes'));
+
+  const continuitySummary = formatChatContinuitySummary(state);
+  assert.ok(continuitySummary.includes('Active goal: Produce a confident synthesis'));
+  assert.ok(continuitySummary.includes('Continuation ready: yes'));
+});
+
+test('session intent store records and clears chat continuity state', () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'liku-session-intent-'));
+  const stateFile = path.join(tempDir, 'session-intent-state.json');
+  const store = createSessionIntentStateStore({ stateFile });
+
+  const recorded = store.recordExecutedTurn({
+    userMessage: 'help me make a confident synthesis of ticker LUNR in tradingview',
+    executionIntent: 'help me make a confident synthesis of ticker LUNR in tradingview',
+    committedSubgoal: 'Inspect the active TradingView chart',
+    actionPlan: [{ type: 'focus_window' }, { type: 'screenshot' }],
+    success: true,
+    screenshotCaptured: true,
+    observationEvidence: { captureMode: 'window', captureTrusted: true },
+    verification: { status: 'verified' },
+    nextRecommendedStep: 'Continue from the latest chart evidence.'
+  }, {
+    cwd: path.join(__dirname, '..')
+  });
+
+  assert.strictEqual(recorded.chatContinuity.activeGoal, 'help me make a confident synthesis of ticker LUNR in tradingview');
+  assert.strictEqual(recorded.chatContinuity.lastTurn.actionSummary, 'focus_window -> screenshot');
+  assert.strictEqual(recorded.chatContinuity.continuationReady, true);
+
+  const reloaded = createSessionIntentStateStore({ stateFile }).getChatContinuity({ cwd: path.join(__dirname, '..') });
+  assert.strictEqual(reloaded.currentSubgoal, 'Inspect the active TradingView chart');
+  assert.strictEqual(reloaded.lastTurn.captureMode, 'window');
+
+  const cleared = store.clearChatContinuity({ cwd: path.join(__dirname, '..') });
+  assert.strictEqual(cleared.chatContinuity.activeGoal, null);
+  assert.strictEqual(cleared.chatContinuity.continuationReady, false);
+  fs.rmSync(tempDir, { recursive: true, force: true });
 });

@@ -22,12 +22,17 @@ async function main() {
   });
 
   const messages = await builder.buildMessages('hello', false, {
-    sessionIntentContext: '- currentRepo: copilot-liku-cli\n- forgoneFeatures: terminal-liku ui'
+    sessionIntentContext: '- currentRepo: copilot-liku-cli\n- forgoneFeatures: terminal-liku ui',
+    chatContinuityContext: '- activeGoal: Produce a confident synthesis of ticker LUNR in TradingView\n- lastExecutedActions: focus_window -> screenshot\n- continuationReady: yes'
   });
 
   const sessionMessage = messages.find((entry) => entry.role === 'system' && entry.content.includes('## Session Constraints'));
   assert(sessionMessage, 'session constraints section is injected');
   assert(sessionMessage.content.includes('terminal-liku ui'));
+
+  const continuityMessage = messages.find((entry) => entry.role === 'system' && entry.content.includes('## Recent Action Continuity'));
+  assert(continuityMessage, 'chat continuity section is injected');
+  assert(continuityMessage.content.includes('lastExecutedActions: focus_window -> screenshot'));
 
   console.log('PASS message builder session intent');
 }

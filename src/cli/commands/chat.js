@@ -7,6 +7,7 @@ const readline = require('readline');
 const { success, error, info, warn, highlight, dim, bold } = require('../util/output');
 const systemAutomation = require('../../main/system-automation');
 const preferences = require('../../main/preferences');
+const { recordChatContinuityTurn } = require('../../main/session-intent-state');
 const {
   getLogLevel: getUiAutomationLogLevel,
   resetLogSettings: resetUiAutomationLogSettings,
@@ -262,6 +263,67 @@ function buildForcedObservationAnswerPrompt(userMessage) {
     'Respond now in natural language only — no JSON action block.',
     inventoryHint
   ].join(' ');
+}
+
+function inferContinuationVerificationStatus(execResult) {
+  if (!execResult) return 'unknown';
+  if (execResult.cancelled) return 'cancelled';
+  if (execResult.success === false) return 'failed';
+  if (execResult.postVerificationFailed) return 'unverified';
+  if (execResult.postVerification?.verified) return 'verified';
+  if (execResult.focusVerification?.verified) return 'verified';
+  if (execResult.focusVerification?.applicable && !execResult.focusVerification?.verified) return 'unverified';
+  return execResult.success ? 'not-applicable' : 'unknown';
+}
+
+function inferNextRecommendedStep(execResult) {
+  if (!execResult) return 'Continue from the last committed subgoal using the current app state.';
+  if (execResult.cancelled) return 'Ask whether to retry the interrupted step or choose a different path.';
+  if (execResult.success === false) return 'Review the failed step and gather fresh evidence before continuing.';
+  if (execResult.postVerification?.needsFollowUp) return 'Continue with the detected follow-up flow for the current app state.';
+  if (execResult.screenshotCaptured) return 'Continue from the latest visual evidence and current app state.';
+  if (inferContinuationVerificationStatus(execResult) === 'unverified') return 'Gather fresh evidence before claiming the requested state change is complete.';
+  return 'Continue from the current subgoal using the latest execution results.';
+}
+
+function recordContinuityFromExecution(ai, actionData, execResult, details = {}) {
+  try {
+    const latestVisual = typeof ai?.getLatestVisualContext === 'function'
+      ? ai.getLatestVisualContext()
+      : null;
+    const captureMode = String(latestVisual?.scope || '').trim() || (execResult?.screenshotCaptured ? 'screen' : null);
+    const captureTrusted = captureMode ? (captureMode === 'window' || captureMode === 'region') : null;
+    const targetWindowHandle = Number(details.targetWindowHandle || execResult?.focusVerification?.expectedWindowHandle || 0) || null;
+    recordChatContinuityTurn({
+      recordedAt: new Date().toISOString(),
+      userMessage: details.userMessage || '',
+      executionIntent: details.executionIntent || details.userMessage || '',
+      activeGoal: details.executionIntent || details.userMessage || '',
+      committedSubgoal: actionData?.thought || details.executionIntent || details.userMessage || '',
+      thought: actionData?.thought || '',
+      actionPlan: Array.isArray(actionData?.actions) ? actionData.actions : [],
+      success: !!execResult?.success,
+      cancelled: !!execResult?.cancelled,
+      postVerificationFailed: !!execResult?.postVerificationFailed,
+      postVerification: execResult?.postVerification || null,
+      focusVerification: execResult?.focusVerification || null,
+      screenshotCaptured: !!execResult?.screenshotCaptured,
+      executedCount: Array.isArray(actionData?.actions) ? actionData.actions.length : 0,
+      targetWindowHandle,
+      windowTitle: latestVisual?.windowTitle || null,
+      observationEvidence: {
+        captureMode,
+        captureTrusted,
+        windowHandle: Number(latestVisual?.windowHandle || 0) || targetWindowHandle || null
+      },
+      verification: {
+        status: inferContinuationVerificationStatus(execResult)
+      },
+      nextRecommendedStep: inferNextRecommendedStep(execResult)
+    }, { cwd: process.cwd() });
+  } catch (continuityError) {
+    warn(`Could not record chat continuity state: ${continuityError.message}`);
+  }
 }
 
 function shouldAutoCaptureObservationAfterActions(userMessage, actions, execResult) {
@@ -1136,6 +1198,14 @@ async function runChatLoop(ai, options) {
       }
     }
 
+    recordContinuityFromExecution(ai, actionData, execResult, {
+      userMessage: line,
+      executionIntent: effectiveUserMessage,
+      targetWindowHandle: actionData?.actions?.find((action) => action?.windowHandle || action?.targetWindowHandle)?.windowHandle
+        || actionData?.actions?.find((action) => action?.windowHandle || action?.targetWindowHandle)?.targetWindowHandle
+        || null
+    });
+
     // ===== VISION AUTO-CONTINUATION =====
     // If the AI requested a screenshot during its action sequence AND we captured it,
     // automatically send a follow-up message so the AI can analyze the capture and
@@ -1251,6 +1321,14 @@ async function runChatLoop(ai, options) {
           error(contExecResult?.error || 'Continuation actions failed');
           break;
         }
+
+        recordContinuityFromExecution(ai, contActionData, contExecResult, {
+          userMessage: line,
+          executionIntent: effectiveUserMessage,
+          targetWindowHandle: contActionData?.actions?.find((action) => action?.windowHandle || action?.targetWindowHandle)?.windowHandle
+            || contActionData?.actions?.find((action) => action?.windowHandle || action?.targetWindowHandle)?.targetWindowHandle
+            || null
+        });
 
         // If the continuation itself requested another screenshot, loop again
         if (!contExecResult?.screenshotCaptured) break;

@@ -33,6 +33,7 @@ let currentCopilotModel = 'gpt-4o';
 let clearedVisual = false;
 let resetBrowser = false;
 let clearedSessionIntent = false;
+let clearedChatContinuity = false;
 
 const sessionIntentState = {
   currentRepo: { repoName: 'copilot-liku-cli' },
@@ -41,11 +42,24 @@ const sessionIntentState = {
   explicitCorrections: [{ text: 'MUSE is a different repo, this is copilot-liku-cli.' }]
 };
 
+const chatContinuityState = {
+  activeGoal: 'Produce a confident synthesis of ticker LUNR in TradingView',
+  currentSubgoal: 'Inspect the active TradingView chart',
+  continuationReady: true,
+  lastTurn: {
+    actionSummary: 'focus_window -> screenshot',
+    verificationStatus: 'verified'
+  }
+};
+
 const handler = createCommandHandler({
   aiProviders: { copilot: {}, openai: {}, anthropic: {}, ollama: {} },
   captureVisualContext: () => Promise.resolve({ type: 'system', message: 'captured' }),
   clearVisualContext: () => {
     clearedVisual = true;
+  },
+  clearChatContinuityState: () => {
+    clearedChatContinuity = true;
   },
   exchangeForCopilotSession: () => Promise.resolve(),
   getCopilotModels: () => ([
@@ -91,6 +105,7 @@ const handler = createCommandHandler({
     }
   ]),
   getCurrentCopilotModel: () => currentCopilotModel,
+  getChatContinuityState: () => chatContinuityState,
   getCurrentProvider: () => currentProvider,
   getSessionIntentState: () => sessionIntentState,
   getStatus: () => ({
@@ -170,7 +185,8 @@ test('clear command resets history and visual state', () => {
   assert.strictEqual(clearedVisual, true);
   assert.strictEqual(resetBrowser, true);
   assert.strictEqual(clearedSessionIntent, true);
-  assert.ok(result.message.includes('session intent state'));
+  assert.strictEqual(clearedChatContinuity, true);
+  assert.ok(result.message.includes('chat continuity state'));
 });
 
 test('state command reports current repo and forgone features', () => {
@@ -179,13 +195,18 @@ test('state command reports current repo and forgone features', () => {
   assert.ok(result.message.includes('Current repo: copilot-liku-cli'));
   assert.ok(result.message.includes('Downstream repo intent: muse-ai'));
   assert.ok(result.message.includes('Forgone features: terminal-liku ui'));
+  assert.ok(result.message.includes('Active goal: Produce a confident synthesis of ticker LUNR in TradingView'));
+  assert.ok(result.message.includes('Continuation ready: yes'));
 });
 
 test('state clear command clears session intent state', () => {
   clearedSessionIntent = false;
+  clearedChatContinuity = false;
   const result = handler.handleCommand('/state clear');
   assert.strictEqual(result.type, 'system');
   assert.strictEqual(clearedSessionIntent, true);
+  assert.strictEqual(clearedChatContinuity, true);
+  assert.ok(result.message.includes('chat continuity state'));
 });
 
 test('model command uses normalized model keys', () => {
