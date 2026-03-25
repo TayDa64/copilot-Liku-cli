@@ -118,6 +118,11 @@ async function main() {
   assert(approval.output.includes('EXECUTE_COUNT:1'), 'approval-style scenario should execute the emitted actions once');
   assert(!approval.output.includes('Non-action message detected'), 'approval-style scenario should not be skipped as non-action');
 
+  const continuity = await runScenario(['lets continue with next steps, maintain continuity']);
+  assert.strictEqual(continuity.exitCode, 0, 'continuity-style scenario should exit successfully');
+  assert(continuity.output.includes('EXECUTE_COUNT:1'), 'continuity-style scenario should execute the emitted actions once');
+  assert(!continuity.output.includes('Parsed action plan withheld'), 'continuity-style scenario should not be withheld as non-executable text');
+
   const acknowledgement = await runScenario(['thanks']);
   assert.strictEqual(acknowledgement.exitCode, 0, 'acknowledgement-style scenario should exit successfully');
   assert(acknowledgement.output.includes('EXECUTE_COUNT:0'), 'acknowledgement-style scenario should not execute emitted actions');

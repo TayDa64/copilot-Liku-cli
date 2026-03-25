@@ -198,7 +198,7 @@ function isLikelyApprovalOrContinuationInput(text) {
   const t = String(text || '').trim().toLowerCase();
   if (!t) return false;
 
-  return /^(yes|y|yeah|yep|sure|ok|okay|go ahead|do it|do that|please do|continue|proceed|next)[!.\s]*$/i.test(t);
+  return /^(?:yes|y|yeah|yep|sure|ok|okay)(?:[!.\s].*)?$|^(?:(?:let'?s|please)\s+)?(?:go ahead|do it|do that|please do|continue|proceed|next(?:\s+step(?:s)?)?|keep going|carry on|move on)(?:[!.\s,].*)?$|^(?:(?:let'?s)\s+)?continue\s+with\s+next\s+steps(?:[!.\s,].*)?$|^(?:(?:let'?s)\s+)?maintain\s+continuity(?:[!.\s,].*)?$/i.test(t);
 }
 
 function isObservationOrSynthesisPlan(actionData) {
