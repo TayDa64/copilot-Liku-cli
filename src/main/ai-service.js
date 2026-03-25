@@ -4484,6 +4484,32 @@ async function verifyAndSelfHealPostActions(actionData, options = {}) {
  * @param {Object} options.targetAnalysis - Visual analysis of click targets
  * @returns {Object} Execution results
  */
+function buildScreenshotCaptureRequest(action, lastTargetWindowHandle = null) {
+  const requestedScope = String(action?.scope || '').trim().toLowerCase();
+  const region = action?.region && typeof action.region === 'object' ? action.region : null;
+  const explicitWindowHandle = Number(action?.windowHandle || action?.hwnd || action?.targetWindowHandle || 0) || 0;
+  const inferredWindowHandle = explicitWindowHandle || (Number(lastTargetWindowHandle || 0) || 0);
+
+  let scope = 'screen';
+  if (region) {
+    scope = 'region';
+  } else if (['active-window', 'window'].includes(requestedScope)) {
+    scope = 'window';
+  } else if (requestedScope === 'screen') {
+    scope = 'screen';
+  } else if (inferredWindowHandle) {
+    scope = 'window';
+  }
+
+  return {
+    scope,
+    region: region || undefined,
+    windowHandle: inferredWindowHandle || undefined,
+    targetWindowHandle: inferredWindowHandle || undefined,
+    reason: action?.reason || ''
+  };
+}
+
 async function executeActions(actionData, onAction = null, onScreenshot = null, options = {}) {
   if (!actionData || !actionData.actions || !Array.isArray(actionData.actions)) {
     return { success: false, error: 'No valid actions provided' };
@@ -4543,7 +4569,7 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
     if (action.type === 'screenshot') {
       screenshotRequested = true;
       if (onScreenshot) {
-        await onScreenshot();
+        await onScreenshot(buildScreenshotCaptureRequest(action, lastTargetWindowHandle));
       }
       results.push({ success: true, action: 'screenshot', message: 'Screenshot captured' });
       continue;
@@ -5058,7 +5084,7 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
     if (action.type === 'screenshot') {
       screenshotRequested = true;
       if (onScreenshot) {
-        await onScreenshot();
+        await onScreenshot(buildScreenshotCaptureRequest(action, lastTargetWindowHandle));
       }
       results.push({ success: true, action: 'screenshot', message: 'Screenshot captured' });
       continue;

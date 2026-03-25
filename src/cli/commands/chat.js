@@ -179,7 +179,7 @@ function isLikelyAutomationInput(text) {
   if (!t) return false;
 
   // Explicit acknowledgements/chit-chat should never execute actions.
-  if (/^(thanks|thank you|awesome|great|nice|outstanding work|good job|perfect|cool|ok|okay|got it|sounds good|that works)[!.\s]*$/i.test(t)) {
+  if (isAcknowledgementOnlyInput(t)) {
     return false;
   }
 
@@ -187,18 +187,44 @@ function isLikelyAutomationInput(text) {
   return /(open|launch|search|play|click|type|press|scroll|drag|close|minimize|restore|focus|bring|navigate|go to|run|execute|find|select|choose|pick|set|change|switch|adjust|update|create|add|remove|alert|timeframe|indicator|watchlist|tool|draw|place|save|submit|capture|screenshot|screen shot)/i.test(t);
 }
 
+function isAcknowledgementOnlyInput(text) {
+  const t = String(text || '').trim().toLowerCase();
+  if (!t) return false;
+
+  return /^(thanks|thank you|awesome|great|nice|outstanding work|good job|perfect|cool|ok|okay|got it|sounds good|that works)[!.\s]*$/i.test(t);
+}
+
 function isLikelyApprovalOrContinuationInput(text) {
   const t = String(text || '').trim().toLowerCase();
   if (!t) return false;
 
-  return /^(yes|y|yeah|yep|sure|ok|okay|go ahead|do it|do that|please do|continue|proceed|next)$/i.test(t);
+  return /^(yes|y|yeah|yep|sure|ok|okay|go ahead|do it|do that|please do|continue|proceed|next)[!.\s]*$/i.test(t);
+}
+
+function isObservationOrSynthesisPlan(actionData) {
+  const actions = Array.isArray(actionData?.actions) ? actionData.actions : [];
+  if (!actions.length) return false;
+
+  const meaningful = actions.filter((action) => action?.type !== 'wait');
+  if (!meaningful.length) return false;
+
+  return meaningful.every((action) => [
+    'screenshot',
+    'focus_window',
+    'bring_window_to_front',
+    'restore_window'
+  ].includes(action?.type));
 }
 
 function shouldExecuteDetectedActions(currentLine, executionIntent, actionData) {
   const hasActions = !!(actionData && Array.isArray(actionData.actions) && actionData.actions.length > 0);
   if (!hasActions) return false;
-  if (isLikelyAutomationInput(executionIntent)) return true;
   if (isLikelyApprovalOrContinuationInput(currentLine)) return true;
+  if (isAcknowledgementOnlyInput(currentLine)) return false;
+  if (isLikelyAutomationInput(executionIntent)) return true;
+  if (isLikelyObservationInput(executionIntent)) return true;
+  if (isLikelyToolInventoryInput(executionIntent)) return true;
+  if (isObservationOrSynthesisPlan(actionData)) return true;
   return false;
 }
 
@@ -206,7 +232,7 @@ function isLikelyObservationInput(text) {
   const t = String(text || '').trim().toLowerCase();
   if (!t) return false;
 
-  return /(what do you see|what can you see|tell me what you see|describe( what)? you see|describe the (screen|window|app)|what controls|what can you use|what is visible|what's visible|enumerate.*controls|which controls)/i.test(t);
+  return /(what do you see|what can you see|tell me what you see|describe( what)? you see|describe the (screen|window|app)|what controls|what can you use|what is visible|what's visible|enumerate.*controls|which controls|synthesis|synthes(?:is|ize)|analy[sz]e|analysis|assess|assessment|inspect|review|look at)/i.test(t);
 }
 
 function isLikelyToolInventoryInput(text) {
@@ -520,24 +546,63 @@ function printCommandResult(cmdResult) {
 }
 
 async function autoCapture(ai, options = {}) {
-  const captureScope = options.scope === 'active-window' ? 'window' : 'screen';
+  const requestedScope = String(options.scope || '').trim().toLowerCase();
+  const captureScope = ['active-window', 'window'].includes(requestedScope)
+    ? 'window'
+    : requestedScope === 'region'
+      ? 'region'
+      : 'screen';
+  const targetWindowHandle = Number(options.windowHandle || options.hwnd || options.targetWindowHandle || 0) || 0;
+  const captureRegion = options.region && typeof options.region === 'object'
+    ? {
+        x: Number(options.region.x),
+        y: Number(options.region.y),
+        width: Number(options.region.width),
+        height: Number(options.region.height)
+      }
+    : null;
+  const hasValidRegion = !!(captureRegion
+    && [captureRegion.x, captureRegion.y, captureRegion.width, captureRegion.height].every(Number.isFinite)
+    && captureRegion.width > 0
+    && captureRegion.height > 0);
   try {
     const { screenshot, screenshotActiveWindow } = require('../../main/ui-automation/screenshot');
-    const capture = captureScope === 'window' ? screenshotActiveWindow : screenshot;
-    const result = await capture({ memory: true, base64: true, metric: 'sha256' });
+    const captureOptions = { memory: true, base64: true, metric: 'sha256' };
+    let result;
+
+    if (captureScope === 'window') {
+      result = targetWindowHandle
+        ? await screenshot({ ...captureOptions, windowHwnd: targetWindowHandle })
+        : await screenshotActiveWindow(captureOptions);
+    } else if (captureScope === 'region' && hasValidRegion) {
+      result = await screenshot({ ...captureOptions, region: captureRegion });
+    } else {
+      result = await screenshot(captureOptions);
+    }
+
     if (result && result.success && result.base64) {
       ai.addVisualContext({
         dataURL: `data:image/png;base64,${result.base64}`,
-        width: 0, height: 0, scope: captureScope, timestamp: Date.now()
+        width: 0,
+        height: 0,
+        scope: captureScope,
+        windowHandle: targetWindowHandle || undefined,
+        region: hasValidRegion ? captureRegion : undefined,
+        timestamp: Date.now()
       });
       info(captureScope === 'window'
-        ? 'Auto-captured active window for visual context.'
-        : 'Auto-captured screenshot for visual context.');
+        ? (targetWindowHandle
+            ? `Auto-captured target window ${targetWindowHandle} for visual context.`
+            : 'Auto-captured active window for visual context.')
+        : captureScope === 'region'
+          ? 'Auto-captured region for visual context.'
+          : 'Auto-captured screenshot for visual context.');
       return true;
     }
 
-    if (captureScope === 'window') {
-      warn('Active-window screenshot capture returned no data. Falling back to full-screen capture.');
+    if (captureScope === 'window' || captureScope === 'region') {
+      const captureLabel = captureScope === 'window' ? 'Active-window screenshot capture' : 'Region screenshot capture';
+      warn(`${captureLabel} returned no data. Falling back to full-screen capture.`);
       const fallback = await screenshot({ memory: true, base64: true, metric: 'sha256' });
       if (fallback && fallback.success && fallback.base64) {
         ai.addVisualContext({
@@ -551,7 +616,9 @@ async function autoCapture(ai, options = {}) {
 
     warn(captureScope === 'window'
       ? 'Active-window screenshot capture returned no data.'
-      : 'Screenshot capture returned no data.');
+      : captureScope === 'region'
+        ? 'Region screenshot capture returned no data.'
+        : 'Screenshot capture returned no data.');
   } catch (e) {
     warn(`Auto-screenshot failed: ${e.message}. Use /capture manually.`);
   }
@@ -565,8 +632,8 @@ async function executeActionBatchWithSafeguards(ai, actionData, session, userMes
   const execResult = await ai.executeActions(
     actionData,
     (result, idx, total) => printActionProgress(result, idx, total),
-    async () => {
-      const ok = await autoCapture(ai);
+    async (captureOptions = {}) => {
+      const ok = await autoCapture(ai, captureOptions);
       if (ok) screenshotCaptured = true;
     },
     {
@@ -598,8 +665,8 @@ async function executeActionBatchWithSafeguards(ai, actionData, session, userMes
     if (actionId) ai.confirmPendingAction(actionId);
     const resumed = await ai.resumeAfterConfirmation(
       (result, idx, total) => printActionProgress(result, idx, total),
-      async () => {
-        const ok = await autoCapture(ai);
+      async (captureOptions = {}) => {
+        const ok = await autoCapture(ai, captureOptions);
         if (ok) screenshotCaptured = true;
       },
       {
@@ -655,7 +722,7 @@ async function runChatLoop(ai, options) {
     if (!line) continue;
 
     const lowerLine = line.toLowerCase();
-    const isContinueLike = ['continue', 'proceed', 'go ahead', 'next'].includes(lowerLine);
+    const isContinueLike = isLikelyApprovalOrContinuationInput(lowerLine);
     if (!line.startsWith('/') && !isContinueLike) {
       lastNonTrivialUserMessage = line;
     }
@@ -822,7 +889,7 @@ async function runChatLoop(ai, options) {
     if (!hasActions) continue;
 
     if (!shouldExecuteDetectedActions(line, executionIntent, actionData)) {
-      info('Non-action message detected; skipping action execution.');
+      info('Parsed action plan withheld because this turn looks like acknowledgement-only or non-executable text.');
       continue;
     }
 

@@ -107,10 +107,21 @@ async function main() {
   assert(direct.output.includes('EXECUTE_COUNT:1'), 'direct alert-setting scenario should execute the emitted actions once');
   assert(!direct.output.includes('Non-action message detected'), 'direct alert-setting scenario should not be skipped as non-action');
 
+  const synthesis = await runScenario(['help me make a confident synthesis of ticker LUNR in tradingview']);
+  assert.strictEqual(synthesis.exitCode, 0, 'TradingView synthesis scenario should exit successfully');
+  assert(synthesis.output.includes('EXECUTE_COUNT:1'), 'TradingView synthesis scenario should execute the emitted actions once');
+  assert(!synthesis.output.includes('Non-action message detected'), 'TradingView synthesis scenario should not be skipped as non-action');
+  assert(!synthesis.output.includes('Parsed action plan withheld'), 'TradingView synthesis scenario should not be withheld as acknowledgement-only text');
+
   const approval = await runScenario(['yes']);
   assert.strictEqual(approval.exitCode, 0, 'approval-style scenario should exit successfully');
   assert(approval.output.includes('EXECUTE_COUNT:1'), 'approval-style scenario should execute the emitted actions once');
   assert(!approval.output.includes('Non-action message detected'), 'approval-style scenario should not be skipped as non-action');
+
+  const acknowledgement = await runScenario(['thanks']);
+  assert.strictEqual(acknowledgement.exitCode, 0, 'acknowledgement-style scenario should exit successfully');
+  assert(acknowledgement.output.includes('EXECUTE_COUNT:0'), 'acknowledgement-style scenario should not execute emitted actions');
+  assert(acknowledgement.output.includes('Parsed action plan withheld'), 'acknowledgement-style scenario should be withheld as acknowledgement-only text');
 
   console.log('PASS chat actionability');
 }

@@ -127,7 +127,9 @@ test('chat.js auto-captures observation context after focus or launch actions', 
 
   assert(chatContent.includes('function shouldAutoCaptureObservationAfterActions'), 'Should define observation auto-capture helper');
   assert(chatContent.includes('async function waitForFreshObservationContext'), 'Observation flow should wait for fresh watcher context');
-  assert(chatContent.includes("options.scope === 'active-window' ? 'window' : 'screen'"), 'Auto-capture should support active-window scope');
+  assert(chatContent.includes("const requestedScope = String(options.scope || '').trim().toLowerCase();"), 'Auto-capture should normalize requested screenshot scope');
+  assert(chatContent.includes("['active-window', 'window'].includes(requestedScope)"), 'Auto-capture should support active-window and explicit window scope');
+  assert(chatContent.includes('targetWindowHandle'), 'Auto-capture should preserve the target window handle when available');
   assert(chatContent.includes("execResult?.success && shouldAutoCaptureObservationAfterActions"), 'Successful observation flows should auto-capture after actions');
   assert(chatContent.includes('watcher.waitForFreshState'), 'Observation flow should wait for a fresh watcher cycle before continuation');
   assert(chatContent.includes("autoCapture(ai, { scope: 'active-window' })"), 'Observation flow should capture the active window');
