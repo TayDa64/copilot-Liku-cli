@@ -441,3 +441,227 @@ The best next coding slice is:
 5. add one end-to-end regression: actionable turn -> execution result saved -> `continue` consumes saved state.
 
 That gives the highest leverage improvement without trying to solve all UI verification in one pass.
+
+## Execution checklist
+
+Use this as the practical implementation tracker for the next passes.
+
+### Phase 1 — Structured continuity baseline
+
+**Status:** Completed in `929c88b`
+
+**Delivered**
+- persisted `chatContinuity` in `src/main/session-intent-state.js`
+- injected `## Recent Action Continuity` in `src/main/ai-service/message-builder.js`
+- wired state clearing/reporting through `src/main/ai-service.js` and `src/main/ai-service/commands.js`
+- recorded post-execution continuity facts from `src/cli/commands/chat.js`
+
+**Files touched**
+- `src/main/session-intent-state.js`
+- `src/main/ai-service/message-builder.js`
+- `src/main/ai-service/commands.js`
+- `src/main/ai-service.js`
+- `src/cli/commands/chat.js`
+- `scripts/test-session-intent-state.js`
+- `scripts/test-message-builder-session-intent.js`
+- `scripts/test-ai-service-commands.js`
+- `scripts/test-chat-inline-proof-evaluator.js`
+
+**Acceptance proof**
+- continuity state persists across turns
+- continuity context is injected into prompts
+- `/clear` and `/state` include continuity handling
+
+**Validation commands**
+```powershell
+node scripts/test-session-intent-state.js
+node scripts/test-message-builder-session-intent.js
+node scripts/test-ai-service-commands.js
+node scripts/test-chat-actionability.js
+```
+
+### Phase 2 — Prefer state over phrasing
+
+**Status:** Next priority
+
+**Goal**
+- make continuation routing prefer structured continuity state before regex heuristics when continuity exists
+
+**Target files**
+- `src/cli/commands/chat.js`
+- `src/main/session-intent-state.js`
+- `scripts/test-chat-actionability.js`
+- likely new: `scripts/test-chat-continuity-prompting.js`
+
+**Implementation tasks**
+- add a `hasUsableChatContinuity(...)` helper in `chat.js`
+- when user input is short continuation text (`continue`, `next`, `keep going`), consult continuity state first
+- allow execution to proceed when `continuationReady === true` even if phrasing is minimal
+- block blind continuation when `continuationReady === false` or continuity is degraded beyond safe auto-execution
+- keep acknowledgement-only protections intact
+
+**Acceptance criteria**
+- continuation works on minimal phrasing because of stored state, not only because of regex breadth
+- acknowledgement-only turns still do not execute
+- degraded continuity produces a recovery-oriented response instead of silent drift
+
+**Validation commands**
+```powershell
+node scripts/test-chat-actionability.js
+node scripts/test-session-intent-state.js
+```
+
+### Phase 3 — Store richer execution facts
+
+**Status:** High priority
+
+**Goal**
+- upgrade `chatContinuity.lastTurn` from a compact summary to a fuller execution record usable for grounded follow-up reasoning
+
+**Target files**
+- `src/cli/commands/chat.js`
+- `src/main/ai-service.js`
+- `src/main/session-intent-state.js`
+- likely new: `src/main/chat-continuity-state.js`
+
+**Implementation tasks**
+- move normalization logic out of `session-intent-state.js` into a dedicated continuity mapper
+- persist richer fields:
+  - per-action success/failure when available
+  - target window title / handle
+  - visual evidence identifiers or timestamps
+  - watcher freshness / focus verification details
+  - popup follow-up / recipe outcomes
+- distinguish user goal, committed subgoal, and next recommended step more explicitly
+
+**Acceptance criteria**
+- follow-up prompts can cite concrete execution facts instead of only action types
+- continuity state can represent successful, degraded, failed, and cancelled turns cleanly
+- the mapper stays reusable and keeps `ai-service.js` from growing further
+
+**Validation commands**
+```powershell
+node scripts/test-session-intent-state.js
+node scripts/test-ai-service-commands.js
+node scripts/test-chat-actionability.js
+```
+
+### Phase 4 — Verification contracts for UI changes
+
+**Status:** High priority
+
+**Goal**
+- prevent Liku from overclaiming that a requested UI change succeeded when evidence is weak or missing
+
+**Target files**
+- likely new: `src/main/action-verification.js`
+- `src/cli/commands/chat.js`
+- `src/main/ai-service.js`
+- `src/main/session-intent-state.js`
+- likely new: `scripts/test-action-verification.js`
+
+**Implementation tasks**
+- support optional `verify` metadata on actions or normalized steps
+- create verification result shapes such as:
+  - `verified`
+  - `unverified`
+  - `contradicted`
+  - `not-applicable`
+- add verification helpers for first useful checks:
+  - target window focused
+  - expected dialog visible
+  - expected popup follow-up remains unresolved
+  - screenshot evidence too weak for claim
+- store verification details in continuity state
+
+**Acceptance criteria**
+- follow-up reasoning clearly distinguishes evidence from assumption
+- contradictory UI evidence blocks blind continuation
+- verification status becomes a first-class part of continuity routing
+
+**Validation commands**
+```powershell
+node scripts/test-action-verification.js
+node scripts/test-session-intent-state.js
+```
+
+### Phase 5 — Explicit screenshot trust and degraded continuity handling
+
+**Status:** High priority
+
+**Goal**
+- make screenshot trust a first-class continuity signal and provide recovery behavior when evidence quality degrades
+
+**Target files**
+- `src/cli/commands/chat.js`
+- `src/main/session-intent-state.js`
+- `src/main/ai-service/message-builder.js`
+- likely new: `scripts/test-chat-continuity-prompting.js`
+
+**Implementation tasks**
+- distinguish `window`, `region`, and `screen` captures in prompt context more explicitly
+- mark full-screen fallback as degraded evidence when target-window capture was expected
+- add recovery rules such as:
+  - retry target-window capture
+  - ask user for confirmation
+  - continue only with bounded claims
+
+**Acceptance criteria**
+- the model can see when the latest screenshot is trusted vs degraded
+- degraded screenshot evidence does not silently look equivalent to target-window evidence
+- continuation can branch into retry/recover/report modes
+
+**Validation commands**
+```powershell
+node scripts/test-message-builder-session-intent.js
+node scripts/test-chat-actionability.js
+```
+
+### Phase 6 — Multi-turn continuity coherence suite
+
+**Status:** Required before calling the continuity work mature
+
+**Goal**
+- prove that follow-up turns are grounded in actual execution results rather than reconstructed loosely from conversation text
+
+**Target files**
+- `scripts/test-chat-actionability.js`
+- likely new: `scripts/test-chat-continuity-state.js`
+- likely new: `scripts/test-chat-continuity-prompting.js`
+- likely new: fixture files for execution-result snapshots
+
+**Implementation tasks**
+- add two-turn and three-turn scenarios:
+  - successful continuation
+  - degraded screenshot fallback continuation
+  - contradicted verification continuation
+  - cancelled turn followed by recovery prompt
+- assert that the prompt contains the right continuity facts
+- assert that unsafe continuation is blocked or redirected appropriately
+
+**Acceptance criteria**
+- tests cover plan coherence, not just action execution
+- continuity regressions fail when state is absent, stale, or contradicted
+- the suite proves that Liku can continue safely and honestly
+
+**Validation commands**
+```powershell
+node scripts/test-chat-actionability.js
+node scripts/test-chat-continuity-state.js
+node scripts/test-chat-continuity-prompting.js
+node scripts/test-chat-inline-proof-evaluator.js
+```
+
+## Recommended implementation order from here
+
+1. **Phase 2 — Prefer state over phrasing**
+2. **Phase 3 — Store richer execution facts**
+3. **Phase 4 — Verification contracts for UI changes**
+4. **Phase 5 — Explicit screenshot trust and degraded recovery**
+5. **Phase 6 — Multi-turn continuity coherence suite**
+
+## Commit strategy
+
+- keep each phase in its own commit
+- require passing proof commands before each commit
+- prefer adding tests in the same commit as the behavior they validate
