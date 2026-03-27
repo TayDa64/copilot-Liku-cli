@@ -713,13 +713,38 @@ async function autoCapture(ai, options = {}) {
     && captureRegion.height > 0);
   try {
     const { screenshot, screenshotActiveWindow } = require('../../main/ui-automation/screenshot');
+    const { captureBackgroundWindow } = require('../../main/background-capture');
     const captureOptions = { memory: true, base64: true, metric: 'sha256' };
     let result;
+    let captureProvider = null;
+    let captureCapability = null;
+    let captureDegradedReason = null;
+    let captureNonDisruptive = false;
+    const preferBackground = captureScope === 'window' && targetWindowHandle > 0;
 
     if (captureScope === 'window') {
-      result = targetWindowHandle
-        ? await screenshot({ ...captureOptions, windowHwnd: targetWindowHandle })
-        : await screenshotActiveWindow(captureOptions);
+      if (preferBackground) {
+        const backgroundResult = await captureBackgroundWindow({
+          targetWindowHandle,
+          windowHandle: targetWindowHandle
+        });
+        if (backgroundResult?.success && backgroundResult.result?.base64) {
+          result = backgroundResult.result;
+          captureProvider = backgroundResult.captureProvider;
+          captureCapability = backgroundResult.captureCapability;
+          captureDegradedReason = backgroundResult.captureDegradedReason;
+          captureNonDisruptive = true;
+        } else {
+          result = await screenshot({ ...captureOptions, windowHwnd: targetWindowHandle });
+          captureProvider = 'window-direct';
+          captureCapability = 'fallback';
+          captureDegradedReason = backgroundResult?.degradedReason || null;
+        }
+      } else {
+        result = targetWindowHandle
+          ? await screenshot({ ...captureOptions, windowHwnd: targetWindowHandle })
+          : await screenshotActiveWindow(captureOptions);
+      }
     } else if (captureScope === 'region' && hasValidRegion) {
       result = await screenshot({ ...captureOptions, region: captureRegion });
     } else {
@@ -740,6 +765,11 @@ async function autoCapture(ai, options = {}) {
         region: hasValidRegion ? captureRegion : undefined,
         captureMode: actualCaptureMode,
         captureTrusted: isTrustedCaptureMode(actualCaptureMode),
+        captureProvider: captureProvider || null,
+        captureCapability: captureCapability || null,
+        captureDegradedReason: captureDegradedReason || null,
+        captureNonDisruptive,
+        captureBackgroundRequested: preferBackground,
         timestamp: Date.now()
       });
       info(captureScope === 'window'
@@ -764,6 +794,11 @@ async function autoCapture(ai, options = {}) {
           scope: 'screen',
           captureMode: String(fallback.captureMode || 'fullscreen-fallback'),
           captureTrusted: false,
+          captureProvider: 'screen-fallback',
+          captureCapability: 'unsupported',
+          captureDegradedReason: 'Background/non-disruptive capture was unavailable; fell back to full-screen capture.',
+          captureNonDisruptive: false,
+          captureBackgroundRequested: preferBackground,
           timestamp: Date.now()
         });
         info('Fallback full-screen screenshot captured for visual context.');

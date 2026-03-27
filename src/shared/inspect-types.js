@@ -81,7 +81,12 @@ function createVisualFrame(params) {
     windowHandle: Number.isFinite(Number(params.windowHandle)) ? Number(params.windowHandle) : null,
     region: params.region && typeof params.region === 'object' ? { ...params.region } : null,
     captureMode: params.captureMode || null,
-    captureTrusted: typeof params.captureTrusted === 'boolean' ? params.captureTrusted : null
+    captureTrusted: typeof params.captureTrusted === 'boolean' ? params.captureTrusted : null,
+    captureProvider: params.captureProvider || null,
+    captureCapability: params.captureCapability || null,
+    captureDegradedReason: params.captureDegradedReason || null,
+    captureNonDisruptive: typeof params.captureNonDisruptive === 'boolean' ? params.captureNonDisruptive : null,
+    captureBackgroundRequested: typeof params.captureBackgroundRequested === 'boolean' ? params.captureBackgroundRequested : null
   };
 }
 

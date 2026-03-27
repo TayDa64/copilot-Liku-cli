@@ -164,6 +164,11 @@ function buildObservationEvidence(latestVisual, execResult = {}, watcherSnapshot
   return {
     captureMode,
     captureTrusted,
+    captureProvider: normalizeText(latestVisual?.captureProvider, 80),
+    captureCapability: normalizeText(latestVisual?.captureCapability, 80),
+    captureDegradedReason: normalizeText(latestVisual?.captureDegradedReason, 180),
+    captureNonDisruptive: typeof latestVisual?.captureNonDisruptive === 'boolean' ? latestVisual.captureNonDisruptive : null,
+    captureBackgroundRequested: typeof latestVisual?.captureBackgroundRequested === 'boolean' ? latestVisual.captureBackgroundRequested : null,
     visualContextRef: buildVisualReference(latestVisual),
     visualTimestamp: safeNumber(latestVisual?.timestamp || latestVisual?.addedAt),
     windowHandle: safeNumber(latestVisual?.windowHandle || details.targetWindowHandle || execResult?.focusVerification?.expectedWindowHandle),

@@ -178,6 +178,11 @@ function normalizeObservationEvidence(turnRecord = {}) {
   return {
     captureMode: normalizeText(evidence.captureMode || turnRecord.captureMode, 60),
     captureTrusted: typeof evidence.captureTrusted === 'boolean' ? evidence.captureTrusted : null,
+    captureProvider: normalizeText(evidence.captureProvider, 80),
+    captureCapability: normalizeText(evidence.captureCapability, 80),
+    captureDegradedReason: normalizeText(evidence.captureDegradedReason, 180),
+    captureNonDisruptive: typeof evidence.captureNonDisruptive === 'boolean' ? evidence.captureNonDisruptive : null,
+    captureBackgroundRequested: typeof evidence.captureBackgroundRequested === 'boolean' ? evidence.captureBackgroundRequested : null,
     visualContextRef: normalizeText(evidence.visualContextRef, 120),
     visualTimestamp: Number.isFinite(Number(evidence.visualTimestamp)) ? Number(evidence.visualTimestamp) : null,
     windowHandle: Number.isFinite(Number(evidence.windowHandle || turnRecord.targetWindowHandle)) ? Number(evidence.windowHandle || turnRecord.targetWindowHandle) : null,
@@ -277,6 +282,7 @@ function deriveDegradedReason(normalizedTurn = {}) {
   if (normalizedTurn.executionStatus === 'failed') return 'The last action batch did not complete successfully.';
   if (normalizedTurn.verificationStatus === 'contradicted') return 'The latest evidence contradicts the claimed result.';
   if (normalizedTurn.verificationStatus === 'unverified') return 'The latest result is not fully verified yet.';
+  if (normalizedTurn.observationEvidence?.captureDegradedReason) return normalizedTurn.observationEvidence.captureDegradedReason;
   if (isScreenLikeCaptureMode(normalizedTurn.captureMode) && normalizedTurn.captureTrusted === false) {
     return 'Visual evidence fell back to full-screen capture instead of a trusted target-window capture.';
   }
@@ -550,6 +556,11 @@ function formatChatContinuityContext(state) {
   }
   if (lastTurn?.captureMode) lines.push(`- lastCaptureMode: ${lastTurn.captureMode}`);
   if (typeof lastTurn?.captureTrusted === 'boolean') lines.push(`- lastCaptureTrusted: ${lastTurn.captureTrusted ? 'yes' : 'no'}`);
+  if (lastTurn?.observationEvidence?.captureProvider) lines.push(`- lastCaptureProvider: ${lastTurn.observationEvidence.captureProvider}`);
+  if (lastTurn?.observationEvidence?.captureCapability) lines.push(`- lastCaptureCapability: ${lastTurn.observationEvidence.captureCapability}`);
+  if (typeof lastTurn?.observationEvidence?.captureNonDisruptive === 'boolean') {
+    lines.push(`- lastCaptureNonDisruptive: ${lastTurn.observationEvidence.captureNonDisruptive ? 'yes' : 'no'}`);
+  }
   if (lastTurn?.observationEvidence?.visualContextRef) lines.push(`- visualContextRef: ${lastTurn.observationEvidence.visualContextRef}`);
   if (typeof lastTurn?.observationEvidence?.uiWatcherFresh === 'boolean') {
     lines.push(`- uiWatcherFresh: ${lastTurn.observationEvidence.uiWatcherFresh ? 'yes' : 'no'}`);

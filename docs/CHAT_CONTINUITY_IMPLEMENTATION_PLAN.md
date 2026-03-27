@@ -452,6 +452,7 @@ Use this as the practical implementation tracker for the next passes.
 - **Milestone 4:** TradingView domain logic has been modularized into focused workflow modules (indicator, alert, chart, drawing, Pine, Paper Trading, DOM) with direct module regressions.
 - **Milestone 5:** multi-turn coherence regressions now cover verified, degraded, contradicted, cancelled, and explicit three-turn continuation paths.
 - **Milestone 6:** explicit repo/process grounding actions are implemented (`semantic_search_repo`, `grep_repo`, `pgrep_process`) with bounded output and contract/tooling coverage.
+- **Milestone 7:** non-disruptive capture scaffolding is in progress with explicit background-capture capability/trust signals flowing into continuity state.
 
 ### Phase 1 — Structured continuity baseline
 
@@ -1225,6 +1226,27 @@ node scripts/test-ai-service-contract.js
 
 ### Milestone 7 — Non-disruptive vision for approval-time continuity
 
+**Status:** In progress in working tree
+
+**Delivered so far**
+- added modular non-disruptive capture provider abstraction in `src/main/background-capture.js`
+  - capability detection for background capture eligibility
+  - trust classification for `window-printwindow` vs degraded `window-copyfromscreen`
+  - explicit degraded reasons for continuity safety routing
+- wired background-capture path into `src/cli/commands/chat.js` auto-capture flow when target window handles are available
+- extended visual frame contract in `src/shared/inspect-types.js` with background-capture metadata:
+  - `captureProvider`
+  - `captureCapability`
+  - `captureDegradedReason`
+  - `captureNonDisruptive`
+  - `captureBackgroundRequested`
+- persisted and surfaced background-capture metadata in continuity state and prompt context through:
+  - `src/main/chat-continuity-state.js`
+  - `src/main/session-intent-state.js`
+- added dedicated and continuity-level regressions:
+  - `scripts/test-background-capture.js`
+  - `scripts/test-session-intent-state.js`
+
 **Objective**
 - allow Liku to preserve target-app observation during approval pauses without forcing focus changes when the platform/app supports it
 
@@ -1249,8 +1271,10 @@ node scripts/test-ai-service-contract.js
 
 **Proof commands**
 ```powershell
+node scripts/test-background-capture.js
 node scripts/test-session-intent-state.js
 node scripts/test-chat-continuity-prompting.js
+node scripts/test-windows-observation-flow.js
 ```
 
 **Dependency notes**

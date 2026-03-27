@@ -156,6 +156,42 @@ test('screen-like fallback evidence degrades continuity readiness', () => {
   fs.rmSync(tempDir, { recursive: true, force: true });
 });
 
+test('background capture degraded reason is persisted and blocks continuation', () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'liku-session-intent-'));
+  const stateFile = path.join(tempDir, 'session-intent-state.json');
+  const store = createSessionIntentStateStore({ stateFile });
+
+  const recorded = store.recordExecutedTurn({
+    userMessage: 'continue',
+    executionIntent: 'Continue from background capture evidence.',
+    committedSubgoal: 'Inspect target app in background',
+    actionPlan: [{ type: 'screenshot', scope: 'window' }],
+    success: true,
+    observationEvidence: {
+      captureMode: 'window-copyfromscreen',
+      captureTrusted: false,
+      captureProvider: 'copyfromscreen',
+      captureCapability: 'degraded',
+      captureDegradedReason: 'Background capture degraded to CopyFromScreen while target was not foreground; content may be occluded or stale.'
+    },
+    verification: { status: 'verified' },
+    nextRecommendedStep: 'Recapture with trusted background provider or focus target app.'
+  }, {
+    cwd: path.join(__dirname, '..')
+  });
+
+  assert.strictEqual(recorded.chatContinuity.continuationReady, false);
+  assert(/Background capture degraded/i.test(recorded.chatContinuity.degradedReason));
+  assert.strictEqual(recorded.chatContinuity.lastTurn.observationEvidence.captureProvider, 'copyfromscreen');
+  assert.strictEqual(recorded.chatContinuity.lastTurn.observationEvidence.captureCapability, 'degraded');
+
+  const continuityContext = formatChatContinuityContext(recorded);
+  assert(continuityContext.includes('lastCaptureProvider: copyfromscreen'));
+  assert(continuityContext.includes('lastCaptureCapability: degraded'));
+
+  fs.rmSync(tempDir, { recursive: true, force: true });
+});
+
 test('contradicted verification blocks continuity readiness', () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'liku-session-intent-'));
   const stateFile = path.join(tempDir, 'session-intent-state.json');
