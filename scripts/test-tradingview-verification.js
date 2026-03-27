@@ -6,6 +6,7 @@ const path = require('path');
 const {
   detectTradingViewDomainActionRisk,
   extractTradingViewObservationKeywords,
+  inferTradingViewTradingMode,
   inferTradingViewObservationSpec,
   isTradingViewTargetHint
 } = require(path.join(__dirname, '..', 'src', 'main', 'tradingview', 'verification.js'));
@@ -48,6 +49,25 @@ test('TradingView DOM safety rail detects critical and high-risk actions', () =>
   assert.strictEqual(high.blockExecution, true);
 });
 
+test('TradingView trading mode inference recognizes paper trading signals', () => {
+  const paper = inferTradingViewTradingMode({
+    title: 'Paper Trading - Depth of Market - TradingView',
+    textSignals: 'open the paper trading panel in tradingview'
+  });
+  assert.strictEqual(paper.mode, 'paper');
+  assert(paper.evidence.includes('paper trading'));
+
+  const unknown = inferTradingViewTradingMode({ title: 'Depth of Market - TradingView' });
+  assert.strictEqual(unknown.mode, 'unknown');
+});
+
+test('TradingView DOM safety rail mentions paper trading guidance when paper mode is referenced', () => {
+  const risk = detectTradingViewDomainActionRisk('place a limit order in the tradingview paper trading dom', ActionRiskLevel);
+  assert(risk, 'paper-trading DOM order-entry risk should be detected');
+  assert.strictEqual(risk.tradingMode.mode, 'paper');
+  assert(/paper trading/i.test(risk.blockReason || ''), 'paper-trading refusal should mention Paper Trading guidance');
+});
+
 test('TradingView target hint detection recognizes canonical app metadata', () => {
   assert.strictEqual(isTradingViewTargetHint({ appName: 'TradingView', processNames: ['tradingview'] }), true);
   assert.strictEqual(isTradingViewTargetHint({ appName: 'Visual Studio Code', processNames: ['code'] }), false);
@@ -70,4 +90,10 @@ test('TradingView implicit observation spec distinguishes dialog and chart-state
   assert(chartSpec, 'chart-state spec should be inferred');
   assert.strictEqual(chartSpec.classification, 'chart-state');
   assert(chartSpec.expectedKeywords.includes('timeframe'));
+
+  const paperDomSpec = inferTradingViewObservationSpec({
+    textSignals: 'Open the Paper Trading depth of market panel in TradingView',
+    nextAction: { type: 'key', key: 'ctrl+d' }
+  });
+  assert.strictEqual(paperDomSpec.tradingModeHint.mode, 'paper');
 });

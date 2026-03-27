@@ -900,13 +900,13 @@ async function run() {
     const executed = [];
     const foregroundSequence = [
       { success: true, hwnd: 777, title: 'TradingView', processName: 'tradingview', windowKind: 'main' },
-      { success: true, hwnd: 778, title: 'Depth of Market - TradingView', processName: 'tradingview', windowKind: 'palette' },
-      { success: true, hwnd: 778, title: 'Depth of Market - TradingView', processName: 'tradingview', windowKind: 'palette' }
+      { success: true, hwnd: 778, title: 'Paper Trading - Depth of Market - TradingView', processName: 'tradingview', windowKind: 'palette' },
+      { success: true, hwnd: 778, title: 'Paper Trading - Depth of Market - TradingView', processName: 'tradingview', windowKind: 'palette' }
     ];
 
     await withPatchedSystemAutomation({
       resolveWindowHandle: async (action) => action?.processName === 'tradingview' ? 777 : 0,
-      getForegroundWindowInfo: async () => foregroundSequence.shift() || { success: true, hwnd: 778, title: 'Depth of Market - TradingView', processName: 'tradingview', windowKind: 'palette' },
+      getForegroundWindowInfo: async () => foregroundSequence.shift() || { success: true, hwnd: 778, title: 'Paper Trading - Depth of Market - TradingView', processName: 'tradingview', windowKind: 'palette' },
       focusWindow: async () => ({ success: true }),
       getRunningProcessesByNames: async () => ([{ pid: 4242, processName: 'tradingview', mainWindowTitle: 'TradingView', startTime: '2026-03-23T00:00:00Z' }])
     }, async () => {
@@ -940,6 +940,7 @@ async function run() {
       assert.strictEqual(execResult.observationCheckpoints.length, 1, 'A DOM checkpoint should be recorded');
       assert.strictEqual(execResult.observationCheckpoints[0].classification, 'panel-open', 'DOM verification should map to panel-open');
       assert.strictEqual(execResult.observationCheckpoints[0].verified, true, 'DOM verification should pass after the panel title is observed');
+      assert.strictEqual(execResult.observationCheckpoints[0].tradingMode.mode, 'paper', 'DOM verification metadata should detect Paper Trading mode from the observed panel');
     });
   });
 
@@ -970,10 +971,10 @@ async function run() {
       thought: 'Place a DOM order in TradingView',
       verification: 'No DOM order should be placed',
       actions: [
-        { type: 'click', reason: 'Place a limit order in the Depth of Market order book' }
+        { type: 'click', reason: 'Place a limit order in the Paper Trading Depth of Market order book' }
       ]
     }, null, null, {
-      userMessage: 'place a limit order in the TradingView DOM',
+      userMessage: 'place a limit order in the TradingView paper trading DOM',
       actionExecutor: async (action) => {
         executed++;
         return { success: true, action: action.type, message: 'executed' };
@@ -984,6 +985,8 @@ async function run() {
     assert.strictEqual(execResult.success, false, 'Advisory-only DOM order-entry actions should fail closed');
     assert.strictEqual(execResult.results[0].blockedByPolicy, true, 'Blocked DOM order-entry should be marked as policy-blocked');
     assert(/advisory-only/i.test(execResult.results[0].error || ''), 'Blocked DOM order-entry should explain the advisory-only safety rail');
+    assert(/paper trading/i.test(execResult.results[0].error || ''), 'Blocked DOM order-entry should mention Paper Trading guidance when paper mode is referenced');
+    assert.strictEqual(execResult.results[0].safety.tradingMode.mode, 'paper', 'Blocked DOM order-entry should expose paper-trading metadata');
   });
 
   await testAsync('TradingView DOM actions remain blocked when resuming after confirmation', async () => {

@@ -14,6 +14,70 @@ function mergeUniqueKeywords(...groups) {
     .filter(Boolean)));
 }
 
+function inferTradingViewTradingMode(input = {}) {
+  const payload = typeof input === 'string'
+    ? { textSignals: input }
+    : (input && typeof input === 'object' ? input : {});
+
+  const combined = [
+    payload.textSignals,
+    payload.title,
+    payload.text,
+    payload.userMessage,
+    payload.reason,
+    payload.popupHint,
+    ...(Array.isArray(payload.keywords) ? payload.keywords : []),
+    ...(Array.isArray(payload.nearbyText) ? payload.nearbyText : [])
+  ]
+    .map((value) => String(value || '').trim())
+    .filter(Boolean)
+    .join(' ');
+
+  const normalized = normalizeTextForMatch(combined);
+  if (!normalized) {
+    return {
+      mode: 'unknown',
+      confidence: 'low',
+      evidence: []
+    };
+  }
+
+  const evidence = [];
+  if (/\bpaper trading\b/.test(normalized)) evidence.push('paper trading');
+  if (/\bpaper account\b/.test(normalized)) evidence.push('paper account');
+  if (/\bdemo trading\b/.test(normalized)) evidence.push('demo trading');
+  if (/\bsimulated\b/.test(normalized)) evidence.push('simulated');
+  if (/\bpractice\b/.test(normalized)) evidence.push('practice');
+
+  if (evidence.length > 0) {
+    return {
+      mode: 'paper',
+      confidence: evidence.includes('paper trading') || evidence.includes('paper account') ? 'high' : 'medium',
+      evidence
+    };
+  }
+
+  const liveEvidence = [];
+  if (/\blive trading\b/.test(normalized)) liveEvidence.push('live trading');
+  if (/\blive account\b/.test(normalized)) liveEvidence.push('live account');
+  if (/\breal money\b/.test(normalized)) liveEvidence.push('real money');
+  if (/\bconnected broker\b/.test(normalized)) liveEvidence.push('connected broker');
+
+  if (liveEvidence.length > 0) {
+    return {
+      mode: 'live',
+      confidence: 'medium',
+      evidence: liveEvidence
+    };
+  }
+
+  return {
+    mode: 'unknown',
+    confidence: 'low',
+    evidence: []
+  };
+}
+
 function extractTradingViewObservationKeywords(text = '') {
   const normalized = normalizeTextForMatch(text);
   if (!normalized) return [];
@@ -50,8 +114,14 @@ function detectTradingViewDomainActionRisk(text = '', ActionRiskLevel) {
   const normalized = normalizeTextForMatch(text);
   if (!normalized) return null;
 
+  const tradingMode = inferTradingViewTradingMode(text);
+
   const domContext = /\b(dom|depth of market|order book|trading panel|tier\s*2|level\s*2|buy mkt|sell mkt|limit buy|limit sell|stop buy|stop sell|cxl all|placed order|modify order|flatten|reverse)\b/i.test(normalized);
   if (!domContext) return null;
+
+  const paperModeGuidance = tradingMode.mode === 'paper'
+    ? ' Paper Trading was detected, but Liku still blocks order execution; it can help open or verify Paper Trading surfaces and guide the steps instead.'
+    : ' If you are using Paper Trading, Liku can help open or verify the Paper Trading surface and guide the steps instead.';
 
   if (/\b(flatten|reverse|cxl all|cancel all orders|cancel all|close position|reverse position)\b/i.test(normalized)) {
     return {
@@ -59,7 +129,8 @@ function detectTradingViewDomainActionRisk(text = '', ActionRiskLevel) {
       warning: 'TradingView DOM position/order-management action detected',
       requiresConfirmation: true,
       blockExecution: true,
-      blockReason: 'Advisory-only safety rail blocked a TradingView DOM position/order-management action'
+      blockReason: `Advisory-only safety rail blocked a TradingView DOM position/order-management action.${paperModeGuidance}`,
+      tradingMode
     };
   }
 
@@ -69,7 +140,8 @@ function detectTradingViewDomainActionRisk(text = '', ActionRiskLevel) {
       warning: 'TradingView DOM order-entry action detected',
       requiresConfirmation: true,
       blockExecution: true,
-      blockReason: 'Advisory-only safety rail blocked a TradingView DOM order-entry action'
+      blockReason: `Advisory-only safety rail blocked a TradingView DOM order-entry action.${paperModeGuidance}`,
+      tradingMode
     };
   }
 
@@ -134,6 +206,10 @@ function inferTradingViewObservationSpec({ textSignals = '', nextAction = null }
     classification,
     requiresObservedChange: nextAction?.type === 'type' && !pineIntent && !domIntent,
     allowWindowHandleChange: classification === 'dialog-open' || classification === 'input-surface-open',
+    tradingModeHint: inferTradingViewTradingMode({
+      textSignals,
+      keywords: expectedKeywords
+    }),
     verifyTarget: {
       ...tradingViewTarget,
       popupKeywords: mergeUniqueKeywords(tradingViewTarget.popupKeywords, expectedKeywords),
@@ -149,6 +225,7 @@ function inferTradingViewObservationSpec({ textSignals = '', nextAction = null }
 module.exports = {
   detectTradingViewDomainActionRisk,
   extractTradingViewObservationKeywords,
+  inferTradingViewTradingMode,
   inferTradingViewObservationSpec,
   isTradingViewTargetHint
 };

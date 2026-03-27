@@ -7,6 +7,7 @@ function createObservationCheckpointRuntime(deps = {}) {
     inferLaunchVerificationTarget,
     buildVerifyTargetHintFromAppName,
     extractTradingViewObservationKeywords,
+    inferTradingViewTradingMode,
     inferTradingViewObservationSpec,
     isTradingViewTargetHint,
     keyCheckpointSettleMs = 240,
@@ -144,6 +145,17 @@ function createObservationCheckpointRuntime(deps = {}) {
       key: String(action.key || '').trim().toLowerCase(),
       classification,
       appName,
+      tradingModeHint: inferTradingViewTradingMode({
+        textSignals: [
+          action.reason,
+          actionData?.thought,
+          actionData?.verification,
+          options.userMessage,
+          verify.target,
+          ...verify.keywords
+        ].filter(Boolean).join(' '),
+        keywords: expectedKeywords
+      }),
       requiresObservedChange: verify.requiresObservedChange === null
         ? (classification === 'dialog-open' || classification === 'input-surface-open')
         : verify.requiresObservedChange,
@@ -208,6 +220,7 @@ function createObservationCheckpointRuntime(deps = {}) {
       key,
       classification: tradingViewSpec.classification,
       appName: 'TradingView',
+      tradingModeHint: tradingViewSpec.tradingModeHint,
       requiresObservedChange: tradingViewSpec.requiresObservedChange,
       allowWindowHandleChange: tradingViewSpec.allowWindowHandleChange,
       timeoutMs: keyCheckpointTimeoutMs,
@@ -233,6 +246,7 @@ function createObservationCheckpointRuntime(deps = {}) {
     let keywordMatched = false;
     let windowKindMatched = false;
     let titleHintMatched = false;
+    let tradingMode = spec.tradingModeHint || { mode: 'unknown', confidence: 'low', evidence: [] };
 
     for (let attempt = 1; attempt <= keyCheckpointMaxPolls; attempt++) {
       const sinceTs = Number(watcher?.cache?.lastUpdate || 0);
@@ -261,6 +275,19 @@ function createObservationCheckpointRuntime(deps = {}) {
         const norm = normalizeTextForMatch(hint);
         return norm && titleNorm.includes(norm);
       });
+      tradingMode = inferTradingViewTradingMode({
+        title: foreground?.title,
+        textSignals: [
+          spec.reason,
+          spec.classification,
+          spec.appName,
+          spec.popupHint,
+          ...(spec.expectedKeywords || []),
+          ...(spec.tradingModeHint?.evidence || [])
+        ].filter(Boolean).join(' '),
+        keywords: spec.expectedKeywords,
+        popupHint: evalResult.popupHint || null
+      });
 
       const freshObservation = !!watcherFreshness?.fresh;
       const surfaceChangeObserved = observedChange || keywordMatched || titleHintMatched;
@@ -279,6 +306,7 @@ function createObservationCheckpointRuntime(deps = {}) {
           keywordMatched,
           titleHintMatched,
           windowKindMatched,
+          tradingMode,
           beforeForeground: beforeForeground || null,
           foreground,
           expectedWindowHandle,
@@ -300,6 +328,7 @@ function createObservationCheckpointRuntime(deps = {}) {
       keywordMatched,
       titleHintMatched,
       windowKindMatched,
+      tradingMode,
       beforeForeground: beforeForeground || null,
       foreground,
       expectedWindowHandle,

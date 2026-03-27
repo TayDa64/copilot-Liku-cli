@@ -91,6 +91,7 @@ const {
 const {
   detectTradingViewDomainActionRisk,
   extractTradingViewObservationKeywords,
+  inferTradingViewTradingMode,
   inferTradingViewObservationSpec,
   isTradingViewTargetHint
 } = require('./tradingview/verification');
@@ -2057,6 +2058,9 @@ function analyzeActionSafety(action, targetInfo = {}) {
     result.requiresConfirmation = !!tradingDomainRisk.requiresConfirmation;
     result.blockExecution = !!tradingDomainRisk.blockExecution;
     result.blockReason = tradingDomainRisk.blockReason || result.blockReason;
+    if (tradingDomainRisk.tradingMode) {
+      result.tradingMode = tradingDomainRisk.tradingMode;
+    }
   }
   
   // Check for danger patterns
@@ -3578,6 +3582,7 @@ const observationCheckpointRuntime = createObservationCheckpointRuntime({
   inferLaunchVerificationTarget,
   buildVerifyTargetHintFromAppName,
   extractTradingViewObservationKeywords,
+  inferTradingViewTradingMode,
   inferTradingViewObservationSpec,
   isTradingViewTargetHint,
   keyCheckpointSettleMs: KEY_CHECKPOINT_SETTLE_MS,

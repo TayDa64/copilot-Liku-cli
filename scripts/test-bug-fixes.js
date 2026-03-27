@@ -274,6 +274,7 @@ test('ai-service gates TradingView follow-up typing on post-key observation chec
   assert(aiServiceContent.includes('observationCheckpoints'), 'Execution results should expose key checkpoint metadata');
   assert(observationCheckpointContent.includes('surface change before continuing'), 'Checkpoint failures should explain missing TradingView surface changes');
   assert(observationCheckpointContent.includes('inferTradingViewObservationSpec'), 'Observation checkpoint module should consume the extracted TradingView observation-spec helper');
+  assert(observationCheckpointContent.includes('inferTradingViewTradingMode'), 'Observation checkpoint module should consume the TradingView trading-mode inference helper');
   assert(aiServiceContent.includes("require('./tradingview/indicator-workflows')"), 'ai-service should consume the extracted TradingView indicator workflow helper');
   assert(aiServiceContent.includes("require('./tradingview/alert-workflows')"), 'ai-service should consume the extracted TradingView alert workflow helper');
   assert(aiServiceContent.includes("require('./tradingview/chart-verification')"), 'ai-service should consume the extracted TradingView chart verification helper');
@@ -283,6 +284,8 @@ test('ai-service gates TradingView follow-up typing on post-key observation chec
   assert(tradingViewVerificationContent.includes("classification === 'panel-open'"), 'TradingView checkpoints should recognize panel-open flows such as Pine or DOM');
   assert(tradingViewVerificationContent.includes('pine editor'), 'TradingView checkpoints should ground Pine Editor workflows');
   assert(tradingViewVerificationContent.includes('depth of market'), 'TradingView checkpoints should ground DOM workflows');
+  assert(tradingViewVerificationContent.includes('function inferTradingViewTradingMode'), 'TradingView verification should expose paper/live/unknown mode inference');
+  assert(tradingViewVerificationContent.includes('Paper Trading was detected'), 'TradingView refusal messaging should mention Paper Trading guidance when relevant');
   assert(tradingViewIndicatorContent.includes("key: '/'"), 'TradingView indicator workflows should open indicator search with the slash surface');
   assert(tradingViewIndicatorContent.includes('indicator-present'), 'TradingView indicator workflows should encode indicator-present verification metadata');
   assert(tradingViewAlertContent.includes("key: 'alt+a'"), 'TradingView alert workflows should open the Create Alert dialog with alt+a');
@@ -297,6 +300,7 @@ test('ai-service gates TradingView follow-up typing on post-key observation chec
   assert(tradingViewPineContent.includes('requiresObservedChange'), 'TradingView Pine workflows should gate follow-up typing on observed panel changes');
   assert(tradingViewDomContent.includes("surfaceTarget: 'dom-panel'"), 'TradingView DOM workflows should encode dom-panel verification metadata');
   assert(tradingViewDomContent.includes('mentionsRiskyTradeAction'), 'TradingView DOM workflows should refuse to rewrite risky trading prompts');
+  assert(aiServiceContent.includes('result.tradingMode = tradingDomainRisk.tradingMode'), 'ai-service safety analysis should expose TradingView trading-mode metadata');
 });
 
 test('ai-service treats TradingView DOM order-entry actions as high risk', () => {
