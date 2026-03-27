@@ -160,6 +160,55 @@ const LIKU_TOOLS = [
   {
     type: 'function',
     function: {
+      name: 'grep_repo',
+      description: 'Search repository files for an exact string or regex and return bounded matches with file/line context.',
+      parameters: {
+        type: 'object',
+        properties: {
+          pattern: { type: 'string', description: 'Text or regex pattern to search for' },
+          cwd: { type: 'string', description: 'Search root directory (optional; defaults to current repo)' },
+          fileGlob: { type: 'string', description: 'Optional file glob filter (for example: *.js)' },
+          literal: { type: 'boolean', description: 'Treat pattern as literal text when true' },
+          caseSensitive: { type: 'boolean', description: 'Use case-sensitive matching when true' },
+          maxResults: { type: 'number', description: 'Maximum number of matches to return (default 25)' }
+        },
+        required: ['pattern']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'semantic_search_repo',
+      description: 'Search repository code semantically by ranking token matches for a natural-language query.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Natural-language query describing the code concept to find' },
+          cwd: { type: 'string', description: 'Search root directory (optional; defaults to current repo)' },
+          maxResults: { type: 'number', description: 'Maximum number of ranked matches to return (default 25)' }
+        },
+        required: ['query']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'pgrep_process',
+      description: 'List running processes and optionally filter by process name substring.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Process-name substring filter (optional)' },
+          limit: { type: 'number', description: 'Maximum results to return (default 20)' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
       name: 'focus_window',
       description: 'Bring a window to the foreground by its handle or title.',
       parameters: {
@@ -210,6 +259,12 @@ function toolCallsToActions(toolCalls) {
         return { type: 'screenshot' };
       case 'run_command':
         return { type: 'run_command', ...args };
+      case 'grep_repo':
+        return { type: 'grep_repo', ...args };
+      case 'semantic_search_repo':
+        return { type: 'semantic_search_repo', ...args };
+      case 'pgrep_process':
+        return { type: 'pgrep_process', ...args };
       case 'focus_window':
         if (args.title) {
           return { type: 'bring_window_to_front', title: args.title };

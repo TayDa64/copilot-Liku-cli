@@ -35,6 +35,9 @@ const ACTION_TYPES = {
   GET_TEXT: 'get_text',             // Read text via TextPattern/ValuePattern/Name
   // Direct command execution (most reliable for terminal operations)
   RUN_COMMAND: 'run_command',       // Run shell command directly
+  GREP_REPO: 'grep_repo',           // Search repository text with bounded output
+  SEMANTIC_SEARCH_REPO: 'semantic_search_repo', // Token-ranked repo search
+  PGREP_PROCESS: 'pgrep_process',   // Search running processes by name
   FOCUS_WINDOW: 'focus_window',     // Focus a specific window
   BRING_WINDOW_TO_FRONT: 'bring_window_to_front',
   SEND_WINDOW_TO_BACK: 'send_window_to_back',
@@ -2117,6 +2120,12 @@ async function executeAction(action) {
       out.type = ACTION_TYPES.SCREENSHOT;
     } else if (t === 'sleep' || t === 'delay' || t === 'wait_ms') {
       out.type = ACTION_TYPES.WAIT;
+    } else if (t === 'grep' || t === 'search_repo' || t === 'repo_search') {
+      out.type = ACTION_TYPES.GREP_REPO;
+    } else if (t === 'semantic_search' || t === 'semantic_repo_search') {
+      out.type = ACTION_TYPES.SEMANTIC_SEARCH_REPO;
+    } else if (t === 'pgrep' || t === 'process_search') {
+      out.type = ACTION_TYPES.PGREP_PROCESS;
     }
 
     // Normalize common property names
@@ -2259,6 +2268,25 @@ async function executeAction(action) {
           ? `Command completed (exit ${cmdResult.exitCode})`
           : `Command failed: ${cmdResult.stderr || cmdResult.error || `exit code ${cmdResult.exitCode}`}`;
         break;
+
+      case ACTION_TYPES.GREP_REPO:
+      case ACTION_TYPES.SEMANTIC_SEARCH_REPO:
+      case ACTION_TYPES.PGREP_PROCESS: {
+        const repoSearchActions = require('./repo-search-actions');
+        const searchResult = await repoSearchActions.executeRepoSearchAction(action);
+        result = {
+          ...result,
+          ...searchResult
+        };
+        if (searchResult.success) {
+          const noun = action.type === ACTION_TYPES.PGREP_PROCESS ? 'process match' : 'repo match';
+          const count = Number(searchResult.count || 0);
+          result.message = `${count} ${noun}${count === 1 ? '' : 'es'} found`;
+        } else {
+          result.message = searchResult.error || `${action.type} failed`;
+        }
+        break;
+      }
 
       case ACTION_TYPES.FOCUS_WINDOW:
       case ACTION_TYPES.BRING_WINDOW_TO_FRONT: {
@@ -2516,7 +2544,16 @@ function parseAIActions(aiResponse) {
       const t = String(a?.type || '').toLowerCase();
       if (!t) continue;
       // Reward concrete execution steps.
-      if (t === ACTION_TYPES.KEY || t === ACTION_TYPES.TYPE || t === ACTION_TYPES.CLICK || t === ACTION_TYPES.CLICK_ELEMENT || t === ACTION_TYPES.RUN_COMMAND) {
+      if (
+        t === ACTION_TYPES.KEY
+        || t === ACTION_TYPES.TYPE
+        || t === ACTION_TYPES.CLICK
+        || t === ACTION_TYPES.CLICK_ELEMENT
+        || t === ACTION_TYPES.RUN_COMMAND
+        || t === ACTION_TYPES.GREP_REPO
+        || t === ACTION_TYPES.SEMANTIC_SEARCH_REPO
+        || t === ACTION_TYPES.PGREP_PROCESS
+      ) {
         score += 3;
       } else if (t === ACTION_TYPES.BRING_WINDOW_TO_FRONT || t === ACTION_TYPES.FOCUS_WINDOW || t === ACTION_TYPES.WAIT) {
         score += 1;

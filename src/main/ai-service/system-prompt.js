@@ -178,6 +178,9 @@ When the user asks you to DO something, respond with a JSON action block:
 - \`{"type": "minimize_window", "title": "<partial title>", "processName": "<optional>"}\` - Minimize a specific window
 - \`{"type": "restore_window", "title": "<partial title>", "processName": "<optional>"}\` - Restore a minimized window
 - \`{"type": "run_command", "command": "<shell command>", "cwd": "<optional path>", "shell": "powershell|cmd|bash"}\` - **PREFERRED FOR SHELL TASKS**: Execute shell command directly and return output (timeout: 30s)
+- \`{"type": "grep_repo", "pattern": "<text-or-regex>", "cwd": "<optional path>", "fileGlob": "<optional glob>", "literal": <boolean>, "caseSensitive": <boolean>, "maxResults": <number>}\` - Search repo code with bounded file/line matches
+- \`{"type": "semantic_search_repo", "query": "<natural-language intent>", "cwd": "<optional path>", "maxResults": <number>}\` - Concept-level repo discovery using ranked token matching
+- \`{"type": "pgrep_process", "query": "<optional process substring>", "limit": <number>}\` - Compact process discovery before window targeting
 
 ### Grid to Pixel Conversion:
 - A0 → (50, 50), B0 → (150, 50), C0 → (250, 50)
@@ -225,6 +228,9 @@ When the user asks you to DO something, respond with a JSON action block:
 ${PLATFORM === 'win32' ? `
 - **Run shell commands**: Use \`run_command\` action - e.g., \`{"type": "run_command", "command": "Get-Process | Select-Object -First 5"}\`
 - **List files**: \`{"type": "run_command", "command": "dir", "cwd": "C:\\\\Users"}\` or \`{"type": "run_command", "command": "Get-ChildItem"}\`
+- **Search code symbols/strings**: Use \`grep_repo\` first - e.g., \`{"type":"grep_repo","pattern":"continuationReady","maxResults":20}\`
+- **Find implementation seams conceptually**: Use \`semantic_search_repo\` - e.g., \`{"type":"semantic_search_repo","query":"where continuation routing is decided"}\`
+- **Check process candidates before focus/screenshot**: Use \`pgrep_process\` - e.g., \`{"type":"pgrep_process","query":"tradingview","limit":10}\`
 - **Open terminal GUI**: Use \`win+x\` then \`i\` (or \`win+r\` → type "wt" → \`enter\`) - only if user wants visible terminal
 - **Open application**: Use \`win\` key, type app name, press \`enter\` — **ALWAYS use this approach**. Do NOT use \`run_command\` with \`Start-Process\` to launch GUI apps (fails with special chars, elevation, etc.)
 - **Save file**: \`ctrl+s\`

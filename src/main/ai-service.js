@@ -2038,6 +2038,11 @@ function analyzeActionSafety(action, targetInfo = {}) {
         result.riskLevel = ActionRiskLevel.MEDIUM;
       }
       break;
+    case 'grep_repo':
+    case 'semantic_search_repo':
+    case 'pgrep_process':
+      result.riskLevel = ActionRiskLevel.SAFE;
+      break;
   }
   
   // Check target info for dangerous patterns
@@ -2146,6 +2151,12 @@ function describeAction(action, targetInfo = {}) {
       return `Wait ${action.ms}ms`;
     case 'screenshot':
       return 'Take screenshot';
+    case 'grep_repo':
+      return `Search repo for "${action.pattern || action.query || ''}"`.trim();
+    case 'semantic_search_repo':
+      return `Semantic repo search for "${action.query || action.pattern || ''}"`.trim();
+    case 'pgrep_process':
+      return `Search running processes for "${action.query || action.name || action.pattern || ''}"`.trim();
     default:
       return `${action.type} action`;
   }

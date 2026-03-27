@@ -446,6 +446,13 @@ That gives the highest leverage improvement without trying to solve all UI verif
 
 Use this as the practical implementation tracker for the next passes.
 
+### Current implementation snapshot (concise)
+
+- **Milestones 1–3:** continuity state persistence, prompt injection, state-first continuation routing, richer turn records, and verification status persistence are implemented and covered by regression tests.
+- **Milestone 4:** TradingView domain logic has been modularized into focused workflow modules (indicator, alert, chart, drawing, Pine, Paper Trading, DOM) with direct module regressions.
+- **Milestone 5:** multi-turn coherence regressions now cover verified, degraded, contradicted, cancelled, and explicit three-turn continuation paths.
+- **Milestone 6:** explicit repo/process grounding actions are implemented (`semantic_search_repo`, `grep_repo`, `pgrep_process`) with bounded output and contract/tooling coverage.
+
 ### Phase 1 — Structured continuity baseline
 
 **Status:** Completed in `929c88b`
@@ -1160,14 +1167,30 @@ node scripts/test-chat-inline-proof-evaluator.js
 
 ### Milestone 6 — Repo-grounded search actions improve implementation assistance
 
+**Status:** Completed in working tree
+
+**Delivered so far**
+- added modular repo/process search execution in `src/main/repo-search-actions.js`
+- added explicit runtime action support in `src/main/system-automation.js` for:
+  - `semantic_search_repo`
+  - `grep_repo`
+  - `pgrep_process`
+- added explicit tool-call definitions and mappings in `src/main/ai-service/providers/copilot/tools.js`
+- updated prompting guidance in `src/main/ai-service/system-prompt.js` so the model can pick repo/process grounding actions directly
+- updated safety/description handling in `src/main/ai-service.js` for new read-only search actions
+- added dedicated regressions in `scripts/test-repo-search-actions.js`
+- updated contract/tool regression expectations in:
+  - `scripts/test-ai-service-contract.js`
+  - `scripts/test-tier2-tier3.js`
+
 **Objective**
 - let Liku ground coding and recovery assistance through explicit repo/process search actions
 
 **Primary files**
-- likely new: `src/main/repo-search-actions.js`
+- `src/main/repo-search-actions.js`
 - `src/main/system-automation.js`
 - `src/main/ai-service/system-prompt.js`
-- `src/cli/liku.js`
+- `src/main/ai-service/providers/copilot/tools.js`
 
 **Key deliverables**
 - explicit actions for:
@@ -1183,6 +1206,7 @@ node scripts/test-chat-inline-proof-evaluator.js
 
 **Proof commands**
 ```powershell
+node scripts/test-repo-search-actions.js
 node scripts/test-run-command.js
 node scripts/test-ai-service-contract.js
 ```

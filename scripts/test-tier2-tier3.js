@@ -40,7 +40,7 @@ test('Each tool has required schema structure', () => {
 
 test('Tool names cover expected action types', () => {
   const names = ai.LIKU_TOOLS.map(t => t.function.name);
-  const expected = ['click', 'click_element', 'type_text', 'press_key', 'scroll', 'screenshot', 'run_command', 'wait', 'drag', 'focus_window'];
+  const expected = ['click', 'click_element', 'type_text', 'press_key', 'scroll', 'screenshot', 'run_command', 'grep_repo', 'semantic_search_repo', 'pgrep_process', 'wait', 'drag', 'focus_window'];
   for (const e of expected) {
     assert(names.includes(e), `Missing tool: ${e}`);
   }

@@ -185,6 +185,9 @@ test('tool schema remains stable enough for function-calling', () => {
     'wait',
     'screenshot',
     'run_command',
+    'grep_repo',
+    'semantic_search_repo',
+    'pgrep_process',
     'focus_window'
   ]);
 });
@@ -193,12 +196,14 @@ test('tool call mapping remains stable', () => {
   const actions = aiService.toolCallsToActions([
     { function: { name: 'press_key', arguments: '{"key":"ctrl+s","reason":"save file"}' } },
     { function: { name: 'focus_window', arguments: '{"title":"Visual Studio Code"}' } },
+    { function: { name: 'grep_repo', arguments: '{"pattern":"continuationReady","maxResults":5}' } },
     { function: { name: 'type_text', arguments: '{"text":"hello"}' } }
   ]);
 
   assert.deepStrictEqual(actions, [
     { type: 'key', key: 'ctrl+s', reason: 'save file' },
     { type: 'bring_window_to_front', title: 'Visual Studio Code' },
+    { type: 'grep_repo', pattern: 'continuationReady', maxResults: 5 },
     { type: 'type', text: 'hello' }
   ]);
 });
