@@ -265,6 +265,22 @@ async function run() {
     assert.strictEqual(rewritten[4].text, 'plot(close)');
   });
 
+  await testAsync('low-signal TradingView DOM request wraps the opener with bounded panel verification', async () => {
+    const rewritten = aiService.rewriteActionsForReliability([
+      { type: 'key', key: 'ctrl+d' },
+      { type: 'wait', ms: 250 }
+    ], {
+      userMessage: 'open depth of market in tradingview'
+    });
+
+    assert(Array.isArray(rewritten), 'dom rewrite should return an action array');
+    assert.strictEqual(rewritten[0].type, 'bring_window_to_front');
+    assert.strictEqual(rewritten[0].processName, 'tradingview');
+    assert.strictEqual(rewritten[2].type, 'key');
+    assert.strictEqual(rewritten[2].verify.kind, 'panel-visible');
+    assert.strictEqual(rewritten[2].verify.target, 'dom-panel');
+  });
+
   await testAsync('TradingView alert accelerator blocks follow-up typing when no dialog change is observed', async () => {
     const executed = [];
     const foregroundSequence = [
@@ -877,6 +893,53 @@ async function run() {
       assert.strictEqual(execResult.observationCheckpoints[0].verified, true, 'The Pine checkpoint should pass after panel observation');
       assert.strictEqual(execResult.observationCheckpoints[0].classification, 'panel-open', 'Pine Editor should verify as a panel-open checkpoint');
       assert.strictEqual(execResult.observationCheckpoints[0].foreground.hwnd, 777, 'Checkpoint should preserve the TradingView main window handle');
+    });
+  });
+
+  await testAsync('explicit TradingView DOM contracts allow bounded panel verification', async () => {
+    const executed = [];
+    const foregroundSequence = [
+      { success: true, hwnd: 777, title: 'TradingView', processName: 'tradingview', windowKind: 'main' },
+      { success: true, hwnd: 778, title: 'Depth of Market - TradingView', processName: 'tradingview', windowKind: 'palette' },
+      { success: true, hwnd: 778, title: 'Depth of Market - TradingView', processName: 'tradingview', windowKind: 'palette' }
+    ];
+
+    await withPatchedSystemAutomation({
+      resolveWindowHandle: async (action) => action?.processName === 'tradingview' ? 777 : 0,
+      getForegroundWindowInfo: async () => foregroundSequence.shift() || { success: true, hwnd: 778, title: 'Depth of Market - TradingView', processName: 'tradingview', windowKind: 'palette' },
+      focusWindow: async () => ({ success: true }),
+      getRunningProcessesByNames: async () => ([{ pid: 4242, processName: 'tradingview', mainWindowTitle: 'TradingView', startTime: '2026-03-23T00:00:00Z' }])
+    }, async () => {
+      const execResult = await aiService.executeActions({
+        thought: 'Open TradingView Depth of Market',
+        verification: 'TradingView should show the DOM panel',
+        actions: [
+          { type: 'focus_window', title: 'TradingView', processName: 'tradingview' },
+          {
+            type: 'key',
+            key: 'ctrl+d',
+            reason: 'Open TradingView Depth of Market',
+            verify: {
+              kind: 'panel-visible',
+              appName: 'TradingView',
+              target: 'dom-panel',
+              keywords: ['dom', 'depth of market', 'order book']
+            }
+          }
+        ]
+      }, null, null, {
+        userMessage: 'open depth of market in tradingview',
+        actionExecutor: async (action) => {
+          executed.push(action.type);
+          return { success: true, action: action.type, message: 'executed' };
+        }
+      });
+
+      assert.strictEqual(execResult.success, true, 'Execution should proceed after the DOM panel is observed');
+      assert.deepStrictEqual(executed, ['focus_window', 'key'], 'DOM workflow should stop at the verified opener in this bounded test');
+      assert.strictEqual(execResult.observationCheckpoints.length, 1, 'A DOM checkpoint should be recorded');
+      assert.strictEqual(execResult.observationCheckpoints[0].classification, 'panel-open', 'DOM verification should map to panel-open');
+      assert.strictEqual(execResult.observationCheckpoints[0].verified, true, 'DOM verification should pass after the panel title is observed');
     });
   });
 
