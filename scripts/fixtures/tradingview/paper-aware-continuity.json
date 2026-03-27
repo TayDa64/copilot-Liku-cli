@@ -1,0 +1,123 @@
+{
+  "verifiedPaperAssistContinuation": {
+    "activeGoal": "Guide a TradingView paper trading workflow safely",
+    "currentSubgoal": "Verify the TradingView Paper Trading surface is open",
+    "continuationReady": true,
+    "degradedReason": null,
+    "lastTurn": {
+      "userMessage": "open paper trading in tradingview",
+      "actionSummary": "focus_window -> key -> screenshot",
+      "executionStatus": "succeeded",
+      "executionResult": {
+        "successCount": 3,
+        "failureCount": 0
+      },
+      "verificationStatus": "verified",
+      "verificationChecks": [
+        {
+          "name": "panel-open",
+          "status": "verified",
+          "detail": "Paper Trading panel observed"
+        }
+      ],
+      "windowTitle": "TradingView - Paper Trading",
+      "targetWindowHandle": 458868,
+      "captureMode": "window-copyfromscreen",
+      "captureTrusted": true,
+      "observationEvidence": {
+        "visualContextRef": "window-copyfromscreen@444",
+        "uiWatcherFresh": true,
+        "uiWatcherAgeMs": 280
+      },
+      "tradingMode": {
+        "mode": "paper",
+        "confidence": "high",
+        "evidence": [
+          "paper trading",
+          "paper account"
+        ]
+      },
+      "nextRecommendedStep": "Continue guiding the Paper Trading surface while staying assist-only and verification-first."
+    }
+  },
+  "degradedPaperAssistContinuation": {
+    "activeGoal": "Guide a TradingView paper trading workflow safely",
+    "currentSubgoal": "Verify the TradingView Paper Trading surface is still visible",
+    "continuationReady": false,
+    "degradedReason": "Visual evidence fell back to full-screen capture instead of a trusted target-window capture.",
+    "lastTurn": {
+      "userMessage": "continue",
+      "actionSummary": "screenshot",
+      "executionStatus": "succeeded",
+      "executionResult": {
+        "successCount": 1,
+        "failureCount": 0
+      },
+      "verificationStatus": "verified",
+      "verificationChecks": [
+        {
+          "name": "panel-open",
+          "status": "verified",
+          "detail": "Paper Trading panel was previously observed"
+        }
+      ],
+      "windowTitle": "Desktop",
+      "targetWindowHandle": 458868,
+      "captureMode": "screen-copyfromscreen",
+      "captureTrusted": false,
+      "observationEvidence": {
+        "visualContextRef": "screen-copyfromscreen@555",
+        "uiWatcherFresh": false,
+        "uiWatcherAgeMs": 2600
+      },
+      "tradingMode": {
+        "mode": "paper",
+        "confidence": "medium",
+        "evidence": [
+          "paper trading"
+        ]
+      },
+      "nextRecommendedStep": "Recapture the TradingView Paper Trading panel before continuing."
+    }
+  },
+  "contradictedPaperAssistContinuation": {
+    "activeGoal": "Guide a TradingView paper trading workflow safely",
+    "currentSubgoal": "Verify the TradingView Paper Trading account remains connected",
+    "continuationReady": false,
+    "degradedReason": "The latest evidence contradicts the claimed result.",
+    "lastTurn": {
+      "userMessage": "continue",
+      "actionSummary": "focus_window -> screenshot",
+      "executionStatus": "succeeded",
+      "executionResult": {
+        "successCount": 2,
+        "failureCount": 0
+      },
+      "verificationStatus": "contradicted",
+      "verificationChecks": [
+        {
+          "name": "paper-trading-panel",
+          "status": "contradicted",
+          "detail": "Paper Trading panel was not visible in the latest capture"
+        }
+      ],
+      "windowTitle": "TradingView - DOM",
+      "targetWindowHandle": 458868,
+      "captureMode": "window-copyfromscreen",
+      "captureTrusted": true,
+      "observationEvidence": {
+        "visualContextRef": "window-copyfromscreen@666",
+        "uiWatcherFresh": true,
+        "uiWatcherAgeMs": 340
+      },
+      "tradingMode": {
+        "mode": "paper",
+        "confidence": "medium",
+        "evidence": [
+          "paper account"
+        ]
+      },
+      "nextRecommendedStep": "Re-open or reconnect the Paper Trading panel before claiming continuation is safe."
+    }
+  }
+}

@@ -42,6 +42,31 @@ function normalizeText(value, maxLength = 240) {
     .slice(0, maxLength) || null;
 }
 
+function normalizeEvidenceList(values, maxLength = 80) {
+  if (!Array.isArray(values)) return [];
+  return values
+    .map((value) => normalizeText(value, maxLength))
+    .filter(Boolean)
+    .slice(0, 6);
+}
+
+function normalizeTradingMode(tradingMode) {
+  if (!tradingMode) return null;
+  if (typeof tradingMode === 'string') {
+    const mode = normalizeText(tradingMode, 40);
+    return mode ? { mode, confidence: null, evidence: [] } : null;
+  }
+
+  const mode = normalizeText(tradingMode.mode, 40);
+  if (!mode) return null;
+
+  return {
+    mode,
+    confidence: normalizeText(tradingMode.confidence, 40),
+    evidence: normalizeEvidenceList(tradingMode.evidence, 80)
+  };
+}
+
 function normalizeActionTypes(actions) {
   if (!Array.isArray(actions)) return [];
   return actions
@@ -87,7 +112,8 @@ function normalizeActionResultEntries(results) {
       ? {
           classification: normalizeText(result.observationCheckpoint.classification, 80),
           verified: !!result.observationCheckpoint.verified,
-          reason: normalizeText(result.observationCheckpoint.reason, 160)
+          reason: normalizeText(result.observationCheckpoint.reason, 160),
+          tradingMode: normalizeTradingMode(result.observationCheckpoint.tradingMode)
         }
       : null
   }));
@@ -161,6 +187,25 @@ function normalizeObservationEvidence(turnRecord = {}) {
     watcherWindowHandle: Number.isFinite(Number(evidence.watcherWindowHandle)) ? Number(evidence.watcherWindowHandle) : null,
     watcherWindowTitle: normalizeText(evidence.watcherWindowTitle, 160)
   };
+}
+
+function deriveTurnTradingMode(turnRecord = {}, actionResults = []) {
+  const candidates = [];
+  const addCandidate = (candidate) => {
+    const normalized = normalizeTradingMode(candidate?.tradingMode || candidate);
+    if (normalized?.mode) candidates.push(normalized);
+  };
+
+  addCandidate(turnRecord.tradingMode);
+  addCandidate(turnRecord?.executionResult?.tradingMode);
+
+  if (Array.isArray(turnRecord?.observationCheckpoints)) {
+    turnRecord.observationCheckpoints.forEach((checkpoint) => addCandidate(checkpoint));
+  }
+
+  actionResults.forEach((result) => addCandidate(result?.observationCheckpoint));
+
+  return candidates.find((candidate) => candidate?.mode) || null;
 }
 
 function isTrustedCaptureMode(captureMode) {
@@ -244,6 +289,7 @@ function normalizeTurnRecord(turnRecord = {}, previousContinuity = defaultChatCo
   const actionResults = normalizeActionResultEntries(turnRecord.results || turnRecord.executionResult?.actionResults);
   const executionResult = normalizeExecutionResultDetails(turnRecord, actionResults);
   const observationEvidence = normalizeObservationEvidence(turnRecord);
+  const tradingMode = deriveTurnTradingMode(turnRecord, actionResults);
   const verificationChecks = normalizeVerificationChecks(turnRecord?.verification?.checks);
   const executionStatus = deriveExecutionStatus(turnRecord);
   const verificationStatus = deriveVerificationStatus(turnRecord);
@@ -280,6 +326,7 @@ function normalizeTurnRecord(turnRecord = {}, previousContinuity = defaultChatCo
     executionStatus,
     executedCount: Number.isFinite(Number(turnRecord.executedCount)) ? Number(turnRecord.executedCount) : actionTypes.length,
     executionResult,
+    tradingMode,
     verificationStatus,
     verificationChecks,
     observationEvidence,
@@ -464,6 +511,7 @@ function formatChatContinuitySummary(state) {
   if (continuity.lastTurn?.executionStatus) lines.push(`Last execution: ${continuity.lastTurn.executionStatus}`);
   if (continuity.lastTurn?.executionResult?.failureCount > 0) lines.push(`Failed actions: ${continuity.lastTurn.executionResult.failureCount}`);
   if (continuity.lastTurn?.verificationStatus) lines.push(`Verification: ${continuity.lastTurn.verificationStatus}`);
+  if (continuity.lastTurn?.tradingMode?.mode) lines.push(`Trading mode: ${continuity.lastTurn.tradingMode.mode}`);
   if (continuity.lastTurn?.targetWindowHandle) lines.push(`Target window: ${continuity.lastTurn.targetWindowHandle}`);
   if (continuity.lastTurn?.captureMode) lines.push(`Capture mode: ${continuity.lastTurn.captureMode}`);
   if (typeof continuity.lastTurn?.captureTrusted === 'boolean') lines.push(`Capture trusted: ${continuity.lastTurn.captureTrusted ? 'yes' : 'no'}`);
@@ -491,6 +539,12 @@ function formatChatContinuityContext(state) {
     const checks = lastTurn.verificationChecks.map((check) => `${check.name}=${check.status}`).join(' | ');
     lines.push(`- verificationChecks: ${checks}`);
   }
+  if (lastTurn?.tradingMode?.mode) {
+    lines.push(`- tradingMode: ${lastTurn.tradingMode.mode}${lastTurn.tradingMode.confidence ? ` (${lastTurn.tradingMode.confidence})` : ''}`);
+  }
+  if (Array.isArray(lastTurn?.tradingMode?.evidence) && lastTurn.tradingMode.evidence.length > 0) {
+    lines.push(`- tradingModeEvidence: ${lastTurn.tradingMode.evidence.join(' | ')}`);
+  }
   if (lastTurn?.targetWindowHandle || lastTurn?.windowTitle) {
     lines.push(`- targetWindow: ${lastTurn.windowTitle || 'unknown'}${lastTurn.targetWindowHandle ? ` [${lastTurn.targetWindowHandle}]` : ''}`);
   }
@@ -515,6 +569,9 @@ function formatChatContinuityContext(state) {
   if (continuity.degradedReason) lines.push(`- degradedReason: ${continuity.degradedReason}`);
   if (lastTurn?.nextRecommendedStep) lines.push(`- nextRecommendedStep: ${lastTurn.nextRecommendedStep}`);
   lines.push('- Rule: If the user asks to continue, continue from the current subgoal and these execution facts instead of inventing a new branch.');
+  if (lastTurn?.tradingMode?.mode === 'paper') {
+    lines.push('- Rule: Paper Trading was observed; continue with assist-only verification and guidance, not order execution.');
+  }
   if (lastTurn?.verificationStatus && lastTurn.verificationStatus !== 'verified') {
     lines.push('- Rule: Do not claim the requested UI change is complete unless the latest evidence verifies it.');
   }

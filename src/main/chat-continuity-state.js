@@ -7,6 +7,35 @@ function safeNumber(value) {
   return Number.isFinite(n) ? n : null;
 }
 
+function normalizeEvidenceList(values, maxLength = 80) {
+  if (!Array.isArray(values)) return [];
+  return values
+    .map((value) => normalizeText(value, maxLength))
+    .filter(Boolean)
+    .slice(0, 6);
+}
+
+function normalizeTradingMode(tradingMode) {
+  if (!tradingMode) return null;
+  if (typeof tradingMode === 'string') {
+    const mode = normalizeText(tradingMode, 40);
+    return mode ? { mode, confidence: null, evidence: [] } : null;
+  }
+
+  const mode = normalizeText(tradingMode.mode, 40);
+  if (!mode) return null;
+
+  return {
+    mode,
+    confidence: normalizeText(tradingMode.confidence, 40),
+    evidence: normalizeEvidenceList(tradingMode.evidence, 80)
+  };
+}
+
+function extractTradingModeCandidate(value) {
+  return normalizeTradingMode(value?.tradingMode || value);
+}
+
 function buildVisualReference(latestVisual) {
   const ts = safeNumber(latestVisual?.timestamp || latestVisual?.addedAt);
   const mode = normalizeText(latestVisual?.captureMode || latestVisual?.scope, 80) || 'visual';
@@ -44,7 +73,8 @@ function normalizeActionResults(results) {
       ? {
           classification: normalizeText(result.observationCheckpoint.classification, 80),
           verified: !!result.observationCheckpoint.verified,
-          reason: normalizeText(result.observationCheckpoint.reason || result.observationCheckpoint.error, 160)
+          reason: normalizeText(result.observationCheckpoint.reason || result.observationCheckpoint.error, 160),
+          tradingMode: normalizeTradingMode(result.observationCheckpoint.tradingMode)
         }
       : null
   }));
@@ -145,11 +175,30 @@ function buildObservationEvidence(latestVisual, execResult = {}, watcherSnapshot
   };
 }
 
+function inferTradingMode(execResult = {}, actionResults = [], details = {}) {
+  const candidates = [];
+  const addCandidate = (candidate) => {
+    const normalized = extractTradingModeCandidate(candidate);
+    if (normalized?.mode) candidates.push(normalized);
+  };
+
+  addCandidate(details.tradingMode);
+
+  if (Array.isArray(execResult?.observationCheckpoints)) {
+    execResult.observationCheckpoints.forEach((checkpoint) => addCandidate(checkpoint));
+  }
+
+  actionResults.forEach((result) => addCandidate(result?.observationCheckpoint));
+
+  return candidates.find((candidate) => candidate?.mode) || null;
+}
+
 function buildChatContinuityTurnRecord({ actionData, execResult, details = {}, latestVisual = null, watcherSnapshot = null }) {
   const actionPlan = normalizeActionPlan(actionData?.actions);
   const actionResults = normalizeActionResults(execResult?.results);
   const verificationChecks = buildVerificationChecks(execResult);
   const verificationStatus = inferVerificationStatus(execResult, verificationChecks);
+  const tradingMode = inferTradingMode(execResult, actionResults, details);
 
   return {
     recordedAt: details.recordedAt || new Date().toISOString(),
@@ -163,6 +212,7 @@ function buildChatContinuityTurnRecord({ actionData, execResult, details = {}, l
     results: actionResults,
     executionResult: buildExecutionResult(execResult, actionResults),
     observationEvidence: buildObservationEvidence(latestVisual, execResult, watcherSnapshot, details),
+    tradingMode,
     verification: {
       status: verificationStatus,
       checks: verificationChecks

@@ -87,3 +87,72 @@ test('continuity mapper captures richer execution facts', () => {
   assert.strictEqual(turnRecord.verification.status, 'verified');
   assert.ok(turnRecord.verification.checks.some((check) => check.name === 'dialog-open'));
 });
+
+test('continuity mapper preserves observed paper trading mode facts', () => {
+  const turnRecord = buildChatContinuityTurnRecord({
+    actionData: {
+      thought: 'Verify the TradingView Paper Trading panel is open',
+      actions: [
+        { type: 'focus_window', title: 'TradingView', processName: 'tradingview' },
+        { type: 'key', key: 'shift+p', reason: 'Open the Paper Trading panel', verify: { kind: 'panel-open', target: 'paper-trading-panel' } }
+      ]
+    },
+    execResult: {
+      success: true,
+      results: [
+        { success: true, action: 'focus_window', message: 'focused' },
+        {
+          success: true,
+          action: 'key',
+          message: 'panel opened',
+          observationCheckpoint: {
+            classification: 'paper-trading-panel',
+            verified: true,
+            reason: 'Paper Trading panel observed',
+            tradingMode: {
+              mode: 'paper',
+              confidence: 'high',
+              evidence: ['paper trading', 'paper account']
+            }
+          }
+        }
+      ],
+      observationCheckpoints: [
+        {
+          applicable: true,
+          classification: 'paper-trading-panel',
+          verified: true,
+          reason: 'Paper Trading panel observed',
+          tradingMode: {
+            mode: 'paper',
+            confidence: 'high',
+            evidence: ['paper trading', 'paper account']
+          }
+        }
+      ]
+    },
+    latestVisual: {
+      captureMode: 'window-copyfromscreen',
+      captureTrusted: true,
+      timestamp: 123456999,
+      windowHandle: 778,
+      windowTitle: 'TradingView - Paper Trading'
+    },
+    watcherSnapshot: {
+      ageMs: 320,
+      activeWindow: { hwnd: 778, title: 'TradingView - Paper Trading' }
+    },
+    details: {
+      userMessage: 'show paper trading in tradingview',
+      executionIntent: 'Open and verify the TradingView Paper Trading panel.',
+      targetWindowHandle: 778,
+      nextRecommendedStep: 'Continue with assist-only Paper Trading guidance without placing orders.'
+    }
+  });
+
+  assert.strictEqual(turnRecord.tradingMode.mode, 'paper');
+  assert.strictEqual(turnRecord.tradingMode.confidence, 'high');
+  assert.deepStrictEqual(turnRecord.tradingMode.evidence, ['paper trading', 'paper account']);
+  assert.strictEqual(turnRecord.results[1].observationCheckpoint.tradingMode.mode, 'paper');
+  assert.strictEqual(turnRecord.nextRecommendedStep, 'Continue with assist-only Paper Trading guidance without placing orders.');
+});

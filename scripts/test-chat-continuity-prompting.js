@@ -11,6 +11,10 @@ const {
   formatChatContinuityContext
 } = require(path.join(__dirname, '..', 'src', 'main', 'session-intent-state.js'));
 
+const PAPER_AWARE_CONTINUITY_FIXTURES = JSON.parse(
+  fs.readFileSync(path.join(__dirname, 'fixtures', 'tradingview', 'paper-aware-continuity.json'), 'utf8')
+);
+
 async function test(name, fn) {
   try {
     await fn();
@@ -104,6 +108,18 @@ await test('prompting includes verified multi-turn execution facts', async () =>
   assert(continuityMessage.content.includes('nextRecommendedStep: Summarize the visible chart state before modifying indicators.'));
 
   fs.rmSync(tempDir, { recursive: true, force: true });
+});
+
+await test('prompting surfaces paper trading continuity facts and assist-only rules', async () => {
+  const continuityMessage = await buildContinuitySystemMessage(
+    formatChatContinuityContext(PAPER_AWARE_CONTINUITY_FIXTURES.verifiedPaperAssistContinuation)
+  );
+
+  assert(continuityMessage, 'continuity section is injected');
+  assert(continuityMessage.content.includes('tradingMode: paper (high)'));
+  assert(continuityMessage.content.includes('tradingModeEvidence: paper trading | paper account'));
+  assert(continuityMessage.content.includes('continuationReady: yes'));
+  assert(continuityMessage.content.includes('Rule: Paper Trading was observed; continue with assist-only verification and guidance, not order execution.'));
 });
 
 await test('prompting surfaces degraded screenshot trust for recovery-oriented continuation', async () => {

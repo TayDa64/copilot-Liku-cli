@@ -1,8 +1,13 @@
 #!/usr/bin/env node
 
 const assert = require('assert');
+const fs = require('fs');
 const { spawn } = require('child_process');
 const path = require('path');
+
+const PAPER_AWARE_CONTINUITY_FIXTURES = JSON.parse(
+  fs.readFileSync(path.join(__dirname, 'fixtures', 'tradingview', 'paper-aware-continuity.json'), 'utf8')
+);
 
 function buildHarnessScript(chatModulePath) {
   return `
@@ -254,6 +259,16 @@ async function main() {
   assert(degradedContinuation.output.includes('EXECUTE_COUNT:0'), 'degraded continuation should not execute emitted actions');
   assert(/Continuity is currently degraded/i.test(degradedContinuation.output), 'degraded continuation should explain recovery-oriented continuity blocking');
 
+  const paperStateBackedContinuation = await runScenarioWithContinuity(['continue'], PAPER_AWARE_CONTINUITY_FIXTURES.verifiedPaperAssistContinuation);
+  assert.strictEqual(paperStateBackedContinuation.exitCode, 0, 'paper-aware continuation scenario should exit successfully');
+  assert(paperStateBackedContinuation.output.includes('EXECUTE_COUNT:1'), 'paper-aware continuation should execute emitted actions when verified continuity says it is safe');
+  assert(paperStateBackedContinuation.output.includes('SEEN_MESSAGES:["continue"]'), 'paper-aware continuation should keep the follow-up prompt minimal while relying on stored continuity');
+
+  const degradedPaperContinuation = await runScenarioWithContinuity(['continue'], PAPER_AWARE_CONTINUITY_FIXTURES.degradedPaperAssistContinuation);
+  assert.strictEqual(degradedPaperContinuation.exitCode, 0, 'degraded paper continuation scenario should exit successfully');
+  assert(degradedPaperContinuation.output.includes('EXECUTE_COUNT:0'), 'degraded paper continuation should not execute emitted actions');
+  assert(/Continuity is currently degraded/i.test(degradedPaperContinuation.output), 'degraded paper continuation should explain recovery requirements before continuing');
+
   const contradictedContinuation = await runScenarioWithContinuity(['continue'], {
     activeGoal: 'Add a TradingView indicator and verify it on chart',
     currentSubgoal: 'Verify the indicator is present',
@@ -269,6 +284,11 @@ async function main() {
   assert.strictEqual(contradictedContinuation.exitCode, 0, 'contradicted continuation scenario should exit successfully');
   assert(contradictedContinuation.output.includes('EXECUTE_COUNT:0'), 'contradicted continuation should not execute emitted actions');
   assert(/contradicted by the latest evidence/i.test(contradictedContinuation.output), 'contradicted continuation should explain why blind continuation is blocked');
+
+  const contradictedPaperContinuation = await runScenarioWithContinuity(['continue'], PAPER_AWARE_CONTINUITY_FIXTURES.contradictedPaperAssistContinuation);
+  assert.strictEqual(contradictedPaperContinuation.exitCode, 0, 'contradicted paper continuation scenario should exit successfully');
+  assert(contradictedPaperContinuation.output.includes('EXECUTE_COUNT:0'), 'contradicted paper continuation should not execute emitted actions');
+  assert(/contradicted by the latest evidence/i.test(contradictedPaperContinuation.output), 'contradicted paper continuation should explain why blind continuation is blocked');
 
   const acknowledgement = await runScenario(['thanks']);
   assert.strictEqual(acknowledgement.exitCode, 0, 'acknowledgement-style scenario should exit successfully');
