@@ -82,6 +82,19 @@ const {
   recordChatContinuityTurn
 } = require('./session-intent-state');
 const {
+  buildOpenApplicationActions,
+  buildProcessCandidatesFromAppName,
+  buildTitleHintsFromAppName,
+  buildVerifyTargetHintFromAppName,
+  resolveNormalizedAppIdentity
+} = require('./tradingview/app-profile');
+const {
+  detectTradingViewDomainActionRisk,
+  extractTradingViewObservationKeywords,
+  inferTradingViewObservationSpec,
+  isTradingViewTargetHint
+} = require('./tradingview/verification');
+const {
   clearSemanticDOMSnapshot,
   getSemanticDOMContextText,
   getUIWatcher,
@@ -2014,7 +2027,7 @@ function analyzeActionSafety(action, targetInfo = {}) {
     && /\b(time\s*frame|timeframe|chart|symbol|watchlist|indicator|search|open|focus|switch|selector|tab|5m|1m|15m|30m|1h|4h|1d)\b/i.test(textToCheck)
     && !/\b(delete|remove|purchase|payment|transfer|permanent|irreversible|shutdown|restart|unsubscribe|close account)\b/i.test(textToCheck);
 
-  const tradingDomainRisk = detectTradingDomainActionRisk(textToCheck);
+  const tradingDomainRisk = detectTradingViewDomainActionRisk(textToCheck, ActionRiskLevel);
   if (tradingDomainRisk) {
     result.riskLevel = tradingDomainRisk.riskLevel;
     result.warnings.push(tradingDomainRisk.warning);
@@ -2394,276 +2407,6 @@ function extractRequestedAppName(text) {
   }
 
   return null;
-}
-
-const DEFAULT_VERIFY_POPUP_KEYWORDS = [
-  'license', 'activation', 'signin', 'login', 'update', 'setup', 'installer', 'warning', 'permission', 'eula', 'project', 'new project', 'open project', 'workspace'
-];
-
-const APP_NAME_PROFILES = [
-  {
-    displayName: 'TradingView',
-    launchQuery: 'TradingView',
-    aliases: ['tradingview', 'trading view', 'tradeingview', 'tradeing view'],
-    processNames: ['tradingview'],
-    titleHints: ['TradingView', 'TradingView Desktop', 'Create Alert - TradingView', 'Alerts - TradingView', 'Pine Editor', 'Depth of Market', 'Object Tree'],
-    popupKeywords: ['signin', 'login', 'update', 'workspace', 'chart', 'alert', 'create alert', 'time interval', 'interval', 'symbol search', 'indicator', 'pine editor', 'depth of market', 'dom', 'order book', 'drawing tools', 'object tree'],
-    dialogTitleHints: ['Create Alert', 'Alerts', 'Alert', 'Time Interval', 'Interval', 'Indicators', 'Symbol Search', 'Pine Editor', 'Depth of Market', 'DOM', 'Object Tree'],
-    chartKeywords: ['chart', 'timeframe', 'time frame', 'interval', 'symbol', 'watchlist', 'indicator', '5m', '15m', '1h', '4h', '1d', 'drawing', 'drawings', 'trend line', 'anchored vwap', 'volume profile', 'dom', 'order book', 'pine editor'],
-    dialogKeywords: ['alert', 'create alert', 'alerts', 'interval', 'time interval', 'indicator', 'symbol', 'pine editor', 'dom', 'depth of market', 'order book', 'object tree'],
-    drawingKeywords: ['drawing', 'drawings', 'trend line', 'ray', 'extended line', 'pitchfork', 'fibonacci', 'fib', 'brush', 'rectangle', 'ellipse', 'path', 'polyline', 'measure', 'anchored text', 'note', 'anchored vwap', 'anchored volume profile', 'fixed range volume profile', 'object tree'],
-    indicatorKeywords: ['indicator', 'indicators', 'study', 'studies', 'overlay', 'oscillator', 'anchored vwap', 'volume profile', 'fixed range volume profile', 'strategy tester'],
-    pineKeywords: ['pine', 'pine editor', 'script', 'scripts', 'add to chart', 'publish script', 'version history', 'pine logs', 'profiler', 'strategy tester'],
-    domKeywords: ['dom', 'depth of market', 'order book', 'trading panel', 'tier 2', 'level 2', 'buy mkt', 'sell mkt', 'limit order', 'stop order', 'flatten', 'reverse', 'cxl all'],
-    preferredWindowKinds: ['main', 'owned', 'palette'],
-    dialogWindowKinds: ['owned', 'palette', 'main']
-  },
-  {
-    displayName: 'Visual Studio Code',
-    launchQuery: 'Visual Studio Code',
-    aliases: ['visual studio code', 'vs code', 'vscode', 'code'],
-    processNames: ['code'],
-    titleHints: ['Visual Studio Code', 'VS Code']
-  },
-  {
-    displayName: 'Microsoft Edge',
-    launchQuery: 'Microsoft Edge',
-    aliases: ['microsoft edge', 'edge'],
-    processNames: ['msedge'],
-    titleHints: ['Microsoft Edge', 'Edge']
-  },
-  {
-    displayName: 'Google Chrome',
-    launchQuery: 'Google Chrome',
-    aliases: ['google chrome', 'chrome'],
-    processNames: ['chrome'],
-    titleHints: ['Google Chrome', 'Chrome']
-  },
-  {
-    displayName: 'Mozilla Firefox',
-    launchQuery: 'Firefox',
-    aliases: ['mozilla firefox', 'firefox'],
-    processNames: ['firefox'],
-    titleHints: ['Mozilla Firefox', 'Firefox']
-  },
-  {
-    displayName: 'Microsoft Teams',
-    launchQuery: 'Microsoft Teams',
-    aliases: ['microsoft teams', 'teams', 'ms teams'],
-    processNames: ['ms-teams', 'teams'],
-    titleHints: ['Microsoft Teams', 'Teams']
-  }
-];
-
-function normalizeAppIdentityText(value) {
-  return normalizeTextForMatch(value).replace(/\s+/g, '');
-}
-
-function boundedEditDistance(left, right, maxDistance = 2) {
-  const a = String(left || '');
-  const b = String(right || '');
-  if (a === b) return 0;
-  if (!a || !b) return Math.max(a.length, b.length);
-  if (Math.abs(a.length - b.length) > maxDistance) return maxDistance + 1;
-
-  let previous = Array.from({ length: b.length + 1 }, (_, index) => index);
-  for (let i = 0; i < a.length; i++) {
-    const current = [i + 1];
-    let rowMin = current[0];
-    for (let j = 0; j < b.length; j++) {
-      const cost = a[i] === b[j] ? 0 : 1;
-      const value = Math.min(
-        previous[j + 1] + 1,
-        current[j] + 1,
-        previous[j] + cost
-      );
-      current.push(value);
-      rowMin = Math.min(rowMin, value);
-    }
-    if (rowMin > maxDistance) return maxDistance + 1;
-    previous = current;
-  }
-  return previous[b.length];
-}
-
-function buildBasicProcessCandidates(appName) {
-  const raw = String(appName || '').trim();
-  if (!raw) return [];
-  const lower = raw.toLowerCase();
-  const compact = lower.replace(/[^a-z0-9]+/g, '');
-  const tokens = lower.split(/[^a-z0-9]+/).filter(Boolean);
-  const candidates = new Set();
-
-  if (compact.length >= 2) candidates.add(compact);
-  if (tokens.length) {
-    tokens.forEach((token) => {
-      if (token.length >= 2) candidates.add(token);
-    });
-    if (tokens.length >= 2) {
-      candidates.add(tokens.join(''));
-    }
-  }
-
-  return Array.from(candidates).slice(0, 6);
-}
-
-function buildBasicTitleHints(appName) {
-  const raw = String(appName || '').trim();
-  if (!raw) return [];
-  const compact = raw.replace(/\s+/g, '');
-  return Array.from(new Set([raw, compact].filter(Boolean)));
-}
-
-function resolveNormalizedAppIdentity(appName) {
-  const requestedName = String(appName || '').trim();
-  if (!requestedName) return null;
-
-  const requestedCompact = normalizeAppIdentityText(requestedName);
-  let bestProfile = null;
-  let bestScore = Number.NEGATIVE_INFINITY;
-  let matchedBy = 'raw';
-
-  for (const profile of APP_NAME_PROFILES) {
-    const aliases = [profile.displayName, profile.launchQuery, ...(profile.aliases || []), ...(profile.processNames || []), ...(profile.titleHints || [])]
-      .map((value) => String(value || '').trim())
-      .filter(Boolean);
-
-    for (const alias of aliases) {
-      const aliasCompact = normalizeAppIdentityText(alias);
-      if (!aliasCompact) continue;
-
-      let score = Number.NEGATIVE_INFINITY;
-      let localMatchedBy = 'none';
-      if (requestedCompact === aliasCompact) {
-        score = 100;
-        localMatchedBy = 'exact';
-      } else if (requestedCompact.length >= 5 && aliasCompact.includes(requestedCompact)) {
-        score = 90;
-        localMatchedBy = 'substring';
-      } else if (aliasCompact.length >= 5 && requestedCompact.includes(aliasCompact)) {
-        score = 88;
-        localMatchedBy = 'superstring';
-      } else if (requestedCompact.length >= 6 && Math.abs(requestedCompact.length - aliasCompact.length) <= 2) {
-        const distance = boundedEditDistance(requestedCompact, aliasCompact, 2);
-        if (distance <= 2) {
-          score = 70 - distance;
-          localMatchedBy = 'fuzzy';
-        }
-      }
-
-      if (score > bestScore) {
-        bestScore = score;
-        bestProfile = profile;
-        matchedBy = localMatchedBy;
-      }
-    }
-  }
-
-  const displayName = bestProfile?.displayName || requestedName;
-  const launchQuery = bestProfile?.launchQuery || displayName;
-  const processNames = Array.from(new Set([
-    ...(bestProfile?.processNames || []),
-    ...buildBasicProcessCandidates(displayName),
-    ...buildBasicProcessCandidates(requestedName)
-  ].map((value) => String(value || '').trim().toLowerCase()).filter(Boolean)));
-  const titleHints = Array.from(new Set([
-    ...(bestProfile?.titleHints || []),
-    ...buildBasicTitleHints(displayName),
-    ...buildBasicTitleHints(requestedName)
-  ].map((value) => String(value || '').trim()).filter(Boolean)));
-  const popupKeywords = Array.from(new Set([
-    ...DEFAULT_VERIFY_POPUP_KEYWORDS,
-    ...(bestProfile?.popupKeywords || [])
-  ].map((value) => String(value || '').trim().toLowerCase()).filter(Boolean)));
-  const dialogTitleHints = Array.from(new Set([
-    ...(bestProfile?.dialogTitleHints || [])
-  ].map((value) => String(value || '').trim()).filter(Boolean)));
-  const chartKeywords = Array.from(new Set([
-    ...(bestProfile?.chartKeywords || [])
-  ].map((value) => String(value || '').trim().toLowerCase()).filter(Boolean)));
-  const dialogKeywords = Array.from(new Set([
-    ...(bestProfile?.dialogKeywords || [])
-  ].map((value) => String(value || '').trim().toLowerCase()).filter(Boolean)));
-  const drawingKeywords = Array.from(new Set([
-    ...(bestProfile?.drawingKeywords || [])
-  ].map((value) => String(value || '').trim().toLowerCase()).filter(Boolean)));
-  const indicatorKeywords = Array.from(new Set([
-    ...(bestProfile?.indicatorKeywords || [])
-  ].map((value) => String(value || '').trim().toLowerCase()).filter(Boolean)));
-  const pineKeywords = Array.from(new Set([
-    ...(bestProfile?.pineKeywords || [])
-  ].map((value) => String(value || '').trim().toLowerCase()).filter(Boolean)));
-  const domKeywords = Array.from(new Set([
-    ...(bestProfile?.domKeywords || [])
-  ].map((value) => String(value || '').trim().toLowerCase()).filter(Boolean)));
-  const preferredWindowKinds = Array.from(new Set([
-    ...(bestProfile?.preferredWindowKinds || [])
-  ].map((value) => String(value || '').trim().toLowerCase()).filter(Boolean)));
-  const dialogWindowKinds = Array.from(new Set([
-    ...(bestProfile?.dialogWindowKinds || [])
-  ].map((value) => String(value || '').trim().toLowerCase()).filter(Boolean)));
-
-  return {
-    requestedName,
-    appName: displayName,
-    launchQuery,
-    matchedBy,
-    processNames,
-    titleHints,
-    popupKeywords,
-    dialogTitleHints,
-    chartKeywords,
-    dialogKeywords,
-    drawingKeywords,
-    indicatorKeywords,
-    pineKeywords,
-    domKeywords,
-    preferredWindowKinds,
-    dialogWindowKinds
-  };
-}
-
-function buildProcessCandidatesFromAppName(appName) {
-  return resolveNormalizedAppIdentity(appName)?.processNames || [];
-}
-
-function buildTitleHintsFromAppName(appName) {
-  return resolveNormalizedAppIdentity(appName)?.titleHints || [];
-}
-
-function buildVerifyTargetHintFromAppName(appName) {
-  const identity = resolveNormalizedAppIdentity(appName);
-  return {
-    appName: identity?.appName || String(appName || '').trim(),
-    requestedAppName: identity?.requestedName || String(appName || '').trim(),
-    normalizedAppName: identity?.appName || String(appName || '').trim(),
-    launchQuery: identity?.launchQuery || String(appName || '').trim(),
-    processNames: identity?.processNames || [],
-    titleHints: identity?.titleHints || [],
-    popupKeywords: identity?.popupKeywords || [...DEFAULT_VERIFY_POPUP_KEYWORDS],
-    dialogTitleHints: identity?.dialogTitleHints || [],
-    chartKeywords: identity?.chartKeywords || [],
-    dialogKeywords: identity?.dialogKeywords || [],
-    drawingKeywords: identity?.drawingKeywords || [],
-    indicatorKeywords: identity?.indicatorKeywords || [],
-    pineKeywords: identity?.pineKeywords || [],
-    domKeywords: identity?.domKeywords || [],
-    preferredWindowKinds: identity?.preferredWindowKinds || [],
-    dialogWindowKinds: identity?.dialogWindowKinds || []
-  };
-}
-
-function buildOpenApplicationActions(appName) {
-  const verifyTarget = buildVerifyTargetHintFromAppName(appName);
-  const launchQuery = verifyTarget.launchQuery || verifyTarget.appName || String(appName || '').trim();
-  return [
-    { type: 'key', key: 'win', reason: 'Open Start menu', verifyTarget },
-    { type: 'wait', ms: 220 },
-    { type: 'type', text: launchQuery, reason: `Search for ${launchQuery}` },
-    { type: 'wait', ms: 140 },
-    { type: 'key', key: 'enter', reason: `Launch ${launchQuery}`, verifyTarget },
-    { type: 'wait', ms: 2200 }
-  ];
 }
 
 function extractFirstUrlFromText(text) {
@@ -3568,68 +3311,6 @@ function mergeUniqueKeywords(...groups) {
     .filter(Boolean)));
 }
 
-function extractKeyObservationKeywords(text = '') {
-  const normalized = normalizeTextForMatch(text);
-  if (!normalized) return [];
-
-  const keywords = [];
-  if (/\b(alert|create alert|price alert|alerts)\b/i.test(normalized)) {
-    keywords.push('alert', 'create alert', 'alerts');
-  }
-  if (/\b(time\s*frame|timeframe|time interval|interval)\b/i.test(normalized)) {
-    keywords.push('time interval', 'interval', 'timeframe');
-  }
-  if (/\b(symbol|ticker|search)\b/i.test(normalized)) {
-    keywords.push('symbol', 'symbol search', 'search');
-  }
-  if (/\b(indicator|study|studies)\b/i.test(normalized)) {
-    keywords.push('indicator', 'indicators');
-  }
-  if (/\b(draw|drawing|drawings|trend\s*line|ray|pitchfork|fibonacci|fib|brush|rectangle|ellipse|path|polyline|measure|object tree|anchored text|note)\b/i.test(normalized)) {
-    keywords.push('drawing', 'drawings', 'trend line', 'object tree');
-  }
-  if (/\b(anchored\s*vwap|vwap|volume profile|fixed range volume profile|anchored volume profile)\b/i.test(normalized)) {
-    keywords.push('anchored vwap', 'volume profile', 'fixed range volume profile');
-  }
-  if (/\b(pine|pine editor|script|add to chart|publish script|version history|pine logs|profiler)\b/i.test(normalized)) {
-    keywords.push('pine', 'pine editor', 'script', 'add to chart', 'pine logs', 'profiler');
-  }
-  if (/\b(dom|depth of market|order book|trading panel|tier\s*2|level\s*2)\b/i.test(normalized)) {
-    keywords.push('dom', 'depth of market', 'order book', 'trading panel');
-  }
-  return mergeUniqueKeywords(keywords);
-}
-
-function detectTradingDomainActionRisk(text = '') {
-  const normalized = normalizeTextForMatch(text);
-  if (!normalized) return null;
-
-  const domContext = /\b(dom|depth of market|order book|trading panel|tier\s*2|level\s*2|buy mkt|sell mkt|limit buy|limit sell|stop buy|stop sell|cxl all|placed order|modify order|flatten|reverse)\b/i.test(normalized);
-  if (!domContext) return null;
-
-  if (/\b(flatten|reverse|cxl all|cancel all orders|cancel all|close position|reverse position)\b/i.test(normalized)) {
-    return {
-      riskLevel: ActionRiskLevel.CRITICAL,
-      warning: 'TradingView DOM position/order-management action detected',
-      requiresConfirmation: true,
-      blockExecution: true,
-      blockReason: 'Advisory-only safety rail blocked a TradingView DOM position/order-management action'
-    };
-  }
-
-  if (/\b(buy mkt|sell mkt|market order|limit order|stop order|limit buy|limit sell|stop buy|stop sell|modify order|place order|qty|quantity)\b/i.test(normalized)) {
-    return {
-      riskLevel: ActionRiskLevel.HIGH,
-      warning: 'TradingView DOM order-entry action detected',
-      requiresConfirmation: true,
-      blockExecution: true,
-      blockReason: 'Advisory-only safety rail blocked a TradingView DOM order-entry action'
-    };
-  }
-
-  return null;
-}
-
 function summarizeForegroundSignature(foreground) {
   if (!foreground || !foreground.success) return null;
   return {
@@ -3659,23 +3340,117 @@ function didForegroundObservationChange(beforeForeground, afterForeground) {
     || before.isMaximized !== after.isMaximized;
 }
 
-function isTradingViewTargetHint(target) {
-  if (!target || typeof target !== 'object') return false;
-  const haystack = [
-    target.appName,
-    target.requestedAppName,
-    target.normalizedAppName,
-    ...(Array.isArray(target.processNames) ? target.processNames : []),
-    ...(Array.isArray(target.titleHints) ? target.titleHints : [])
-  ]
-    .map((value) => String(value || '').trim().toLowerCase())
-    .filter(Boolean)
-    .join(' ');
+function normalizeActionVerifyMetadata(verify) {
+  if (!verify || typeof verify !== 'object') return null;
 
-  return /tradingview|trading\s+view/.test(haystack);
+  const kind = String(verify.kind || '').trim().toLowerCase();
+  if (!kind) return null;
+
+  return {
+    kind,
+    appName: String(verify.appName || verify.application || '').trim() || null,
+    target: String(verify.target || verify.surface || '').trim().toLowerCase() || null,
+    keywords: Array.isArray(verify.keywords)
+      ? verify.keywords.map((value) => String(value || '').trim()).filter(Boolean)
+      : [],
+    titleHints: Array.isArray(verify.titleHints)
+      ? verify.titleHints.map((value) => String(value || '').trim()).filter(Boolean)
+      : [],
+    windowKinds: Array.isArray(verify.windowKinds)
+      ? verify.windowKinds.map((value) => String(value || '').trim().toLowerCase()).filter(Boolean)
+      : [],
+    requiresObservedChange: typeof verify.requiresObservedChange === 'boolean'
+      ? verify.requiresObservedChange
+      : null
+  };
+}
+
+function classifyVerificationSurface(verify, nextAction) {
+  const kind = String(verify?.kind || '').trim().toLowerCase();
+  const target = String(verify?.target || '').trim().toLowerCase();
+
+  if (kind === 'panel-visible' || kind === 'panel-open') return 'panel-open';
+  if (kind === 'input-surface-open' || kind === 'menu-open' || kind === 'text-visible') return 'input-surface-open';
+  if (kind === 'dialog-visible') {
+    return /indicator|search|input|picker/.test(target) ? 'input-surface-open' : 'dialog-open';
+  }
+  if (kind === 'indicator-present' || kind === 'timeframe-updated' || kind === 'watchlist-updated' || kind === 'chart-state-updated') {
+    return 'chart-state';
+  }
+  if (nextAction?.type === 'type') return 'input-surface-open';
+  return null;
+}
+
+function buildKeyObservationCheckpointFromVerifyMetadata(action, actionData, actionIndex, options = {}) {
+  if (!action || action.type !== 'key') return null;
+
+  const verify = normalizeActionVerifyMetadata(action.verify);
+  if (!verify) return null;
+
+  const actions = Array.isArray(actionData?.actions) ? actionData.actions : [];
+  const nextAction = actions[actionIndex + 1] || null;
+  const classification = classifyVerificationSurface(verify, nextAction);
+  if (!classification) return null;
+
+  const explicitTarget = action.verifyTarget && typeof action.verifyTarget === 'object'
+    ? action.verifyTarget
+    : null;
+  const inferredTarget = inferLaunchVerificationTarget(actionData, options.userMessage || '');
+  const appName = verify.appName || explicitTarget?.appName || inferredTarget?.appName || 'TradingView';
+  const verifyTarget = explicitTarget || buildVerifyTargetHintFromAppName(appName);
+
+  const expectedKeywords = mergeUniqueKeywords(
+    verify.keywords,
+    extractTradingViewObservationKeywords([
+      action.reason,
+      actionData?.thought,
+      actionData?.verification,
+      options.userMessage,
+      nextAction?.reason,
+      nextAction?.text,
+      verify.target
+    ].filter(Boolean).join(' ')),
+    classification === 'dialog-open' ? verifyTarget.dialogKeywords : [],
+    classification === 'panel-open' ? verifyTarget.pineKeywords : [],
+    classification === 'chart-state' ? verifyTarget.chartKeywords : [],
+    /indicator/.test(verify.target || '') ? verifyTarget.indicatorKeywords : []
+  );
+
+  const expectedWindowKinds = verify.windowKinds.length > 0
+    ? verify.windowKinds
+    : (classification === 'chart-state' || classification === 'panel-open')
+      ? (verifyTarget.preferredWindowKinds || ['main'])
+      : (verifyTarget.dialogWindowKinds || ['owned', 'palette', 'main']);
+
+  return {
+    applicable: true,
+    key: String(action.key || '').trim().toLowerCase(),
+    classification,
+    appName,
+    requiresObservedChange: verify.requiresObservedChange === null
+      ? (classification === 'dialog-open' || classification === 'input-surface-open')
+      : verify.requiresObservedChange,
+    allowWindowHandleChange: classification === 'dialog-open' || classification === 'input-surface-open',
+    timeoutMs: KEY_CHECKPOINT_TIMEOUT_MS,
+    verifyTarget: {
+      ...verifyTarget,
+      popupKeywords: mergeUniqueKeywords(verifyTarget.popupKeywords, expectedKeywords),
+      titleHints: Array.from(new Set([
+        ...(verifyTarget.titleHints || []),
+        ...(verifyTarget.dialogTitleHints || []),
+        ...verify.titleHints
+      ]))
+    },
+    expectedKeywords,
+    expectedWindowKinds,
+    reason: action.reason || actionData?.verification || actionData?.thought || ''
+  };
 }
 
 function inferKeyObservationCheckpoint(action, actionData, actionIndex, options = {}) {
+  const explicitSpec = buildKeyObservationCheckpointFromVerifyMetadata(action, actionData, actionIndex, options);
+  if (explicitSpec) return explicitSpec;
+
   if (!action || action.type !== 'key') return null;
 
   const key = String(action.key || '').trim().toLowerCase();
@@ -3706,62 +3481,22 @@ function inferKeyObservationCheckpoint(action, actionData, actionIndex, options 
     nextAction?.reason,
     nextAction?.text
   ].filter(Boolean).join(' ');
-  const normalizedSignals = normalizeTextForMatch(textSignals);
-
-  const alertIntent = /\b(alert|create alert|price alert|alerts)\b/i.test(normalizedSignals);
-  const timeframeIntent = /\b(time\s*frame|timeframe|time interval|interval|chart|5m|15m|30m|1h|4h|1d)\b/i.test(normalizedSignals);
-  const drawingIntent = /\b(draw|drawing|drawings|trend\s*line|ray|pitchfork|fibonacci|fib|brush|rectangle|ellipse|path|polyline|measure|object tree|anchored text|note)\b/i.test(normalizedSignals);
-  const indicatorIntent = /\b(indicator|study|studies|overlay|oscillator|anchored\s*vwap|vwap|volume profile|fixed range volume profile|anchored volume profile|strategy tester)\b/i.test(normalizedSignals);
-  const pineIntent = /\b(pine|pine editor|script|scripts|add to chart|publish script|version history|pine logs|profiler)\b/i.test(normalizedSignals);
-  const domIntent = /\b(dom|depth of market|order book|trading panel|tier\s*2|level\s*2)\b/i.test(normalizedSignals);
-  const inputSurfaceIntent = nextAction?.type === 'type';
-
-  if (!alertIntent && !timeframeIntent && !drawingIntent && !indicatorIntent && !pineIntent && !domIntent && !inputSurfaceIntent) {
+  const tradingViewSpec = inferTradingViewObservationSpec({ textSignals, nextAction });
+  if (!tradingViewSpec) {
     return null;
   }
-
-  const tradingViewTarget = buildVerifyTargetHintFromAppName('TradingView');
-  const expectedKeywords = mergeUniqueKeywords(
-    extractKeyObservationKeywords(textSignals),
-    alertIntent ? tradingViewTarget.dialogKeywords : [],
-    (timeframeIntent || drawingIntent) ? tradingViewTarget.chartKeywords : [],
-    drawingIntent ? tradingViewTarget.drawingKeywords : [],
-    indicatorIntent ? tradingViewTarget.indicatorKeywords : [],
-    pineIntent ? tradingViewTarget.pineKeywords : [],
-    domIntent ? tradingViewTarget.domKeywords : []
-  );
-  const expectedTitleHints = Array.from(new Set([
-    ...(Array.isArray(tradingViewTarget.dialogTitleHints) ? tradingViewTarget.dialogTitleHints : []),
-    ...(Array.isArray(tradingViewTarget.titleHints) ? tradingViewTarget.titleHints : [])
-  ]));
-
-  const classification = alertIntent
-    ? 'dialog-open'
-    : (pineIntent || domIntent)
-      ? 'panel-open'
-    : inputSurfaceIntent
-      ? 'input-surface-open'
-      : 'chart-state';
-
-  const requiresObservedChange = nextAction?.type === 'type' && !pineIntent && !domIntent;
 
   return {
     applicable: true,
     key,
-    classification,
+    classification: tradingViewSpec.classification,
     appName: 'TradingView',
-    requiresObservedChange,
-    allowWindowHandleChange: classification === 'dialog-open' || classification === 'input-surface-open',
+    requiresObservedChange: tradingViewSpec.requiresObservedChange,
+    allowWindowHandleChange: tradingViewSpec.allowWindowHandleChange,
     timeoutMs: KEY_CHECKPOINT_TIMEOUT_MS,
-    verifyTarget: {
-      ...tradingViewTarget,
-      popupKeywords: mergeUniqueKeywords(tradingViewTarget.popupKeywords, expectedKeywords),
-      titleHints: Array.from(new Set([...(tradingViewTarget.titleHints || []), ...expectedTitleHints]))
-    },
-    expectedKeywords,
-    expectedWindowKinds: (classification === 'chart-state' || classification === 'panel-open')
-      ? (tradingViewTarget.preferredWindowKinds || ['main'])
-      : (tradingViewTarget.dialogWindowKinds || ['owned', 'palette', 'main']),
+    verifyTarget: tradingViewSpec.verifyTarget,
+    expectedKeywords: tradingViewSpec.expectedKeywords,
+    expectedWindowKinds: tradingViewSpec.expectedWindowKinds,
     reason: action.reason || actionData?.verification || actionData?.thought || ''
   };
 }

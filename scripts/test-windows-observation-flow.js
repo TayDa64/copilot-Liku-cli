@@ -205,6 +205,56 @@ async function run() {
     });
   });
 
+  await testAsync('explicit action.verify contract enables reusable TradingView dialog verification', async () => {
+    const executed = [];
+    const foregroundSequence = [
+      { success: true, hwnd: 777, title: 'TradingView', processName: 'tradingview', windowKind: 'main' },
+      { success: true, hwnd: 889, title: 'Create Alert - TradingView', processName: 'tradingview', windowKind: 'owned' },
+      { success: true, hwnd: 889, title: 'Create Alert - TradingView', processName: 'tradingview', windowKind: 'owned' },
+      { success: true, hwnd: 889, title: 'Create Alert - TradingView', processName: 'tradingview', windowKind: 'owned' }
+    ];
+
+    await withPatchedSystemAutomation({
+      resolveWindowHandle: async (action) => action?.processName === 'tradingview' ? 777 : 0,
+      getForegroundWindowInfo: async () => {
+        return foregroundSequence.shift() || { success: true, hwnd: 889, title: 'Create Alert - TradingView', processName: 'tradingview', windowKind: 'owned' };
+      },
+      focusWindow: async () => ({ success: true }),
+      getRunningProcessesByNames: async () => ([{ pid: 4242, processName: 'tradingview', mainWindowTitle: 'TradingView', startTime: '2026-03-23T00:00:00Z' }])
+    }, async () => {
+      const execResult = await aiService.executeActions({
+        thought: 'Advance the current TradingView workflow',
+        verification: 'TradingView should show the requested next surface',
+        actions: [
+          { type: 'focus_window', title: 'TradingView', processName: 'tradingview' },
+          {
+            type: 'key',
+            key: 'alt+a',
+            reason: 'Advance the current TradingView workflow',
+            verify: {
+              kind: 'dialog-visible',
+              appName: 'TradingView',
+              target: 'create-alert',
+              keywords: ['create alert']
+            }
+          },
+          { type: 'type', text: '20.02', reason: 'Enter alert price' }
+        ]
+      }, null, null, {
+        userMessage: 'advance the current TradingView workflow and enter 20.02 when the surface opens',
+        actionExecutor: async (action) => {
+          executed.push(action.type);
+          return { success: true, action: action.type, message: 'executed' };
+        }
+      });
+
+      assert.strictEqual(execResult.success, true, 'Execution should proceed after the explicit verify contract is satisfied');
+      assert.deepStrictEqual(executed, ['focus_window', 'key', 'type'], 'Typing should continue only after the explicit dialog contract is verified');
+      assert.strictEqual(execResult.observationCheckpoints[0].classification, 'dialog-open', 'Explicit verify metadata should map to a reusable dialog-open checkpoint');
+      assert.strictEqual(execResult.observationCheckpoints[0].verified, true, 'Explicit verify metadata should drive the bounded post-key verification');
+    });
+  });
+
   await testAsync('watcher waitForFreshState resolves after matching foreground update', async () => {
     const watcher = new UIWatcher({ pollInterval: 50 });
     watcher.cache.activeWindow = { hwnd: 111, title: 'Old Window', processName: 'code' };

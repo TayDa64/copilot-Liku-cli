@@ -7,7 +7,8 @@ const readline = require('readline');
 const { success, error, info, warn, highlight, dim, bold } = require('../util/output');
 const systemAutomation = require('../../main/system-automation');
 const preferences = require('../../main/preferences');
-const { recordChatContinuityTurn } = require('../../main/session-intent-state');
+const { buildChatContinuityTurnRecord } = require('../../main/chat-continuity-state');
+const { getChatContinuityState, recordChatContinuityTurn } = require('../../main/session-intent-state');
 const {
   getLogLevel: getUiAutomationLogLevel,
   resetLogSettings: resetUiAutomationLogSettings,
@@ -202,6 +203,83 @@ function isLikelyApprovalOrContinuationInput(text) {
   return /^(?:yes|y|yeah|yep|sure|ok|okay)(?:[!.\s].*)?$|^(?:(?:let'?s|please)\s+)?(?:go ahead|do it|do that|please do|continue|proceed|next(?:\s+step(?:s)?)?|keep going|carry on|move on)(?:[!.\s,].*)?$|^(?:(?:let'?s)\s+)?continue\s+with\s+next\s+steps(?:[!.\s,].*)?$|^(?:(?:let'?s)\s+)?maintain\s+continuity(?:[!.\s,].*)?$/i.test(t);
 }
 
+function isMinimalContinuationInput(text) {
+  const t = String(text || '').trim().toLowerCase();
+  if (!t) return false;
+
+  return /^(?:(?:let'?s|please)\s+)?(?:continue|proceed|next(?:\s+step(?:s)?)?|keep going|carry on|move on)(?:[!.\s,].*)?$|^(?:(?:let'?s)\s+)?continue\s+with\s+next\s+steps(?:[!.\s,].*)?$|^(?:(?:let'?s)\s+)?maintain\s+continuity(?:[!.\s,].*)?$/i.test(t);
+}
+
+function hasUsableChatContinuity(continuity) {
+  if (!continuity || typeof continuity !== 'object') return false;
+  return !!(
+    continuity.activeGoal
+    || continuity.currentSubgoal
+    || continuity.lastTurn?.nextRecommendedStep
+    || continuity.lastTurn?.actionSummary
+  );
+}
+
+function isTrustedCaptureMode(captureMode) {
+  const normalized = String(captureMode || '').trim().toLowerCase();
+  if (!normalized) return false;
+  return normalized === 'window'
+    || normalized === 'region'
+    || normalized.startsWith('window-')
+    || normalized.startsWith('region-');
+}
+
+function buildContinuationIntentFromState(continuity, fallbackText = '') {
+  return String(
+    continuity?.lastTurn?.nextRecommendedStep
+    || continuity?.currentSubgoal
+    || continuity?.activeGoal
+    || fallbackText
+    || ''
+  ).trim();
+}
+
+function buildContinuityRecoveryMessage(continuity) {
+  const verificationStatus = String(continuity?.lastTurn?.verificationStatus || '').trim().toLowerCase();
+  if (verificationStatus === 'contradicted') {
+    return 'The last step is contradicted by the latest evidence, so I will not continue blindly. Retry the step or gather fresh evidence first.';
+  }
+  if (verificationStatus === 'unverified') {
+    return 'The last step is not fully verified yet, so I need fresh evidence or an explicit bounded retry before continuing.';
+  }
+
+  const reason = String(continuity?.degradedReason || '').trim();
+  if (reason) {
+    return `Continuity is currently degraded: ${reason} Ask me to recapture the target window, retry the last step, or confirm a bounded continuation.`;
+  }
+
+  return 'There is not enough verified continuity state to continue safely. Retry the last step or gather fresh evidence first.';
+}
+
+function getContinuationDecision(userInput, continuity) {
+  if (!isMinimalContinuationInput(userInput)) {
+    return { block: false, useContinuityState: false, reason: null };
+  }
+
+  if (!hasUsableChatContinuity(continuity)) {
+    return { block: false, useContinuityState: false, reason: null };
+  }
+
+  if (continuity.continuationReady && !continuity.degradedReason) {
+    return {
+      block: false,
+      useContinuityState: true,
+      effectiveIntent: buildContinuationIntentFromState(continuity, userInput)
+    };
+  }
+
+  return {
+    block: true,
+    useContinuityState: false,
+    reason: buildContinuityRecoveryMessage(continuity)
+  };
+}
+
 function isObservationOrSynthesisPlan(actionData) {
   const actions = Array.isArray(actionData?.actions) ? actionData.actions : [];
   if (!actions.length) return false;
@@ -269,6 +347,14 @@ function inferContinuationVerificationStatus(execResult) {
   if (!execResult) return 'unknown';
   if (execResult.cancelled) return 'cancelled';
   if (execResult.success === false) return 'failed';
+  if (Array.isArray(execResult.observationCheckpoints)) {
+    if (execResult.observationCheckpoints.some((checkpoint) => checkpoint?.applicable && checkpoint?.verified === false)) {
+      return 'unverified';
+    }
+    if (execResult.observationCheckpoints.some((checkpoint) => checkpoint?.verified === true)) {
+      return 'verified';
+    }
+  }
   if (execResult.postVerificationFailed) return 'unverified';
   if (execResult.postVerification?.verified) return 'verified';
   if (execResult.focusVerification?.verified) return 'verified';
@@ -291,36 +377,34 @@ function recordContinuityFromExecution(ai, actionData, execResult, details = {})
     const latestVisual = typeof ai?.getLatestVisualContext === 'function'
       ? ai.getLatestVisualContext()
       : null;
-    const captureMode = String(latestVisual?.scope || '').trim() || (execResult?.screenshotCaptured ? 'screen' : null);
-    const captureTrusted = captureMode ? (captureMode === 'window' || captureMode === 'region') : null;
+    const watcher = typeof ai?.getUIWatcher === 'function' ? ai.getUIWatcher() : null;
+    const watcherSnapshot = watcher && typeof watcher.getCapabilitySnapshot === 'function'
+      ? watcher.getCapabilitySnapshot()
+      : null;
     const targetWindowHandle = Number(details.targetWindowHandle || execResult?.focusVerification?.expectedWindowHandle || 0) || null;
-    recordChatContinuityTurn({
-      recordedAt: new Date().toISOString(),
-      userMessage: details.userMessage || '',
-      executionIntent: details.executionIntent || details.userMessage || '',
-      activeGoal: details.executionIntent || details.userMessage || '',
-      committedSubgoal: actionData?.thought || details.executionIntent || details.userMessage || '',
-      thought: actionData?.thought || '',
-      actionPlan: Array.isArray(actionData?.actions) ? actionData.actions : [],
-      success: !!execResult?.success,
-      cancelled: !!execResult?.cancelled,
-      postVerificationFailed: !!execResult?.postVerificationFailed,
-      postVerification: execResult?.postVerification || null,
-      focusVerification: execResult?.focusVerification || null,
-      screenshotCaptured: !!execResult?.screenshotCaptured,
-      executedCount: Array.isArray(actionData?.actions) ? actionData.actions.length : 0,
-      targetWindowHandle,
-      windowTitle: latestVisual?.windowTitle || null,
-      observationEvidence: {
-        captureMode,
-        captureTrusted,
-        windowHandle: Number(latestVisual?.windowHandle || 0) || targetWindowHandle || null
+    const turnRecord = buildChatContinuityTurnRecord({
+      actionData,
+      execResult: {
+        ...execResult,
+        verification: {
+          status: inferContinuationVerificationStatus(execResult)
+        }
       },
-      verification: {
-        status: inferContinuationVerificationStatus(execResult)
-      },
-      nextRecommendedStep: inferNextRecommendedStep(execResult)
-    }, { cwd: process.cwd() });
+      latestVisual,
+      watcherSnapshot,
+      details: {
+        ...details,
+        recordedAt: new Date().toISOString(),
+        targetWindowHandle,
+        nextRecommendedStep: inferNextRecommendedStep(execResult),
+        windowTitle: latestVisual?.windowTitle || null,
+        captureTrusted: typeof latestVisual?.captureTrusted === 'boolean'
+          ? latestVisual.captureTrusted
+          : null,
+        captureMode: String(latestVisual?.captureMode || latestVisual?.scope || '').trim() || null
+      }
+    });
+    recordChatContinuityTurn(turnRecord, { cwd: process.cwd() });
   } catch (continuityError) {
     warn(`Could not record chat continuity state: ${continuityError.message}`);
   }
@@ -643,13 +727,19 @@ async function autoCapture(ai, options = {}) {
     }
 
     if (result && result.success && result.base64) {
+      const actualCaptureMode = String(result.captureMode || captureScope).trim() || captureScope;
+      const actualScope = actualCaptureMode.startsWith('screen') || /fullscreen/i.test(actualCaptureMode)
+        ? 'screen'
+        : captureScope;
       ai.addVisualContext({
         dataURL: `data:image/png;base64,${result.base64}`,
         width: 0,
         height: 0,
-        scope: captureScope,
+        scope: actualScope,
         windowHandle: targetWindowHandle || undefined,
         region: hasValidRegion ? captureRegion : undefined,
+        captureMode: actualCaptureMode,
+        captureTrusted: isTrustedCaptureMode(actualCaptureMode),
         timestamp: Date.now()
       });
       info(captureScope === 'window'
@@ -669,7 +759,12 @@ async function autoCapture(ai, options = {}) {
       if (fallback && fallback.success && fallback.base64) {
         ai.addVisualContext({
           dataURL: `data:image/png;base64,${fallback.base64}`,
-          width: 0, height: 0, scope: 'screen', timestamp: Date.now()
+          width: 0,
+          height: 0,
+          scope: 'screen',
+          captureMode: String(fallback.captureMode || 'fullscreen-fallback'),
+          captureTrusted: false,
+          timestamp: Date.now()
         });
         info('Fallback full-screen screenshot captured for visual context.');
         return true;
@@ -785,11 +880,23 @@ async function runChatLoop(ai, options) {
 
     const lowerLine = line.toLowerCase();
     const isContinueLike = isLikelyApprovalOrContinuationInput(lowerLine);
+    const chatContinuity = isContinueLike ? getChatContinuityState({ cwd: process.cwd() }) : null;
+    const continuationDecision = isContinueLike
+      ? getContinuationDecision(line, chatContinuity)
+      : { block: false, useContinuityState: false, reason: null };
+
+    if (continuationDecision.block) {
+      warn(continuationDecision.reason);
+      continue;
+    }
+
     if (!line.startsWith('/') && !isContinueLike) {
       lastNonTrivialUserMessage = line;
     }
 
-    const executionIntent = isContinueLike ? lastNonTrivialUserMessage : line;
+    const executionIntent = continuationDecision.useContinuityState
+      ? continuationDecision.effectiveIntent
+      : (isContinueLike ? (lastNonTrivialUserMessage || line) : line);
 
     if (['exit', 'quit', 'q'].includes(line.toLowerCase())) {
       break;
@@ -1134,7 +1241,7 @@ async function runChatLoop(ai, options) {
     }
 
     let execResult = null;
-    const effectiveUserMessage = isContinueLike ? lastNonTrivialUserMessage : line;
+    const effectiveUserMessage = executionIntent || line;
 
     if (sequenceMode) {
       info(`Guided sequence: executing ${actionData.actions.length} step(s) continuously.`);

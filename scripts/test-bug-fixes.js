@@ -228,34 +228,40 @@ test('rewriteActionsForReliability normalizes typoed app launches', () => {
 
 test('ai-service normalizes app identity for learned skill scope', () => {
   const aiServicePath = path.join(__dirname, '..', 'src', 'main', 'ai-service.js');
+  const appProfilePath = path.join(__dirname, '..', 'src', 'main', 'tradingview', 'app-profile.js');
   const fs = require('fs');
 
   const aiServiceContent = fs.readFileSync(aiServicePath, 'utf8');
+  const appProfileContent = fs.readFileSync(appProfilePath, 'utf8');
 
-  assert(aiServiceContent.includes('resolveNormalizedAppIdentity('), 'ai-service should define normalized app identity resolution');
-  assert(aiServiceContent.includes("'tradeing view'"), 'ai-service should recognize the TradingView typo alias');
+  assert(aiServiceContent.includes("require('./tradingview/app-profile')"), 'ai-service should consume the extracted app profile module');
+  assert(appProfileContent.includes('resolveNormalizedAppIdentity('), 'app profile module should define normalized app identity resolution');
+  assert(appProfileContent.includes("'tradeing view'"), 'app profile module should recognize the TradingView typo alias');
   assert(aiServiceContent.includes('normalizedSkillApp?.processNames'), 'Learned skill scope should include normalized process names');
   assert(aiServiceContent.includes('normalizedSkillApp?.titleHints'), 'Learned skill scope should include normalized title hints');
-  assert(aiServiceContent.includes('dialogTitleHints'), 'TradingView app profile should include dialog title hints');
-  assert(aiServiceContent.includes('chartKeywords'), 'TradingView app profile should include chart-state keywords');
-  assert(aiServiceContent.includes('drawingKeywords'), 'TradingView app profile should include drawing-tool keywords');
-  assert(aiServiceContent.includes('pineKeywords'), 'TradingView app profile should include Pine Editor keywords');
-  assert(aiServiceContent.includes('domKeywords'), 'TradingView app profile should include DOM keywords');
+  assert(appProfileContent.includes('dialogTitleHints'), 'TradingView app profile should include dialog title hints');
+  assert(appProfileContent.includes('chartKeywords'), 'TradingView app profile should include chart-state keywords');
+  assert(appProfileContent.includes('drawingKeywords'), 'TradingView app profile should include drawing-tool keywords');
+  assert(appProfileContent.includes('pineKeywords'), 'TradingView app profile should include Pine Editor keywords');
+  assert(appProfileContent.includes('domKeywords'), 'TradingView app profile should include DOM keywords');
 });
 
 test('ai-service gates TradingView follow-up typing on post-key observation checkpoints', () => {
   const aiServicePath = path.join(__dirname, '..', 'src', 'main', 'ai-service.js');
+  const tradingViewVerificationPath = path.join(__dirname, '..', 'src', 'main', 'tradingview', 'verification.js');
   const fs = require('fs');
 
   const aiServiceContent = fs.readFileSync(aiServicePath, 'utf8');
+  const tradingViewVerificationContent = fs.readFileSync(tradingViewVerificationPath, 'utf8');
 
   assert(aiServiceContent.includes('inferKeyObservationCheckpoint'), 'ai-service should infer TradingView post-key checkpoints');
   assert(aiServiceContent.includes('verifyKeyObservationCheckpoint'), 'ai-service should verify TradingView post-key checkpoints');
   assert(aiServiceContent.includes('observationCheckpoints'), 'Execution results should expose key checkpoint metadata');
   assert(aiServiceContent.includes('surface change before continuing'), 'Checkpoint failures should explain missing TradingView surface changes');
-  assert(aiServiceContent.includes("classification === 'panel-open'"), 'TradingView checkpoints should recognize panel-open flows such as Pine or DOM');
-  assert(aiServiceContent.includes('pine editor'), 'TradingView checkpoints should ground Pine Editor workflows');
-  assert(aiServiceContent.includes('depth of market'), 'TradingView checkpoints should ground DOM workflows');
+  assert(aiServiceContent.includes('inferTradingViewObservationSpec'), 'ai-service should consume the extracted TradingView observation-spec helper');
+  assert(tradingViewVerificationContent.includes("classification === 'panel-open'"), 'TradingView checkpoints should recognize panel-open flows such as Pine or DOM');
+  assert(tradingViewVerificationContent.includes('pine editor'), 'TradingView checkpoints should ground Pine Editor workflows');
+  assert(tradingViewVerificationContent.includes('depth of market'), 'TradingView checkpoints should ground DOM workflows');
 });
 
 test('ai-service treats TradingView DOM order-entry actions as high risk', () => {

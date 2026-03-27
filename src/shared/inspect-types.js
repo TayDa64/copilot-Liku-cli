@@ -77,7 +77,11 @@ function createVisualFrame(params) {
     coordinateSpace: 'screen-physical',
     scope: params.scope || params.type || 'screen',
     sourceId: params.sourceId || null,
-    sourceName: params.sourceName || null
+    sourceName: params.sourceName || null,
+    windowHandle: Number.isFinite(Number(params.windowHandle)) ? Number(params.windowHandle) : null,
+    region: params.region && typeof params.region === 'object' ? { ...params.region } : null,
+    captureMode: params.captureMode || null,
+    captureTrusted: typeof params.captureTrusted === 'boolean' ? params.captureTrusted : null
   };
 }
 

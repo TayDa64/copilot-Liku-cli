@@ -56,6 +56,131 @@ function summarizeActionTypes(actionTypes) {
     : 'none';
 }
 
+function normalizeActionPlanEntries(actions) {
+  if (!Array.isArray(actions)) return [];
+  return actions.slice(0, 12).map((action, index) => ({
+    index: Number.isFinite(Number(action?.index)) ? Number(action.index) : index,
+    type: normalizeText(action?.type, 60),
+    reason: normalizeText(action?.reason, 160),
+    key: normalizeText(action?.key, 60),
+    text: normalizeText(action?.text, 120),
+    scope: normalizeText(action?.scope, 60),
+    title: normalizeText(action?.title, 120),
+    processName: normalizeText(action?.processName, 80),
+    windowHandle: Number.isFinite(Number(action?.windowHandle)) ? Number(action.windowHandle) : null,
+    verifyKind: normalizeText(action?.verifyKind, 80),
+    verifyTarget: normalizeText(action?.verifyTarget, 120)
+  }));
+}
+
+function normalizeActionResultEntries(results) {
+  if (!Array.isArray(results)) return [];
+  return results.slice(0, 12).map((result, index) => ({
+    index: Number.isFinite(Number(result?.index)) ? Number(result.index) : index,
+    type: normalizeText(result?.type, 60),
+    success: !!result?.success,
+    error: normalizeText(result?.error, 180),
+    message: normalizeText(result?.message, 160),
+    userConfirmed: !!result?.userConfirmed,
+    blockedByPolicy: !!result?.blockedByPolicy,
+    observationCheckpoint: result?.observationCheckpoint
+      ? {
+          classification: normalizeText(result.observationCheckpoint.classification, 80),
+          verified: !!result.observationCheckpoint.verified,
+          reason: normalizeText(result.observationCheckpoint.reason, 160)
+        }
+      : null
+  }));
+}
+
+function normalizeVerificationChecks(verificationChecks) {
+  if (!Array.isArray(verificationChecks)) return [];
+  return verificationChecks.slice(0, 8).map((check, index) => ({
+    index,
+    name: normalizeText(check?.name, 80),
+    status: normalizeText(check?.status, 40),
+    detail: normalizeText(check?.detail, 160)
+  }));
+}
+
+function normalizeExecutionResultDetails(turnRecord = {}, actionResults = []) {
+  const executionResult = turnRecord?.executionResult && typeof turnRecord.executionResult === 'object'
+    ? turnRecord.executionResult
+    : {};
+  return {
+    cancelled: !!executionResult.cancelled || !!turnRecord.cancelled,
+    pendingConfirmation: !!executionResult.pendingConfirmation,
+    userConfirmed: !!executionResult.userConfirmed,
+    executedCount: Number.isFinite(Number(executionResult.executedCount))
+      ? Number(executionResult.executedCount)
+      : actionResults.length,
+    successCount: Number.isFinite(Number(executionResult.successCount))
+      ? Number(executionResult.successCount)
+      : actionResults.filter((result) => result?.success).length,
+    failureCount: Number.isFinite(Number(executionResult.failureCount))
+      ? Number(executionResult.failureCount)
+      : actionResults.filter((result) => result?.success === false).length,
+    failedActions: Array.isArray(executionResult.failedActions)
+      ? executionResult.failedActions.slice(0, 4).map((entry, index) => ({
+          index,
+          type: normalizeText(entry?.type, 60),
+          error: normalizeText(entry?.error, 160)
+        }))
+      : [],
+    reflectionApplied: executionResult.reflectionApplied && typeof executionResult.reflectionApplied === 'object'
+      ? {
+          action: normalizeText(executionResult.reflectionApplied.action, 80),
+          applied: !!executionResult.reflectionApplied.applied,
+          detail: normalizeText(executionResult.reflectionApplied.detail, 160)
+        }
+      : null,
+    popupFollowUp: executionResult.popupFollowUp && typeof executionResult.popupFollowUp === 'object'
+      ? {
+          attempted: !!executionResult.popupFollowUp.attempted,
+          completed: !!executionResult.popupFollowUp.completed,
+          steps: Number.isFinite(Number(executionResult.popupFollowUp.steps)) ? Number(executionResult.popupFollowUp.steps) : null,
+          recipeId: normalizeText(executionResult.popupFollowUp.recipeId, 80)
+        }
+      : null
+  };
+}
+
+function normalizeObservationEvidence(turnRecord = {}) {
+  const evidence = turnRecord?.observationEvidence && typeof turnRecord.observationEvidence === 'object'
+    ? turnRecord.observationEvidence
+    : {};
+  return {
+    captureMode: normalizeText(evidence.captureMode || turnRecord.captureMode, 60),
+    captureTrusted: typeof evidence.captureTrusted === 'boolean' ? evidence.captureTrusted : null,
+    visualContextRef: normalizeText(evidence.visualContextRef, 120),
+    visualTimestamp: Number.isFinite(Number(evidence.visualTimestamp)) ? Number(evidence.visualTimestamp) : null,
+    windowHandle: Number.isFinite(Number(evidence.windowHandle || turnRecord.targetWindowHandle)) ? Number(evidence.windowHandle || turnRecord.targetWindowHandle) : null,
+    windowTitle: normalizeText(evidence.windowTitle || turnRecord.windowTitle, 160),
+    uiWatcherFresh: typeof evidence.uiWatcherFresh === 'boolean' ? evidence.uiWatcherFresh : null,
+    uiWatcherAgeMs: Number.isFinite(Number(evidence.uiWatcherAgeMs)) ? Number(evidence.uiWatcherAgeMs) : null,
+    watcherWindowHandle: Number.isFinite(Number(evidence.watcherWindowHandle)) ? Number(evidence.watcherWindowHandle) : null,
+    watcherWindowTitle: normalizeText(evidence.watcherWindowTitle, 160)
+  };
+}
+
+function isTrustedCaptureMode(captureMode) {
+  const normalized = String(captureMode || '').trim().toLowerCase();
+  if (!normalized) return false;
+  return normalized === 'window'
+    || normalized === 'region'
+    || normalized.startsWith('window-')
+    || normalized.startsWith('region-');
+}
+
+function isScreenLikeCaptureMode(captureMode) {
+  const normalized = String(captureMode || '').trim().toLowerCase();
+  if (!normalized) return false;
+  return normalized === 'screen'
+    || normalized === 'fullscreen-fallback'
+    || normalized.startsWith('screen-')
+    || normalized.includes('fullscreen');
+}
+
 function deriveVerificationStatus(turnRecord = {}) {
   if (turnRecord?.verification?.status) return normalizeText(turnRecord.verification.status, 60);
   if (turnRecord?.cancelled) return 'cancelled';
@@ -82,7 +207,7 @@ function deriveCaptureTrusted(turnRecord = {}) {
   }
   const captureMode = deriveCaptureMode(turnRecord);
   if (!captureMode) return null;
-  return captureMode === 'window' || captureMode === 'region';
+  return isTrustedCaptureMode(captureMode);
 }
 
 function deriveExecutionStatus(turnRecord = {}) {
@@ -105,8 +230,9 @@ function deriveNextRecommendedStep(turnRecord = {}) {
 function deriveDegradedReason(normalizedTurn = {}) {
   if (normalizedTurn.executionStatus === 'cancelled') return 'The last action batch was cancelled before completion.';
   if (normalizedTurn.executionStatus === 'failed') return 'The last action batch did not complete successfully.';
+  if (normalizedTurn.verificationStatus === 'contradicted') return 'The latest evidence contradicts the claimed result.';
   if (normalizedTurn.verificationStatus === 'unverified') return 'The latest result is not fully verified yet.';
-  if (normalizedTurn.captureMode === 'screen' && normalizedTurn.captureTrusted === false) {
+  if (isScreenLikeCaptureMode(normalizedTurn.captureMode) && normalizedTurn.captureTrusted === false) {
     return 'Visual evidence fell back to full-screen capture instead of a trusted target-window capture.';
   }
   return null;
@@ -114,10 +240,15 @@ function deriveDegradedReason(normalizedTurn = {}) {
 
 function normalizeTurnRecord(turnRecord = {}, previousContinuity = defaultChatContinuity()) {
   const actionTypes = normalizeActionTypes(turnRecord.actionPlan || turnRecord.actions);
+  const actionPlan = normalizeActionPlanEntries(turnRecord.actionPlan || turnRecord.actions);
+  const actionResults = normalizeActionResultEntries(turnRecord.results || turnRecord.executionResult?.actionResults);
+  const executionResult = normalizeExecutionResultDetails(turnRecord, actionResults);
+  const observationEvidence = normalizeObservationEvidence(turnRecord);
+  const verificationChecks = normalizeVerificationChecks(turnRecord?.verification?.checks);
   const executionStatus = deriveExecutionStatus(turnRecord);
   const verificationStatus = deriveVerificationStatus(turnRecord);
-  const captureMode = deriveCaptureMode(turnRecord);
-  const captureTrusted = deriveCaptureTrusted(turnRecord);
+  const captureMode = observationEvidence.captureMode || deriveCaptureMode(turnRecord);
+  const captureTrusted = observationEvidence.captureTrusted ?? deriveCaptureTrusted(turnRecord);
   const activeGoal = normalizeText(
     turnRecord.activeGoal
       || turnRecord.executionIntent
@@ -144,9 +275,14 @@ function normalizeTurnRecord(turnRecord = {}, previousContinuity = defaultChatCo
     thought: normalizeText(turnRecord.thought, 240),
     actionTypes,
     actionSummary: summarizeActionTypes(actionTypes),
+    actionPlan,
+    actionResults,
     executionStatus,
     executedCount: Number.isFinite(Number(turnRecord.executedCount)) ? Number(turnRecord.executedCount) : actionTypes.length,
+    executionResult,
     verificationStatus,
+    verificationChecks,
+    observationEvidence,
     captureMode,
     captureTrusted,
     targetWindowHandle: Number.isFinite(Number(turnRecord.targetWindowHandle)) ? Number(turnRecord.targetWindowHandle) : null,
@@ -154,12 +290,14 @@ function normalizeTurnRecord(turnRecord = {}, previousContinuity = defaultChatCo
     nextRecommendedStep: deriveNextRecommendedStep(turnRecord)
   };
 
+  const degradedReason = deriveDegradedReason(normalizedTurn);
+
   return {
     activeGoal,
     currentSubgoal,
     lastTurn: normalizedTurn,
-    continuationReady: normalizedTurn.executionStatus === 'succeeded',
-    degradedReason: deriveDegradedReason(normalizedTurn)
+    continuationReady: normalizedTurn.executionStatus === 'succeeded' && !degradedReason,
+    degradedReason
   };
 }
 
@@ -324,7 +462,11 @@ function formatChatContinuitySummary(state) {
   if (continuity.currentSubgoal) lines.push(`Current subgoal: ${continuity.currentSubgoal}`);
   if (continuity.lastTurn?.actionSummary) lines.push(`Last actions: ${continuity.lastTurn.actionSummary}`);
   if (continuity.lastTurn?.executionStatus) lines.push(`Last execution: ${continuity.lastTurn.executionStatus}`);
+  if (continuity.lastTurn?.executionResult?.failureCount > 0) lines.push(`Failed actions: ${continuity.lastTurn.executionResult.failureCount}`);
   if (continuity.lastTurn?.verificationStatus) lines.push(`Verification: ${continuity.lastTurn.verificationStatus}`);
+  if (continuity.lastTurn?.targetWindowHandle) lines.push(`Target window: ${continuity.lastTurn.targetWindowHandle}`);
+  if (continuity.lastTurn?.captureMode) lines.push(`Capture mode: ${continuity.lastTurn.captureMode}`);
+  if (typeof continuity.lastTurn?.captureTrusted === 'boolean') lines.push(`Capture trusted: ${continuity.lastTurn.captureTrusted ? 'yes' : 'no'}`);
   if (typeof continuity.continuationReady === 'boolean') lines.push(`Continuation ready: ${continuity.continuationReady ? 'yes' : 'no'}`);
   if (continuity.degradedReason) lines.push(`Continuity caution: ${continuity.degradedReason}`);
   return lines.join('\n').trim() || 'No chat continuity recorded.';
@@ -341,9 +483,34 @@ function formatChatContinuityContext(state) {
   if (lastTurn?.userMessage) lines.push(`- lastUserMessage: ${lastTurn.userMessage}`);
   if (lastTurn?.actionSummary) lines.push(`- lastExecutedActions: ${lastTurn.actionSummary}`);
   if (lastTurn?.executionStatus) lines.push(`- lastExecutionStatus: ${lastTurn.executionStatus}`);
+  if (lastTurn?.executionResult?.successCount !== undefined || lastTurn?.executionResult?.failureCount !== undefined) {
+    lines.push(`- lastExecutionCounts: success=${Number(lastTurn.executionResult?.successCount || 0)}, failed=${Number(lastTurn.executionResult?.failureCount || 0)}`);
+  }
   if (lastTurn?.verificationStatus) lines.push(`- lastVerificationStatus: ${lastTurn.verificationStatus}`);
+  if (Array.isArray(lastTurn?.verificationChecks) && lastTurn.verificationChecks.length > 0) {
+    const checks = lastTurn.verificationChecks.map((check) => `${check.name}=${check.status}`).join(' | ');
+    lines.push(`- verificationChecks: ${checks}`);
+  }
+  if (lastTurn?.targetWindowHandle || lastTurn?.windowTitle) {
+    lines.push(`- targetWindow: ${lastTurn.windowTitle || 'unknown'}${lastTurn.targetWindowHandle ? ` [${lastTurn.targetWindowHandle}]` : ''}`);
+  }
   if (lastTurn?.captureMode) lines.push(`- lastCaptureMode: ${lastTurn.captureMode}`);
   if (typeof lastTurn?.captureTrusted === 'boolean') lines.push(`- lastCaptureTrusted: ${lastTurn.captureTrusted ? 'yes' : 'no'}`);
+  if (lastTurn?.observationEvidence?.visualContextRef) lines.push(`- visualContextRef: ${lastTurn.observationEvidence.visualContextRef}`);
+  if (typeof lastTurn?.observationEvidence?.uiWatcherFresh === 'boolean') {
+    lines.push(`- uiWatcherFresh: ${lastTurn.observationEvidence.uiWatcherFresh ? 'yes' : 'no'}`);
+  }
+  if (lastTurn?.observationEvidence?.uiWatcherAgeMs !== null && lastTurn?.observationEvidence?.uiWatcherAgeMs !== undefined) {
+    lines.push(`- uiWatcherAgeMs: ${lastTurn.observationEvidence.uiWatcherAgeMs}`);
+  }
+  if (Array.isArray(lastTurn?.actionResults) && lastTurn.actionResults.length > 0) {
+    const compactResults = lastTurn.actionResults.slice(0, 4).map((result) => `${result.type}:${result.success ? 'ok' : 'fail'}`).join(' | ');
+    lines.push(`- actionOutcomes: ${compactResults}`);
+  }
+  if (lastTurn?.executionResult?.popupFollowUp?.attempted) {
+    const popup = lastTurn.executionResult.popupFollowUp;
+    lines.push(`- popupFollowUp: ${popup.recipeId || 'recipe'} attempted=${popup.attempted ? 'yes' : 'no'} completed=${popup.completed ? 'yes' : 'no'}`);
+  }
   lines.push(`- continuationReady: ${continuity.continuationReady ? 'yes' : 'no'}`);
   if (continuity.degradedReason) lines.push(`- degradedReason: ${continuity.degradedReason}`);
   if (lastTurn?.nextRecommendedStep) lines.push(`- nextRecommendedStep: ${lastTurn.nextRecommendedStep}`);

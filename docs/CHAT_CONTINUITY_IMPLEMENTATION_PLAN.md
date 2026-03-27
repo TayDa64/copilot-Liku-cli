@@ -482,7 +482,12 @@ node scripts/test-chat-actionability.js
 
 ### Phase 2 — Prefer state over phrasing
 
-**Status:** Next priority
+**Status:** Completed in working tree
+
+**Delivered**
+- state-first continuation routing in `src/cli/commands/chat.js`
+- continuity-aware recovery messaging for degraded, contradicted, and unverified follow-up turns
+- multi-turn continuation coverage in `scripts/test-chat-actionability.js`
 
 **Goal**
 - make continuation routing prefer structured continuity state before regex heuristics when continuity exists
@@ -513,7 +518,12 @@ node scripts/test-session-intent-state.js
 
 ### Phase 3 — Store richer execution facts
 
-**Status:** High priority
+**Status:** Completed in working tree
+
+**Delivered**
+- dedicated continuity mapper in `src/main/chat-continuity-state.js`
+- richer persisted execution, verification, watcher, and popup follow-up facts in `src/main/session-intent-state.js`
+- mapper/state regressions in `scripts/test-chat-continuity-state.js` and `scripts/test-session-intent-state.js`
 
 **Goal**
 - upgrade `chatContinuity.lastTurn` from a compact summary to a fuller execution record usable for grounded follow-up reasoning
@@ -548,7 +558,12 @@ node scripts/test-chat-actionability.js
 
 ### Phase 4 — Verification contracts for UI changes
 
-**Status:** High priority
+**Status:** Completed in working tree
+
+**Delivered**
+- reusable `action.verify` checkpoint support in `src/main/ai-service.js`
+- explicit contradicted/unverified continuity handling in `src/main/session-intent-state.js` and `src/cli/commands/chat.js`
+- reusable TradingView dialog verification coverage in `scripts/test-windows-observation-flow.js`
 
 **Goal**
 - prevent Liku from overclaiming that a requested UI change succeeded when evidence is weak or missing
@@ -587,7 +602,12 @@ node scripts/test-session-intent-state.js
 
 ### Phase 5 — Explicit screenshot trust and degraded continuity handling
 
-**Status:** High priority
+**Status:** Completed in working tree
+
+**Delivered**
+- trusted vs degraded capture handling in `src/main/session-intent-state.js`
+- degraded screenshot recovery prompting in `src/main/ai-service/message-builder.js` and `src/cli/commands/chat.js`
+- degraded screenshot prompt regressions in `scripts/test-chat-continuity-prompting.js`
 
 **Goal**
 - make screenshot trust a first-class continuity signal and provide recovery behavior when evidence quality degrades
@@ -619,7 +639,12 @@ node scripts/test-chat-actionability.js
 
 ### Phase 6 — Multi-turn continuity coherence suite
 
-**Status:** Required before calling the continuity work mature
+**Status:** Completed in working tree
+
+**Delivered**
+- multi-turn prompting regressions in `scripts/test-chat-continuity-prompting.js`
+- two-turn continuation persistence/blocking scenarios in `scripts/test-chat-actionability.js`
+- explicit contradicted/cancelled continuity recovery assertions across prompt and state tests
 
 **Goal**
 - prove that follow-up turns are grounded in actual execution results rather than reconstructed loosely from conversation text
@@ -654,14 +679,530 @@ node scripts/test-chat-inline-proof-evaluator.js
 
 ## Recommended implementation order from here
 
-1. **Phase 2 — Prefer state over phrasing**
-2. **Phase 3 — Store richer execution facts**
-3. **Phase 4 — Verification contracts for UI changes**
-4. **Phase 5 — Explicit screenshot trust and degraded recovery**
-5. **Phase 6 — Multi-turn continuity coherence suite**
+1. **Milestone 4 — TradingView domain modules replace one-off workflow logic**
+2. **Milestone 6 — Repo-grounded search actions improve implementation assistance**
+3. **Milestone 7 — Non-disruptive vision for approval-time continuity**
 
 ## Commit strategy
 
 - keep each phase in its own commit
 - require passing proof commands before each commit
 - prefer adding tests in the same commit as the behavior they validate
+
+## Transcript-grounded findings and future implementation directions
+
+The following findings are grounded in the real `liku chat` transcript captured during a TradingView workflow and cross-checked against the current codebase.
+
+### 1. Prefer modular domain capabilities over one-off named workflows
+
+The transcript used **Bollinger Bands** as the requested example, but the implementation direction should stay at the level of a reusable **indicator workflow** instead of a single indicator-specific feature.
+
+Why this is the correct abstraction:
+
+- the runtime already models TradingView as a domain with reusable keyword families rather than only one-off actions:
+  - `src/main/tradingview/app-profile.js`
+    - `APP_NAME_PROFILES` contains TradingView-specific:
+      - `indicatorKeywords`
+      - `dialogKeywords`
+      - `chartKeywords`
+      - `drawingKeywords`
+      - `pineKeywords`
+- key observation checkpoints already infer reusable TradingView intent classes:
+  - `src/main/ai-service.js`
+    - `inferKeyObservationCheckpoint(...)`
+    - classes such as `dialog-open`, `panel-open`, `input-surface-open`, `chart-state`
+- current tests already prove reusable alert-dialog behavior rather than a single hard-coded alert flow:
+  - `scripts/test-windows-observation-flow.js`
+
+Recommended design rule:
+
+- do **not** add `add_bollinger_bands` as a special implementation target
+- instead add a modular capability such as:
+  - `indicator search/open`
+  - `indicator add by name`
+  - `indicator verify present`
+  - `indicator configure`
+  - `indicator remove`
+
+This gives one reusable capability surface for:
+
+- Bollinger Bands
+- Anchored VWAP
+- Volume Profile
+- Strategy Tester add-ons
+- future studies / overlays / oscillators
+
+Recommended future module shape:
+
+- `src/main/tradingview/indicator-workflows.js`
+- `src/main/tradingview/indicator-verification.js`
+- transcript fixtures under `scripts/fixtures/tradingview/`
+
+### 2. Screenshot fallback must become an explicit continuity and verification signal
+
+The transcript demonstrated a real failure mode:
+
+- active-window capture failed
+- Liku fell back to full-screen capture
+- later reasoning occurred in a mixed desktop context where VS Code, OBS, YouTube Studio, and TradingView were all visible
+
+This is already partially grounded in current code:
+
+- `src/main/ui-automation/screenshot.js`
+  - returns `captureMode`
+  - distinguishes `window-printwindow`, `window-copyfromscreen`, `screen-copyfromscreen`
+- `src/cli/commands/chat.js`
+  - already warns and falls back when active-window capture returns no data
+- `src/main/session-intent-state.js`
+  - already stores `captureMode`, `verificationStatus`, and `degradedReason`
+
+But the transcript shows the remaining gap:
+
+- degraded screenshot evidence is still not treated strongly enough as a continuity gate
+
+Future implementation rule:
+
+- if the intended target is a specific app/window and the resulting evidence is `screen` or `fullscreen-fallback`, continuity should become **degraded** unless:
+  - target foreground is re-verified, or
+  - the user explicitly approves bounded continuation, or
+  - a successful target-window recapture occurs
+
+This should be wired into:
+
+- continuation routing in `src/cli/commands/chat.js`
+- prompt context in `src/main/ai-service/message-builder.js`
+- continuity persistence in `src/main/session-intent-state.js`
+
+### 3. Verification should promote reusable UI-surface contracts, not app-specific hacks
+
+The transcript showed two concrete TradingView flows that should become reusable verification contracts:
+
+1. **Create Alert**
+   - verify that an alert dialog or alert-owned window opened before typing continues
+2. **Indicator Search / Add Indicator**
+   - verify that the indicator search surface opened before typing
+   - do not claim the indicator is present on-chart unless evidence supports it
+
+The codebase already has a strong starting seam for this:
+
+- `src/main/ai-service.js`
+  - `inferKeyObservationCheckpoint(...)`
+  - `verifyKeyObservationCheckpoint(...)`
+- existing grounded tests:
+  - `scripts/test-windows-observation-flow.js`
+    - alert accelerator fails safely when dialog transition is not observed
+    - alert accelerator allows typing after observed dialog transition
+
+Recommended generalization:
+
+- add reusable verification kinds instead of app-specific branches wherever possible:
+  - `dialog-visible`
+  - `input-surface-open`
+  - `panel-open`
+  - `target-window-focused`
+  - `indicator-present`
+  - `chart-state-updated`
+
+This keeps the design modular for TradingView, browser apps, and future low-UIA surfaces.
+
+### 4. Future implementation section: code-search and repo-grounding capabilities
+
+The current runtime already benefits from direct shell execution for discovery-style tasks:
+
+- `src/main/system-automation.js`
+  - `RUN_COMMAND`
+  - `executeCommand(...)`
+- `src/main/ai-service/system-prompt.js`
+  - explicitly encourages `run_command` for shell tasks and file listing
+
+However, the transcript and this repository work suggest a stronger future feature area: **repo-grounded search actions**.
+
+Potential future actions:
+
+- `semantic_search_repo`
+- `grep_repo`
+- `pgrep_process`
+
+Suggested capability boundaries:
+
+- `semantic_search_repo`
+  - use when the user asks for concept-level discovery across code
+  - example: “find where continuity routing is decided”
+- `grep_repo`
+  - use when the user asks for exact symbol/string/regex grounding
+  - example: “show all uses of `continuationReady`”
+- `pgrep_process`
+  - use when the user asks to verify whether app/runtime processes are alive
+  - example: “is TradingView still running”, “which OBS process/window should I target”
+
+How these would improve Liku:
+
+- stronger self-grounding before suggesting code changes
+- lower hallucination risk in repo-editing workflows
+- better recovery when the user asks for implementation-aware reasoning from within desktop chat
+- better window/process targeting when multiple candidate apps are open
+
+Recommended boundaries:
+
+- keep these as explicit tools/actions, not hidden model behavior
+- preserve advisory-safe defaults
+- require compact, bounded outputs so prompt size stays controlled
+
+### 5. Background Window Capture (Non-Disruptive Vision) would improve approval-time continuity
+
+This is the most strategically valuable future capability surfaced by the transcript.
+
+Current behavior:
+
+- Liku often needs to focus the target window before capturing trustworthy visual evidence
+- when the user is asked for approval, focus may move away from the target app
+- continuity can degrade while the user is reading/responding in another surface such as VS Code or the chat terminal
+
+Why background capture would help:
+
+1. **Preserve user workflow during approvals**
+   - the user can stay in VS Code or terminal while Liku keeps observing TradingView or OBS without stealing focus
+
+2. **Preserve target-window continuity**
+   - Liku can verify that the chart/dialog/panel still exists after an approval pause
+   - this reduces stale assumptions between “pending confirmation” and “resume execution”
+
+3. **Reduce focus churn and re-targeting errors**
+   - fewer forced `focus_window` hops means fewer accidental context switches and fewer mixed-window screenshots
+
+4. **Improve honesty of follow-up reasoning**
+   - if Liku can capture the intended target without foreground disruption, it can distinguish:
+     - “the target remained stable while you reviewed the approval”
+     - vs “the target may have changed while focus was elsewhere”
+
+5. **Enable background monitors/watchers later**
+   - especially useful for chart monitoring, stream health, popups, and long-running UI tasks
+
+Important constraint:
+
+- this should be treated as a **future architecture enhancement**, not as a substitute for continuity/verification improvements already needed now
+- the immediate near-term priority remains:
+  - state-first continuation routing
+  - degraded screenshot trust
+  - reusable verification contracts
+
+### 6. Detailed future implementation tracks
+
+Below are the recommended future tracks after the current continuity phases.
+
+#### Track A — TradingView domain modules
+
+Goal:
+- formalize TradingView as modular workflows instead of isolated prompt tricks
+
+Recommended modules:
+- `src/main/tradingview/app-profile.js`
+- `src/main/tradingview/indicator-workflows.js`
+- `src/main/tradingview/alert-workflows.js`
+- `src/main/tradingview/chart-verification.js`
+
+Initial reusable operations:
+- open indicator search
+- add indicator by name
+- verify indicator search opened
+- verify indicator presence on chart when possible
+- open alert dialog
+- verify alert dialog transition
+- apply timeframe changes with verification
+
+#### Track B — Continuity evidence engine
+
+Goal:
+- promote capture quality, watcher freshness, and verification into a reusable evidence contract
+
+Recommended modules:
+- `src/main/chat-continuity-state.js`
+- `src/main/action-verification.js`
+- `src/main/evidence-quality.js`
+
+Initial responsibilities:
+- normalize capture modes and trust levels
+- classify degraded vs trusted evidence
+- decide when continuation is safe, degraded, blocked, or recovery-required
+
+#### Track C — Repo-grounded search actions
+
+Goal:
+- improve implementation assistance from within Liku itself
+
+Potential actions:
+- `semantic_search_repo`
+- `grep_repo`
+- `pgrep_process`
+
+Initial use cases:
+- locate implementation seams before editing
+- verify exact symbol usage before proposing a change
+- discover the correct process/window candidate before focusing or capturing
+
+#### Track D — Non-disruptive vision
+
+Goal:
+- observe target applications without forcing focus changes during approvals or long-running tasks
+
+Potential implementation directions:
+- stronger HWND-bound capture path
+- best-effort non-foreground capture provider abstraction
+- explicit capability detection per target app/window class
+- degraded fallback when non-disruptive capture is unsupported
+
+Acceptance principles:
+- never silently equate degraded background capture with trusted target capture
+- always surface evidence quality in continuity state
+- preserve user focus when possible, but never overclaim certainty
+
+## Future milestone roadmap
+
+This roadmap turns the future-direction findings above into a staged implementation sequence that can be used as the handoff point for code work.
+
+### Milestone 1 — Continuity routing becomes state-first
+
+**Objective**
+- make follow-up turns rely on persisted continuity state before conversational phrasing heuristics whenever valid continuity exists
+
+**Primary files**
+- `src/cli/commands/chat.js`
+- `src/main/session-intent-state.js`
+- `scripts/test-chat-actionability.js`
+
+**Key deliverables**
+- `hasUsableChatContinuity(...)` helper
+- minimal continuation routing rules for `continue`, `next`, `keep going`, `carry on`
+- recovery response when continuity exists but is degraded or blocked
+
+**Acceptance criteria**
+- short continuation prompts execute only when continuity state says continuation is safe
+- acknowledgement-only turns remain non-executing
+- degraded continuity yields an explicit recovery-oriented reply
+
+**Proof commands**
+```powershell
+node scripts/test-chat-actionability.js
+node scripts/test-session-intent-state.js
+```
+
+**Why this milestone comes first**
+- it is the smallest behavior change that makes the rest of the continuity work meaningful
+- it reduces drift before deeper state enrichment lands
+
+### Milestone 2 — Evidence quality becomes a first-class continuity signal
+
+**Objective**
+- distinguish trusted target evidence from degraded fallback evidence and make that distinction visible in both routing and prompting
+
+**Primary files**
+- `src/main/session-intent-state.js`
+- `src/main/ai-service/message-builder.js`
+- `src/cli/commands/chat.js`
+- likely new: `src/main/evidence-quality.js`
+
+**Key deliverables**
+- normalized evidence-quality model for `window`, `region`, `screen`, and fallback states
+- explicit degraded markers in continuity state and prompt context
+- recovery policy when `screen` evidence is used after target-window intent
+
+**Acceptance criteria**
+- full-screen fallback is not treated as equivalent to a trusted target-window capture
+- continuity prompts expose evidence quality clearly
+- continuation can branch to retry, bounded continuation, or user confirmation
+
+**Proof commands**
+```powershell
+node scripts/test-message-builder-session-intent.js
+node scripts/test-chat-actionability.js
+```
+
+**Dependency notes**
+- builds directly on Milestone 1
+- should be completed before expanding verification claims further
+
+### Milestone 3 — Reusable verification contracts for low-UIA UI changes
+
+**Objective**
+- stop relying on raw action completion as proof of UI success, especially for TradingView-like workflows
+
+**Primary files**
+- `src/main/ai-service.js`
+- likely new: `src/main/action-verification.js`
+- `src/main/session-intent-state.js`
+- `scripts/test-windows-observation-flow.js`
+- likely new: `scripts/test-action-verification.js`
+
+**Key deliverables**
+- reusable verification shapes:
+  - `verified`
+  - `unverified`
+  - `contradicted`
+  - `not-applicable`
+- reusable verification kinds:
+  - `target-window-focused`
+  - `dialog-visible`
+  - `input-surface-open`
+  - `panel-open`
+  - `indicator-present`
+  - `chart-state-updated`
+
+**Acceptance criteria**
+- Liku does not continue typing into an expected dialog unless the dialog transition is observed
+- indicator-search and alert-style flows are verified through reusable contracts rather than one-off heuristics
+- continuity state records verification outcomes for future turns
+
+**Proof commands**
+```powershell
+node scripts/test-windows-observation-flow.js
+node scripts/test-action-verification.js
+node scripts/test-session-intent-state.js
+```
+
+**Dependency notes**
+- evidence quality from Milestone 2 should feed verification confidence
+
+### Milestone 4 — TradingView domain modules replace one-off workflow logic
+
+**Status:** In progress in working tree
+
+**Delivered so far**
+- extracted TradingView app identity/profile normalization to `src/main/tradingview/app-profile.js`
+- extracted TradingView observation/risk inference to `src/main/tradingview/verification.js`
+- added direct module regressions in `scripts/test-tradingview-app-profile.js` and `scripts/test-tradingview-verification.js`
+
+**Objective**
+- formalize reusable TradingView workflow modules around alerts, indicators, and chart verification
+
+**Primary files**
+- likely new: `src/main/tradingview/app-profile.js`
+- likely new: `src/main/tradingview/indicator-workflows.js`
+- likely new: `src/main/tradingview/alert-workflows.js`
+- likely new: `src/main/tradingview/chart-verification.js`
+- `src/main/ai-service.js`
+
+**Key deliverables**
+- indicator workflows based on name-driven and intent-driven operations
+- alert workflows separated from indicator workflows
+- chart verification helpers reusable by continuity and prompt building
+
+**Acceptance criteria**
+- the implementation target is “indicators” as a modular capability, not “Bollinger Bands” as a special-case feature
+- alert and indicator flows share reusable verification and targeting utilities
+- app-domain logic shrinks inside `ai-service.js`
+
+**Proof commands**
+```powershell
+node scripts/test-windows-observation-flow.js
+node scripts/test-chat-actionability.js
+```
+
+**Dependency notes**
+- depends on Milestone 3 so domain modules can consume stable verification contracts
+
+### Milestone 5 — Multi-turn coherence suite proves safe continuation
+
+**Objective**
+- move continuity from “seems improved” to “provably grounded under regression”
+
+**Primary files**
+- `scripts/test-chat-actionability.js`
+- likely new: `scripts/test-chat-continuity-state.js`
+- likely new: `scripts/test-chat-continuity-prompting.js`
+- likely new: `scripts/fixtures/tradingview/`
+
+**Key deliverables**
+- two-turn and three-turn fixtures covering:
+  - successful continuation
+  - degraded screenshot fallback continuation
+  - contradicted verification continuation
+  - cancelled turn followed by recovery prompt
+
+**Acceptance criteria**
+- prompts contain the right continuity facts for each scenario
+- unsafe continuation is blocked or redirected
+- regressions fail when continuity is stale, absent, contradicted, or degraded beyond safe execution
+
+**Proof commands**
+```powershell
+node scripts/test-chat-actionability.js
+node scripts/test-chat-continuity-state.js
+node scripts/test-chat-continuity-prompting.js
+node scripts/test-chat-inline-proof-evaluator.js
+```
+
+### Milestone 6 — Repo-grounded search actions improve implementation assistance
+
+**Objective**
+- let Liku ground coding and recovery assistance through explicit repo/process search actions
+
+**Primary files**
+- likely new: `src/main/repo-search-actions.js`
+- `src/main/system-automation.js`
+- `src/main/ai-service/system-prompt.js`
+- `src/cli/liku.js`
+
+**Key deliverables**
+- explicit actions for:
+  - `semantic_search_repo`
+  - `grep_repo`
+  - `pgrep_process`
+- bounded outputs and safety constraints for each action
+
+**Acceptance criteria**
+- Liku can explicitly ground implementation answers in repo search results
+- process targeting can use compact process-discovery results rather than guesswork
+- search outputs stay concise enough for prompt use
+
+**Proof commands**
+```powershell
+node scripts/test-run-command.js
+node scripts/test-ai-service-contract.js
+```
+
+**Dependency notes**
+- does not block continuity implementation, but compounds its usefulness for dev-facing tasks
+
+### Milestone 7 — Non-disruptive vision for approval-time continuity
+
+**Objective**
+- allow Liku to preserve target-app observation during approval pauses without forcing focus changes when the platform/app supports it
+
+**Primary files**
+- `src/main/ui-automation/screenshot.js`
+- likely new: `src/main/background-capture.js`
+- `src/cli/commands/chat.js`
+- `src/main/session-intent-state.js`
+
+**Key deliverables**
+- provider abstraction for best-effort non-foreground capture
+- capability detection per target app/window class
+- continuity integration that distinguishes:
+  - trusted background capture
+  - degraded background capture
+  - unsupported background capture
+
+**Acceptance criteria**
+- approval pauses no longer automatically imply target-observation loss when supported capture is available
+- focus is preserved for the user when possible
+- unsupported or degraded background capture is reported honestly
+
+**Proof commands**
+```powershell
+node scripts/test-session-intent-state.js
+node scripts/test-chat-continuity-prompting.js
+```
+
+**Dependency notes**
+- this is intentionally later-stage architecture work
+- it should build on Milestones 1–5 rather than replace them
+
+## Recommended handoff into implementation work
+
+Once implementation begins, the strongest first coding slice is:
+
+1. **Milestone 1** — state-first continuation routing
+2. **Milestone 2** — evidence quality / degraded screenshot trust
+3. **Milestone 3** — reusable verification contracts
+
+That sequence gives the best implementation starting point because it directly addresses the transcript-proven failure modes before larger modularization or future platform work.

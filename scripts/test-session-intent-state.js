@@ -117,6 +117,7 @@ test('session intent store records and clears chat continuity state', () => {
   assert.strictEqual(recorded.chatContinuity.activeGoal, 'help me make a confident synthesis of ticker LUNR in tradingview');
   assert.strictEqual(recorded.chatContinuity.lastTurn.actionSummary, 'focus_window -> screenshot');
   assert.strictEqual(recorded.chatContinuity.continuationReady, true);
+  assert.strictEqual(recorded.chatContinuity.lastTurn.observationEvidence.captureMode, 'window');
 
   const reloaded = createSessionIntentStateStore({ stateFile }).getChatContinuity({ cwd: path.join(__dirname, '..') });
   assert.strictEqual(reloaded.currentSubgoal, 'Inspect the active TradingView chart');
@@ -125,5 +126,135 @@ test('session intent store records and clears chat continuity state', () => {
   const cleared = store.clearChatContinuity({ cwd: path.join(__dirname, '..') });
   assert.strictEqual(cleared.chatContinuity.activeGoal, null);
   assert.strictEqual(cleared.chatContinuity.continuationReady, false);
+  fs.rmSync(tempDir, { recursive: true, force: true });
+});
+
+test('screen-like fallback evidence degrades continuity readiness', () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'liku-session-intent-'));
+  const stateFile = path.join(tempDir, 'session-intent-state.json');
+  const store = createSessionIntentStateStore({ stateFile });
+
+  const recorded = store.recordExecutedTurn({
+    userMessage: 'continue',
+    executionIntent: 'Continue from the current TradingView chart state.',
+    committedSubgoal: 'Inspect the active TradingView chart',
+    actionPlan: [{ type: 'screenshot' }],
+    success: true,
+    screenshotCaptured: true,
+    observationEvidence: { captureMode: 'screen-copyfromscreen', captureTrusted: false },
+    verification: { status: 'verified' },
+    nextRecommendedStep: 'Continue from the latest visual evidence.'
+  }, {
+    cwd: path.join(__dirname, '..')
+  });
+
+  assert.strictEqual(recorded.chatContinuity.lastTurn.captureMode, 'screen-copyfromscreen');
+  assert.strictEqual(recorded.chatContinuity.lastTurn.captureTrusted, false);
+  assert.strictEqual(recorded.chatContinuity.continuationReady, false);
+  assert(/full-screen capture/i.test(recorded.chatContinuity.degradedReason));
+
+  fs.rmSync(tempDir, { recursive: true, force: true });
+});
+
+test('contradicted verification blocks continuity readiness', () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'liku-session-intent-'));
+  const stateFile = path.join(tempDir, 'session-intent-state.json');
+  const store = createSessionIntentStateStore({ stateFile });
+
+  const recorded = store.recordExecutedTurn({
+    userMessage: 'continue',
+    executionIntent: 'Continue indicator verification.',
+    committedSubgoal: 'Verify that the requested indicator appears on the chart',
+    actionPlan: [{ type: 'screenshot', scope: 'active-window' }],
+    results: [{ type: 'screenshot', success: true, message: 'captured' }],
+    success: true,
+    observationEvidence: {
+      captureMode: 'window-copyfromscreen',
+      captureTrusted: true,
+      visualContextRef: 'window-copyfromscreen@456'
+    },
+    verification: {
+      status: 'contradicted',
+      checks: [{ name: 'indicator-present', status: 'contradicted', detail: 'requested indicator not visible on chart' }]
+    },
+    nextRecommendedStep: 'Retry indicator search before claiming success.'
+  }, {
+    cwd: path.join(__dirname, '..')
+  });
+
+  assert.strictEqual(recorded.chatContinuity.continuationReady, false);
+  assert.strictEqual(recorded.chatContinuity.degradedReason, 'The latest evidence contradicts the claimed result.');
+
+  const continuityContext = formatChatContinuityContext(recorded);
+  assert.ok(continuityContext.includes('lastVerificationStatus: contradicted'));
+  assert.ok(continuityContext.includes('Rule: Do not claim the requested UI change is complete unless the latest evidence verifies it.'));
+
+  fs.rmSync(tempDir, { recursive: true, force: true });
+});
+
+test('session intent store persists richer execution facts for chat continuity', () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'liku-session-intent-'));
+  const stateFile = path.join(tempDir, 'session-intent-state.json');
+  const store = createSessionIntentStateStore({ stateFile });
+
+  const recorded = store.recordExecutedTurn({
+    userMessage: 'continue',
+    executionIntent: 'Continue from the chart inspection step.',
+    committedSubgoal: 'Inspect the active TradingView chart',
+    actionPlan: [
+      { index: 0, type: 'focus_window', title: 'TradingView', processName: 'tradingview' },
+      { index: 1, type: 'key', key: 'alt+a', verifyKind: 'dialog-visible', verifyTarget: 'create-alert' }
+    ],
+    results: [
+      { index: 0, type: 'focus_window', success: true, message: 'focused' },
+      { index: 1, type: 'key', success: false, error: 'dialog not observed' }
+    ],
+    success: false,
+    executionResult: {
+      executedCount: 2,
+      successCount: 1,
+      failureCount: 1,
+      failedActions: [{ type: 'key', error: 'dialog not observed' }],
+      popupFollowUp: { attempted: true, completed: false, steps: 1, recipeId: 'generic-fallback' }
+    },
+    observationEvidence: {
+      captureMode: 'window-copyfromscreen',
+      captureTrusted: true,
+      visualContextRef: 'window-copyfromscreen@123',
+      uiWatcherFresh: true,
+      uiWatcherAgeMs: 420
+    },
+    verification: {
+      status: 'unverified',
+      checks: [
+        { name: 'target-window-focused', status: 'verified' },
+        { name: 'dialog-open', status: 'unverified', detail: 'dialog not observed' }
+      ]
+    },
+    targetWindowHandle: 777,
+    windowTitle: 'TradingView - LUNR',
+    nextRecommendedStep: 'Retry the dialog-opening step with fresh evidence.'
+  }, {
+    cwd: path.join(__dirname, '..')
+  });
+
+  const turn = recorded.chatContinuity.lastTurn;
+  assert.strictEqual(turn.actionPlan.length, 2);
+  assert.strictEqual(turn.actionResults.length, 2);
+  assert.strictEqual(turn.executionResult.failureCount, 1);
+  assert.strictEqual(turn.executionResult.popupFollowUp.recipeId, 'generic-fallback');
+  assert.strictEqual(turn.observationEvidence.visualContextRef, 'window-copyfromscreen@123');
+  assert.strictEqual(turn.verificationChecks.length, 2);
+  assert.strictEqual(turn.targetWindowHandle, 777);
+  assert.strictEqual(recorded.chatContinuity.continuationReady, false);
+
+  const continuitySummary = formatChatContinuitySummary(recorded);
+  assert.ok(continuitySummary.includes('Failed actions: 1'));
+  assert.ok(continuitySummary.includes('Target window: 777'));
+
+  const continuityContext = formatChatContinuityContext(recorded);
+  assert.ok(continuityContext.includes('verificationChecks: target-window-focused=verified | dialog-open=unverified'));
+  assert.ok(continuityContext.includes('actionOutcomes: focus_window:ok | key:fail'));
+
   fs.rmSync(tempDir, { recursive: true, force: true });
 });
