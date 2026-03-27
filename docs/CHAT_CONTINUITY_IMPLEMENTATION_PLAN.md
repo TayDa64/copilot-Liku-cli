@@ -1182,6 +1182,15 @@ node scripts/test-chat-inline-proof-evaluator.js
 - updated contract/tool regression expectations in:
   - `scripts/test-ai-service-contract.js`
   - `scripts/test-tier2-tier3.js`
+- strengthened repo-search quality and safety:
+  - semantic ranking now weights symbol-like matches, path relevance, token coverage, and file recency
+  - grep/semantic outputs now include bounded line-window snippets for grounded follow-up reasoning
+  - centralized hard caps for `maxResults` and timeout limits
+  - regex validation and malformed-pattern safety handling
+  - root-bound relative path enforcement for result file references
+- strengthened `pgrep_process` process grounding:
+  - Windows process results now include `hasWindow` / `windowTitle` enrichment when available
+  - process matching now uses deterministic ranking (exact > prefix > contains, with window-aware preference)
 
 **Objective**
 - let Liku ground coding and recovery assistance through explicit repo/process search actions

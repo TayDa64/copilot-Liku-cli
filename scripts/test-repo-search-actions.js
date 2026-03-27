@@ -69,13 +69,14 @@ async function main() {
     assert.ok(Array.isArray(result.results));
     assert.ok(result.results.length >= 1);
     assert.ok(result.results.some((entry) => String(entry.path).includes('chat.js')));
+    assert.ok(result.results[0].snippet && typeof result.results[0].snippet.text === 'string');
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
-  await test('semanticSearchRepo ranks continuity-oriented matches', async () => {
+  await test('semanticSearchRepo ranks symbol-like matches above incidental text', async () => {
     const tempDir = createFixtureRepo();
     const result = await semanticSearchRepo({
-      query: 'where continuation verification is summarized',
+      query: 'build continuity summary function',
       cwd: tempDir,
       maxResults: 8
     });
@@ -84,6 +85,35 @@ async function main() {
     assert.ok(Array.isArray(result.results));
     assert.ok(result.results.length >= 1);
     assert.ok(result.results[0].score >= 1);
+    const topPaths = result.results
+      .slice(0, 3)
+      .map((entry) => String(entry.path).replace(/\\/g, '/').replace(/^\.\//, ''));
+    assert.ok(topPaths.some((entry) => entry.includes('src/continuity.js')));
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  await test('grepRepo rejects malformed regex safely', async () => {
+    const tempDir = createFixtureRepo();
+    const result = await grepRepo({
+      pattern: '(unclosed(',
+      cwd: tempDir,
+      literal: false
+    });
+    assert.strictEqual(result.success, false);
+    assert.ok(/invalid regex pattern/i.test(String(result.error || '')));
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  await test('grepRepo enforces hard maxResults cap', async () => {
+    const tempDir = createFixtureRepo();
+    const result = await grepRepo({
+      pattern: 'continuation',
+      cwd: tempDir,
+      literal: true,
+      maxResults: 9999
+    });
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.maxResultsApplied, 200);
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
@@ -92,6 +122,7 @@ async function main() {
     assert.strictEqual(result.success, true);
     assert.ok(Array.isArray(result.results));
     assert.ok(result.results.length >= 1);
+    assert.ok(result.maxResultsApplied <= 200);
   });
 
   await test('executeRepoSearchAction routes supported actions', async () => {
