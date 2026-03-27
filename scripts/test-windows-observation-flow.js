@@ -281,6 +281,22 @@ async function run() {
     assert.strictEqual(rewritten[2].verify.target, 'dom-panel');
   });
 
+  await testAsync('low-signal TradingView paper trading request rewrites to bounded paper-assist verification', async () => {
+    const rewritten = aiService.rewriteActionsForReliability([
+      { type: 'key', key: 'alt+t' },
+      { type: 'wait', ms: 250 }
+    ], {
+      userMessage: 'open paper trading in tradingview'
+    });
+
+    assert(Array.isArray(rewritten), 'paper trading rewrite should return an action array');
+    assert.strictEqual(rewritten[0].type, 'bring_window_to_front');
+    assert.strictEqual(rewritten[0].processName, 'tradingview');
+    assert.strictEqual(rewritten[2].type, 'key');
+    assert.strictEqual(rewritten[2].verify.kind, 'panel-visible');
+    assert.strictEqual(rewritten[2].verify.target, 'paper-trading-panel');
+  });
+
   await testAsync('TradingView alert accelerator blocks follow-up typing when no dialog change is observed', async () => {
     const executed = [];
     const foregroundSequence = [
@@ -941,6 +957,54 @@ async function run() {
       assert.strictEqual(execResult.observationCheckpoints[0].classification, 'panel-open', 'DOM verification should map to panel-open');
       assert.strictEqual(execResult.observationCheckpoints[0].verified, true, 'DOM verification should pass after the panel title is observed');
       assert.strictEqual(execResult.observationCheckpoints[0].tradingMode.mode, 'paper', 'DOM verification metadata should detect Paper Trading mode from the observed panel');
+    });
+  });
+
+  await testAsync('explicit TradingView Paper Trading contracts allow bounded paper-assist verification', async () => {
+    const executed = [];
+    const foregroundSequence = [
+      { success: true, hwnd: 777, title: 'TradingView', processName: 'tradingview', windowKind: 'main' },
+      { success: true, hwnd: 779, title: 'Paper Trading - TradingView', processName: 'tradingview', windowKind: 'palette' },
+      { success: true, hwnd: 779, title: 'Paper Trading - TradingView', processName: 'tradingview', windowKind: 'palette' }
+    ];
+
+    await withPatchedSystemAutomation({
+      resolveWindowHandle: async (action) => action?.processName === 'tradingview' ? 777 : 0,
+      getForegroundWindowInfo: async () => foregroundSequence.shift() || { success: true, hwnd: 779, title: 'Paper Trading - TradingView', processName: 'tradingview', windowKind: 'palette' },
+      focusWindow: async () => ({ success: true }),
+      getRunningProcessesByNames: async () => ([{ pid: 4242, processName: 'tradingview', mainWindowTitle: 'TradingView', startTime: '2026-03-23T00:00:00Z' }])
+    }, async () => {
+      const execResult = await aiService.executeActions({
+        thought: 'Open TradingView Paper Trading',
+        verification: 'TradingView should show the Paper Trading panel',
+        actions: [
+          { type: 'focus_window', title: 'TradingView', processName: 'tradingview' },
+          {
+            type: 'key',
+            key: 'alt+t',
+            reason: 'Open TradingView Paper Trading',
+            verify: {
+              kind: 'panel-visible',
+              appName: 'TradingView',
+              target: 'paper-trading-panel',
+              keywords: ['paper trading', 'paper account', 'trading panel']
+            }
+          }
+        ]
+      }, null, null, {
+        userMessage: 'open paper trading in tradingview',
+        actionExecutor: async (action) => {
+          executed.push(action.type);
+          return { success: true, action: action.type, message: 'executed' };
+        }
+      });
+
+      assert.strictEqual(execResult.success, true, 'Execution should proceed after the Paper Trading panel is observed');
+      assert.deepStrictEqual(executed, ['focus_window', 'key'], 'Paper-assist workflow should stop at the verified opener in this bounded test');
+      assert.strictEqual(execResult.observationCheckpoints.length, 1, 'A Paper Trading checkpoint should be recorded');
+      assert.strictEqual(execResult.observationCheckpoints[0].classification, 'panel-open', 'Paper Trading verification should map to panel-open');
+      assert.strictEqual(execResult.observationCheckpoints[0].verified, true, 'Paper Trading verification should pass after the panel title is observed');
+      assert.strictEqual(execResult.observationCheckpoints[0].tradingMode.mode, 'paper', 'Paper Trading verification metadata should detect paper mode from the observed panel');
     });
   });
 

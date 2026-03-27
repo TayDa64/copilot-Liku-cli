@@ -113,6 +113,9 @@ const {
   maybeRewriteTradingViewPineWorkflow
 } = require('./tradingview/pine-workflows');
 const {
+  maybeRewriteTradingViewPaperWorkflow
+} = require('./tradingview/paper-workflows');
+const {
   maybeRewriteTradingViewDomWorkflow
 } = require('./tradingview/dom-workflows');
 const {
@@ -3081,6 +3084,11 @@ function rewriteActionsForReliability(actions, context = {}) {
   const tradingViewPineRewrite = maybeRewriteTradingViewPineWorkflow(actions, { userMessage });
   if (tradingViewPineRewrite) {
     return tradingViewPineRewrite;
+  }
+
+  const tradingViewPaperRewrite = maybeRewriteTradingViewPaperWorkflow(actions, { userMessage });
+  if (tradingViewPaperRewrite) {
+    return tradingViewPaperRewrite;
   }
 
   const tradingViewDomRewrite = maybeRewriteTradingViewDomWorkflow(actions, { userMessage });

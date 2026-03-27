@@ -96,4 +96,12 @@ test('TradingView implicit observation spec distinguishes dialog and chart-state
     nextAction: { type: 'key', key: 'ctrl+d' }
   });
   assert.strictEqual(paperDomSpec.tradingModeHint.mode, 'paper');
+
+  const paperPanelSpec = inferTradingViewObservationSpec({
+    textSignals: 'Open the Paper Trading panel in TradingView',
+    nextAction: { type: 'key', key: 'alt+t' }
+  });
+  assert(paperPanelSpec, 'paper-trading panel spec should be inferred');
+  assert.strictEqual(paperPanelSpec.classification, 'panel-open');
+  assert(paperPanelSpec.expectedKeywords.includes('paper trading'));
 });

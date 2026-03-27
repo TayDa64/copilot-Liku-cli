@@ -8,15 +8,16 @@ const APP_NAME_PROFILES = [
     launchQuery: 'TradingView',
     aliases: ['tradingview', 'trading view', 'tradeingview', 'tradeing view'],
     processNames: ['tradingview'],
-    titleHints: ['TradingView', 'TradingView Desktop', 'Create Alert - TradingView', 'Alerts - TradingView', 'Pine Editor', 'Depth of Market', 'Object Tree'],
-    popupKeywords: ['signin', 'login', 'update', 'workspace', 'chart', 'alert', 'create alert', 'time interval', 'interval', 'symbol search', 'indicator', 'pine editor', 'depth of market', 'dom', 'order book', 'drawing tools', 'object tree'],
-    dialogTitleHints: ['Create Alert', 'Alerts', 'Alert', 'Time Interval', 'Interval', 'Indicators', 'Symbol Search', 'Pine Editor', 'Depth of Market', 'DOM', 'Object Tree'],
-    chartKeywords: ['chart', 'timeframe', 'time frame', 'interval', 'symbol', 'watchlist', 'indicator', '5m', '15m', '1h', '4h', '1d', 'drawing', 'drawings', 'trend line', 'anchored vwap', 'volume profile', 'dom', 'order book', 'pine editor'],
-    dialogKeywords: ['alert', 'create alert', 'alerts', 'interval', 'time interval', 'indicator', 'symbol', 'pine editor', 'dom', 'depth of market', 'order book', 'object tree'],
+    titleHints: ['TradingView', 'TradingView Desktop', 'Create Alert - TradingView', 'Alerts - TradingView', 'Pine Editor', 'Depth of Market', 'Object Tree', 'Paper Trading', 'Trading Panel'],
+    popupKeywords: ['signin', 'login', 'update', 'workspace', 'chart', 'alert', 'create alert', 'time interval', 'interval', 'symbol search', 'indicator', 'pine editor', 'depth of market', 'dom', 'order book', 'drawing tools', 'object tree', 'paper trading', 'paper account', 'trading panel'],
+    dialogTitleHints: ['Create Alert', 'Alerts', 'Alert', 'Time Interval', 'Interval', 'Indicators', 'Symbol Search', 'Pine Editor', 'Depth of Market', 'DOM', 'Object Tree', 'Paper Trading', 'Trading Panel'],
+    chartKeywords: ['chart', 'timeframe', 'time frame', 'interval', 'symbol', 'watchlist', 'indicator', '5m', '15m', '1h', '4h', '1d', 'drawing', 'drawings', 'trend line', 'anchored vwap', 'volume profile', 'dom', 'order book', 'pine editor', 'paper trading', 'trading panel'],
+    dialogKeywords: ['alert', 'create alert', 'alerts', 'interval', 'time interval', 'indicator', 'symbol', 'pine editor', 'dom', 'depth of market', 'order book', 'object tree', 'paper trading', 'paper account', 'trading panel'],
     drawingKeywords: ['drawing', 'drawings', 'trend line', 'ray', 'extended line', 'pitchfork', 'fibonacci', 'fib', 'brush', 'rectangle', 'ellipse', 'path', 'polyline', 'measure', 'anchored text', 'note', 'anchored vwap', 'anchored volume profile', 'fixed range volume profile', 'object tree'],
     indicatorKeywords: ['indicator', 'indicators', 'study', 'studies', 'overlay', 'oscillator', 'anchored vwap', 'volume profile', 'fixed range volume profile', 'strategy tester'],
     pineKeywords: ['pine', 'pine editor', 'script', 'scripts', 'add to chart', 'publish script', 'version history', 'pine logs', 'profiler', 'strategy tester'],
     domKeywords: ['dom', 'depth of market', 'order book', 'trading panel', 'tier 2', 'level 2', 'buy mkt', 'sell mkt', 'limit order', 'stop order', 'flatten', 'reverse', 'cxl all'],
+    paperKeywords: ['paper trading', 'paper account', 'demo trading', 'simulated', 'practice', 'trading panel'],
     preferredWindowKinds: ['main', 'owned', 'palette'],
     dialogWindowKinds: ['owned', 'palette', 'main']
   },
@@ -205,6 +206,9 @@ function resolveNormalizedAppIdentity(appName) {
   const domKeywords = Array.from(new Set([
     ...(bestProfile?.domKeywords || [])
   ].map((value) => String(value || '').trim().toLowerCase()).filter(Boolean)));
+  const paperKeywords = Array.from(new Set([
+    ...(bestProfile?.paperKeywords || [])
+  ].map((value) => String(value || '').trim().toLowerCase()).filter(Boolean)));
   const preferredWindowKinds = Array.from(new Set([
     ...(bestProfile?.preferredWindowKinds || [])
   ].map((value) => String(value || '').trim().toLowerCase()).filter(Boolean)));
@@ -227,6 +231,7 @@ function resolveNormalizedAppIdentity(appName) {
     indicatorKeywords,
     pineKeywords,
     domKeywords,
+    paperKeywords,
     preferredWindowKinds,
     dialogWindowKinds
   };
@@ -257,6 +262,7 @@ function buildVerifyTargetHintFromAppName(appName) {
     indicatorKeywords: identity?.indicatorKeywords || [],
     pineKeywords: identity?.pineKeywords || [],
     domKeywords: identity?.domKeywords || [],
+    paperKeywords: identity?.paperKeywords || [],
     preferredWindowKinds: identity?.preferredWindowKinds || [],
     dialogWindowKinds: identity?.dialogWindowKinds || []
   };

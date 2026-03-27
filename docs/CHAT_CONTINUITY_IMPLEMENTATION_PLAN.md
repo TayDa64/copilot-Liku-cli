@@ -1075,6 +1075,7 @@ node scripts/test-session-intent-state.js
 - extracted TradingView chart verification plus timeframe/symbol/watchlist workflow shaping to `src/main/tradingview/chart-verification.js`
 - extracted verification-first TradingView drawing/object-tree surface workflow shaping to `src/main/tradingview/drawing-workflows.js`
 - extracted verification-first TradingView Pine Editor surface workflow shaping to `src/main/tradingview/pine-workflows.js`
+- extracted verification-first TradingView Paper Trading assist workflow shaping to `src/main/tradingview/paper-workflows.js`
 - extracted verification-first TradingView Depth of Market surface workflow shaping to `src/main/tradingview/dom-workflows.js`
 - extracted reusable post-key observation checkpoint helpers to `src/main/ai-service/observation-checkpoints.js`
 - added direct module regressions in `scripts/test-tradingview-app-profile.js` and `scripts/test-tradingview-verification.js`
@@ -1084,7 +1085,10 @@ node scripts/test-session-intent-state.js
 - added direct chart-verification regression coverage in `scripts/test-tradingview-chart-verification.js`
 - added direct drawing-workflow regression coverage in `scripts/test-tradingview-drawing-workflows.js`
 - added direct Pine workflow regression coverage in `scripts/test-tradingview-pine-workflows.js`
+- added direct Paper Trading workflow regression coverage in `scripts/test-tradingview-paper-workflows.js`
 - added direct DOM workflow regression coverage in `scripts/test-tradingview-dom-workflows.js`
+
+- added bounded Paper Trading assist rewrites so `open/connect/show Paper Trading` requests verify the paper surface before continuation while still refusing order execution
 
 **Objective**
 - formalize reusable TradingView workflow modules around alerts, indicators, and chart verification

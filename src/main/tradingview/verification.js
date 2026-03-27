@@ -107,6 +107,9 @@ function extractTradingViewObservationKeywords(text = '') {
   if (/\b(dom|depth of market|order book|trading panel|tier\s*2|level\s*2)\b/i.test(normalized)) {
     keywords.push('dom', 'depth of market', 'order book', 'trading panel');
   }
+  if (/\b(paper trading|paper account|demo trading|simulated|practice)\b/i.test(normalized)) {
+    keywords.push('paper trading', 'paper account', 'demo trading', 'simulated', 'trading panel');
+  }
   return mergeUniqueKeywords(keywords);
 }
 
@@ -173,9 +176,10 @@ function inferTradingViewObservationSpec({ textSignals = '', nextAction = null }
   const indicatorIntent = /\b(indicator|study|studies|overlay|oscillator|anchored\s*vwap|vwap|volume profile|fixed range volume profile|anchored volume profile|strategy tester)\b/i.test(normalizedSignals);
   const pineIntent = /\b(pine|pine editor|script|scripts|add to chart|publish script|version history|pine logs|profiler)\b/i.test(normalizedSignals);
   const domIntent = /\b(dom|depth of market|order book|trading panel|tier\s*2|level\s*2)\b/i.test(normalizedSignals);
+  const paperIntent = /\bpaper trading\b|\bpaper account\b|\bdemo trading\b|\bsimulated\b|\bpractice\b/i.test(normalizedSignals);
   const inputSurfaceIntent = nextAction?.type === 'type';
 
-  if (!alertIntent && !timeframeIntent && !drawingIntent && !indicatorIntent && !pineIntent && !domIntent && !inputSurfaceIntent) {
+  if (!alertIntent && !timeframeIntent && !drawingIntent && !indicatorIntent && !pineIntent && !domIntent && !paperIntent && !inputSurfaceIntent) {
     return null;
   }
 
@@ -187,7 +191,8 @@ function inferTradingViewObservationSpec({ textSignals = '', nextAction = null }
     drawingIntent ? tradingViewTarget.drawingKeywords : [],
     indicatorIntent ? tradingViewTarget.indicatorKeywords : [],
     pineIntent ? tradingViewTarget.pineKeywords : [],
-    domIntent ? tradingViewTarget.domKeywords : []
+    domIntent ? tradingViewTarget.domKeywords : [],
+    paperIntent ? tradingViewTarget.paperKeywords : []
   );
   const expectedTitleHints = Array.from(new Set([
     ...(Array.isArray(tradingViewTarget.dialogTitleHints) ? tradingViewTarget.dialogTitleHints : []),
@@ -196,7 +201,7 @@ function inferTradingViewObservationSpec({ textSignals = '', nextAction = null }
 
   const classification = alertIntent
     ? 'dialog-open'
-    : (pineIntent || domIntent)
+    : (pineIntent || domIntent || paperIntent)
       ? 'panel-open'
       : inputSurfaceIntent
         ? 'input-surface-open'
