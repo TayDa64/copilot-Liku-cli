@@ -612,6 +612,49 @@ async function run() {
     }
   });
 
+  await testAsync('pending confirmation triggers approval-pause non-disruptive recapture when target window is known', async () => {
+    aiService.clearPendingAction();
+    const captureRequests = [];
+
+    try {
+      const execResult = await aiService.executeActions({
+        thought: 'Run a destructive command only after confirmation',
+        verification: 'Command should not execute before explicit confirmation',
+        actions: [
+          {
+            type: 'run_command',
+            command: 'Remove-Item -LiteralPath C:\\temp\\dangerous -Recurse -Force',
+            reason: 'Delete a directory recursively',
+            windowHandle: 777,
+            processName: 'tradingview',
+            className: 'Chrome_WidgetWin_1'
+          }
+        ]
+      }, null, async (captureOptions = {}) => {
+        captureRequests.push(captureOptions);
+      }, {
+        userMessage: 'delete the dangerous directory now',
+        onRequireConfirmation: () => {}
+      });
+
+      assert.strictEqual(execResult.pendingConfirmation, true, 'Execution should pause for confirmation');
+      assert.strictEqual(captureRequests.length, 1, 'Approval pause should request exactly one refresh capture');
+      assert.strictEqual(captureRequests[0].scope, 'window', 'Approval pause capture should target the window scope');
+      assert.strictEqual(captureRequests[0].windowHandle, 777, 'Approval pause capture should target the known window handle');
+      assert.strictEqual(captureRequests[0].approvalPauseRefresh, true, 'Approval pause capture should mark refresh metadata');
+      assert.strictEqual(captureRequests[0].capturePurpose, 'approval-pause-refresh', 'Approval pause capture should include capture purpose metadata');
+      assert.strictEqual(captureRequests[0].processName, 'tradingview', 'Approval pause capture should carry target process metadata');
+      assert.strictEqual(captureRequests[0].className, 'Chrome_WidgetWin_1', 'Approval pause capture should carry target class metadata');
+
+      const pending = aiService.getPendingAction();
+      assert(pending && pending.approvalPauseCapture, 'Pending action should retain approval-pause capture metadata');
+      assert.strictEqual(pending.approvalPauseCapture.requested, true, 'Pending action should record that recapture was requested');
+      assert.strictEqual(pending.approvalPauseCapture.windowHandle, 777, 'Pending action should record the capture target window handle');
+    } finally {
+      aiService.clearPendingAction();
+    }
+  });
+
   await testAsync('benign timeframe enter does not require destructive-style confirmation', async () => {
     const safety = aiService.analyzeActionSafety(
       { type: 'key', key: 'enter', reason: 'Confirm 5m timeframe' },

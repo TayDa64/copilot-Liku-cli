@@ -2,6 +2,21 @@ function normalizeMode(value) {
   return String(value || '').trim().toLowerCase();
 }
 
+function normalizeLowerText(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function normalizeWindowProfile(profile = {}) {
+  if (!profile || typeof profile !== 'object') return null;
+  return {
+    processName: normalizeLowerText(profile.processName),
+    className: normalizeLowerText(profile.className),
+    windowKind: normalizeLowerText(profile.windowKind),
+    title: String(profile.title || profile.windowTitle || '').trim(),
+    isMinimized: profile.isMinimized === true
+  };
+}
+
 function classifyBackgroundCapability(options = {}) {
   const windowHandle = Number(options.windowHandle || options.targetWindowHandle || 0) || 0;
   if (!windowHandle) {
@@ -12,10 +27,64 @@ function classifyBackgroundCapability(options = {}) {
     };
   }
 
+  if (process.platform !== 'win32') {
+    return {
+      supported: false,
+      capability: 'unsupported',
+      reason: 'Background window capture is currently implemented for Windows HWND targets only.'
+    };
+  }
+
+  const profile = normalizeWindowProfile(
+    options.windowProfile
+    || options.targetWindow
+    || options.windowInfo
+  );
+  if (profile?.isMinimized) {
+    return {
+      supported: false,
+      capability: 'unsupported',
+      reason: 'Target window is minimized; non-disruptive background capture cannot provide trustworthy evidence.'
+    };
+  }
+
+  const processName = profile?.processName || '';
+  const className = profile?.className || '';
+  const windowKind = profile?.windowKind || '';
+
+  const knownCompositorClass = /^chrome_widgetwin/i.test(className);
+  const knownCompositorProcess = [
+    'chrome',
+    'msedge',
+    'code',
+    'slack',
+    'discord',
+    'teams',
+    'ms-teams',
+    'obs64'
+  ].includes(processName);
+  const likelyOwnedSurface = windowKind === 'owned' || windowKind === 'palette';
+  const likelyUwpSurface = className.includes('applicationframewindow')
+    || className.includes('windows.ui.core.corewindow')
+    || processName === 'applicationframehost';
+
+  if (likelyUwpSurface || knownCompositorClass || knownCompositorProcess || likelyOwnedSurface) {
+    const tags = [];
+    if (knownCompositorClass) tags.push(`class=${profile.className}`);
+    if (knownCompositorProcess) tags.push(`process=${profile.processName}`);
+    if (likelyOwnedSurface) tags.push(`windowKind=${profile.windowKind}`);
+    if (likelyUwpSurface) tags.push('uwp-surface');
+    return {
+      supported: true,
+      capability: 'degraded',
+      reason: `Background capture is best-effort for this window profile (${tags.join(', ') || 'unknown profile'}); PrintWindow may fail or return stale/blank frames.`
+    };
+  }
+
   return {
     supported: true,
-    capability: 'best-effort',
-    reason: 'Background capture can try PrintWindow and degrade to CopyFromScreen when needed.'
+    capability: 'supported',
+    reason: 'Background capture can attempt trusted PrintWindow for this window profile and degrade only when needed.'
   };
 }
 
@@ -69,17 +138,45 @@ async function captureBackgroundWindow(options = {}, dependencies = {}) {
     || require('./ui-automation/screenshot').screenshot;
   const getForegroundWindowHandle = dependencies.getForegroundWindowHandle
     || require('./system-automation').getForegroundWindowHandle;
+  const getWindowProfileByHandle = dependencies.getWindowProfileByHandle
+    || (async (windowHandle) => {
+      try {
+        const windowManager = require('./ui-automation/window/manager');
+        if (typeof windowManager.findWindows !== 'function') return null;
+        const windows = await windowManager.findWindows({ includeUntitled: true });
+        if (!Array.isArray(windows) || windows.length === 0) return null;
+        return windows.find((windowInfo) => Number(windowInfo?.hwnd || 0) === Number(windowHandle || 0)) || null;
+      } catch {
+        return null;
+      }
+    });
 
-  const capability = classifyBackgroundCapability(options);
+  const targetWindowHandle = Number(options.windowHandle || options.targetWindowHandle || 0) || 0;
+  let resolvedProfile = normalizeWindowProfile(
+    options.windowProfile
+    || options.targetWindow
+    || options.windowInfo
+  );
+  if (!resolvedProfile && targetWindowHandle > 0) {
+    resolvedProfile = normalizeWindowProfile(await getWindowProfileByHandle(targetWindowHandle));
+  }
+  const classificationOptions = {
+    ...options,
+    windowHandle: targetWindowHandle,
+    targetWindowHandle,
+    windowProfile: resolvedProfile
+  };
+
+  const capability = classifyBackgroundCapability(classificationOptions);
   if (!capability.supported) {
     return {
       success: false,
       capability: capability.capability,
-      degradedReason: capability.reason
+      degradedReason: capability.reason,
+      windowProfile: resolvedProfile
     };
   }
 
-  const targetWindowHandle = Number(options.windowHandle || options.targetWindowHandle || 0) || 0;
   const captureOptions = {
     memory: true,
     base64: true,
@@ -108,6 +205,15 @@ async function captureBackgroundWindow(options = {}, dependencies = {}) {
     captureMode: screenshotResult.captureMode,
     isBackgroundTarget
   });
+  const matrixDegraded = capability.capability === 'degraded';
+  const trustDegraded = trust.captureCapability === 'degraded';
+  const combinedCapability = matrixDegraded || trustDegraded
+    ? 'degraded'
+    : trust.captureCapability;
+  const combinedReason = matrixDegraded
+    ? capability.reason
+    : trust.captureDegradedReason;
+  const combinedTrusted = trust.captureTrusted && !matrixDegraded;
 
   return {
     success: true,
@@ -116,9 +222,10 @@ async function captureBackgroundWindow(options = {}, dependencies = {}) {
     foregroundWindowHandle,
     isBackgroundTarget,
     captureProvider: trust.captureProvider,
-    captureCapability: trust.captureCapability,
-    captureTrusted: trust.captureTrusted,
-    captureDegradedReason: trust.captureDegradedReason
+    captureCapability: combinedCapability,
+    captureTrusted: combinedTrusted,
+    captureDegradedReason: combinedReason,
+    windowProfile: resolvedProfile
   };
 }
 

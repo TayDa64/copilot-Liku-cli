@@ -4095,11 +4095,14 @@ async function verifyAndSelfHealPostActions(actionData, options = {}) {
  * @param {Object} options.targetAnalysis - Visual analysis of click targets
  * @returns {Object} Execution results
  */
-function buildScreenshotCaptureRequest(action, lastTargetWindowHandle = null) {
+function buildScreenshotCaptureRequest(action, lastTargetWindowHandle = null, options = {}) {
   const requestedScope = String(action?.scope || '').trim().toLowerCase();
   const region = action?.region && typeof action.region === 'object' ? action.region : null;
   const explicitWindowHandle = Number(action?.windowHandle || action?.hwnd || action?.targetWindowHandle || 0) || 0;
   const inferredWindowHandle = explicitWindowHandle || (Number(lastTargetWindowHandle || 0) || 0);
+  const windowProfile = options?.windowProfile && typeof options.windowProfile === 'object'
+    ? options.windowProfile
+    : null;
 
   let scope = 'screen';
   if (region) {
@@ -4117,7 +4120,13 @@ function buildScreenshotCaptureRequest(action, lastTargetWindowHandle = null) {
     region: region || undefined,
     windowHandle: inferredWindowHandle || undefined,
     targetWindowHandle: inferredWindowHandle || undefined,
-    reason: action?.reason || ''
+    reason: action?.reason || '',
+    processName: String(windowProfile?.processName || '').trim() || undefined,
+    className: String(windowProfile?.className || '').trim() || undefined,
+    windowKind: String(windowProfile?.windowKind || '').trim() || undefined,
+    windowTitle: String(windowProfile?.title || windowProfile?.windowTitle || '').trim() || undefined,
+    capturePurpose: String(options?.capturePurpose || '').trim() || undefined,
+    approvalPauseRefresh: options?.approvalPauseRefresh === true
   };
 }
 
@@ -4147,12 +4156,25 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
   let screenshotRequested = false;
   let pendingConfirmation = false;
   let lastTargetWindowHandle = null;
+  let lastTargetWindowProfile = null;
   let focusRecoveryTarget = null;
   let postVerification = { applicable: false, verified: true, healed: false, attempts: 0 };
   const observationCheckpoints = [];
 
   for (let i = 0; i < actionData.actions.length; i++) {
     const action = actionData.actions[i];
+    const actionWindowHandle = Number(action?.windowHandle || action?.hwnd || action?.targetWindowHandle || 0) || 0;
+    if (actionWindowHandle > 0) {
+      lastTargetWindowHandle = actionWindowHandle;
+    }
+    if (action?.processName || action?.className || action?.windowKind || action?.title || action?.windowTitle) {
+      lastTargetWindowProfile = {
+        processName: action.processName || lastTargetWindowProfile?.processName || undefined,
+        className: action.className || lastTargetWindowProfile?.className || undefined,
+        windowKind: action.windowKind || lastTargetWindowProfile?.windowKind || undefined,
+        title: action.title || action.windowTitle || lastTargetWindowProfile?.title || undefined
+      };
+    }
 
     // Track the intended target window across steps so later key/type actions can
     // re-focus it. Without this, focus can drift back to the overlay/terminal.
@@ -4161,6 +4183,12 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
         const hwnd = await systemAutomation.resolveWindowHandle(action);
         if (hwnd) {
           lastTargetWindowHandle = hwnd;
+          lastTargetWindowProfile = {
+            processName: action.processName || lastTargetWindowProfile?.processName || undefined,
+            className: action.className || lastTargetWindowProfile?.className || undefined,
+            windowKind: action.windowKind || lastTargetWindowProfile?.windowKind || undefined,
+            title: action.title || action.windowTitle || lastTargetWindowProfile?.title || undefined
+          };
           focusRecoveryTarget = {
             title: action.title || undefined,
             processName: action.processName || undefined
@@ -4170,6 +4198,12 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
     }
 
     if (action.type === 'restore_window') {
+      lastTargetWindowProfile = {
+        processName: action.processName || lastTargetWindowProfile?.processName || undefined,
+        className: action.className || lastTargetWindowProfile?.className || undefined,
+        windowKind: action.windowKind || lastTargetWindowProfile?.windowKind || undefined,
+        title: action.title || action.windowTitle || lastTargetWindowProfile?.title || undefined
+      };
       focusRecoveryTarget = {
         title: action.title || undefined,
         processName: action.processName || undefined
@@ -4180,7 +4214,9 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
     if (action.type === 'screenshot') {
       screenshotRequested = true;
       if (onScreenshot) {
-        await onScreenshot(buildScreenshotCaptureRequest(action, lastTargetWindowHandle));
+        await onScreenshot(buildScreenshotCaptureRequest(action, lastTargetWindowHandle, {
+          windowProfile: lastTargetWindowProfile
+        }));
       }
       results.push({ success: true, action: 'screenshot', message: 'Screenshot captured' });
       continue;
@@ -4222,6 +4258,44 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
     // If HIGH or CRITICAL risk, require confirmation (unless user already confirmed via Execute button)
     if (safety.requiresConfirmation && !canBypassConfirmation) {
       console.log(`[AI-SERVICE] Action ${i} requires user confirmation`);
+      let approvalPauseCapture = null;
+      const approvalCaptureWindowHandle = Number(
+        action?.windowHandle || action?.hwnd || action?.targetWindowHandle || lastTargetWindowHandle || 0
+      ) || 0;
+      if (onScreenshot && approvalCaptureWindowHandle > 0) {
+        const approvalCaptureRequest = buildScreenshotCaptureRequest(
+          {
+            ...action,
+            scope: 'window',
+            reason: action?.reason || 'Refresh non-disruptive evidence while waiting for user confirmation.'
+          },
+          approvalCaptureWindowHandle,
+          {
+            windowProfile: lastTargetWindowProfile,
+            capturePurpose: 'approval-pause-refresh',
+            approvalPauseRefresh: true
+          }
+        );
+
+        try {
+          await onScreenshot(approvalCaptureRequest);
+          screenshotRequested = true;
+          approvalPauseCapture = {
+            requested: true,
+            capturePurpose: 'approval-pause-refresh',
+            scope: approvalCaptureRequest.scope,
+            windowHandle: approvalCaptureRequest.windowHandle || null
+          };
+        } catch (captureError) {
+          approvalPauseCapture = {
+            requested: true,
+            capturePurpose: 'approval-pause-refresh',
+            scope: approvalCaptureRequest.scope,
+            windowHandle: approvalCaptureRequest.windowHandle || null,
+            error: String(captureError?.message || captureError || '')
+          };
+        }
+      }
       
       // Store as pending action
       setPendingAction({
@@ -4230,7 +4304,10 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
         remainingActions: actionData.actions.slice(i),
         completedResults: [...results],
         thought: actionData.thought,
-        verification: actionData.verification
+        verification: actionData.verification,
+        lastTargetWindowHandle,
+        lastTargetWindowProfile,
+        approvalPauseCapture
       });
       
       // Notify via callback
@@ -4339,6 +4416,12 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
         if (observedHwnd) {
           lastTargetWindowHandle = observedHwnd;
         }
+        lastTargetWindowProfile = {
+          processName: observationCheckpoint.foreground.processName || lastTargetWindowProfile?.processName || undefined,
+          className: observationCheckpoint.foreground.className || lastTargetWindowProfile?.className || undefined,
+          windowKind: observationCheckpoint.foreground.windowKind || lastTargetWindowProfile?.windowKind || undefined,
+          title: observationCheckpoint.foreground.title || lastTargetWindowProfile?.title || undefined
+        };
         focusRecoveryTarget = {
           title: observationCheckpoint.foreground.title || focusRecoveryTarget?.title || undefined,
           processName: observationCheckpoint.foreground.processName || focusRecoveryTarget?.processName || undefined
@@ -4631,6 +4714,7 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
     postVerificationFailed: !!(postVerification.applicable && !postVerification.verified),
     pendingConfirmation,
     pendingActionId: pendingConfirmation ? getPendingAction()?.actionId : null,
+    approvalPauseCapture: pendingConfirmation ? getPendingAction()?.approvalPauseCapture || null : null,
     reflectionApplied
   };
 }
@@ -4663,7 +4747,10 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
   
   const results = [...pending.completedResults];
   let screenshotRequested = false;
-  let lastTargetWindowHandle = null;
+  let lastTargetWindowHandle = Number(pending.lastTargetWindowHandle || 0) || null;
+  let lastTargetWindowProfile = pending.lastTargetWindowProfile && typeof pending.lastTargetWindowProfile === 'object'
+    ? { ...pending.lastTargetWindowProfile }
+    : null;
   let focusRecoveryTarget = null;
   let postVerification = { applicable: false, verified: true, healed: false, attempts: 0 };
   const observationCheckpoints = [];
@@ -4677,6 +4764,12 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
         const hwnd = await systemAutomation.resolveWindowHandle(action);
         if (hwnd) {
           lastTargetWindowHandle = hwnd;
+          lastTargetWindowProfile = {
+            processName: action.processName || lastTargetWindowProfile?.processName || undefined,
+            className: action.className || lastTargetWindowProfile?.className || undefined,
+            windowKind: action.windowKind || lastTargetWindowProfile?.windowKind || undefined,
+            title: action.title || action.windowTitle || lastTargetWindowProfile?.title || undefined
+          };
           focusRecoveryTarget = {
             title: action.title || undefined,
             processName: action.processName || undefined
@@ -4686,6 +4779,12 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
     }
 
     if (action.type === 'restore_window') {
+      lastTargetWindowProfile = {
+        processName: action.processName || lastTargetWindowProfile?.processName || undefined,
+        className: action.className || lastTargetWindowProfile?.className || undefined,
+        windowKind: action.windowKind || lastTargetWindowProfile?.windowKind || undefined,
+        title: action.title || action.windowTitle || lastTargetWindowProfile?.title || undefined
+      };
       focusRecoveryTarget = {
         title: action.title || undefined,
         processName: action.processName || undefined
@@ -4695,7 +4794,9 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
     if (action.type === 'screenshot') {
       screenshotRequested = true;
       if (onScreenshot) {
-        await onScreenshot(buildScreenshotCaptureRequest(action, lastTargetWindowHandle));
+        await onScreenshot(buildScreenshotCaptureRequest(action, lastTargetWindowHandle, {
+          windowProfile: lastTargetWindowProfile
+        }));
       }
       results.push({ success: true, action: 'screenshot', message: 'Screenshot captured' });
       continue;
@@ -4808,6 +4909,12 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
         if (observedHwnd) {
           lastTargetWindowHandle = observedHwnd;
         }
+        lastTargetWindowProfile = {
+          processName: observationCheckpoint.foreground.processName || lastTargetWindowProfile?.processName || undefined,
+          className: observationCheckpoint.foreground.className || lastTargetWindowProfile?.className || undefined,
+          windowKind: observationCheckpoint.foreground.windowKind || lastTargetWindowProfile?.windowKind || undefined,
+          title: observationCheckpoint.foreground.title || lastTargetWindowProfile?.title || undefined
+        };
         focusRecoveryTarget = {
           title: observationCheckpoint.foreground.title || focusRecoveryTarget?.title || undefined,
           processName: observationCheckpoint.foreground.processName || focusRecoveryTarget?.processName || undefined

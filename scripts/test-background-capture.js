@@ -69,6 +69,63 @@ async function main() {
     assert.strictEqual(result.captureTrusted, false);
     assert(/degraded/i.test(String(result.captureDegradedReason || '')));
   });
+
+  await test('classifyBackgroundCapability flags known compositor profiles as degraded', async () => {
+    const capability = classifyBackgroundCapability({
+      targetWindowHandle: 404,
+      windowProfile: {
+        processName: 'msedge',
+        className: 'Chrome_WidgetWin_1',
+        windowKind: 'main'
+      }
+    });
+
+    assert.strictEqual(capability.supported, true);
+    assert.strictEqual(capability.capability, 'degraded');
+    assert(/best-effort/i.test(String(capability.reason || '')));
+  });
+
+  await test('classifyBackgroundCapability rejects minimized windows as unsupported', async () => {
+    const capability = classifyBackgroundCapability({
+      targetWindowHandle: 505,
+      windowProfile: {
+        processName: 'tradingview',
+        className: 'Chrome_WidgetWin_1',
+        isMinimized: true
+      }
+    });
+
+    assert.strictEqual(capability.supported, false);
+    assert.strictEqual(capability.capability, 'unsupported');
+    assert(/minimized/i.test(String(capability.reason || '')));
+  });
+
+  await test('background capture keeps degraded matrix profiles untrusted even with PrintWindow mode', async () => {
+    const result = await captureBackgroundWindow(
+      {
+        windowHandle: 909,
+        windowProfile: {
+          processName: 'code',
+          className: 'Chrome_WidgetWin_1',
+          windowKind: 'main'
+        }
+      },
+      {
+        screenshotFn: async () => ({
+          success: true,
+          base64: 'YmF6',
+          captureMode: 'window-printwindow'
+        }),
+        getForegroundWindowHandle: async () => 202
+      }
+    );
+
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.captureProvider, 'printwindow');
+    assert.strictEqual(result.captureCapability, 'degraded');
+    assert.strictEqual(result.captureTrusted, false);
+    assert(/best-effort/i.test(String(result.captureDegradedReason || '')));
+  });
 }
 
 main().catch((error) => {

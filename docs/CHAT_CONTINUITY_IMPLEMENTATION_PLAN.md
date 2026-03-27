@@ -452,7 +452,7 @@ Use this as the practical implementation tracker for the next passes.
 - **Milestone 4:** TradingView domain logic has been modularized into focused workflow modules (indicator, alert, chart, drawing, Pine, Paper Trading, DOM) with direct module regressions.
 - **Milestone 5:** multi-turn coherence regressions now cover verified, degraded, contradicted, cancelled, and explicit three-turn continuation paths.
 - **Milestone 6:** explicit repo/process grounding actions are implemented (`semantic_search_repo`, `grep_repo`, `pgrep_process`) with bounded output and contract/tooling coverage.
-- **Milestone 7:** non-disruptive capture scaffolding is in progress with explicit background-capture capability/trust signals flowing into continuity state.
+- **Milestone 7:** non-disruptive capture is in progress with profile-aware capability matrixing and approval-pause evidence refresh integrated into continuity metadata.
 
 ### Phase 1 — Structured continuity baseline
 
@@ -1233,6 +1233,10 @@ node scripts/test-ai-service-contract.js
   - capability detection for background capture eligibility
   - trust classification for `window-printwindow` vs degraded `window-copyfromscreen`
   - explicit degraded reasons for continuity safety routing
+- upgraded background capability detection with a process/class/window-kind matrix:
+  - classifies known compositor/UWP/owned-surface profiles as `degraded`
+  - marks minimized targets as `unsupported`
+  - keeps evidence trust conservative even when `PrintWindow` succeeds on degraded profiles
 - wired background-capture path into `src/cli/commands/chat.js` auto-capture flow when target window handles are available
 - extended visual frame contract in `src/shared/inspect-types.js` with background-capture metadata:
   - `captureProvider`
@@ -1243,9 +1247,14 @@ node scripts/test-ai-service-contract.js
 - persisted and surfaced background-capture metadata in continuity state and prompt context through:
   - `src/main/chat-continuity-state.js`
   - `src/main/session-intent-state.js`
+- integrated approval-pause recapture hook in `src/main/ai-service.js`:
+  - refreshes non-disruptive evidence when execution pauses for high/critical confirmation
+  - carries target window profile metadata (`processName`, `className`, `windowKind`, `windowTitle`) into capture requests
+  - persists approval-pause capture metadata on pending actions for transparent continuity state
 - added dedicated and continuity-level regressions:
   - `scripts/test-background-capture.js`
   - `scripts/test-session-intent-state.js`
+  - `scripts/test-windows-observation-flow.js`
 
 **Objective**
 - allow Liku to preserve target-app observation during approval pauses without forcing focus changes when the platform/app supports it
