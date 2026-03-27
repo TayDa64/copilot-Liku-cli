@@ -246,6 +246,25 @@ async function run() {
     assert.strictEqual(rewritten[4].text, 'trend line');
   });
 
+  await testAsync('low-signal TradingView Pine Editor request wraps the opener with bounded panel verification', async () => {
+    const rewritten = aiService.rewriteActionsForReliability([
+      { type: 'key', key: 'ctrl+e' },
+      { type: 'type', text: 'plot(close)' }
+    ], {
+      userMessage: 'open pine editor in tradingview and type plot(close)'
+    });
+
+    assert(Array.isArray(rewritten), 'pine rewrite should return an action array');
+    assert.strictEqual(rewritten[0].type, 'bring_window_to_front');
+    assert.strictEqual(rewritten[0].processName, 'tradingview');
+    assert.strictEqual(rewritten[2].type, 'key');
+    assert.strictEqual(rewritten[2].verify.kind, 'panel-visible');
+    assert.strictEqual(rewritten[2].verify.target, 'pine-editor');
+    assert.strictEqual(rewritten[2].verify.requiresObservedChange, true);
+    assert.strictEqual(rewritten[4].type, 'type');
+    assert.strictEqual(rewritten[4].text, 'plot(close)');
+  });
+
   await testAsync('TradingView alert accelerator blocks follow-up typing when no dialog change is observed', async () => {
     const executed = [];
     const foregroundSequence = [
@@ -807,6 +826,57 @@ async function run() {
       assert.strictEqual(execResult.observationCheckpoints.length, 1, 'A drawing search checkpoint should be recorded');
       assert.strictEqual(execResult.observationCheckpoints[0].classification, 'input-surface-open', 'Drawing search verification should map to input-surface-open');
       assert.strictEqual(execResult.observationCheckpoints[0].verified, true, 'Drawing search verification should pass after the surface title is observed');
+    });
+  });
+
+  await testAsync('explicit TradingView Pine Editor contracts gate typing on observed panel change', async () => {
+    const executed = [];
+    const foregroundSequence = [
+      { success: true, hwnd: 777, title: 'TradingView', processName: 'tradingview', windowKind: 'main' },
+      { success: true, hwnd: 777, title: 'Pine Editor - TradingView', processName: 'tradingview', windowKind: 'main' },
+      { success: true, hwnd: 777, title: 'Pine Editor - TradingView', processName: 'tradingview', windowKind: 'main' },
+      { success: true, hwnd: 777, title: 'Pine Editor - TradingView', processName: 'tradingview', windowKind: 'main' }
+    ];
+
+    await withPatchedSystemAutomation({
+      resolveWindowHandle: async (action) => action?.processName === 'tradingview' ? 777 : 0,
+      getForegroundWindowInfo: async () => foregroundSequence.shift() || { success: true, hwnd: 777, title: 'Pine Editor - TradingView', processName: 'tradingview', windowKind: 'main' },
+      focusWindow: async () => ({ success: true }),
+      getRunningProcessesByNames: async () => ([{ pid: 4242, processName: 'tradingview', mainWindowTitle: 'TradingView', startTime: '2026-03-23T00:00:00Z' }])
+    }, async () => {
+      const execResult = await aiService.executeActions({
+        thought: 'Open TradingView Pine Editor and type a script',
+        verification: 'TradingView should show the Pine Editor before typing',
+        actions: [
+          { type: 'focus_window', title: 'TradingView', processName: 'tradingview' },
+          {
+            type: 'key',
+            key: 'ctrl+e',
+            reason: 'Open TradingView Pine Editor',
+            verify: {
+              kind: 'panel-visible',
+              appName: 'TradingView',
+              target: 'pine-editor',
+              keywords: ['pine', 'pine editor', 'script'],
+              requiresObservedChange: true
+            }
+          },
+          { type: 'type', text: 'plot(close)', reason: 'Type Pine script' }
+        ]
+      }, null, null, {
+        userMessage: 'open pine editor in tradingview and type plot(close)',
+        actionExecutor: async (action) => {
+          executed.push(action.type);
+          return { success: true, action: action.type, message: 'executed' };
+        }
+      });
+
+      assert.strictEqual(execResult.success, true, 'Execution should proceed after the Pine Editor surface is observed');
+      assert.deepStrictEqual(executed, ['focus_window', 'key', 'type'], 'Typing should continue only after the Pine panel transition is verified');
+      assert.strictEqual(execResult.observationCheckpoints.length, 1, 'A post-key observation checkpoint should be returned');
+      assert.strictEqual(execResult.observationCheckpoints[0].verified, true, 'The Pine checkpoint should pass after panel observation');
+      assert.strictEqual(execResult.observationCheckpoints[0].classification, 'panel-open', 'Pine Editor should verify as a panel-open checkpoint');
+      assert.strictEqual(execResult.observationCheckpoints[0].foreground.hwnd, 777, 'Checkpoint should preserve the TradingView main window handle');
     });
   });
 

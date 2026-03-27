@@ -109,6 +109,9 @@ const {
   maybeRewriteTradingViewDrawingWorkflow
 } = require('./tradingview/drawing-workflows');
 const {
+  maybeRewriteTradingViewPineWorkflow
+} = require('./tradingview/pine-workflows');
+const {
   createObservationCheckpointRuntime
 } = require('./ai-service/observation-checkpoints');
 const {
@@ -3066,6 +3069,11 @@ function rewriteActionsForReliability(actions, context = {}) {
   const tradingViewDrawingRewrite = maybeRewriteTradingViewDrawingWorkflow(actions, { userMessage });
   if (tradingViewDrawingRewrite) {
     return tradingViewDrawingRewrite;
+  }
+
+  const tradingViewPineRewrite = maybeRewriteTradingViewPineWorkflow(actions, { userMessage });
+  if (tradingViewPineRewrite) {
+    return tradingViewPineRewrite;
   }
 
   const tradingViewIndicatorRewrite = maybeRewriteTradingViewIndicatorWorkflow(actions, { userMessage });
