@@ -122,6 +122,19 @@ await test('prompting surfaces paper trading continuity facts and assist-only ru
   assert(continuityMessage.content.includes('Rule: Paper Trading was observed; continue with assist-only verification and guidance, not order execution.'));
 });
 
+await test('prompting surfaces cancelled paper continuity recovery requirements', async () => {
+  const continuityMessage = await buildContinuitySystemMessage(
+    formatChatContinuityContext(PAPER_AWARE_CONTINUITY_FIXTURES.cancelledPaperAssistContinuation)
+  );
+
+  assert(continuityMessage, 'continuity section is injected');
+  assert(continuityMessage.content.includes('tradingMode: paper (high)'));
+  assert(continuityMessage.content.includes('lastExecutionStatus: cancelled'));
+  assert(continuityMessage.content.includes('continuationReady: no'));
+  assert(continuityMessage.content.includes('degradedReason: The last action batch was cancelled before completion.'));
+  assert(continuityMessage.content.includes('nextRecommendedStep: Ask whether to retry the interrupted paper-trading setup step before continuing.'));
+});
+
 await test('prompting surfaces degraded screenshot trust for recovery-oriented continuation', async () => {
   const { tempDir, stateFile, cwd } = createTempStore();
   const store = createSessionIntentStateStore({ stateFile });

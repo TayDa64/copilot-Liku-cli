@@ -229,6 +229,36 @@ async function main() {
   assert(persistedContinuation.output.includes('SEEN_MESSAGES:["help me make a confident synthesis of ticker LUNR in tradingview","continue"]'), 'persisted continuation should keep the second user turn minimal while relying on recorded state');
   assert(/RECORDED_CONTINUITY:.*"continuationReady":true/i.test(persistedContinuation.output), 'persisted continuation should record usable continuity between turns');
 
+  const persistedThreeTurnContinuation = await runScenarioWithContinuity([
+    'help me make a confident synthesis of ticker LUNR in tradingview',
+    'continue',
+    'keep going'
+  ], null, [{
+    captureMode: 'window-copyfromscreen',
+    captureTrusted: true,
+    timestamp: 123,
+    windowHandle: 458868,
+    windowTitle: 'TradingView - LUNR'
+  }, {
+    captureMode: 'window-copyfromscreen',
+    captureTrusted: true,
+    timestamp: 124,
+    windowHandle: 458868,
+    windowTitle: 'TradingView - LUNR'
+  }, {
+    captureMode: 'window-copyfromscreen',
+    captureTrusted: true,
+    timestamp: 125,
+    windowHandle: 458868,
+    windowTitle: 'TradingView - LUNR'
+  }]);
+  assert.strictEqual(persistedThreeTurnContinuation.exitCode, 0, 'persisted three-turn continuation scenario should exit successfully');
+  assert(persistedThreeTurnContinuation.output.includes('EXECUTE_COUNT:3'), 'persisted three-turn continuation should execute each turn while continuity stays verified');
+  assert(
+    persistedThreeTurnContinuation.output.includes('SEEN_MESSAGES:["help me make a confident synthesis of ticker LUNR in tradingview","continue","keep going"]'),
+    'persisted three-turn continuation should preserve minimal follow-up prompts while using recorded continuity'
+  );
+
   const persistedDegradedContinuation = await runScenarioWithContinuity([
     'help me make a confident synthesis of ticker LUNR in tradingview',
     'continue'
@@ -289,6 +319,11 @@ async function main() {
   assert.strictEqual(contradictedPaperContinuation.exitCode, 0, 'contradicted paper continuation scenario should exit successfully');
   assert(contradictedPaperContinuation.output.includes('EXECUTE_COUNT:0'), 'contradicted paper continuation should not execute emitted actions');
   assert(/contradicted by the latest evidence/i.test(contradictedPaperContinuation.output), 'contradicted paper continuation should explain why blind continuation is blocked');
+
+  const cancelledPaperContinuation = await runScenarioWithContinuity(['continue'], PAPER_AWARE_CONTINUITY_FIXTURES.cancelledPaperAssistContinuation);
+  assert.strictEqual(cancelledPaperContinuation.exitCode, 0, 'cancelled paper continuation scenario should exit successfully');
+  assert(cancelledPaperContinuation.output.includes('EXECUTE_COUNT:0'), 'cancelled paper continuation should not execute emitted actions');
+  assert(/Continuity is currently degraded: The last action batch was cancelled before completion/i.test(cancelledPaperContinuation.output), 'cancelled paper continuation should direct recovery instead of blind continuation');
 
   const acknowledgement = await runScenario(['thanks']);
   assert.strictEqual(acknowledgement.exitCode, 0, 'acknowledgement-style scenario should exit successfully');

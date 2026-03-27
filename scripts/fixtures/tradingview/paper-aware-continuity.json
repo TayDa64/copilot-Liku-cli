@@ -119,5 +119,39 @@
       },
       "nextRecommendedStep": "Re-open or reconnect the Paper Trading panel before claiming continuation is safe."
     }
+  },
+  "cancelledPaperAssistContinuation": {
+    "activeGoal": "Guide a TradingView paper trading workflow safely",
+    "currentSubgoal": "Resume the interrupted Paper Trading panel setup",
+    "continuationReady": false,
+    "degradedReason": "The last action batch was cancelled before completion.",
+    "lastTurn": {
+      "userMessage": "continue",
+      "actionSummary": "focus_window -> key",
+      "executionStatus": "cancelled",
+      "executionResult": {
+        "successCount": 1,
+        "failureCount": 1
+      },
+      "verificationStatus": "not-applicable",
+      "verificationChecks": [],
+      "windowTitle": "TradingView - Paper Trading",
+      "targetWindowHandle": 458868,
+      "captureMode": "window-copyfromscreen",
+      "captureTrusted": true,
+      "observationEvidence": {
+        "visualContextRef": "window-copyfromscreen@777",
+        "uiWatcherFresh": true,
+        "uiWatcherAgeMs": 410
+      },
+      "tradingMode": {
+        "mode": "paper",
+        "confidence": "high",
+        "evidence": [
+          "paper trading"
+        ]
+      },
+      "nextRecommendedStep": "Ask whether to retry the interrupted paper-trading setup step before continuing."
+    }
   }
 }

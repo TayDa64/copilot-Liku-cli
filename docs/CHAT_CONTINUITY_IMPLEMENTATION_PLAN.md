@@ -1121,12 +1121,13 @@ node scripts/test-chat-actionability.js
 
 ### Milestone 5 — Multi-turn coherence suite proves safe continuation
 
-**Status:** In progress in working tree
+**Status:** Completed in working tree
 
 **Delivered so far**
 - added reusable paper-aware TradingView continuity fixtures in `scripts/fixtures/tradingview/paper-aware-continuity.json`
-- extended `scripts/test-chat-actionability.js` with verified, degraded, and contradicted Paper Trading continuation routing regressions
+- extended `scripts/test-chat-actionability.js` with verified, degraded, contradicted, cancelled, and explicit three-turn continuation routing regressions
 - extended `scripts/test-chat-continuity-state.js` and `scripts/test-chat-continuity-prompting.js` with paper-trading mode continuity persistence and prompt-context coverage
+- added cancelled paper-continuity prompt coverage in `scripts/test-chat-continuity-prompting.js`
 
 **Objective**
 - move continuity from “seems improved” to “provably grounded under regression”
