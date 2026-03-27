@@ -101,6 +101,14 @@ const {
   maybeRewriteTradingViewAlertWorkflow
 } = require('./tradingview/alert-workflows');
 const {
+  maybeRewriteTradingViewTimeframeWorkflow,
+  maybeRewriteTradingViewSymbolWorkflow,
+  maybeRewriteTradingViewWatchlistWorkflow
+} = require('./tradingview/chart-verification');
+const {
+  createObservationCheckpointRuntime
+} = require('./ai-service/observation-checkpoints');
+const {
   clearSemanticDOMSnapshot,
   getSemanticDOMContextText,
   getUIWatcher,
@@ -3037,6 +3045,21 @@ function rewriteActionsForReliability(actions, context = {}) {
 
   const userMessage = typeof context.userMessage === 'string' ? context.userMessage : '';
 
+  const tradingViewTimeframeRewrite = maybeRewriteTradingViewTimeframeWorkflow(actions, { userMessage });
+  if (tradingViewTimeframeRewrite) {
+    return tradingViewTimeframeRewrite;
+  }
+
+  const tradingViewSymbolRewrite = maybeRewriteTradingViewSymbolWorkflow(actions, { userMessage });
+  if (tradingViewSymbolRewrite) {
+    return tradingViewSymbolRewrite;
+  }
+
+  const tradingViewWatchlistRewrite = maybeRewriteTradingViewWatchlistWorkflow(actions, { userMessage });
+  if (tradingViewWatchlistRewrite) {
+    return tradingViewWatchlistRewrite;
+  }
+
   const tradingViewIndicatorRewrite = maybeRewriteTradingViewIndicatorWorkflow(actions, { userMessage });
   if (tradingViewIndicatorRewrite) {
     return tradingViewIndicatorRewrite;
@@ -3356,263 +3379,6 @@ function didForegroundObservationChange(beforeForeground, afterForeground) {
     || before.isMaximized !== after.isMaximized;
 }
 
-function normalizeActionVerifyMetadata(verify) {
-  if (!verify || typeof verify !== 'object') return null;
-
-  const kind = String(verify.kind || '').trim().toLowerCase();
-  if (!kind) return null;
-
-  return {
-    kind,
-    appName: String(verify.appName || verify.application || '').trim() || null,
-    target: String(verify.target || verify.surface || '').trim().toLowerCase() || null,
-    keywords: Array.isArray(verify.keywords)
-      ? verify.keywords.map((value) => String(value || '').trim()).filter(Boolean)
-      : [],
-    titleHints: Array.isArray(verify.titleHints)
-      ? verify.titleHints.map((value) => String(value || '').trim()).filter(Boolean)
-      : [],
-    windowKinds: Array.isArray(verify.windowKinds)
-      ? verify.windowKinds.map((value) => String(value || '').trim().toLowerCase()).filter(Boolean)
-      : [],
-    requiresObservedChange: typeof verify.requiresObservedChange === 'boolean'
-      ? verify.requiresObservedChange
-      : null
-  };
-}
-
-function classifyVerificationSurface(verify, nextAction) {
-  const kind = String(verify?.kind || '').trim().toLowerCase();
-  const target = String(verify?.target || '').trim().toLowerCase();
-
-  if (kind === 'panel-visible' || kind === 'panel-open') return 'panel-open';
-  if (kind === 'input-surface-open' || kind === 'menu-open' || kind === 'text-visible') return 'input-surface-open';
-  if (kind === 'dialog-visible') {
-    return /indicator|search|input|picker/.test(target) ? 'input-surface-open' : 'dialog-open';
-  }
-  if (kind === 'indicator-present' || kind === 'timeframe-updated' || kind === 'watchlist-updated' || kind === 'chart-state-updated') {
-    return 'chart-state';
-  }
-  if (nextAction?.type === 'type') return 'input-surface-open';
-  return null;
-}
-
-function buildKeyObservationCheckpointFromVerifyMetadata(action, actionData, actionIndex, options = {}) {
-  if (!action || action.type !== 'key') return null;
-
-  const verify = normalizeActionVerifyMetadata(action.verify);
-  if (!verify) return null;
-
-  const actions = Array.isArray(actionData?.actions) ? actionData.actions : [];
-  const nextAction = actions[actionIndex + 1] || null;
-  const classification = classifyVerificationSurface(verify, nextAction);
-  if (!classification) return null;
-
-  const explicitTarget = action.verifyTarget && typeof action.verifyTarget === 'object'
-    ? action.verifyTarget
-    : null;
-  const inferredTarget = inferLaunchVerificationTarget(actionData, options.userMessage || '');
-  const appName = verify.appName || explicitTarget?.appName || inferredTarget?.appName || 'TradingView';
-  const verifyTarget = explicitTarget || buildVerifyTargetHintFromAppName(appName);
-
-  const expectedKeywords = mergeUniqueKeywords(
-    verify.keywords,
-    extractTradingViewObservationKeywords([
-      action.reason,
-      actionData?.thought,
-      actionData?.verification,
-      options.userMessage,
-      nextAction?.reason,
-      nextAction?.text,
-      verify.target
-    ].filter(Boolean).join(' ')),
-    classification === 'dialog-open' ? verifyTarget.dialogKeywords : [],
-    classification === 'panel-open' ? verifyTarget.pineKeywords : [],
-    classification === 'chart-state' ? verifyTarget.chartKeywords : [],
-    /indicator/.test(verify.target || '') ? verifyTarget.indicatorKeywords : []
-  );
-
-  const expectedWindowKinds = verify.windowKinds.length > 0
-    ? verify.windowKinds
-    : (classification === 'chart-state' || classification === 'panel-open')
-      ? (verifyTarget.preferredWindowKinds || ['main'])
-      : (verifyTarget.dialogWindowKinds || ['owned', 'palette', 'main']);
-
-  return {
-    applicable: true,
-    key: String(action.key || '').trim().toLowerCase(),
-    classification,
-    appName,
-    requiresObservedChange: verify.requiresObservedChange === null
-      ? (classification === 'dialog-open' || classification === 'input-surface-open')
-      : verify.requiresObservedChange,
-    allowWindowHandleChange: classification === 'dialog-open' || classification === 'input-surface-open',
-    timeoutMs: KEY_CHECKPOINT_TIMEOUT_MS,
-    verifyTarget: {
-      ...verifyTarget,
-      popupKeywords: mergeUniqueKeywords(verifyTarget.popupKeywords, expectedKeywords),
-      titleHints: Array.from(new Set([
-        ...(verifyTarget.titleHints || []),
-        ...(verifyTarget.dialogTitleHints || []),
-        ...verify.titleHints
-      ]))
-    },
-    expectedKeywords,
-    expectedWindowKinds,
-    reason: action.reason || actionData?.verification || actionData?.thought || ''
-  };
-}
-
-function inferKeyObservationCheckpoint(action, actionData, actionIndex, options = {}) {
-  const explicitSpec = buildKeyObservationCheckpointFromVerifyMetadata(action, actionData, actionIndex, options);
-  if (explicitSpec) return explicitSpec;
-
-  if (!action || action.type !== 'key') return null;
-
-  const key = String(action.key || '').trim().toLowerCase();
-  if (!key || (!key.includes('alt') && !/(^|\+)enter$|^enter$|^return$/i.test(key))) {
-    return null;
-  }
-
-  const actions = Array.isArray(actionData?.actions) ? actionData.actions : [];
-  const nextAction = actions[actionIndex + 1] || null;
-  const verifyTarget = action.verifyTarget && typeof action.verifyTarget === 'object'
-    ? action.verifyTarget
-    : null;
-  const inferredTarget = verifyTarget || inferLaunchVerificationTarget(actionData, options.userMessage || '');
-  const likelyTradingView = isTradingViewTargetHint(inferredTarget)
-    || /tradingview|trading\s+view/i.test(String(options.focusRecoveryTarget?.title || ''))
-    || /tradingview/i.test(String(options.focusRecoveryTarget?.processName || ''))
-    || /tradingview|trading\s+view/i.test(String(options.userMessage || ''))
-    || /tradingview|trading\s+view/i.test(String(actionData?.thought || ''))
-    || /tradingview|trading\s+view/i.test(String(actionData?.verification || ''));
-
-  if (!likelyTradingView) return null;
-
-  const textSignals = [
-    action.reason,
-    actionData?.thought,
-    actionData?.verification,
-    options.userMessage,
-    nextAction?.reason,
-    nextAction?.text
-  ].filter(Boolean).join(' ');
-  const tradingViewSpec = inferTradingViewObservationSpec({ textSignals, nextAction });
-  if (!tradingViewSpec) {
-    return null;
-  }
-
-  return {
-    applicable: true,
-    key,
-    classification: tradingViewSpec.classification,
-    appName: 'TradingView',
-    requiresObservedChange: tradingViewSpec.requiresObservedChange,
-    allowWindowHandleChange: tradingViewSpec.allowWindowHandleChange,
-    timeoutMs: KEY_CHECKPOINT_TIMEOUT_MS,
-    verifyTarget: tradingViewSpec.verifyTarget,
-    expectedKeywords: tradingViewSpec.expectedKeywords,
-    expectedWindowKinds: tradingViewSpec.expectedWindowKinds,
-    reason: action.reason || actionData?.verification || actionData?.thought || ''
-  };
-}
-
-async function verifyKeyObservationCheckpoint(spec, beforeForeground, options = {}) {
-  if (!spec?.applicable) {
-    return { applicable: false, verified: true, classification: null };
-  }
-
-  const watcher = getUIWatcher();
-  const expectedWindowHandle = Number(options.expectedWindowHandle || 0) || 0;
-  const beforeSignature = summarizeForegroundSignature(beforeForeground);
-  const waitTargetHwnd = spec.allowWindowHandleChange ? 0 : expectedWindowHandle;
-  let watcherFreshness = null;
-  let foreground = null;
-  let evalResult = { matched: false, matchReason: 'none', needsFollowUp: false, popupHint: null };
-  let observedChange = false;
-  let keywordMatched = false;
-  let windowKindMatched = false;
-  let titleHintMatched = false;
-
-  for (let attempt = 1; attempt <= KEY_CHECKPOINT_MAX_POLLS; attempt++) {
-    const sinceTs = Number(watcher?.cache?.lastUpdate || 0);
-    await sleepMs(KEY_CHECKPOINT_SETTLE_MS + ((attempt - 1) * 120));
-
-    if (watcher && watcher.isPolling && typeof watcher.waitForFreshState === 'function') {
-      watcherFreshness = await watcher.waitForFreshState({
-        targetHwnd: waitTargetHwnd,
-        sinceTs,
-        timeoutMs: spec.timeoutMs || KEY_CHECKPOINT_TIMEOUT_MS
-      });
-    }
-
-    foreground = await systemAutomation.getForegroundWindowInfo();
-    evalResult = evaluateForegroundAgainstTarget(foreground, spec.verifyTarget || {});
-    observedChange = didForegroundObservationChange(beforeForeground, foreground);
-
-    const titleNorm = normalizeTextForMatch(foreground?.title || '');
-    keywordMatched = (spec.expectedKeywords || []).some((keyword) => {
-      const norm = normalizeTextForMatch(keyword);
-      return norm && titleNorm.includes(norm);
-    });
-    windowKindMatched = !(spec.expectedWindowKinds || []).length
-      || (spec.expectedWindowKinds || []).includes(String(foreground?.windowKind || '').trim().toLowerCase());
-    titleHintMatched = (spec.verifyTarget?.dialogTitleHints || []).some((hint) => {
-      const norm = normalizeTextForMatch(hint);
-      return norm && titleNorm.includes(norm);
-    });
-
-    const freshObservation = !!watcherFreshness?.fresh;
-    const surfaceChangeObserved = observedChange || keywordMatched || titleHintMatched;
-    const verified = spec.requiresObservedChange
-      ? !!(foreground?.success && evalResult.matched && windowKindMatched && surfaceChangeObserved)
-      : !!(foreground?.success && evalResult.matched && windowKindMatched && (surfaceChangeObserved || freshObservation || !spec.requiresObservedChange));
-
-    if (verified) {
-      return {
-        applicable: true,
-        verified: true,
-        classification: spec.classification,
-        attempts: attempt,
-        observedChange,
-        freshObservation,
-        keywordMatched,
-        titleHintMatched,
-        windowKindMatched,
-        beforeForeground: beforeForeground || null,
-        foreground,
-        expectedWindowHandle,
-        waitTargetHwnd,
-        matchReason: evalResult.matchReason,
-        popupHint: evalResult.popupHint || null,
-        reason: spec.reason || ''
-      };
-    }
-  }
-
-  return {
-    applicable: true,
-    verified: false,
-    classification: spec.classification,
-    attempts: KEY_CHECKPOINT_MAX_POLLS,
-    observedChange,
-    freshObservation: !!watcherFreshness?.fresh,
-    keywordMatched,
-    titleHintMatched,
-    windowKindMatched,
-    beforeForeground: beforeForeground || null,
-    foreground,
-    expectedWindowHandle,
-    waitTargetHwnd,
-    matchReason: evalResult.matchReason,
-    popupHint: evalResult.popupHint || null,
-    reason: spec.reason || '',
-    error: spec.requiresObservedChange
-      ? 'Post-key observation checkpoint could not confirm a TradingView surface change before continuing'
-      : 'Post-key observation checkpoint could not confirm fresh TradingView state'
-  };
-}
-
 function inferLaunchVerificationTarget(actionData, userMessage = '') {
   const actions = Array.isArray(actionData?.actions) ? actionData.actions : [];
   const explicitHint = [...actions]
@@ -3774,6 +3540,26 @@ function evaluateForegroundAgainstTarget(foreground, target) {
 
   return withFollowUp(false, 'none');
 }
+
+const observationCheckpointRuntime = createObservationCheckpointRuntime({
+  systemAutomation,
+  getUIWatcher,
+  sleepMs,
+  evaluateForegroundAgainstTarget,
+  inferLaunchVerificationTarget,
+  buildVerifyTargetHintFromAppName,
+  extractTradingViewObservationKeywords,
+  inferTradingViewObservationSpec,
+  isTradingViewTargetHint,
+  keyCheckpointSettleMs: KEY_CHECKPOINT_SETTLE_MS,
+  keyCheckpointTimeoutMs: KEY_CHECKPOINT_TIMEOUT_MS,
+  keyCheckpointMaxPolls: KEY_CHECKPOINT_MAX_POLLS
+});
+
+const {
+  inferKeyObservationCheckpoint,
+  verifyKeyObservationCheckpoint
+} = observationCheckpointRuntime;
 
 function buildPostLaunchSelfHealPlans(target, runtime = {}) {
   const plans = [];

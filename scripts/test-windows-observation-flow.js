@@ -159,6 +159,60 @@ async function run() {
     assert.strictEqual(rewritten[4].text, '20.02');
   });
 
+  await testAsync('low-signal TradingView timeframe request rewrites to bounded timeframe workflow', async () => {
+    const rewritten = aiService.rewriteActionsForReliability([
+      { type: 'screenshot' },
+      { type: 'wait', ms: 250 }
+    ], {
+      userMessage: 'change the timeframe selector from 1m to 5m in tradingview'
+    });
+
+    assert(Array.isArray(rewritten), 'timeframe rewrite should return an action array');
+    assert.strictEqual(rewritten[0].type, 'bring_window_to_front');
+    assert.strictEqual(rewritten[0].processName, 'tradingview');
+    assert.strictEqual(rewritten[2].type, 'type');
+    assert.strictEqual(rewritten[2].text, '5m');
+    assert.strictEqual(rewritten[4].type, 'key');
+    assert.strictEqual(rewritten[4].key, 'enter');
+    assert.strictEqual(rewritten[4].verify.kind, 'timeframe-updated');
+  });
+
+  await testAsync('low-signal TradingView symbol request rewrites to bounded symbol workflow', async () => {
+    const rewritten = aiService.rewriteActionsForReliability([
+      { type: 'screenshot' },
+      { type: 'wait', ms: 250 }
+    ], {
+      userMessage: 'change the symbol to NVDA in tradingview'
+    });
+
+    assert(Array.isArray(rewritten), 'symbol rewrite should return an action array');
+    assert.strictEqual(rewritten[0].type, 'bring_window_to_front');
+    assert.strictEqual(rewritten[0].processName, 'tradingview');
+    assert.strictEqual(rewritten[2].type, 'type');
+    assert.strictEqual(rewritten[2].text, 'NVDA');
+    assert.strictEqual(rewritten[4].type, 'key');
+    assert.strictEqual(rewritten[4].key, 'enter');
+    assert.strictEqual(rewritten[4].verify.kind, 'symbol-updated');
+  });
+
+  await testAsync('low-signal TradingView watchlist request rewrites to bounded watchlist workflow', async () => {
+    const rewritten = aiService.rewriteActionsForReliability([
+      { type: 'screenshot' },
+      { type: 'wait', ms: 250 }
+    ], {
+      userMessage: 'select the watchlist symbol NVDA in tradingview'
+    });
+
+    assert(Array.isArray(rewritten), 'watchlist rewrite should return an action array');
+    assert.strictEqual(rewritten[0].type, 'bring_window_to_front');
+    assert.strictEqual(rewritten[0].processName, 'tradingview');
+    assert.strictEqual(rewritten[2].type, 'type');
+    assert.strictEqual(rewritten[2].text, 'NVDA');
+    assert.strictEqual(rewritten[4].type, 'key');
+    assert.strictEqual(rewritten[4].key, 'enter');
+    assert.strictEqual(rewritten[4].verify.kind, 'watchlist-updated');
+  });
+
   await testAsync('TradingView alert accelerator blocks follow-up typing when no dialog change is observed', async () => {
     const executed = [];
     const foregroundSequence = [
@@ -482,6 +536,150 @@ async function run() {
 
     assert.strictEqual(safety.riskLevel, aiService.ActionRiskLevel.MEDIUM, 'Benign timeframe enter should remain medium risk');
     assert.strictEqual(safety.requiresConfirmation, false, 'Benign timeframe enter should not require extra confirmation');
+  });
+
+  await testAsync('explicit TradingView timeframe contracts allow bounded chart-state continuation', async () => {
+    const executed = [];
+    const foregroundSequence = [
+      { success: true, hwnd: 777, title: 'TradingView - 1m', processName: 'tradingview', windowKind: 'main' },
+      { success: true, hwnd: 777, title: 'TradingView - 5m', processName: 'tradingview', windowKind: 'main' },
+      { success: true, hwnd: 777, title: 'TradingView - 5m', processName: 'tradingview', windowKind: 'main' }
+    ];
+
+    await withPatchedSystemAutomation({
+      resolveWindowHandle: async (action) => action?.processName === 'tradingview' ? 777 : 0,
+      getForegroundWindowInfo: async () => foregroundSequence.shift() || { success: true, hwnd: 777, title: 'TradingView - 5m', processName: 'tradingview', windowKind: 'main' },
+      focusWindow: async () => ({ success: true }),
+      getRunningProcessesByNames: async () => ([{ pid: 4242, processName: 'tradingview', mainWindowTitle: 'TradingView', startTime: '2026-03-23T00:00:00Z' }])
+    }, async () => {
+      const execResult = await aiService.executeActions({
+        thought: 'Switch TradingView timeframe to 5m',
+        verification: 'TradingView should show 5m timeframe',
+        actions: [
+          { type: 'focus_window', title: 'TradingView', processName: 'tradingview' },
+          { type: 'type', text: '5m', reason: 'Type the requested timeframe into the active timeframe surface' },
+          {
+            type: 'key',
+            key: 'enter',
+            reason: 'Confirm 5m timeframe',
+            verify: {
+              kind: 'timeframe-updated',
+              appName: 'TradingView',
+              target: 'timeframe-updated',
+              keywords: ['timeframe', 'interval', '5m']
+            }
+          }
+        ]
+      }, null, null, {
+        userMessage: 'change the timeframe selector from 1m to 5m in tradingview',
+        actionExecutor: async (action) => {
+          executed.push(action.type);
+          return { success: true, action: action.type, message: 'executed' };
+        }
+      });
+
+      assert.strictEqual(execResult.success, true, 'Execution should proceed after the timeframe change is observed');
+      assert.deepStrictEqual(executed, ['focus_window', 'type', 'key'], 'Timeframe workflow should continue after bounded chart-state verification');
+      assert.strictEqual(execResult.observationCheckpoints.length, 1, 'A timeframe checkpoint should be recorded');
+      assert.strictEqual(execResult.observationCheckpoints[0].classification, 'chart-state', 'Timeframe verification should map to chart-state');
+      assert.strictEqual(execResult.observationCheckpoints[0].verified, true, 'Timeframe chart-state verification should pass after the updated chart title is observed');
+    });
+  });
+
+  await testAsync('explicit TradingView symbol contracts allow bounded chart-state continuation', async () => {
+    const executed = [];
+    const foregroundSequence = [
+      { success: true, hwnd: 777, title: 'TradingView - AAPL', processName: 'tradingview', windowKind: 'main' },
+      { success: true, hwnd: 777, title: 'TradingView - NVDA', processName: 'tradingview', windowKind: 'main' },
+      { success: true, hwnd: 777, title: 'TradingView - NVDA', processName: 'tradingview', windowKind: 'main' }
+    ];
+
+    await withPatchedSystemAutomation({
+      resolveWindowHandle: async (action) => action?.processName === 'tradingview' ? 777 : 0,
+      getForegroundWindowInfo: async () => foregroundSequence.shift() || { success: true, hwnd: 777, title: 'TradingView - NVDA', processName: 'tradingview', windowKind: 'main' },
+      focusWindow: async () => ({ success: true }),
+      getRunningProcessesByNames: async () => ([{ pid: 4242, processName: 'tradingview', mainWindowTitle: 'TradingView', startTime: '2026-03-23T00:00:00Z' }])
+    }, async () => {
+      const execResult = await aiService.executeActions({
+        thought: 'Switch TradingView symbol to NVDA',
+        verification: 'TradingView should show NVDA chart state',
+        actions: [
+          { type: 'focus_window', title: 'TradingView', processName: 'tradingview' },
+          { type: 'type', text: 'NVDA', reason: 'Type the requested symbol into the active symbol surface' },
+          {
+            type: 'key',
+            key: 'enter',
+            reason: 'Confirm TradingView symbol NVDA',
+            verify: {
+              kind: 'symbol-updated',
+              appName: 'TradingView',
+              target: 'symbol-updated',
+              keywords: ['symbol', 'ticker', 'NVDA']
+            }
+          }
+        ]
+      }, null, null, {
+        userMessage: 'change the symbol to NVDA in tradingview',
+        actionExecutor: async (action) => {
+          executed.push(action.type);
+          return { success: true, action: action.type, message: 'executed' };
+        }
+      });
+
+      assert.strictEqual(execResult.success, true, 'Execution should proceed after the symbol change is observed');
+      assert.deepStrictEqual(executed, ['focus_window', 'type', 'key'], 'Symbol workflow should continue after bounded chart-state verification');
+      assert.strictEqual(execResult.observationCheckpoints.length, 1, 'A symbol checkpoint should be recorded');
+      assert.strictEqual(execResult.observationCheckpoints[0].classification, 'chart-state', 'Symbol verification should map to chart-state');
+      assert.strictEqual(execResult.observationCheckpoints[0].verified, true, 'Symbol chart-state verification should pass after the updated chart title is observed');
+    });
+  });
+
+  await testAsync('explicit TradingView watchlist contracts allow bounded chart-state continuation', async () => {
+    const executed = [];
+    const foregroundSequence = [
+      { success: true, hwnd: 777, title: 'TradingView - Watchlist AAPL', processName: 'tradingview', windowKind: 'main' },
+      { success: true, hwnd: 777, title: 'TradingView - Watchlist NVDA', processName: 'tradingview', windowKind: 'main' },
+      { success: true, hwnd: 777, title: 'TradingView - Watchlist NVDA', processName: 'tradingview', windowKind: 'main' }
+    ];
+
+    await withPatchedSystemAutomation({
+      resolveWindowHandle: async (action) => action?.processName === 'tradingview' ? 777 : 0,
+      getForegroundWindowInfo: async () => foregroundSequence.shift() || { success: true, hwnd: 777, title: 'TradingView - Watchlist NVDA', processName: 'tradingview', windowKind: 'main' },
+      focusWindow: async () => ({ success: true }),
+      getRunningProcessesByNames: async () => ([{ pid: 4242, processName: 'tradingview', mainWindowTitle: 'TradingView', startTime: '2026-03-23T00:00:00Z' }])
+    }, async () => {
+      const execResult = await aiService.executeActions({
+        thought: 'Switch TradingView watchlist symbol to NVDA',
+        verification: 'TradingView should show watchlist NVDA chart state',
+        actions: [
+          { type: 'focus_window', title: 'TradingView', processName: 'tradingview' },
+          { type: 'type', text: 'NVDA', reason: 'Type the requested watchlist symbol into the active watchlist surface' },
+          {
+            type: 'key',
+            key: 'enter',
+            reason: 'Confirm TradingView watchlist symbol NVDA',
+            verify: {
+              kind: 'watchlist-updated',
+              appName: 'TradingView',
+              target: 'watchlist-updated',
+              keywords: ['watchlist', 'symbol', 'NVDA']
+            }
+          }
+        ]
+      }, null, null, {
+        userMessage: 'select the watchlist symbol NVDA in tradingview',
+        actionExecutor: async (action) => {
+          executed.push(action.type);
+          return { success: true, action: action.type, message: 'executed' };
+        }
+      });
+
+      assert.strictEqual(execResult.success, true, 'Execution should proceed after the watchlist change is observed');
+      assert.deepStrictEqual(executed, ['focus_window', 'type', 'key'], 'Watchlist workflow should continue after bounded chart-state verification');
+      assert.strictEqual(execResult.observationCheckpoints.length, 1, 'A watchlist checkpoint should be recorded');
+      assert.strictEqual(execResult.observationCheckpoints[0].classification, 'chart-state', 'Watchlist verification should map to chart-state');
+      assert.strictEqual(execResult.observationCheckpoints[0].verified, true, 'Watchlist chart-state verification should pass after the updated chart title is observed');
+    });
   });
 
   await testAsync('TradingView DOM order-entry actions are elevated to high risk', async () => {
