@@ -95,6 +95,12 @@ const {
   isTradingViewTargetHint
 } = require('./tradingview/verification');
 const {
+  maybeRewriteTradingViewIndicatorWorkflow
+} = require('./tradingview/indicator-workflows');
+const {
+  maybeRewriteTradingViewAlertWorkflow
+} = require('./tradingview/alert-workflows');
+const {
   clearSemanticDOMSnapshot,
   getSemanticDOMContextText,
   getUIWatcher,
@@ -3030,6 +3036,16 @@ function rewriteActionsForReliability(actions, context = {}) {
   if (!Array.isArray(actions) || actions.length === 0) return actions;
 
   const userMessage = typeof context.userMessage === 'string' ? context.userMessage : '';
+
+  const tradingViewIndicatorRewrite = maybeRewriteTradingViewIndicatorWorkflow(actions, { userMessage });
+  if (tradingViewIndicatorRewrite) {
+    return tradingViewIndicatorRewrite;
+  }
+
+  const tradingViewAlertRewrite = maybeRewriteTradingViewAlertWorkflow(actions, { userMessage });
+  if (tradingViewAlertRewrite) {
+    return tradingViewAlertRewrite;
+  }
 
   // ── Redundant-search elimination ──────────────────────────────
   // If the plan contains a Google search URL followed by direct URL navigation,

@@ -249,19 +249,29 @@ test('ai-service normalizes app identity for learned skill scope', () => {
 test('ai-service gates TradingView follow-up typing on post-key observation checkpoints', () => {
   const aiServicePath = path.join(__dirname, '..', 'src', 'main', 'ai-service.js');
   const tradingViewVerificationPath = path.join(__dirname, '..', 'src', 'main', 'tradingview', 'verification.js');
+  const tradingViewIndicatorPath = path.join(__dirname, '..', 'src', 'main', 'tradingview', 'indicator-workflows.js');
+  const tradingViewAlertPath = path.join(__dirname, '..', 'src', 'main', 'tradingview', 'alert-workflows.js');
   const fs = require('fs');
 
   const aiServiceContent = fs.readFileSync(aiServicePath, 'utf8');
   const tradingViewVerificationContent = fs.readFileSync(tradingViewVerificationPath, 'utf8');
+  const tradingViewIndicatorContent = fs.readFileSync(tradingViewIndicatorPath, 'utf8');
+  const tradingViewAlertContent = fs.readFileSync(tradingViewAlertPath, 'utf8');
 
   assert(aiServiceContent.includes('inferKeyObservationCheckpoint'), 'ai-service should infer TradingView post-key checkpoints');
   assert(aiServiceContent.includes('verifyKeyObservationCheckpoint'), 'ai-service should verify TradingView post-key checkpoints');
   assert(aiServiceContent.includes('observationCheckpoints'), 'Execution results should expose key checkpoint metadata');
   assert(aiServiceContent.includes('surface change before continuing'), 'Checkpoint failures should explain missing TradingView surface changes');
   assert(aiServiceContent.includes('inferTradingViewObservationSpec'), 'ai-service should consume the extracted TradingView observation-spec helper');
+  assert(aiServiceContent.includes("require('./tradingview/indicator-workflows')"), 'ai-service should consume the extracted TradingView indicator workflow helper');
+  assert(aiServiceContent.includes("require('./tradingview/alert-workflows')"), 'ai-service should consume the extracted TradingView alert workflow helper');
   assert(tradingViewVerificationContent.includes("classification === 'panel-open'"), 'TradingView checkpoints should recognize panel-open flows such as Pine or DOM');
   assert(tradingViewVerificationContent.includes('pine editor'), 'TradingView checkpoints should ground Pine Editor workflows');
   assert(tradingViewVerificationContent.includes('depth of market'), 'TradingView checkpoints should ground DOM workflows');
+  assert(tradingViewIndicatorContent.includes("key: '/'"), 'TradingView indicator workflows should open indicator search with the slash surface');
+  assert(tradingViewIndicatorContent.includes('indicator-present'), 'TradingView indicator workflows should encode indicator-present verification metadata');
+  assert(tradingViewAlertContent.includes("key: 'alt+a'"), 'TradingView alert workflows should open the Create Alert dialog with alt+a');
+  assert(tradingViewAlertContent.includes('create-alert'), 'TradingView alert workflows should encode create-alert verification metadata');
 });
 
 test('ai-service treats TradingView DOM order-entry actions as high risk', () => {

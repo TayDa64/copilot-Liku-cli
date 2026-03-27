@@ -122,6 +122,43 @@ async function run() {
     });
   });
 
+  await testAsync('low-signal TradingView indicator request rewrites to deterministic indicator workflow', async () => {
+    const rewritten = aiService.rewriteActionsForReliability([
+      { type: 'screenshot' },
+      { type: 'wait', ms: 250 }
+    ], {
+      userMessage: 'open indicator search in tradingview and add anchored vwap'
+    });
+
+    assert(Array.isArray(rewritten), 'indicator rewrite should return an action array');
+    assert.strictEqual(rewritten[0].type, 'bring_window_to_front');
+    assert.strictEqual(rewritten[0].processName, 'tradingview');
+    assert.strictEqual(rewritten[2].type, 'key');
+    assert.strictEqual(rewritten[2].key, '/');
+    assert.strictEqual(rewritten[2].verify.kind, 'dialog-visible');
+    assert.strictEqual(rewritten[4].type, 'type');
+    assert.strictEqual(rewritten[4].text, 'anchored vwap');
+    assert.strictEqual(rewritten[6].verify.kind, 'indicator-present');
+  });
+
+  await testAsync('low-signal TradingView alert request rewrites to deterministic alert workflow', async () => {
+    const rewritten = aiService.rewriteActionsForReliability([
+      { type: 'screenshot' },
+      { type: 'wait', ms: 250 }
+    ], {
+      userMessage: 'set an alert for a price target of $20.02 in tradingview'
+    });
+
+    assert(Array.isArray(rewritten), 'alert rewrite should return an action array');
+    assert.strictEqual(rewritten[0].type, 'bring_window_to_front');
+    assert.strictEqual(rewritten[0].processName, 'tradingview');
+    assert.strictEqual(rewritten[2].type, 'key');
+    assert.strictEqual(rewritten[2].key, 'alt+a');
+    assert.strictEqual(rewritten[2].verify.kind, 'dialog-visible');
+    assert.strictEqual(rewritten[4].type, 'type');
+    assert.strictEqual(rewritten[4].text, '20.02');
+  });
+
   await testAsync('TradingView alert accelerator blocks follow-up typing when no dialog change is observed', async () => {
     const executed = [];
     const foregroundSequence = [
@@ -252,6 +289,69 @@ async function run() {
       assert.deepStrictEqual(executed, ['focus_window', 'key', 'type'], 'Typing should continue only after the explicit dialog contract is verified');
       assert.strictEqual(execResult.observationCheckpoints[0].classification, 'dialog-open', 'Explicit verify metadata should map to a reusable dialog-open checkpoint');
       assert.strictEqual(execResult.observationCheckpoints[0].verified, true, 'Explicit verify metadata should drive the bounded post-key verification');
+    });
+  });
+
+  await testAsync('explicit TradingView indicator contracts allow bounded add-indicator continuation', async () => {
+    const executed = [];
+    const foregroundSequence = [
+      { success: true, hwnd: 777, title: 'TradingView', processName: 'tradingview', windowKind: 'main' },
+      { success: true, hwnd: 889, title: 'Indicators - TradingView', processName: 'tradingview', windowKind: 'palette' },
+      { success: true, hwnd: 777, title: 'TradingView', processName: 'tradingview', windowKind: 'main' },
+      { success: true, hwnd: 777, title: 'TradingView', processName: 'tradingview', windowKind: 'main' }
+    ];
+
+    await withPatchedSystemAutomation({
+      resolveWindowHandle: async (action) => action?.processName === 'tradingview' ? 777 : 0,
+      getForegroundWindowInfo: async () => {
+        return foregroundSequence.shift() || { success: true, hwnd: 777, title: 'TradingView', processName: 'tradingview', windowKind: 'main' };
+      },
+      focusWindow: async () => ({ success: true }),
+      getRunningProcessesByNames: async () => ([{ pid: 4242, processName: 'tradingview', mainWindowTitle: 'TradingView', startTime: '2026-03-23T00:00:00Z' }])
+    }, async () => {
+      const execResult = await aiService.executeActions({
+        thought: 'Add Anchored VWAP in TradingView',
+        verification: 'TradingView should open indicator search and add Anchored VWAP',
+        actions: [
+          { type: 'focus_window', title: 'TradingView', processName: 'tradingview' },
+          {
+            type: 'key',
+            key: '/',
+            reason: 'Open the TradingView indicator search',
+            verify: {
+              kind: 'dialog-visible',
+              appName: 'TradingView',
+              target: 'indicator-search',
+              keywords: ['indicator', 'indicators', 'anchored vwap']
+            }
+          },
+          { type: 'type', text: 'Anchored VWAP', reason: 'Search for Anchored VWAP' },
+          {
+            type: 'key',
+            key: 'enter',
+            reason: 'Add Anchored VWAP to the chart',
+            verify: {
+              kind: 'indicator-present',
+              appName: 'TradingView',
+              target: 'indicator-present',
+              keywords: ['anchored vwap']
+            }
+          }
+        ]
+      }, null, null, {
+        userMessage: 'open indicator search in tradingview and add anchored vwap',
+        actionExecutor: async (action) => {
+          executed.push(action.type);
+          return { success: true, action: action.type, message: 'executed' };
+        }
+      });
+
+      assert.strictEqual(execResult.success, true, 'Execution should proceed after bounded indicator workflow verification');
+      assert.deepStrictEqual(executed, ['focus_window', 'key', 'type', 'key'], 'Indicator workflow should continue through search and add actions');
+      assert.strictEqual(execResult.observationCheckpoints[0].classification, 'input-surface-open', 'Indicator search should be treated as an input-surface checkpoint');
+      assert.strictEqual(execResult.observationCheckpoints[0].verified, true, 'Indicator search surface should verify before typing');
+      assert.strictEqual(execResult.observationCheckpoints[1].classification, 'chart-state', 'Indicator add should map to a chart-state checkpoint');
+      assert.strictEqual(execResult.observationCheckpoints[1].verified, true, 'Indicator add should verify before the workflow claims success');
     });
   });
 
