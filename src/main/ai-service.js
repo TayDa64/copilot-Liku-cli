@@ -106,6 +106,9 @@ const {
   maybeRewriteTradingViewWatchlistWorkflow
 } = require('./tradingview/chart-verification');
 const {
+  maybeRewriteTradingViewDrawingWorkflow
+} = require('./tradingview/drawing-workflows');
+const {
   createObservationCheckpointRuntime
 } = require('./ai-service/observation-checkpoints');
 const {
@@ -3060,6 +3063,11 @@ function rewriteActionsForReliability(actions, context = {}) {
     return tradingViewWatchlistRewrite;
   }
 
+  const tradingViewDrawingRewrite = maybeRewriteTradingViewDrawingWorkflow(actions, { userMessage });
+  if (tradingViewDrawingRewrite) {
+    return tradingViewDrawingRewrite;
+  }
+
   const tradingViewIndicatorRewrite = maybeRewriteTradingViewIndicatorWorkflow(actions, { userMessage });
   if (tradingViewIndicatorRewrite) {
     return tradingViewIndicatorRewrite;
@@ -3140,6 +3148,11 @@ function rewriteActionsForReliability(actions, context = {}) {
   }
 
   if (requestedAppName && !requestedUrl) {
+    const hasExplicitVerificationContract = actions.some((a) => a?.verify && typeof a.verify === 'object' && String(a.verify.kind || '').trim());
+    if (hasExplicitVerificationContract) {
+      return actions;
+    }
+
     // If the AI's plan already targets a browser window, preserve it — the model
     // is interacting with an open browser, not trying to launch a new application.
     if (actionsLikelyBrowserSession(actions)) {

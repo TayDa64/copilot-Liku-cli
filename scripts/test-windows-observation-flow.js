@@ -213,6 +213,39 @@ async function run() {
     assert.strictEqual(rewritten[4].verify.kind, 'watchlist-updated');
   });
 
+  await testAsync('low-signal TradingView object tree request wraps the opener with bounded surface verification', async () => {
+    const rewritten = aiService.rewriteActionsForReliability([
+      { type: 'key', key: 'ctrl+shift+o' },
+      { type: 'wait', ms: 250 }
+    ], {
+      userMessage: 'open object tree in tradingview'
+    });
+
+    assert(Array.isArray(rewritten), 'object tree rewrite should return an action array');
+    assert.strictEqual(rewritten[0].type, 'bring_window_to_front');
+    assert.strictEqual(rewritten[0].processName, 'tradingview');
+    assert.strictEqual(rewritten[2].type, 'key');
+    assert.strictEqual(rewritten[2].verify.kind, 'panel-visible');
+    assert.strictEqual(rewritten[2].verify.target, 'object-tree');
+  });
+
+  await testAsync('low-signal TradingView drawing search request wraps the opener before typing continues', async () => {
+    const rewritten = aiService.rewriteActionsForReliability([
+      { type: 'key', key: '/' },
+      { type: 'type', text: 'trend line' }
+    ], {
+      userMessage: 'search for trend line in tradingview drawing tools'
+    });
+
+    assert(Array.isArray(rewritten), 'drawing search rewrite should return an action array');
+    assert.strictEqual(rewritten[0].type, 'bring_window_to_front');
+    assert.strictEqual(rewritten[2].type, 'key');
+    assert.strictEqual(rewritten[2].verify.kind, 'input-surface-open');
+    assert.strictEqual(rewritten[2].verify.target, 'drawing-search');
+    assert.strictEqual(rewritten[4].type, 'type');
+    assert.strictEqual(rewritten[4].text, 'trend line');
+  });
+
   await testAsync('TradingView alert accelerator blocks follow-up typing when no dialog change is observed', async () => {
     const executed = [];
     const foregroundSequence = [
@@ -679,6 +712,101 @@ async function run() {
       assert.strictEqual(execResult.observationCheckpoints.length, 1, 'A watchlist checkpoint should be recorded');
       assert.strictEqual(execResult.observationCheckpoints[0].classification, 'chart-state', 'Watchlist verification should map to chart-state');
       assert.strictEqual(execResult.observationCheckpoints[0].verified, true, 'Watchlist chart-state verification should pass after the updated chart title is observed');
+    });
+  });
+
+  await testAsync('explicit TradingView object tree contracts allow bounded panel verification', async () => {
+    const executed = [];
+    const foregroundSequence = [
+      { success: true, hwnd: 777, title: 'TradingView - LUNR', processName: 'tradingview', windowKind: 'main' },
+      { success: true, hwnd: 778, title: 'Object Tree - TradingView', processName: 'tradingview', windowKind: 'palette' },
+      { success: true, hwnd: 778, title: 'Object Tree - TradingView', processName: 'tradingview', windowKind: 'palette' }
+    ];
+
+    await withPatchedSystemAutomation({
+      resolveWindowHandle: async (action) => action?.processName === 'tradingview' ? 777 : 0,
+      getForegroundWindowInfo: async () => foregroundSequence.shift() || { success: true, hwnd: 778, title: 'Object Tree - TradingView', processName: 'tradingview', windowKind: 'palette' },
+      focusWindow: async () => ({ success: true }),
+      getRunningProcessesByNames: async () => ([{ pid: 4242, processName: 'tradingview', mainWindowTitle: 'TradingView', startTime: '2026-03-23T00:00:00Z' }])
+    }, async () => {
+      const execResult = await aiService.executeActions({
+        thought: 'Open TradingView Object Tree',
+        verification: 'TradingView should show the Object Tree panel',
+        actions: [
+          { type: 'focus_window', title: 'TradingView', processName: 'tradingview' },
+          {
+            type: 'key',
+            key: 'ctrl+shift+o',
+            reason: 'Open TradingView Object Tree',
+            verify: {
+              kind: 'panel-visible',
+              appName: 'TradingView',
+              target: 'object-tree',
+              keywords: ['object tree', 'drawing']
+            }
+          }
+        ]
+      }, null, null, {
+        userMessage: 'open object tree in tradingview',
+        actionExecutor: async (action) => {
+          executed.push(action.type);
+          return { success: true, action: action.type, message: 'executed' };
+        }
+      });
+
+      assert.strictEqual(execResult.success, true, 'Execution should proceed after the object tree panel is observed');
+      assert.deepStrictEqual(executed, ['focus_window', 'key'], 'Object tree workflow should stop at the verified opener in this bounded test');
+      assert.strictEqual(execResult.observationCheckpoints.length, 1, 'An object tree checkpoint should be recorded');
+      assert.strictEqual(execResult.observationCheckpoints[0].classification, 'panel-open', 'Object tree verification should map to panel-open');
+      assert.strictEqual(execResult.observationCheckpoints[0].verified, true, 'Object tree verification should pass after the panel title is observed');
+    });
+  });
+
+  await testAsync('explicit TradingView drawing search contracts gate typing on observed surface change', async () => {
+    const executed = [];
+    const foregroundSequence = [
+      { success: true, hwnd: 777, title: 'TradingView - LUNR', processName: 'tradingview', windowKind: 'main' },
+      { success: true, hwnd: 778, title: 'Drawing Tools - TradingView', processName: 'tradingview', windowKind: 'palette' },
+      { success: true, hwnd: 778, title: 'Drawing Tools - TradingView', processName: 'tradingview', windowKind: 'palette' }
+    ];
+
+    await withPatchedSystemAutomation({
+      resolveWindowHandle: async (action) => action?.processName === 'tradingview' ? 777 : 0,
+      getForegroundWindowInfo: async () => foregroundSequence.shift() || { success: true, hwnd: 778, title: 'Drawing Tools - TradingView', processName: 'tradingview', windowKind: 'palette' },
+      focusWindow: async () => ({ success: true }),
+      getRunningProcessesByNames: async () => ([{ pid: 4242, processName: 'tradingview', mainWindowTitle: 'TradingView', startTime: '2026-03-23T00:00:00Z' }])
+    }, async () => {
+      const execResult = await aiService.executeActions({
+        thought: 'Open TradingView drawing search for trend line',
+        verification: 'TradingView should show the drawing tools surface before typing',
+        actions: [
+          { type: 'focus_window', title: 'TradingView', processName: 'tradingview' },
+          {
+            type: 'key',
+            key: '/',
+            reason: 'Open TradingView drawing search',
+            verify: {
+              kind: 'input-surface-open',
+              appName: 'TradingView',
+              target: 'drawing-search',
+              keywords: ['drawing tools', 'trend line', 'drawing']
+            }
+          },
+          { type: 'type', text: 'trend line', reason: 'Search for TradingView drawing trend line' }
+        ]
+      }, null, null, {
+        userMessage: 'search for trend line in tradingview drawing tools',
+        actionExecutor: async (action) => {
+          executed.push(action.type);
+          return { success: true, action: action.type, message: 'executed' };
+        }
+      });
+
+      assert.strictEqual(execResult.success, true, 'Execution should continue after the drawing surface change is observed');
+      assert.deepStrictEqual(executed, ['focus_window', 'key', 'type'], 'Typing should continue only after the drawing search surface is verified');
+      assert.strictEqual(execResult.observationCheckpoints.length, 1, 'A drawing search checkpoint should be recorded');
+      assert.strictEqual(execResult.observationCheckpoints[0].classification, 'input-surface-open', 'Drawing search verification should map to input-surface-open');
+      assert.strictEqual(execResult.observationCheckpoints[0].verified, true, 'Drawing search verification should pass after the surface title is observed');
     });
   });
 

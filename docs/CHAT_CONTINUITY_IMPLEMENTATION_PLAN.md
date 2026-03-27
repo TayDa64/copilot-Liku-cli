@@ -1072,11 +1072,13 @@ node scripts/test-session-intent-state.js
 - extracted deterministic TradingView indicator workflow shaping to `src/main/tradingview/indicator-workflows.js`
 - extracted deterministic TradingView alert workflow shaping to `src/main/tradingview/alert-workflows.js`
 - extracted TradingView chart verification plus timeframe/symbol/watchlist workflow shaping to `src/main/tradingview/chart-verification.js`
+- extracted verification-first TradingView drawing/object-tree surface workflow shaping to `src/main/tradingview/drawing-workflows.js`
 - extracted reusable post-key observation checkpoint helpers to `src/main/ai-service/observation-checkpoints.js`
 - added direct module regressions in `scripts/test-tradingview-app-profile.js` and `scripts/test-tradingview-verification.js`
 - added direct indicator-workflow regression coverage in `scripts/test-tradingview-indicator-workflows.js`
 - added direct alert-workflow regression coverage in `scripts/test-tradingview-alert-workflows.js`
 - added direct chart-verification regression coverage in `scripts/test-tradingview-chart-verification.js`
+- added direct drawing-workflow regression coverage in `scripts/test-tradingview-drawing-workflows.js`
 
 **Objective**
 - formalize reusable TradingView workflow modules around alerts, indicators, and chart verification
