@@ -46,6 +46,11 @@ function inferPineEvidenceRequestKind(userMessage = '') {
     return 'generic-status';
   }
 
+  if (/\b(version history|revision|revisions|provenance|history|versions)\b/.test(text)
+    && /\b(latest|top|visible|recent|metadata|summary|summarize|details)\b/.test(text)) {
+    return 'provenance-summary';
+  }
+
   return null;
 }
 
@@ -76,6 +81,11 @@ function buildPineEvidenceConstraint({ foreground, userMessage }) {
 
   if (requestKind === 'line-budget') {
     lines.push('- Rule: Pine scripts are capped at 500 lines in TradingView. Treat visible line-count hints as bounded editor evidence, and prefer targeted edits over full rewrites when the budget is tight.');
+  }
+
+  if (requestKind === 'provenance-summary') {
+    lines.push('- Rule: Treat Pine Version History as bounded provenance evidence only; summarize only the top visible revision labels, relative times, and other metadata that are directly visible.');
+    lines.push('- Rule: Do not infer hidden diffs, full script history, authorship, or runtime/chart behavior from the visible revision list alone.');
   }
 
   lines.push('- Rule: If the user asks for Pine runtime or strategy diagnosis, mention Pine execution-model caveats such as realtime rollback, confirmed vs unconfirmed bars, and indicator vs strategy recalculation differences before inferring behavior from compile status alone.');

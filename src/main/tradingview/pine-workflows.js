@@ -62,6 +62,17 @@ function inferPineEditorEvidenceMode(raw = '') {
   return 'generic-status';
 }
 
+function inferPineVersionHistoryEvidenceMode(raw = '') {
+  const normalized = normalizeTextForMatch(raw);
+  if (!normalized) return 'generic-provenance';
+
+  const mentionsMetadataSummary = /\b(latest|top|visible|recent|newest|metadata|summary|summarize|revision metadata|provenance details|revision details)\b/.test(normalized);
+  const mentionsRevisionList = /\b(revision|revisions|version history|history|versions|changes|provenance)\b/.test(normalized);
+  if (mentionsRevisionList && mentionsMetadataSummary) return 'provenance-summary';
+
+  return 'generic-provenance';
+}
+
 function buildPineReadbackStep(surfaceTarget, evidenceMode = null) {
   if (surfaceTarget === 'pine-editor') {
     const mode = evidenceMode || 'generic-status';
@@ -97,10 +108,14 @@ function buildPineReadbackStep(surfaceTarget, evidenceMode = null) {
   }
 
   if (surfaceTarget === 'pine-version-history') {
+    const mode = evidenceMode || 'generic-provenance';
     return {
       type: 'get_text',
       text: 'Pine Version History',
-      reason: 'Read visible Pine Version History entries for bounded provenance gathering'
+      reason: mode === 'provenance-summary'
+        ? 'Read top visible Pine Version History revision metadata for a bounded provenance summary'
+        : 'Read visible Pine Version History entries for bounded provenance gathering',
+      pineEvidenceMode: mode
     };
   }
 
@@ -156,6 +171,8 @@ function inferTradingViewPineIntent(userMessage = '', actions = []) {
   const wantsEvidenceReadback = inferPineEvidenceReadIntent(raw, surface.target);
   const pineEvidenceMode = surface.target === 'pine-editor' && wantsEvidenceReadback
     ? inferPineEditorEvidenceMode(raw)
+    : surface.target === 'pine-version-history' && wantsEvidenceReadback
+      ? inferPineVersionHistoryEvidenceMode(raw)
     : null;
 
   const existingWorkflowSignal = Array.isArray(actions) && actions.some((action) => /pine/.test(String(action?.verify?.target || '')));
@@ -262,5 +279,6 @@ function maybeRewriteTradingViewPineWorkflow(actions, context = {}) {
 module.exports = {
   inferTradingViewPineIntent,
   buildTradingViewPineWorkflowActions,
-  maybeRewriteTradingViewPineWorkflow
+  maybeRewriteTradingViewPineWorkflow,
+  inferPineVersionHistoryEvidenceMode
 };

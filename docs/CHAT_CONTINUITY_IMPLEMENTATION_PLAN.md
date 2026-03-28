@@ -1674,6 +1674,17 @@ This is the next Pine-facing implementation slice after the current Logs / Profi
 
 #### Slice D-next-2 — Pine Version History top visible revision metadata summaries
 
+**Status:** First slice completed in working tree
+
+**Delivered so far**
+- extended `src/main/tradingview/pine-workflows.js` with a `provenance-summary` evidence mode for `pine-version-history`
+- Version History metadata requests such as `summarize the top visible revision metadata` now preserve or auto-append bounded `get_text` provenance-summary readback
+- extended prompt/seam/execution coverage in:
+  - `src/main/ai-service/message-builder.js`
+  - `scripts/test-tradingview-pine-data-workflows.js`
+  - `scripts/test-windows-observation-flow.js`
+  - `scripts/test-bug-fixes.js`
+
 **Why this is second**
 - the UI access path is already implemented, but the current behavior is still just raw visible text gathering
 - the next value is structural summarization of the top visible revisions, not merely reopening the panel

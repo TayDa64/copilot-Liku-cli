@@ -6,7 +6,8 @@ const path = require('path');
 const {
   inferTradingViewPineIntent,
   buildTradingViewPineWorkflowActions,
-  maybeRewriteTradingViewPineWorkflow
+  maybeRewriteTradingViewPineWorkflow,
+  inferPineVersionHistoryEvidenceMode
 } = require(path.join(__dirname, '..', 'src', 'main', 'tradingview', 'pine-workflows.js'));
 
 function test(name, fn) {
@@ -90,6 +91,23 @@ test('pine workflow recognizes pine version history provenance requests', () => 
   assert(intent, 'intent should be inferred');
   assert.strictEqual(intent.surfaceTarget, 'pine-version-history');
   assert.strictEqual(intent.wantsEvidenceReadback, true);
+});
+
+test('pine workflow classifies version history metadata summary requests', () => {
+  const mode = inferPineVersionHistoryEvidenceMode('open pine version history in tradingview and summarize the top visible revision metadata');
+
+  assert.strictEqual(mode, 'provenance-summary');
+});
+
+test('pine workflow recognizes visible revision metadata requests', () => {
+  const intent = inferTradingViewPineIntent('open pine version history in tradingview and summarize the top visible revision metadata', [
+    { type: 'key', key: 'alt+h' }
+  ]);
+
+  assert(intent, 'intent should be inferred');
+  assert.strictEqual(intent.surfaceTarget, 'pine-version-history');
+  assert.strictEqual(intent.wantsEvidenceReadback, true);
+  assert.strictEqual(intent.pineEvidenceMode, 'provenance-summary');
 });
 
 test('open pine logs and read output stays verification-first', () => {
@@ -228,6 +246,25 @@ test('open pine version history and read revisions stays verification-first', ()
   assert.strictEqual(rewritten[4].text, 'Pine Version History');
 });
 
+test('open pine version history and summarize visible revision metadata stays verification-first', () => {
+  const rewritten = buildTradingViewPineWorkflowActions({
+    appName: 'TradingView',
+    surfaceTarget: 'pine-version-history',
+    verifyKind: 'panel-visible',
+    openerIndex: 0,
+    wantsEvidenceReadback: true,
+    pineEvidenceMode: 'provenance-summary',
+    requiresObservedChange: false
+  }, [
+    { type: 'key', key: 'alt+h', reason: 'Open Pine Version History' }
+  ]);
+
+  assert.strictEqual(rewritten[4].type, 'get_text');
+  assert.strictEqual(rewritten[4].text, 'Pine Version History');
+  assert.strictEqual(rewritten[4].pineEvidenceMode, 'provenance-summary');
+  assert(/top visible Pine Version History revision metadata/i.test(rewritten[4].reason), 'version-history metadata readback should use provenance-summary wording');
+});
+
 test('pine evidence-gathering workflow preserves trailing get_text read step', () => {
   const rewritten = maybeRewriteTradingViewPineWorkflow([
     { type: 'key', key: 'ctrl+shift+l' },
@@ -285,6 +322,22 @@ test('pine version history workflow preserves trailing get_text read step', () =
   const readSteps = rewritten.filter((action) => action?.type === 'get_text');
   assert.strictEqual(readSteps.length, 1, 'explicit version-history readback step should be preserved without duplication');
   assert.strictEqual(readSteps[0].text, 'Pine Version History');
+  assert.strictEqual(rewritten[2].verify.target, 'pine-version-history');
+});
+
+test('pine version history metadata workflow preserves trailing get_text read step', () => {
+  const rewritten = maybeRewriteTradingViewPineWorkflow([
+    { type: 'key', key: 'alt+h' },
+    { type: 'get_text', text: 'Pine Version History', reason: 'Read top visible Pine Version History revision metadata', pineEvidenceMode: 'provenance-summary' }
+  ], {
+    userMessage: 'open pine version history in tradingview and summarize the top visible revision metadata'
+  });
+
+  assert(Array.isArray(rewritten), 'workflow should rewrite');
+  const readSteps = rewritten.filter((action) => action?.type === 'get_text');
+  assert.strictEqual(readSteps.length, 1, 'explicit version-history metadata readback step should be preserved without duplication');
+  assert.strictEqual(readSteps[0].text, 'Pine Version History');
+  assert.strictEqual(readSteps[0].pineEvidenceMode, 'provenance-summary');
   assert.strictEqual(rewritten[2].verify.target, 'pine-version-history');
 });
 

@@ -249,6 +249,8 @@ test('pine workflow encodes diagnostics and compile-result evidence modes', () =
   assert(pineWorkflowContent.includes('pineEvidenceMode'), 'Pine get_text steps should preserve evidence mode metadata');
   assert(pineWorkflowContent.includes('compile-result text for a bounded diagnostics summary'), 'Pine workflows should use compile-result-specific readback wording');
   assert(pineWorkflowContent.includes('diagnostics and warnings text'), 'Pine workflows should use diagnostics-specific readback wording');
+  assert(pineWorkflowContent.includes('provenance-summary'), 'Pine workflows should support version-history provenance-summary evidence mode');
+  assert(pineWorkflowContent.includes('top visible Pine Version History revision metadata'), 'Pine workflows should use provenance-summary-specific readback wording');
 });
 
 test('system prompt includes Pine diagnostics guidance', () => {
@@ -258,6 +260,8 @@ test('system prompt includes Pine diagnostics guidance', () => {
   const systemPromptContent = fs.readFileSync(systemPromptPath, 'utf8');
 
   assert(systemPromptContent.includes('TradingView Pine diagnostics rule'), 'System prompt should include Pine diagnostics guidance');
+  assert(systemPromptContent.includes('visible revision/provenance details'), 'System prompt should steer Pine provenance requests toward verified Version History text');
+  assert(systemPromptContent.includes('treat visible Pine Version History entries as bounded audit/provenance evidence only'), 'Pine provenance guidance should prevent overclaiming from visible revision history');
   assert(systemPromptContent.includes('compile success'), 'System prompt should mention compile success bounds');
   assert(systemPromptContent.includes('realtime rollback'), 'System prompt should mention Pine execution-model caveats');
 });

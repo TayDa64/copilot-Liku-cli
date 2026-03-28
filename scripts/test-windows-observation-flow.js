@@ -358,6 +358,20 @@ async function run() {
     assert.strictEqual(rewritten[4].text, 'Pine Version History');
   });
 
+  await testAsync('low-signal TradingView Pine Version History metadata request rewrites to provenance-summary get_text', async () => {
+    const rewritten = aiService.rewriteActionsForReliability([
+      { type: 'key', key: 'alt+h' }
+    ], {
+      userMessage: 'open pine version history in tradingview and summarize the top visible revision metadata'
+    });
+
+    assert(Array.isArray(rewritten), 'pine version history metadata rewrite should return an action array');
+    assert.strictEqual(rewritten[2].verify.target, 'pine-version-history');
+    assert.strictEqual(rewritten[4].type, 'get_text');
+    assert.strictEqual(rewritten[4].text, 'Pine Version History');
+    assert.strictEqual(rewritten[4].pineEvidenceMode, 'provenance-summary');
+  });
+
   await testAsync('verified pine logs workflow allows bounded evidence gathering without screenshot loop', async () => {
     const executed = [];
     const foregroundSequence = [
@@ -511,6 +525,60 @@ async function run() {
       assert.strictEqual(execResult.observationCheckpoints[0].verified, true, 'Pine Version History panel observation should pass');
       assert.strictEqual(execResult.results[2].text, 'Revision 18 saved 2m ago; Revision 17 saved 18m ago', 'Version History text evidence should be preserved on the get_text result');
       assert(!execResult.screenshotCaptured, 'Pine Version History provenance gathering should not require a screenshot loop');
+    });
+  });
+
+  await testAsync('verified pine version history metadata workflow preserves top visible revision text without screenshot loop', async () => {
+    const executed = [];
+    const evidenceModes = [];
+    const foregroundSequence = [
+      { success: true, hwnd: 777, title: 'TradingView', processName: 'tradingview', windowKind: 'main' },
+      { success: true, hwnd: 891, title: 'Pine Version History - TradingView', processName: 'tradingview', windowKind: 'owned' },
+      { success: true, hwnd: 891, title: 'Pine Version History - TradingView', processName: 'tradingview', windowKind: 'owned' },
+      { success: true, hwnd: 891, title: 'Pine Version History - TradingView', processName: 'tradingview', windowKind: 'owned' }
+    ];
+
+    await withPatchedSystemAutomation({
+      resolveWindowHandle: async (action) => action?.processName === 'tradingview' ? 777 : 0,
+      getForegroundWindowHandle: async () => 777,
+      getForegroundWindowInfo: async () => {
+        return foregroundSequence.shift() || { success: true, hwnd: 891, title: 'Pine Version History - TradingView', processName: 'tradingview', windowKind: 'owned' };
+      },
+      focusWindow: async () => ({ success: true }),
+      getRunningProcessesByNames: async () => ([{ pid: 4242, processName: 'tradingview', mainWindowTitle: 'TradingView', startTime: '2026-03-23T00:00:00Z' }])
+    }, async () => {
+      const execResult = await aiService.executeActions({
+        thought: 'Open Pine Version History and summarize the top visible revision metadata',
+        verification: 'TradingView should show Pine Version History before text is read',
+        actions: [
+          { type: 'focus_window', title: 'TradingView', processName: 'tradingview' },
+          { type: 'key', key: 'alt+h', reason: 'Open Pine Version History', verify: { kind: 'panel-visible', appName: 'TradingView', target: 'pine-version-history', keywords: ['pine version history', 'version history', 'pine'] } },
+          { type: 'get_text', text: 'Pine Version History', reason: 'Read top visible Pine Version History revision metadata', pineEvidenceMode: 'provenance-summary' }
+        ]
+      }, null, null, {
+        userMessage: 'open pine version history in tradingview and summarize the top visible revision metadata',
+        actionExecutor: async (action) => {
+          executed.push(action.type);
+          if (action.type === 'get_text') {
+            evidenceModes.push(action.pineEvidenceMode || null);
+            return {
+              success: true,
+              action: action.type,
+              text: 'Revision 18 saved 2m ago; Revision 17 saved 18m ago; showing 2 visible revisions',
+              method: 'TextPattern',
+              message: 'Got text via TextPattern: "Revision 18 saved 2m ago; Revision 17 saved 18m ago; showing 2 visible revisions"'
+            };
+          }
+          return { success: true, action: action.type, message: 'executed' };
+        }
+      });
+
+      assert.strictEqual(execResult.success, true, 'Execution should proceed after Pine Version History metadata view is observed');
+      assert.deepStrictEqual(executed, ['focus_window', 'key', 'get_text'], 'Version History metadata summary should continue to read text after panel verification');
+      assert.deepStrictEqual(evidenceModes, ['provenance-summary'], 'Version History metadata workflow should preserve provenance-summary evidence mode');
+      assert.strictEqual(execResult.observationCheckpoints[0].verified, true, 'Pine Version History panel observation should pass');
+      assert.strictEqual(execResult.results[2].text, 'Revision 18 saved 2m ago; Revision 17 saved 18m ago; showing 2 visible revisions', 'Version History metadata text should be preserved on the get_text result');
+      assert(!execResult.screenshotCaptured, 'Pine Version History metadata gathering should not require a screenshot loop');
     });
   });
 
