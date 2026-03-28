@@ -1339,7 +1339,7 @@ The findings below are grounded in current repo seams, especially:
 
 ### Track A — Intent-safe reliability rewrites
 
-**Status:** First slice completed in working tree
+**Status:** Second slice completed in working tree
 
 **Delivered so far**
 - hardened `extractRequestedAppName(...)` in `src/main/ai-service.js` so passive open-state phrasing no longer gets treated as app-launch intent
@@ -1679,6 +1679,7 @@ This is the next Pine-facing implementation slice after the current Logs / Profi
 **Delivered so far**
 - extended `src/main/tradingview/pine-workflows.js` with a `provenance-summary` evidence mode for `pine-version-history`
 - Version History metadata requests such as `summarize the top visible revision metadata` now preserve or auto-append bounded `get_text` provenance-summary readback
+- `get_text` provenance-summary results now attach deterministic visible revision metadata such as latest visible revision label, latest visible relative time, visible revision count, and visible recency signal
 - extended prompt/seam/execution coverage in:
   - `src/main/ai-service/message-builder.js`
   - `scripts/test-tradingview-pine-data-workflows.js`

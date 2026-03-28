@@ -85,6 +85,7 @@ function buildPineEvidenceConstraint({ foreground, userMessage }) {
 
   if (requestKind === 'provenance-summary') {
     lines.push('- Rule: Treat Pine Version History as bounded provenance evidence only; summarize only the top visible revision labels, relative times, and other metadata that are directly visible.');
+    lines.push('- Rule: When possible, structure the summary into compact visible fields such as latest visible revision label, latest visible relative time, visible revision count, and visible recency signal.');
     lines.push('- Rule: Do not infer hidden diffs, full script history, authorship, or runtime/chart behavior from the visible revision list alone.');
   }
 

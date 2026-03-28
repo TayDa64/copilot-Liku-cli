@@ -70,6 +70,7 @@ async function main() {
     assert(evidenceMessage, 'pine evidence block should be injected');
     assert(evidenceMessage.content.includes('requestKind: provenance-summary'));
     assert(evidenceMessage.content.includes('Treat Pine Version History as bounded provenance evidence only'));
+    assert(evidenceMessage.content.includes('latest visible revision label, latest visible relative time, visible revision count, and visible recency signal'));
     assert(evidenceMessage.content.includes('Do not infer hidden diffs, full script history, authorship, or runtime/chart behavior from the visible revision list alone.'));
   });
 }

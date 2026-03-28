@@ -578,6 +578,14 @@ async function run() {
       assert.deepStrictEqual(evidenceModes, ['provenance-summary'], 'Version History metadata workflow should preserve provenance-summary evidence mode');
       assert.strictEqual(execResult.observationCheckpoints[0].verified, true, 'Pine Version History panel observation should pass');
       assert.strictEqual(execResult.results[2].text, 'Revision 18 saved 2m ago; Revision 17 saved 18m ago; showing 2 visible revisions', 'Version History metadata text should be preserved on the get_text result');
+      assert.strictEqual(execResult.results[2].pineStructuredSummary.latestVisibleRevisionLabel, 'Revision 18', 'Version History metadata summary should expose the latest visible revision label');
+      assert.strictEqual(execResult.results[2].pineStructuredSummary.latestVisibleRelativeTime, '2m ago', 'Version History metadata summary should expose the latest visible relative time');
+      assert.strictEqual(execResult.results[2].pineStructuredSummary.visibleRevisionCount, 2, 'Version History metadata summary should expose the visible revision count');
+      assert.strictEqual(execResult.results[2].pineStructuredSummary.visibleRecencySignal, 'recent-churn-visible', 'Version History metadata summary should expose a bounded visible recency signal');
+      assert.deepStrictEqual(execResult.results[2].pineStructuredSummary.topVisibleRevisions, [
+        { label: 'Revision 18', relativeTime: '2m ago', revisionNumber: 18 },
+        { label: 'Revision 17', relativeTime: '18m ago', revisionNumber: 17 }
+      ], 'Version History metadata summary should expose compact top visible revisions');
       assert(!execResult.screenshotCaptured, 'Pine Version History metadata gathering should not require a screenshot loop');
     });
   });

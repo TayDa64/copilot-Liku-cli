@@ -312,6 +312,105 @@ function executePowerShell(command) {
   });
 }
 
+function normalizeCompactText(value, maxLength = 240) {
+  return String(value || '').replace(/\s+/g, ' ').trim().slice(0, maxLength) || null;
+}
+
+function parseRelativeTimeToMinutes(value) {
+  const text = normalizeCompactText(value, 80);
+  if (!text) return null;
+  const match = text.match(/(\d+)\s*(s|sec|secs|second|seconds|m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days|w|wk|wks|week|weeks)\s+ago/i);
+  if (!match) return null;
+
+  const amount = Number(match[1]);
+  const unit = match[2].toLowerCase();
+  if (!Number.isFinite(amount)) return null;
+
+  if (unit.startsWith('s')) return Math.max(1, amount / 60);
+  if (unit.startsWith('m')) return amount;
+  if (unit.startsWith('h')) return amount * 60;
+  if (unit.startsWith('d')) return amount * 60 * 24;
+  if (unit.startsWith('w')) return amount * 60 * 24 * 7;
+  return null;
+}
+
+function inferVisibleRevisionRecencySignal(minutes) {
+  if (!Number.isFinite(minutes)) return 'unknown-visible-recency';
+  if (minutes <= 60) return 'recent-churn-visible';
+  if (minutes <= 1440) return 'same-day-visible';
+  if (minutes >= 10080) return 'stable-visible';
+  return 'moderate-visible';
+}
+
+function buildPineVersionHistoryStructuredSummary(text, summaryFields = []) {
+  const rawText = normalizeCompactText(text, 2000);
+  if (!rawText) return null;
+
+  const revisionSegments = rawText
+    .split(/[;\n]+/)
+    .map((segment) => normalizeCompactText(segment, 280))
+    .filter(Boolean);
+
+  const visibleRevisions = revisionSegments
+    .map((segment) => {
+      const match = segment.match(/^(Revision\s+#?\s*\d+)\b(?:.*?\b(?:saved|updated|created)\s+(.+?ago))?$/i);
+      if (!match) return null;
+
+      const label = normalizeCompactText(match[1], 80);
+      const relativeTime = normalizeCompactText(match[2], 80);
+      const revisionNumberMatch = label ? label.match(/(\d+)/) : null;
+      const revisionNumber = revisionNumberMatch ? Number(revisionNumberMatch[1]) : null;
+
+      return {
+        label,
+        revisionNumber: Number.isFinite(revisionNumber) ? revisionNumber : null,
+        relativeTime,
+        recencyMinutes: parseRelativeTimeToMinutes(relativeTime)
+      };
+    })
+    .filter(Boolean)
+    .slice(0, 5);
+
+  const visibleCountMatch = rawText.match(/showing\s+(\d+)\s+visible\s+revisions?/i);
+  const visibleRevisionCount = visibleCountMatch
+    ? Number(visibleCountMatch[1])
+    : visibleRevisions.length;
+
+  const latestVisibleRevision = visibleRevisions[0] || null;
+  const compactSummary = [
+    latestVisibleRevision?.label ? `latest=${latestVisibleRevision.label}` : null,
+    latestVisibleRevision?.relativeTime ? `saved=${latestVisibleRevision.relativeTime}` : null,
+    Number.isFinite(visibleRevisionCount) ? `visible=${visibleRevisionCount}` : null,
+    latestVisibleRevision ? `signal=${inferVisibleRevisionRecencySignal(latestVisibleRevision.recencyMinutes)}` : null
+  ].filter(Boolean).join(' | ');
+
+  const fullSummary = {
+    latestVisibleRevisionLabel: latestVisibleRevision?.label || null,
+    latestVisibleRevisionNumber: Number.isFinite(latestVisibleRevision?.revisionNumber) ? latestVisibleRevision.revisionNumber : null,
+    latestVisibleRelativeTime: latestVisibleRevision?.relativeTime || null,
+    visibleRevisionCount: Number.isFinite(visibleRevisionCount) ? visibleRevisionCount : null,
+    visibleRecencySignal: latestVisibleRevision ? inferVisibleRevisionRecencySignal(latestVisibleRevision.recencyMinutes) : 'unknown-visible-recency',
+    topVisibleRevisions: visibleRevisions.map((entry) => ({
+      label: entry.label,
+      relativeTime: entry.relativeTime,
+      revisionNumber: entry.revisionNumber
+    })),
+    compactSummary: compactSummary || null
+  };
+
+  if (!Array.isArray(summaryFields) || summaryFields.length === 0) {
+    return fullSummary;
+  }
+
+  const structured = { compactSummary: fullSummary.compactSummary };
+  if (summaryFields.includes('latest-revision-label')) structured.latestVisibleRevisionLabel = fullSummary.latestVisibleRevisionLabel;
+  if (summaryFields.includes('latest-relative-time')) structured.latestVisibleRelativeTime = fullSummary.latestVisibleRelativeTime;
+  if (summaryFields.includes('visible-revision-count')) structured.visibleRevisionCount = fullSummary.visibleRevisionCount;
+  if (summaryFields.includes('visible-recency-signal')) structured.visibleRecencySignal = fullSummary.visibleRecencySignal;
+  if (summaryFields.includes('top-visible-revisions')) structured.topVisibleRevisions = fullSummary.topVisibleRevisions;
+  return structured;
+}
+
 /**
  * Focus the desktop / unfocus Electron windows before sending keyboard input
  * This is critical for SendKeys/SendInput to reach the correct target
@@ -2388,8 +2487,13 @@ async function executeAction(action) {
           action.criteria || { text: action.text, automationId: action.automationId, controlType: action.controlType }
         );
         result = { ...result, ...gtResult };
+        if (gtResult.success
+          && action?.pineEvidenceMode === 'provenance-summary'
+          && /pine version history/i.test(String(action?.text || action?.criteria?.text || ''))) {
+          result.pineStructuredSummary = buildPineVersionHistoryStructuredSummary(gtResult.text, action.pineSummaryFields);
+        }
         result.message = gtResult.success
-          ? `Got text via ${gtResult.method}: "${(gtResult.text || '').slice(0, 50)}"`
+          ? `Got text via ${gtResult.method}: "${(gtResult.text || '').slice(0, 50)}"${result.pineStructuredSummary?.compactSummary ? ` [${result.pineStructuredSummary.compactSummary}]` : ''}`
           : `Get text failed: ${gtResult.error}`;
         break;
       }

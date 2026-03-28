@@ -15,6 +15,14 @@ function mergeUnique(values = []) {
     .filter(Boolean)));
 }
 
+const PINE_VERSION_HISTORY_SUMMARY_FIELDS = Object.freeze([
+  'latest-revision-label',
+  'latest-relative-time',
+  'visible-revision-count',
+  'visible-recency-signal',
+  'top-visible-revisions'
+]);
+
 function inferPineEvidenceReadIntent(raw = '', surfaceTarget = '') {
   const normalized = normalizeTextForMatch(raw);
   if (!normalized) return false;
@@ -109,14 +117,18 @@ function buildPineReadbackStep(surfaceTarget, evidenceMode = null) {
 
   if (surfaceTarget === 'pine-version-history') {
     const mode = evidenceMode || 'generic-provenance';
-    return {
+    const step = {
       type: 'get_text',
       text: 'Pine Version History',
       reason: mode === 'provenance-summary'
-        ? 'Read top visible Pine Version History revision metadata for a bounded provenance summary'
+        ? 'Read top visible Pine Version History revision metadata for a bounded structured provenance summary'
         : 'Read visible Pine Version History entries for bounded provenance gathering',
       pineEvidenceMode: mode
     };
+    if (mode === 'provenance-summary') {
+      step.pineSummaryFields = [...PINE_VERSION_HISTORY_SUMMARY_FIELDS];
+    }
+    return step;
   }
 
   return null;
@@ -242,6 +254,14 @@ function buildTradingViewPineWorkflowActions(intent = {}, actions = []) {
 
   const trailing = actions.slice(intent.openerIndex + 1)
     .filter((action) => action && typeof action === 'object' && action.type !== 'screenshot');
+
+  if (intent.surfaceTarget === 'pine-version-history' && intent.pineEvidenceMode === 'provenance-summary') {
+    trailing.forEach((action) => {
+      if (action?.type === 'get_text' && !Array.isArray(action.pineSummaryFields)) {
+        action.pineSummaryFields = [...PINE_VERSION_HISTORY_SUMMARY_FIELDS];
+      }
+    });
+  }
 
   const hasExplicitReadbackStep = trailing.some((action) => action?.type === 'get_text' || action?.type === 'find_element');
 

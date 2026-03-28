@@ -262,6 +262,13 @@ test('open pine version history and summarize visible revision metadata stays ve
   assert.strictEqual(rewritten[4].type, 'get_text');
   assert.strictEqual(rewritten[4].text, 'Pine Version History');
   assert.strictEqual(rewritten[4].pineEvidenceMode, 'provenance-summary');
+  assert.deepStrictEqual(rewritten[4].pineSummaryFields, [
+    'latest-revision-label',
+    'latest-relative-time',
+    'visible-revision-count',
+    'visible-recency-signal',
+    'top-visible-revisions'
+  ]);
   assert(/top visible Pine Version History revision metadata/i.test(rewritten[4].reason), 'version-history metadata readback should use provenance-summary wording');
 });
 
@@ -338,6 +345,13 @@ test('pine version history metadata workflow preserves trailing get_text read st
   assert.strictEqual(readSteps.length, 1, 'explicit version-history metadata readback step should be preserved without duplication');
   assert.strictEqual(readSteps[0].text, 'Pine Version History');
   assert.strictEqual(readSteps[0].pineEvidenceMode, 'provenance-summary');
+  assert.deepStrictEqual(readSteps[0].pineSummaryFields, [
+    'latest-revision-label',
+    'latest-relative-time',
+    'visible-revision-count',
+    'visible-recency-signal',
+    'top-visible-revisions'
+  ]);
   assert.strictEqual(rewritten[2].verify.target, 'pine-version-history');
 });
 
