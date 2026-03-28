@@ -526,10 +526,42 @@ function formatChatContinuitySummary(state) {
   return lines.join('\n').trim() || 'No chat continuity recorded.';
 }
 
-function formatChatContinuityContext(state) {
+function isBroadAdvisoryPivotInput(message) {
+  const text = String(message || '').trim().toLowerCase();
+  if (!text) return false;
+
+  const hasAdvisorySignal = /\b(what would help|what should i|how can i|confidence|invest|investing|visualizations|indicators|data|catalyst|fundamental|fundamentals|what matters|what should i watch|what should i use)\b/i.test(text);
+  const hasExplicitExecutionSignal = /\b(continue|apply|add|open|show|set|switch|change|draw|place|capture|screenshot|pine logs|pine editor|volume profile|rsi|macd|bollinger|alert|timeframe|watchlist)\b/i.test(text);
+  return hasAdvisorySignal && !hasExplicitExecutionSignal;
+}
+
+function formatScopedAdvisoryContinuityContext(continuity) {
+  const lastTurn = continuity?.lastTurn || null;
+  const lines = [
+    '- continuityScope: advisory-pivot'
+  ];
+
+  if (lastTurn?.targetWindowHandle || lastTurn?.windowTitle) {
+    lines.push(`- priorTargetWindow: ${lastTurn.windowTitle || 'unknown'}${lastTurn.targetWindowHandle ? ` [${lastTurn.targetWindowHandle}]` : ''}`);
+  }
+  if (lastTurn?.captureMode) lines.push(`- priorCaptureMode: ${lastTurn.captureMode}`);
+  if (typeof lastTurn?.captureTrusted === 'boolean') lines.push(`- priorCaptureTrusted: ${lastTurn.captureTrusted ? 'yes' : 'no'}`);
+  if (typeof continuity?.continuationReady === 'boolean') lines.push(`- priorContinuationReady: ${continuity.continuationReady ? 'yes' : 'no'}`);
+  if (continuity?.degradedReason) lines.push(`- priorDegradedReason: ${continuity.degradedReason}`);
+  lines.push('- Rule: The current user turn is broad advisory planning, not an explicit continuation of the prior chart-analysis step.');
+  lines.push('- Rule: Do not restate prior chart-specific observations, indicator readings, or price-level claims as current facts unless fresh trusted evidence is gathered or the user explicitly resumes that analysis branch.');
+  lines.push('- Rule: You may reuse only high-level domain context and safe next-step options from the prior TradingView workflow.');
+  return lines.join('\n').trim();
+}
+
+function formatChatContinuityContext(state, options = {}) {
   const continuity = state?.chatContinuity || state || defaultChatContinuity();
   const lastTurn = continuity.lastTurn || null;
   if (!continuity.activeGoal && !lastTurn) return '';
+
+  if (isBroadAdvisoryPivotInput(options?.userMessage)) {
+    return formatScopedAdvisoryContinuityContext(continuity);
+  }
 
   const lines = [];
   if (continuity.activeGoal) lines.push(`- activeGoal: ${continuity.activeGoal}`);

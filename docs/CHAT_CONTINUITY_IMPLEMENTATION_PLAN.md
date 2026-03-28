@@ -1529,6 +1529,45 @@ node scripts/test-chat-actionability.js
 - `yes, open Pine Logs` executes instead of being treated as generic acknowledgement
 - pure acknowledgements like `thanks` remain non-executable
 
+### Track F — Continuity scoping respects advisory pivots
+
+**Status:** First slice completed in working tree
+
+**Delivered so far**
+- scoped `formatChatContinuityContext(...)` in `src/main/session-intent-state.js` so broad advisory pivots receive a reduced continuity block instead of full stale chart-execution detail
+- updated `src/main/ai-service.js` to pass the current user message into continuity formatting so prompt assembly can distinguish advisory pivots from explicit continuation
+- added prompting regression coverage in `scripts/test-chat-continuity-prompting.js` to ensure stale TradingView chart details are not injected into broad advisory questions
+
+**Why this track exists**
+- Real TradingView testing showed fresh advisory questions like `what would help me have confidence about investing in LUNR?` could inherit stale chart-analysis claims from a previous branch.
+- The continuity system should preserve history, but broad planning/advisory turns should not restate old chart-specific facts as if they were current evidence.
+
+**Goal**
+- keep continuity state intact while scoping prompt injection so fresh advisory pivots do not inherit stale chart-specific claims.
+
+**Primary files**
+- `src/main/session-intent-state.js`
+- `src/main/ai-service.js`
+- `src/main/ai-service/message-builder.js`
+- `scripts/test-chat-continuity-prompting.js`
+
+**Implementation checklist**
+- detect broad advisory pivots separately from explicit continuation or execution follow-through
+- inject a reduced continuity block for advisory pivots that preserves only high-level app/domain context and safety guidance
+- omit stale last-step chart execution facts and verification details from those advisory-pivot prompts
+
+**Acceptance proof (slice 1)**
+```powershell
+node scripts/test-chat-continuity-prompting.js
+node scripts/test-chat-actionability.js
+node scripts/test-message-builder-session-intent.js
+```
+
+**Acceptance criteria**
+- broad advisory pivots do not restate stale chart-specific observations as current facts
+- explicit continuation behavior remains unchanged
+- continuity state is preserved without being over-injected into the wrong branch
+
 ### Track D — Pine-backed evidence gathering for concrete TradingView insight
 
 **Status:** In progress in working tree

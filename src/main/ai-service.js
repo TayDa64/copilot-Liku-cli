@@ -432,7 +432,7 @@ async function buildMessages(userMessage, includeVisual = false, options = {}) {
       mergedOptions.sessionIntentContext = formatSessionIntentContext(sessionState) || '';
     }
     if (!(typeof mergedOptions.chatContinuityContext === 'string' && mergedOptions.chatContinuityContext.trim())) {
-      mergedOptions.chatContinuityContext = formatChatContinuityContext(sessionState) || '';
+      mergedOptions.chatContinuityContext = formatChatContinuityContext(sessionState, { userMessage }) || '';
     }
   } catch {}
   return messageBuilder.buildMessages(userMessage, includeVisual, mergedOptions);
@@ -1337,7 +1337,7 @@ async function sendMessage(userMessage, options = {}) {
     ingestUserIntentState(enhancedMessage, { cwd: process.cwd() });
     const sessionState = getSessionIntentState({ cwd: process.cwd() });
     sessionIntentContextText = formatSessionIntentContext(sessionState) || '';
-    chatContinuityContextText = formatChatContinuityContext(sessionState) || '';
+    chatContinuityContextText = formatChatContinuityContext(sessionState, { userMessage: enhancedMessage }) || '';
   } catch (err) {
     console.warn('[AI] Session intent state error (non-fatal):', err.message);
   }

@@ -223,6 +223,66 @@ await test('prompting blocks overclaiming on contradicted and cancelled turns', 
 
   fs.rmSync(tempDir, { recursive: true, force: true });
 });
+
+await test('prompting scopes stale chart continuity on fresh advisory pivots', async () => {
+  const { tempDir, stateFile, cwd } = createTempStore();
+  const store = createSessionIntentStateStore({ stateFile });
+
+  const state = store.recordExecutedTurn({
+    userMessage: 'help me make a confident synthesis of ticker LUNR in tradingview',
+    executionIntent: 'Inspect the active TradingView chart and gather evidence for synthesis',
+    committedSubgoal: 'Inspect the active TradingView chart',
+    actionPlan: [
+      { type: 'focus_window', title: 'TradingView', processName: 'tradingview', windowHandle: 777 },
+      { type: 'screenshot', scope: 'active-window' }
+    ],
+    results: [
+      { type: 'focus_window', success: true, message: 'focused' },
+      { type: 'screenshot', success: true, message: 'captured chart' }
+    ],
+    success: true,
+    observationEvidence: {
+      captureMode: 'window-copyfromscreen',
+      captureTrusted: true,
+      visualContextRef: 'window-copyfromscreen@987'
+    },
+    verification: {
+      status: 'verified',
+      checks: [{ name: 'target-window-focused', status: 'verified' }]
+    },
+    targetWindowHandle: 777,
+    windowTitle: 'TradingView - LUNR',
+    nextRecommendedStep: 'Summarize the visible chart state before modifying indicators.'
+  }, { cwd });
+
+  const builder = createMessageBuilder({
+    getBrowserSessionState: () => ({ lastUpdated: null }),
+    getCurrentProvider: () => 'copilot',
+    getForegroundWindowInfo: async () => null,
+    getInspectService: () => ({ isInspectModeActive: () => false }),
+    getLatestVisualContext: () => null,
+    getPreferencesSystemContext: () => '',
+    getPreferencesSystemContextForApp: () => '',
+    getRecentConversationHistory: () => [],
+    getSemanticDOMContextText: () => '',
+    getUIWatcher: () => null,
+    maxHistory: 0,
+    systemPrompt: 'base system prompt'
+  });
+
+  const messages = await builder.buildMessages('what would help me have confidence about investing in LUNR? visualizations, indicators, data?', false, {
+    chatContinuityContext: formatChatContinuityContext(state, { userMessage: 'what would help me have confidence about investing in LUNR? visualizations, indicators, data?' })
+  });
+
+  const continuityMessage = messages.find((entry) => entry.role === 'system' && entry.content.includes('## Recent Action Continuity'));
+  assert(continuityMessage, 'continuity section is injected');
+  assert(continuityMessage.content.includes('continuityScope: advisory-pivot'));
+  assert(continuityMessage.content.includes('Rule: The current user turn is broad advisory planning, not an explicit continuation of the prior chart-analysis step.'));
+  assert(!continuityMessage.content.includes('lastExecutedActions:'), 'advisory pivot continuity should omit stale chart-execution detail');
+  assert(!continuityMessage.content.includes('lastVerificationStatus:'), 'advisory pivot continuity should omit stale chart-verification detail');
+
+  fs.rmSync(tempDir, { recursive: true, force: true });
+});
 }
 
 main().catch((error) => {
