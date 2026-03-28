@@ -1497,8 +1497,9 @@ node scripts/test-windows-observation-flow.js
 
 **Delivered so far**
 - extended `src/main/tradingview/pine-workflows.js` so Pine Logs evidence-gathering requests can stay verification-first while preserving or auto-appending bounded `get_text` readback
+- extended `src/main/tradingview/pine-workflows.js` so Pine Profiler evidence-gathering requests can also stay verification-first while preserving or auto-appending bounded `get_text` readback
 - added dedicated Pine data-workflow regressions in `scripts/test-tradingview-pine-data-workflows.js`
-- extended `scripts/test-windows-observation-flow.js` with verified Pine Logs readback coverage that gathers text without re-entering a screenshot loop
+- extended `scripts/test-windows-observation-flow.js` with verified Pine Logs and Pine Profiler readback coverage that gathers text without re-entering a screenshot loop
 - updated `src/main/ai-service/system-prompt.js` so TradingView Pine output/error requests prefer verified Pine surfaces plus `get_text` over screenshot-only inference
 
 **Why this track exists**
@@ -1558,6 +1559,9 @@ node scripts/test-windows-observation-flow.js
 **Acceptance criteria**
 - Liku can gather concrete TradingView-adjacent evidence through Pine surfaces without pretending to have precise chart-state access it does not really have
 - Pine workflows strengthen analysis honesty instead of bypassing it
+
+**Next best slice from here**
+- extend the same bounded evidence-gathering pattern to `pine-version-history` for visible revision/provenance summaries without implying chart-state insight
 
 ### Track E — Honest drawing capability framing
 

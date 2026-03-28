@@ -280,6 +280,21 @@ async function run() {
     assert.strictEqual(rewritten[4].text, 'Pine Logs');
   });
 
+  await testAsync('low-signal TradingView Pine Profiler evidence request rewrites to panel verification plus get_text', async () => {
+    const rewritten = aiService.rewriteActionsForReliability([
+      { type: 'key', key: 'ctrl+shift+p' }
+    ], {
+      userMessage: 'open pine profiler in tradingview and summarize the visible metrics'
+    });
+
+    assert(Array.isArray(rewritten), 'pine profiler evidence rewrite should return an action array');
+    assert.strictEqual(rewritten[0].type, 'bring_window_to_front');
+    assert.strictEqual(rewritten[2].type, 'key');
+    assert.strictEqual(rewritten[2].verify.target, 'pine-profiler');
+    assert.strictEqual(rewritten[4].type, 'get_text');
+    assert.strictEqual(rewritten[4].text, 'Pine Profiler');
+  });
+
   await testAsync('verified pine logs workflow allows bounded evidence gathering without screenshot loop', async () => {
     const executed = [];
     const foregroundSequence = [
@@ -329,6 +344,58 @@ async function run() {
       assert.strictEqual(execResult.observationCheckpoints[0].verified, true, 'Pine Logs panel observation should pass');
       assert.strictEqual(execResult.results[2].text, 'Error at 12: mismatched input', 'Text evidence should be preserved on the get_text result');
       assert(!execResult.screenshotCaptured, 'Pine Logs evidence gathering should not require a screenshot loop');
+    });
+  });
+
+  await testAsync('verified pine profiler workflow allows bounded evidence gathering without screenshot loop', async () => {
+    const executed = [];
+    const foregroundSequence = [
+      { success: true, hwnd: 777, title: 'TradingView', processName: 'tradingview', windowKind: 'main' },
+      { success: true, hwnd: 890, title: 'Pine Profiler - TradingView', processName: 'tradingview', windowKind: 'owned' },
+      { success: true, hwnd: 890, title: 'Pine Profiler - TradingView', processName: 'tradingview', windowKind: 'owned' },
+      { success: true, hwnd: 890, title: 'Pine Profiler - TradingView', processName: 'tradingview', windowKind: 'owned' }
+    ];
+
+    await withPatchedSystemAutomation({
+      resolveWindowHandle: async (action) => action?.processName === 'tradingview' ? 777 : 0,
+      getForegroundWindowHandle: async () => 777,
+      getForegroundWindowInfo: async () => {
+        return foregroundSequence.shift() || { success: true, hwnd: 890, title: 'Pine Profiler - TradingView', processName: 'tradingview', windowKind: 'owned' };
+      },
+      focusWindow: async () => ({ success: true }),
+      getRunningProcessesByNames: async () => ([{ pid: 4242, processName: 'tradingview', mainWindowTitle: 'TradingView', startTime: '2026-03-23T00:00:00Z' }])
+    }, async () => {
+      const execResult = await aiService.executeActions({
+        thought: 'Open Pine Profiler and summarize the latest visible metrics',
+        verification: 'TradingView should show Pine Profiler before text is read',
+        actions: [
+          { type: 'focus_window', title: 'TradingView', processName: 'tradingview' },
+          { type: 'key', key: 'ctrl+shift+p', reason: 'Open Pine Profiler', verify: { kind: 'panel-visible', appName: 'TradingView', target: 'pine-profiler', keywords: ['pine profiler', 'profiler', 'pine'] } },
+          { type: 'get_text', text: 'Pine Profiler', reason: 'Read visible Pine Profiler output' }
+        ]
+      }, null, null, {
+        userMessage: 'open pine profiler in tradingview and summarize the visible metrics',
+        actionExecutor: async (action) => {
+          executed.push(action.type);
+          if (action.type === 'get_text') {
+            return {
+              success: true,
+              action: action.type,
+              text: 'Profiler: 12 calls, avg 1.3ms, max 3.8ms',
+              method: 'TextPattern',
+              message: 'Got text via TextPattern: "Profiler: 12 calls, avg 1.3ms, max 3.8ms"'
+            };
+          }
+          return { success: true, action: action.type, message: 'executed' };
+        }
+      });
+
+      assert.strictEqual(execResult.success, true, 'Execution should proceed after Pine Profiler is observed');
+      assert.deepStrictEqual(executed, ['focus_window', 'key', 'get_text'], 'Bounded profiler evidence gathering should continue to read text after panel verification');
+      assert.strictEqual(execResult.observationCheckpoints.length, 1, 'A post-key observation checkpoint should be returned');
+      assert.strictEqual(execResult.observationCheckpoints[0].verified, true, 'Pine Profiler panel observation should pass');
+      assert.strictEqual(execResult.results[2].text, 'Profiler: 12 calls, avg 1.3ms, max 3.8ms', 'Profiler text evidence should be preserved on the get_text result');
+      assert(!execResult.screenshotCaptured, 'Pine Profiler evidence gathering should not require a screenshot loop');
     });
   });
 

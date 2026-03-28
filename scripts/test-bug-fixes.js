@@ -327,8 +327,10 @@ test('ai-service gates TradingView follow-up typing on post-key observation chec
   assert(tradingViewDrawingContent.includes("target: 'object-tree'"), 'TradingView drawing workflows should encode object-tree verification metadata');
   assert(tradingViewDrawingContent.includes("kind: intent.verifyKind"), 'TradingView drawing workflows should preserve verification-first surface contracts');
   assert(tradingViewPineContent.includes("target: 'pine-editor'"), 'TradingView Pine workflows should encode pine-editor verification metadata');
+  assert(tradingViewPineContent.includes("target: 'pine-profiler'"), 'TradingView Pine workflows should encode pine-profiler verification metadata');
   assert(tradingViewPineContent.includes('requiresObservedChange'), 'TradingView Pine workflows should gate follow-up typing on observed panel changes');
   assert(tradingViewPineContent.includes("type: 'get_text'"), 'TradingView Pine workflows should support bounded Pine Logs readback');
+  assert(tradingViewPineContent.includes("text: 'Pine Profiler'"), 'TradingView Pine workflows should support bounded Pine Profiler readback');
   assert(tradingViewPineContent.includes('wantsEvidenceReadback'), 'TradingView Pine workflows should detect Pine evidence-gathering requests');
   assert(tradingViewPaperContent.includes("target: 'paper-trading-panel'"), 'TradingView Paper workflows should encode paper-trading-panel verification metadata');
   assert(tradingViewPaperContent.includes('paper account'), 'TradingView Paper workflows should ground paper-assist keywords');

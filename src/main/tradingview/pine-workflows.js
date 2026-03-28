@@ -20,10 +20,34 @@ function inferPineEvidenceReadIntent(raw = '', surfaceTarget = '') {
   if (!normalized) return false;
 
   const mentionsReadVerb = /\b(read|review|inspect|check|show|summarize|tell me|tell us|extract|gather)\b/.test(normalized);
-  const mentionsOutputTarget = /\b(output|log|logs|errors|messages|status|compiler|compile|results|result|text)\b/.test(normalized);
+  const mentionsOutputTarget = /\b(output|log|logs|errors|messages|status|compiler|compile|results|result|text|profiler|performance|timings|timing|stats|statistics|metrics)\b/.test(normalized);
   if (mentionsReadVerb && mentionsOutputTarget) return true;
 
+  if (surfaceTarget === 'pine-profiler' && mentionsReadVerb && /\b(profiler|performance|timings|timing|stats|statistics|metrics)\b/.test(normalized)) {
+    return true;
+  }
+
   return surfaceTarget === 'pine-logs' && /\bwhat does|what do|what is in|what's in\b/.test(normalized) && /\b(log|logs|errors|messages|status)\b/.test(normalized);
+}
+
+function buildPineReadbackStep(surfaceTarget) {
+  if (surfaceTarget === 'pine-logs') {
+    return {
+      type: 'get_text',
+      text: 'Pine Logs',
+      reason: 'Read visible Pine Logs output for bounded evidence gathering'
+    };
+  }
+
+  if (surfaceTarget === 'pine-profiler') {
+    return {
+      type: 'get_text',
+      text: 'Pine Profiler',
+      reason: 'Read visible Pine Profiler output for bounded evidence gathering'
+    };
+  }
+
+  return null;
 }
 
 function inferPineSurfaceTarget(raw = '') {
@@ -141,12 +165,9 @@ function buildTradingViewPineWorkflowActions(intent = {}, actions = []) {
 
   const hasExplicitReadbackStep = trailing.some((action) => action?.type === 'get_text' || action?.type === 'find_element');
 
-  if (intent.wantsEvidenceReadback && intent.surfaceTarget === 'pine-logs' && !hasExplicitReadbackStep) {
-    trailing.push({
-      type: 'get_text',
-      text: 'Pine Logs',
-      reason: 'Read visible Pine Logs output for bounded evidence gathering'
-    });
+  if (intent.wantsEvidenceReadback && !hasExplicitReadbackStep) {
+    const readbackStep = buildPineReadbackStep(intent.surfaceTarget);
+    if (readbackStep) trailing.push(readbackStep);
   }
 
   if (trailing.length > 0 && trailing[0]?.type !== 'wait') {
