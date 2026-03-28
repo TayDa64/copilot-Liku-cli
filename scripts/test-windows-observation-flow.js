@@ -571,6 +571,8 @@ async function run() {
     assert(chatContent.includes('isLikelyObservationInput(effectiveUserMessage) && isScreenshotOnlyPlan(contActionData)'), 'Chat loop should detect screenshot-only observation detours');
     assert(chatContent.includes('buildForcedObservationAnswerPrompt(effectiveUserMessage)'), 'Chat loop should request a direct answer after screenshot-only detours');
     assert(chatContent.includes('Respond now in natural language only — no JSON action block.'), 'Forced observation prompt should require a natural-language answer');
+    assert(chatContent.includes('buildBoundedObservationFallback(effectiveUserMessage, ai)'), 'Chat loop should fall back to a bounded observation answer when the forced retry still returns actions');
+    assert(chatContent.includes('using a bounded fallback answer instead of continuing the screenshot loop'), 'Chat loop should warn that it is using a bounded fallback answer instead of dead-ending');
   });
 
   await testAsync('screenshot module reports fallback capture mode markers', async () => {

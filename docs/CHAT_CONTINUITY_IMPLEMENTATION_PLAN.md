@@ -1440,6 +1440,14 @@ node scripts/test-message-builder-session-intent.js
 
 ### Track C — Forced-observation recovery becomes useful, not just safe
 
+**Status:** First slice completed in working tree
+
+**Delivered so far**
+- replaced the screenshot-loop dead-end in `src/cli/commands/chat.js` with a deterministic bounded observation fallback
+- bounded fallback answers now summarize evidence quality and explicitly state what cannot be claimed safely
+- added behavioral regression coverage in `scripts/test-chat-forced-observation-fallback.js`
+- extended `scripts/test-windows-observation-flow.js` to assert the bounded fallback path is wired into the chat loop
+
 **Why this track exists**
 - Current loop-prevention in `src/cli/commands/chat.js` correctly blocks screenshot-only loops.
 - If the forced natural-language retry still returns JSON actions, the runtime currently stops rather than producing a bounded fallback answer.
@@ -1467,10 +1475,16 @@ node scripts/test-message-builder-session-intent.js
 
 **Regression additions**
 - `scripts/test-windows-observation-flow.js`
-  - `forced observation retry that still returns actions falls back to bounded answer`
-- likely new `scripts/test-chat-forced-observation-fallback.js`
+  - `chat continuation guard forces direct observation answer after screenshot-only detour`
+- `scripts/test-chat-forced-observation-fallback.js`
   - `forced observation fallback does not emit additional screenshot actions`
   - `bounded fallback answer includes degraded evidence explanation`
+
+**Acceptance proof (slice 1)**
+```powershell
+node scripts/test-chat-forced-observation-fallback.js
+node scripts/test-windows-observation-flow.js
+```
 
 **Acceptance criteria**
 - no screenshot-only loop

@@ -343,6 +343,69 @@ function buildForcedObservationAnswerPrompt(userMessage) {
   ].join(' ');
 }
 
+function isScreenLikeCaptureMode(captureMode) {
+  const normalized = String(captureMode || '').trim().toLowerCase();
+  return normalized === 'screen'
+    || normalized === 'fullscreen-fallback'
+    || normalized.startsWith('screen-')
+    || normalized.includes('fullscreen');
+}
+
+function buildBoundedObservationFallback(userMessage, ai) {
+  const latestVisual = typeof ai?.getLatestVisualContext === 'function'
+    ? ai.getLatestVisualContext()
+    : null;
+  const continuity = getChatContinuityState({ cwd: process.cwd() });
+  const captureMode = String(latestVisual?.captureMode || latestVisual?.scope || continuity?.lastTurn?.captureMode || 'unknown').trim() || 'unknown';
+  const captureTrusted = typeof latestVisual?.captureTrusted === 'boolean'
+    ? latestVisual.captureTrusted
+    : (typeof continuity?.lastTurn?.captureTrusted === 'boolean' ? continuity.lastTurn.captureTrusted : null);
+  const targetWindow = String(
+    latestVisual?.windowTitle
+    || continuity?.lastTurn?.windowTitle
+    || continuity?.currentSubgoal
+    || continuity?.activeGoal
+    || 'current target window'
+  ).trim();
+  const degraded = captureTrusted === false || isScreenLikeCaptureMode(captureMode);
+
+  if (isLikelyToolInventoryInput(userMessage)) {
+    return [
+      'I have fresh visual context, but I am switching to a bounded fallback answer because the assistant kept asking for more screenshot actions instead of answering directly.',
+      '',
+      'Direct UIA controls:',
+      '- Sparse or uncertain from the current low-UIA/visual-first context unless Live UI State explicitly lists them.',
+      '',
+      'Reliable keyboard/window controls:',
+      '- Focus or restore the target window, use known keyboard shortcuts, and capture verified screenshots or panel transitions.',
+      '',
+      'Visible but screenshot-only controls:',
+      degraded
+        ? `- The current image is degraded (${captureMode}), so visible controls may be mixed with other desktop content and should be treated as uncertain until re-captured.`
+        : `- The current image is a trusted ${captureMode} capture, so visible controls can be described, but they still should not be treated as directly targetable unless UIA or verified workflows support them.`
+    ].join('\n');
+  }
+
+  const lines = [
+    'I already have fresh visual context, but the model continued returning screenshot actions instead of a direct answer. Here is a bounded observation fallback instead.',
+    '',
+    `- Target: ${targetWindow}`,
+    `- Evidence quality: ${degraded ? 'degraded-mixed-desktop' : 'trusted-target-window'} (${captureMode})`
+  ];
+
+  if (degraded) {
+    lines.push('- What I can say safely: I have recent visual context for the target, but it is degraded or mixed-desktop evidence rather than a trusted target-window capture.');
+    lines.push('- What I cannot claim safely: exact indicator values, exact trendline placement, exact support/resistance numbers, or other fine chart details that are not directly legible in the current image.');
+    lines.push('- Next safe options: re-capture the target window, open a verified TradingView surface such as Pine Editor or Pine Logs for stronger evidence, or continue with a bounded high-level synthesis only.');
+  } else {
+    lines.push('- What I can say safely: I can describe directly visible facts from the latest target-window capture and keep interpretation separate from observation.');
+    lines.push('- What I still will not overclaim: details that are not directly legible, unverified UI state changes, or precise drawing placement that requires a stronger evidence path.');
+    lines.push('- Next safe options: continue with a bounded synthesis, open verified TradingView tools (for example Pine surfaces), or ask for a specific chart feature to inspect.');
+  }
+
+  return lines.join('\n');
+}
+
 function inferContinuationVerificationStatus(execResult) {
   if (!execResult) return 'unknown';
   if (execResult.cancelled) return 'cancelled';
@@ -1422,7 +1485,12 @@ async function runChatLoop(ai, options) {
           const forcedActions = ai.parseActions(forcedAnswerResp.message);
           const forcedHasActions = !!(forcedActions && Array.isArray(forcedActions.actions) && forcedActions.actions.length > 0);
           if (forcedHasActions) {
-            warn('Forced observation answer still returned actions; stopping to avoid screenshot-only loops.');
+            warn('Forced observation answer still returned actions; using a bounded fallback answer instead of continuing the screenshot loop.');
+            printAssistantMessage({
+              provider: 'liku',
+              model: 'bounded-observation-fallback',
+              message: buildBoundedObservationFallback(effectiveUserMessage, ai)
+            });
           }
           break;
         }
