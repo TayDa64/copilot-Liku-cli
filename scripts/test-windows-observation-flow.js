@@ -295,6 +295,21 @@ async function run() {
     assert.strictEqual(rewritten[4].text, 'Pine Profiler');
   });
 
+  await testAsync('low-signal TradingView Pine Version History request rewrites to panel verification plus get_text', async () => {
+    const rewritten = aiService.rewriteActionsForReliability([
+      { type: 'key', key: 'alt+h' }
+    ], {
+      userMessage: 'open pine version history in tradingview and summarize the latest visible revisions'
+    });
+
+    assert(Array.isArray(rewritten), 'pine version history evidence rewrite should return an action array');
+    assert.strictEqual(rewritten[0].type, 'bring_window_to_front');
+    assert.strictEqual(rewritten[2].type, 'key');
+    assert.strictEqual(rewritten[2].verify.target, 'pine-version-history');
+    assert.strictEqual(rewritten[4].type, 'get_text');
+    assert.strictEqual(rewritten[4].text, 'Pine Version History');
+  });
+
   await testAsync('verified pine logs workflow allows bounded evidence gathering without screenshot loop', async () => {
     const executed = [];
     const foregroundSequence = [
@@ -396,6 +411,58 @@ async function run() {
       assert.strictEqual(execResult.observationCheckpoints[0].verified, true, 'Pine Profiler panel observation should pass');
       assert.strictEqual(execResult.results[2].text, 'Profiler: 12 calls, avg 1.3ms, max 3.8ms', 'Profiler text evidence should be preserved on the get_text result');
       assert(!execResult.screenshotCaptured, 'Pine Profiler evidence gathering should not require a screenshot loop');
+    });
+  });
+
+  await testAsync('verified pine version history workflow allows bounded provenance gathering without screenshot loop', async () => {
+    const executed = [];
+    const foregroundSequence = [
+      { success: true, hwnd: 777, title: 'TradingView', processName: 'tradingview', windowKind: 'main' },
+      { success: true, hwnd: 891, title: 'Pine Version History - TradingView', processName: 'tradingview', windowKind: 'owned' },
+      { success: true, hwnd: 891, title: 'Pine Version History - TradingView', processName: 'tradingview', windowKind: 'owned' },
+      { success: true, hwnd: 891, title: 'Pine Version History - TradingView', processName: 'tradingview', windowKind: 'owned' }
+    ];
+
+    await withPatchedSystemAutomation({
+      resolveWindowHandle: async (action) => action?.processName === 'tradingview' ? 777 : 0,
+      getForegroundWindowHandle: async () => 777,
+      getForegroundWindowInfo: async () => {
+        return foregroundSequence.shift() || { success: true, hwnd: 891, title: 'Pine Version History - TradingView', processName: 'tradingview', windowKind: 'owned' };
+      },
+      focusWindow: async () => ({ success: true }),
+      getRunningProcessesByNames: async () => ([{ pid: 4242, processName: 'tradingview', mainWindowTitle: 'TradingView', startTime: '2026-03-23T00:00:00Z' }])
+    }, async () => {
+      const execResult = await aiService.executeActions({
+        thought: 'Open Pine Version History and summarize the latest visible revisions',
+        verification: 'TradingView should show Pine Version History before text is read',
+        actions: [
+          { type: 'focus_window', title: 'TradingView', processName: 'tradingview' },
+          { type: 'key', key: 'alt+h', reason: 'Open Pine Version History', verify: { kind: 'panel-visible', appName: 'TradingView', target: 'pine-version-history', keywords: ['pine version history', 'version history', 'pine'] } },
+          { type: 'get_text', text: 'Pine Version History', reason: 'Read visible Pine Version History entries' }
+        ]
+      }, null, null, {
+        userMessage: 'open pine version history in tradingview and summarize the latest visible revisions',
+        actionExecutor: async (action) => {
+          executed.push(action.type);
+          if (action.type === 'get_text') {
+            return {
+              success: true,
+              action: action.type,
+              text: 'Revision 18 saved 2m ago; Revision 17 saved 18m ago',
+              method: 'TextPattern',
+              message: 'Got text via TextPattern: "Revision 18 saved 2m ago; Revision 17 saved 18m ago"'
+            };
+          }
+          return { success: true, action: action.type, message: 'executed' };
+        }
+      });
+
+      assert.strictEqual(execResult.success, true, 'Execution should proceed after Pine Version History is observed');
+      assert.deepStrictEqual(executed, ['focus_window', 'key', 'get_text'], 'Bounded provenance gathering should continue to read text after panel verification');
+      assert.strictEqual(execResult.observationCheckpoints.length, 1, 'A post-key observation checkpoint should be returned');
+      assert.strictEqual(execResult.observationCheckpoints[0].verified, true, 'Pine Version History panel observation should pass');
+      assert.strictEqual(execResult.results[2].text, 'Revision 18 saved 2m ago; Revision 17 saved 18m ago', 'Version History text evidence should be preserved on the get_text result');
+      assert(!execResult.screenshotCaptured, 'Pine Version History provenance gathering should not require a screenshot loop');
     });
   });
 

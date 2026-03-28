@@ -40,6 +40,16 @@ test('pine workflow recognizes pine profiler evidence-gathering requests', () =>
   assert.strictEqual(intent.wantsEvidenceReadback, true);
 });
 
+test('pine workflow recognizes pine version history provenance requests', () => {
+  const intent = inferTradingViewPineIntent('open pine version history in tradingview and read the latest visible revisions', [
+    { type: 'key', key: 'alt+h' }
+  ]);
+
+  assert(intent, 'intent should be inferred');
+  assert.strictEqual(intent.surfaceTarget, 'pine-version-history');
+  assert.strictEqual(intent.wantsEvidenceReadback, true);
+});
+
 test('open pine logs and read output stays verification-first', () => {
   const rewritten = buildTradingViewPineWorkflowActions({
     appName: 'TradingView',
@@ -78,6 +88,25 @@ test('open pine profiler and summarize metrics stays verification-first', () => 
   assert.strictEqual(rewritten[4].text, 'Pine Profiler');
 });
 
+test('open pine version history and read revisions stays verification-first', () => {
+  const rewritten = buildTradingViewPineWorkflowActions({
+    appName: 'TradingView',
+    surfaceTarget: 'pine-version-history',
+    verifyKind: 'panel-visible',
+    openerIndex: 0,
+    wantsEvidenceReadback: true,
+    requiresObservedChange: false
+  }, [
+    { type: 'key', key: 'alt+h', reason: 'Open Pine Version History' }
+  ]);
+
+  assert.strictEqual(rewritten[0].type, 'bring_window_to_front');
+  assert.strictEqual(rewritten[2].type, 'key');
+  assert.strictEqual(rewritten[2].verify.target, 'pine-version-history');
+  assert.strictEqual(rewritten[4].type, 'get_text');
+  assert.strictEqual(rewritten[4].text, 'Pine Version History');
+});
+
 test('pine evidence-gathering workflow preserves trailing get_text read step', () => {
   const rewritten = maybeRewriteTradingViewPineWorkflow([
     { type: 'key', key: 'ctrl+shift+l' },
@@ -106,6 +135,21 @@ test('pine profiler evidence workflow preserves trailing get_text read step', ()
   assert.strictEqual(readSteps.length, 1, 'explicit profiler readback step should be preserved without duplication');
   assert.strictEqual(readSteps[0].text, 'Pine Profiler');
   assert.strictEqual(rewritten[2].verify.target, 'pine-profiler');
+});
+
+test('pine version history workflow preserves trailing get_text read step', () => {
+  const rewritten = maybeRewriteTradingViewPineWorkflow([
+    { type: 'key', key: 'alt+h' },
+    { type: 'get_text', text: 'Pine Version History', reason: 'Read visible Pine Version History entries' }
+  ], {
+    userMessage: 'open pine version history in tradingview and summarize the latest visible revisions'
+  });
+
+  assert(Array.isArray(rewritten), 'workflow should rewrite');
+  const readSteps = rewritten.filter((action) => action?.type === 'get_text');
+  assert.strictEqual(readSteps.length, 1, 'explicit version-history readback step should be preserved without duplication');
+  assert.strictEqual(readSteps[0].text, 'Pine Version History');
+  assert.strictEqual(rewritten[2].verify.target, 'pine-version-history');
 });
 
 test('pine workflow does not hijack speculative chart-analysis prompts', () => {

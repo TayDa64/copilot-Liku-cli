@@ -328,9 +328,11 @@ test('ai-service gates TradingView follow-up typing on post-key observation chec
   assert(tradingViewDrawingContent.includes("kind: intent.verifyKind"), 'TradingView drawing workflows should preserve verification-first surface contracts');
   assert(tradingViewPineContent.includes("target: 'pine-editor'"), 'TradingView Pine workflows should encode pine-editor verification metadata');
   assert(tradingViewPineContent.includes("target: 'pine-profiler'"), 'TradingView Pine workflows should encode pine-profiler verification metadata');
+  assert(tradingViewPineContent.includes("target: 'pine-version-history'"), 'TradingView Pine workflows should encode pine-version-history verification metadata');
   assert(tradingViewPineContent.includes('requiresObservedChange'), 'TradingView Pine workflows should gate follow-up typing on observed panel changes');
   assert(tradingViewPineContent.includes("type: 'get_text'"), 'TradingView Pine workflows should support bounded Pine Logs readback');
   assert(tradingViewPineContent.includes("text: 'Pine Profiler'"), 'TradingView Pine workflows should support bounded Pine Profiler readback');
+  assert(tradingViewPineContent.includes("text: 'Pine Version History'"), 'TradingView Pine workflows should support bounded Pine Version History readback');
   assert(tradingViewPineContent.includes('wantsEvidenceReadback'), 'TradingView Pine workflows should detect Pine evidence-gathering requests');
   assert(tradingViewPaperContent.includes("target: 'paper-trading-panel'"), 'TradingView Paper workflows should encode paper-trading-panel verification metadata');
   assert(tradingViewPaperContent.includes('paper account'), 'TradingView Paper workflows should ground paper-assist keywords');
@@ -345,7 +347,7 @@ test('system prompt guides Pine evidence gathering toward get_text over screensh
   const content = fs.readFileSync(systemPromptPath, 'utf8');
 
   assert(content.includes('TradingView Pine evidence rule'), 'System prompt should include explicit TradingView Pine evidence guidance');
-  assert(content.includes('Pine Logs / Profiler text'), 'System prompt should point the model toward Pine text evidence');
+  assert(content.includes('Pine Logs / Profiler / Version History text'), 'System prompt should point the model toward Pine text and provenance evidence');
   assert(content.includes('get_text'), 'System prompt should mention get_text for Pine evidence gathering');
 });
 

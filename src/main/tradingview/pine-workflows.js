@@ -20,10 +20,14 @@ function inferPineEvidenceReadIntent(raw = '', surfaceTarget = '') {
   if (!normalized) return false;
 
   const mentionsReadVerb = /\b(read|review|inspect|check|show|summarize|tell me|tell us|extract|gather)\b/.test(normalized);
-  const mentionsOutputTarget = /\b(output|log|logs|errors|messages|status|compiler|compile|results|result|text|profiler|performance|timings|timing|stats|statistics|metrics)\b/.test(normalized);
+  const mentionsOutputTarget = /\b(output|log|logs|errors|messages|status|compiler|compile|results|result|text|profiler|performance|timings|timing|stats|statistics|metrics|history|version|versions|revision|revisions|changes|provenance)\b/.test(normalized);
   if (mentionsReadVerb && mentionsOutputTarget) return true;
 
   if (surfaceTarget === 'pine-profiler' && mentionsReadVerb && /\b(profiler|performance|timings|timing|stats|statistics|metrics)\b/.test(normalized)) {
+    return true;
+  }
+
+  if (surfaceTarget === 'pine-version-history' && mentionsReadVerb && /\b(history|version|versions|revision|revisions|changes|provenance)\b/.test(normalized)) {
     return true;
   }
 
@@ -44,6 +48,14 @@ function buildPineReadbackStep(surfaceTarget) {
       type: 'get_text',
       text: 'Pine Profiler',
       reason: 'Read visible Pine Profiler output for bounded evidence gathering'
+    };
+  }
+
+  if (surfaceTarget === 'pine-version-history') {
+    return {
+      type: 'get_text',
+      text: 'Pine Version History',
+      reason: 'Read visible Pine Version History entries for bounded provenance gathering'
     };
   }
 
