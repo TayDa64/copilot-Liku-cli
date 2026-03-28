@@ -1491,6 +1491,44 @@ node scripts/test-windows-observation-flow.js
 - no silent dead-end stop when the model violates the no-JSON retry
 - user receives a bounded answer or safe next-step message
 
+### Track E — Recommendation follow-through becomes executable
+
+**Status:** First slice completed in working tree
+
+**Delivered so far**
+- added explicit affirmative-follow-through classification in `src/cli/commands/chat.js` so turns like `yes, lets apply the volume profile` preserve the current requested operation as execution intent instead of collapsing back to the prior advisory turn
+- prioritized that follow-through classifier inside `shouldExecuteDetectedActions(...)` before generic approval handling so explicit TradingView/Pine follow-up requests execute reliably
+- extended `scripts/test-chat-actionability.js` with transcript-grounded regressions for:
+  - explicit indicator follow-through
+  - explicit Pine follow-through
+  - advisory recommendation -> explicit follow-through execution
+
+**Why this track exists**
+- Real TradingView testing showed a valid indicator workflow could still be withheld after a natural user reply like `yes, lets apply the volume profile`.
+- The deeper issue is not only approval detection; it is preserving recommendation-followthrough turns as explicit operations instead of treating them as generic continuation or acknowledgement text.
+
+**Goal**
+- make affirmative + explicit requested TradingView/Pine follow-through execute reliably.
+
+**Primary files**
+- `src/cli/commands/chat.js`
+- `scripts/test-chat-actionability.js`
+
+**Implementation checklist**
+- add a dedicated helper for affirmative + explicit requested operation input
+- preserve the current user turn as `executionIntent` for explicit follow-through requests instead of defaulting to the previous advisory turn
+- keep pure acknowledgement-only turns non-executable
+
+**Acceptance proof (slice 1)**
+```powershell
+node scripts/test-chat-actionability.js
+```
+
+**Acceptance criteria**
+- `yes, lets apply the volume profile` executes instead of being withheld
+- `yes, open Pine Logs` executes instead of being treated as generic acknowledgement
+- pure acknowledgements like `thanks` remain non-executable
+
 ### Track D — Pine-backed evidence gathering for concrete TradingView insight
 
 **Status:** In progress in working tree

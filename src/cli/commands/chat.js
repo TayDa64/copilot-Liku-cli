@@ -203,6 +203,17 @@ function isLikelyApprovalOrContinuationInput(text) {
   return /^(?:yes|y|yeah|yep|sure|ok|okay)(?:[!.\s].*)?$|^(?:(?:let'?s|please)\s+)?(?:go ahead|do it|do that|please do|continue|proceed|next(?:\s+step(?:s)?)?|keep going|carry on|move on)(?:[!.\s,].*)?$|^(?:(?:let'?s)\s+)?continue\s+with\s+next\s+steps(?:[!.\s,].*)?$|^(?:(?:let'?s)\s+)?maintain\s+continuity(?:[!.\s,].*)?$/i.test(t);
 }
 
+function isAffirmativeExplicitOperationInput(text) {
+  const t = String(text || '').trim().toLowerCase();
+  if (!t) return false;
+  if (isAcknowledgementOnlyInput(t)) return false;
+  if (!/^(?:yes|y|yeah|yep|sure|ok|okay)\b/i.test(t)) return false;
+
+  const hasOperationVerb = /\b(apply|add|open|show|use|set|switch|change|launch|bring|focus|capture|take|draw|place|create|remove|enable|disable|retry|recapture|inspect|analy[sz]e)\b/i.test(t);
+  const hasOperationTarget = /\b(indicator|volume profile|vpvr|rsi|macd|bollinger|pine(?:\s+(?:logs|editor|profiler|version history))?|tradingview|alert|timeframe|watchlist|drawing|drawings|tool|tools|chart|dom|paper trading)\b/i.test(t);
+  return hasOperationVerb || hasOperationTarget;
+}
+
 function isMinimalContinuationInput(text) {
   const t = String(text || '').trim().toLowerCase();
   if (!t) return false;
@@ -298,8 +309,9 @@ function isObservationOrSynthesisPlan(actionData) {
 function shouldExecuteDetectedActions(currentLine, executionIntent, actionData) {
   const hasActions = !!(actionData && Array.isArray(actionData.actions) && actionData.actions.length > 0);
   if (!hasActions) return false;
-  if (isLikelyApprovalOrContinuationInput(currentLine)) return true;
   if (isAcknowledgementOnlyInput(currentLine)) return false;
+  if (isAffirmativeExplicitOperationInput(currentLine)) return true;
+  if (isLikelyApprovalOrContinuationInput(currentLine)) return true;
   if (isLikelyAutomationInput(executionIntent)) return true;
   if (isLikelyObservationInput(executionIntent)) return true;
   if (isLikelyToolInventoryInput(executionIntent)) return true;
@@ -978,6 +990,7 @@ async function runChatLoop(ai, options) {
 
     const lowerLine = line.toLowerCase();
     const isContinueLike = isLikelyApprovalOrContinuationInput(lowerLine);
+    const isAffirmativeExplicitOperation = isAffirmativeExplicitOperationInput(line);
     const chatContinuity = isContinueLike ? getChatContinuityState({ cwd: process.cwd() }) : null;
     const continuationDecision = isContinueLike
       ? getContinuationDecision(line, chatContinuity)
@@ -994,7 +1007,7 @@ async function runChatLoop(ai, options) {
 
     const executionIntent = continuationDecision.useContinuityState
       ? continuationDecision.effectiveIntent
-      : (isContinueLike ? (lastNonTrivialUserMessage || line) : line);
+      : (isContinueLike && !isAffirmativeExplicitOperation ? (lastNonTrivialUserMessage || line) : line);
 
     if (['exit', 'quit', 'q'].includes(line.toLowerCase())) {
       break;

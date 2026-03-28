@@ -19,6 +19,7 @@ let seenMessages = [];
 let continuityState = process.env.__CHAT_CONTINUITY__ ? JSON.parse(process.env.__CHAT_CONTINUITY__) : null;
 const scriptedVisualStates = process.env.__LATEST_VISUAL_SEQUENCE__ ? JSON.parse(process.env.__LATEST_VISUAL_SEQUENCE__) : [];
 let lastRecordedTurn = null;
+let preflightUserMessages = [];
 
 function isScreenLikeCaptureMode(captureMode) {
   const normalized = String(captureMode || '').trim().toLowerCase();
@@ -64,28 +65,82 @@ function deriveContinuityState(turnRecord) {
   };
 }
 
-const actionResponse = JSON.stringify({
-  thought: 'Set alert in TradingView',
-  actions: [
-    { type: 'focus_window', windowHandle: 458868 },
-    { type: 'key', key: 'alt+a', reason: 'Open the Create Alert dialog' },
-    { type: 'type', text: '20.02' },
-    { type: 'key', key: 'enter', reason: 'Save the alert' }
-  ],
-  verification: 'TradingView should show the alert configured at 20.02'
-}, null, 2);
+function buildActionResponse(line) {
+  const lower = String(line || '').toLowerCase();
+
+  if (/confidence about investing|what would help me have confidence/.test(lower)) {
+    return 'To build confidence in LUNR, combine chart structure, indicators, and catalyst data.';
+  }
+
+  if (/volume profile|vpvr/.test(lower)) {
+    return JSON.stringify({
+      thought: 'Apply Volume Profile in TradingView',
+      actions: [
+        { type: 'focus_window', windowHandle: 458868 },
+        { type: 'key', key: '/', reason: 'Open Indicators search in TradingView' },
+        { type: 'type', text: 'Volume Profile Visible Range' },
+        { type: 'key', key: 'enter', reason: 'Add Volume Profile Visible Range' }
+      ],
+      verification: 'TradingView should show Volume Profile Visible Range on the chart.'
+    }, null, 2);
+  }
+
+  if (/add rsi/.test(lower)) {
+    return JSON.stringify({
+      thought: 'Add RSI in TradingView',
+      actions: [
+        { type: 'focus_window', windowHandle: 458868 },
+        { type: 'key', key: '/', reason: 'Open Indicators search in TradingView' },
+        { type: 'type', text: 'RSI' },
+        { type: 'key', key: 'enter', reason: 'Add RSI indicator' }
+      ],
+      verification: 'TradingView should show RSI on the chart.'
+    }, null, 2);
+  }
+
+  if (/pine logs/.test(lower)) {
+    return JSON.stringify({
+      thought: 'Open Pine Logs in TradingView',
+      actions: [
+        { type: 'focus_window', windowHandle: 458868 },
+        { type: 'key', key: 'alt+l', reason: 'Open Pine Logs' }
+      ],
+      verification: 'TradingView should show the Pine Logs panel.'
+    }, null, 2);
+  }
+
+  return JSON.stringify({
+    thought: 'Set alert in TradingView',
+    actions: [
+      { type: 'focus_window', windowHandle: 458868 },
+      { type: 'key', key: 'alt+a', reason: 'Open the Create Alert dialog' },
+      { type: 'type', text: '20.02' },
+      { type: 'key', key: 'enter', reason: 'Save the alert' }
+    ],
+    verification: 'TradingView should show the alert configured at 20.02'
+  }, null, 2);
+}
 
 const aiStub = {
   sendMessage: async (line) => {
     seenMessages.push(line);
-    return { success: true, provider: 'stub', model: 'stub-model', message: line ? actionResponse : 'stub response', requestedModel: 'stub-model' };
+    return { success: true, provider: 'stub', model: 'stub-model', message: line ? buildActionResponse(line) : 'stub response', requestedModel: 'stub-model' };
   },
   handleCommand: async () => ({ type: 'info', message: 'stub command' }),
-  parseActions: (message) => JSON.parse(String(message || 'null')),
+  parseActions: (message) => {
+    try {
+      return JSON.parse(String(message || 'null'));
+    } catch {
+      return null;
+    }
+  },
   saveSessionNote: () => null,
   setUIWatcher: () => {},
   getUIWatcher: () => null,
-  preflightActions: (value) => value,
+  preflightActions: (value, options = {}) => {
+    preflightUserMessages.push(options?.userMessage || null);
+    return value;
+  },
   analyzeActionSafety: () => ({ requiresConfirmation: false }),
   executeActions: async () => {
     executeCount++;
@@ -138,6 +193,7 @@ Module._load = function(request, parent, isMain) {
   const result = await chat.run([], { execute: 'auto', quiet: true });
   console.log('EXECUTE_COUNT:' + executeCount);
   console.log('SEEN_MESSAGES:' + JSON.stringify(seenMessages));
+  console.log('PREFLIGHT_USER_MESSAGES:' + JSON.stringify(preflightUserMessages));
   console.log('RECORDED_CONTINUITY:' + JSON.stringify(continuityState));
   console.log('LAST_TURN:' + JSON.stringify(lastRecordedTurn));
   process.exit(result && result.success === false ? 1 : 0);
@@ -194,6 +250,26 @@ async function main() {
   assert.strictEqual(approval.exitCode, 0, 'approval-style scenario should exit successfully');
   assert(approval.output.includes('EXECUTE_COUNT:1'), 'approval-style scenario should execute the emitted actions once');
   assert(!approval.output.includes('Non-action message detected'), 'approval-style scenario should not be skipped as non-action');
+
+  const explicitIndicatorFollowThrough = await runScenario(['yes, lets apply the volume profile']);
+  assert.strictEqual(explicitIndicatorFollowThrough.exitCode, 0, 'affirmative explicit indicator follow-through should exit successfully');
+  assert(explicitIndicatorFollowThrough.output.includes('EXECUTE_COUNT:1'), 'affirmative explicit indicator follow-through should execute emitted actions');
+  assert(!explicitIndicatorFollowThrough.output.includes('Parsed action plan withheld'), 'affirmative explicit indicator follow-through should not be withheld as acknowledgement-only text');
+  assert(explicitIndicatorFollowThrough.output.includes('PREFLIGHT_USER_MESSAGES:["yes, lets apply the volume profile"]'), 'affirmative explicit indicator follow-through should preserve the current operation as execution intent');
+
+  const explicitPineFollowThrough = await runScenario(['yes, open Pine Logs']);
+  assert.strictEqual(explicitPineFollowThrough.exitCode, 0, 'affirmative explicit Pine follow-through should exit successfully');
+  assert(explicitPineFollowThrough.output.includes('EXECUTE_COUNT:1'), 'affirmative explicit Pine follow-through should execute emitted actions');
+  assert(explicitPineFollowThrough.output.includes('PREFLIGHT_USER_MESSAGES:["yes, open Pine Logs"]'), 'affirmative explicit Pine follow-through should preserve the current operation as execution intent');
+
+  const recommendationFollowThrough = await runScenario([
+    'what would help me have confidence about investing in LUNR? visualizations, indicators, data?',
+    'yes, lets apply the volume profile'
+  ]);
+  assert.strictEqual(recommendationFollowThrough.exitCode, 0, 'recommendation follow-through scenario should exit successfully');
+  assert(recommendationFollowThrough.output.includes('EXECUTE_COUNT:1'), 'recommendation follow-through should execute the explicit indicator request on the second turn');
+  assert(recommendationFollowThrough.output.includes('SEEN_MESSAGES:["what would help me have confidence about investing in LUNR? visualizations, indicators, data?","yes, lets apply the volume profile"]'), 'recommendation follow-through should keep the explicit second-turn request intact');
+  assert(recommendationFollowThrough.output.includes('PREFLIGHT_USER_MESSAGES:["yes, lets apply the volume profile"]'), 'recommendation follow-through should not collapse the explicit follow-through intent back to the prior advisory question');
 
   const continuity = await runScenario(['lets continue with next steps, maintain continuity']);
   assert.strictEqual(continuity.exitCode, 0, 'continuity-style scenario should exit successfully');
