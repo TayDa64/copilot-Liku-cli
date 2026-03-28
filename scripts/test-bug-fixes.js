@@ -38,6 +38,14 @@ function assertEqual(actual, expected, message) {
   }
 }
 
+function assertDeepEqual(actual, expected, message) {
+  const actualJson = JSON.stringify(actual);
+  const expectedJson = JSON.stringify(expected);
+  if (actualJson !== expectedJson) {
+    throw new Error(`${message || 'Assertion failed'}: expected ${expectedJson}, got ${actualJson}`);
+  }
+}
+
 console.log('\n========================================');
 console.log('  Testing v0.0.5 Bug Fixes');
 console.log('========================================\n');
@@ -224,6 +232,23 @@ test('rewriteActionsForReliability normalizes typoed app launches', () => {
   assert(launchAction.verifyTarget.chartKeywords.includes('timeframe'), 'verifyTarget should include TradingView chart-state keywords');
   assert(launchAction.verifyTarget.pineKeywords.includes('pine editor'), 'verifyTarget should include TradingView Pine Editor keywords');
   assert(launchAction.verifyTarget.domKeywords.includes('depth of market'), 'verifyTarget should include TradingView DOM keywords');
+});
+
+test('rewriteActionsForReliability does not reinterpret passive TradingView open-state prompts as app launches', () => {
+  const aiServicePath = path.join(__dirname, '..', 'src', 'main', 'ai-service.js');
+  const aiService = require(aiServicePath);
+
+  const original = [
+    { type: 'focus_window', windowHandle: 264274 },
+    { type: 'wait', ms: 1000 },
+    { type: 'screenshot' }
+  ];
+
+  const rewritten = aiService.rewriteActionsForReliability(original, {
+    userMessage: 'I have tradingview open in the background, what do you think?'
+  });
+
+  assertDeepEqual(rewritten, original, 'Passive open-state phrasing should preserve a concrete TradingView observation plan');
 });
 
 test('ai-service normalizes app identity for learned skill scope', () => {

@@ -2425,6 +2425,23 @@ function maybeBuildBrowserRecoverySearchFallback(actions, userMessage) {
   return buildBrowserSearchActions(explicitBrowser, recoveryQuery);
 }
 
+function sanitizeRequestedAppCandidate(candidate) {
+  if (!candidate || typeof candidate !== 'string') return null;
+  let normalized = candidate.replace(/\s+/g, ' ').trim();
+  if (!normalized) return null;
+
+  normalized = normalized.replace(/^[`'"(\[]+|[`'"),.!?\]]+$/g, '').trim();
+  normalized = normalized.replace(/\s+(?:and|then)\s+(?:tell|show|analy[sz]e|give|capture|take|inspect|look|summari[sz]e|draw|visuali[sz]e|use|what)\b.*$/i, '').trim();
+  normalized = normalized.replace(/\s*[,;:!?].*$/, '').trim();
+
+  if (!normalized) return null;
+  if (/^(?:in|on|at|with|while|when|since|because|already|currently|right\s+now)\b/i.test(normalized)) {
+    return null;
+  }
+  if (normalized.length > 64) return null;
+  return normalized;
+}
+
 function extractRequestedAppName(text) {
   if (!text || typeof text !== 'string') return null;
   const normalized = text.replace(/\s+/g, ' ').trim();
@@ -2432,18 +2449,23 @@ function extractRequestedAppName(text) {
 
   // Reject when the sentence is about interacting with web content, not launching an app
   const webContentRe = /\b(website|web\s*site|link|results|search\s*results|page|tab|url|button|menu|element)\b/i;
+  const appSurfaceRe = /\b(dialog|panel|timeframe|time\s+frame|watchlist|symbol|chart|create\s+alert|alert\s+dialog|indicator(?:\s+search)?|pine\s+editor|pine\s+logs|dom|depth\s+of\s+market|paper\s+trading|drawing\s+tools?|object\s+tree|trading\s+panel)\b/i;
 
-  const m = normalized.match(/\b(open|launch|start|run)\b\s+(?:the\s+)?(.+?)\s+\b(app|application|program|software)\b/i);
-  if (m && m[2]) {
-    const candidate = m[2].trim();
-    if (webContentRe.test(candidate)) return null;
-    return candidate;
-  }
+  const intentPatterns = [
+    /^(?:please\s+|hey\s+|ok(?:ay)?\s+|first\s+|then\s+)*(open|launch|start|run)\b\s+(?:the\s+)?(.+?)\s+\b(app|application|program|software)\b(?:[.!?]|$)/i,
+    /^(?:please\s+|hey\s+|ok(?:ay)?\s+|first\s+|then\s+)*(open|launch|start|run)\b\s+(?:the\s+)?(.+)$/i,
+    /^(?:can|could|would|will)\s+you\s+(?:please\s+)?(?:first\s+|then\s+)*(open|launch|start|run)\b\s+(?:the\s+)?(.+?)(?:\s+\b(app|application|program|software)\b)?(?:[.!?]|$)/i,
+    /^(?:i\s+need\s+to|need\s+to|i\s+want\s+to|want\s+to|help\s+me|let'?s|lets|try\s+to|trying\s+to|go\s+ahead\s+and)\s+(open|launch|start|run)\b\s+(?:the\s+)?(.+?)(?:\s+\b(app|application|program|software)\b)?(?:[.!?]|$)/i
+  ];
 
-  const short = normalized.match(/\b(open|launch|start|run)\b\s+(?:the\s+)?(.+)/i);
-  if (short && short[2] && short[2].length <= 48 && !/https?:\/\//i.test(short[2])) {
-    const candidate = short[2].trim();
-    if (webContentRe.test(candidate)) return null;
+  for (const pattern of intentPatterns) {
+    const match = normalized.match(pattern);
+    const rawCandidate = match?.[2];
+    if (!rawCandidate || /https?:\/\//i.test(rawCandidate)) continue;
+    const candidate = sanitizeRequestedAppCandidate(rawCandidate);
+    if (!candidate) continue;
+    if (webContentRe.test(candidate)) continue;
+    if (appSurfaceRe.test(candidate)) continue;
     return candidate;
   }
 
@@ -2839,6 +2861,44 @@ function actionsLikelyBrowserSession(actions) {
   });
 }
 
+function actionsLikelyConcreteAppObservationPlan(actions, requestedAppName) {
+  if (!Array.isArray(actions) || actions.length === 0 || !requestedAppName) return false;
+
+  const allowedTypes = new Set(['focus_window', 'bring_window_to_front', 'wait', 'screenshot']);
+  const onlyObservationTypes = actions.every((action) => allowedTypes.has(String(action?.type || '').toLowerCase()));
+  if (!onlyObservationTypes) return false;
+  if (!actions.some((action) => String(action?.type || '').toLowerCase() === 'screenshot')) return false;
+
+  const normalizedIdentity = resolveNormalizedAppIdentity(requestedAppName);
+  const expectedProcessNames = new Set((normalizedIdentity?.processNames || []).map((value) => String(value || '').trim().toLowerCase()).filter(Boolean));
+  const expectedTitleHints = (normalizedIdentity?.titleHints || []).map((value) => String(value || '').trim().toLowerCase()).filter(Boolean);
+
+  return actions.some((action) => {
+    const type = String(action?.type || '').toLowerCase();
+    if (type !== 'focus_window' && type !== 'bring_window_to_front') return false;
+
+    const explicitWindowHandle = Number(action?.windowHandle || action?.hwnd || action?.targetWindowHandle || 0) || 0;
+    if (explicitWindowHandle > 0) return true;
+
+    const verifyTarget = action?.verifyTarget;
+    if (verifyTarget && normalizedIdentity?.appName === 'TradingView' && isTradingViewTargetHint(verifyTarget)) {
+      return true;
+    }
+
+    const processName = String(action?.processName || '').trim().toLowerCase();
+    if (processName && Array.from(expectedProcessNames).some((candidate) => processName === candidate || processName.includes(candidate))) {
+      return true;
+    }
+
+    const title = String(action?.title || action?.windowTitle || '').trim().toLowerCase();
+    if (title && expectedTitleHints.some((hint) => title.includes(hint))) {
+      return true;
+    }
+
+    return false;
+  });
+}
+
 function extractUrlFromActions(actions) {
   if (!Array.isArray(actions)) return null;
   for (const action of actions) {
@@ -3189,6 +3249,10 @@ function rewriteActionsForReliability(actions, context = {}) {
   if (requestedAppName && !requestedUrl) {
     const hasExplicitVerificationContract = actions.some((a) => a?.verify && typeof a.verify === 'object' && String(a.verify.kind || '').trim());
     if (hasExplicitVerificationContract) {
+      return actions;
+    }
+
+    if (actionsLikelyConcreteAppObservationPlan(actions, requestedAppName)) {
       return actions;
     }
 

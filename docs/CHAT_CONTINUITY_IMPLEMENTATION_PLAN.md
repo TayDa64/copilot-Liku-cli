@@ -1315,3 +1315,285 @@ If follow-on work is needed, it is no longer “finish the current plan,” but 
   - define new work beyond this plan rather than treating unfinished status text as implementation debt
 
 That means the remaining work after this document is not an open implementation gap inside Milestones 1–7; it is deciding what the next roadmap should be.
+
+## Post-plan hardening checklist (grounded in TradingView runtime findings)
+
+The current continuity plan is implemented, but recent real-world TradingView testing exposed a new class of follow-on work. These are not missing Milestones 1–7 items; they are the next practical hardening tracks after the continuity architecture landed.
+
+The findings below are grounded in current repo seams, especially:
+
+- `src/main/ai-service.js`
+  - `extractRequestedAppName(...)`
+  - `rewriteActionsForReliability(...)`
+- `src/cli/commands/chat.js`
+  - screenshot-only loop forcing
+  - continuation/forced-answer handling
+- `src/main/ai-service/message-builder.js`
+  - same-turn visual context injection
+- `src/main/tradingview/pine-workflows.js`
+  - Pine surface opening + verified typing
+- `src/main/tradingview/drawing-workflows.js`
+  - drawing surface access vs unsafe placement refusal
+- `src/main/system-automation.js`
+  - `run_command`, `grep_repo`, `semantic_search_repo`, `pgrep_process`
+
+### Track A — Intent-safe reliability rewrites
+
+**Status:** First slice completed in working tree
+
+**Delivered so far**
+- hardened `extractRequestedAppName(...)` in `src/main/ai-service.js` so passive open-state phrasing no longer gets treated as app-launch intent
+- added a concrete observation-plan preservation guard in `rewriteActionsForReliability(...)` for existing-window focus/wait/screenshot flows
+- added regression coverage in:
+  - `scripts/test-windows-observation-flow.js`
+  - `scripts/test-bug-fixes.js`
+- revalidated with:
+  - `node scripts/test-windows-observation-flow.js`
+  - `node scripts/test-bug-fixes.js`
+
+**Why this track exists**
+- Real runtime testing showed an observation prompt like “I have tradingview open in the background, what do you think?” can still be reinterpreted as a desktop-app launch request.
+- The current launch extraction logic in `src/main/ai-service.js` accepts broad `open ...` phrasing and can trigger `buildOpenApplicationActions(...)` even when the model already produced a better observation plan such as `focus_window + screenshot`.
+
+**Goal**
+- prevent passive observation/synthesis requests from being rewritten into Start-menu launch flows.
+
+**Primary files**
+- `src/main/ai-service.js`
+- `src/main/tradingview/app-profile.js`
+- `scripts/test-windows-observation-flow.js`
+- `scripts/test-chat-actionability.js`
+- likely new: `scripts/test-ai-service-reliability-rewrites.js`
+
+**Implementation checklist**
+- narrow `extractRequestedAppName(...)` so it ignores passive phrasing such as:
+  - `I have TradingView open ...`
+  - `TradingView is open ...`
+  - `with TradingView open ...`
+- add a preservation rule in `rewriteActionsForReliability(...)`:
+  - if the plan already contains a concrete `focus_window`, `bring_window_to_front`, or TradingView-targeted verification hint, prefer preserving that observation plan over app-launch rewriting
+- add a negative rewrite guard for TradingView synthesis/observation prompts that mention `open` only as a state description, not as an imperative
+
+**Regression additions**
+- `scripts/test-windows-observation-flow.js`
+  - `observation prompt with existing TradingView focus plan is not rewritten into app launch`
+- likely new `scripts/test-ai-service-reliability-rewrites.js`
+  - `extractRequestedAppName ignores passive open-state phrasing`
+  - `rewriteActionsForReliability preserves focus-window screenshot observation plans`
+- `scripts/test-chat-actionability.js`
+  - `passive TradingView observation prompt executes observation plan without app-launch rewrite`
+
+**Acceptance criteria**
+- observation prompts do not get rewritten into Start-menu launch flows when a valid foreground/focus plan already exists
+- app-launch rewrites still work for genuine launch intent
+
+### Track B — Same-turn degraded visual evidence contract
+
+**Why this track exists**
+- The continuity stack already degrades follow-up routing when screenshot trust falls back to full-screen capture.
+- Current same-turn visual analysis can still overclaim chart specifics after `screen-copyfromscreen` fallback because `message-builder.js` injects the image but not a strong current-turn evidence-trust contract.
+
+**Goal**
+- force bounded, uncertainty-aware analysis when the current screenshot is degraded or mixed-desktop evidence.
+
+**Primary files**
+- `src/main/ai-service/message-builder.js`
+- `src/main/ai-service.js`
+- `src/main/chat-continuity-state.js`
+- `src/main/session-intent-state.js`
+- `scripts/test-chat-continuity-prompting.js`
+- likely new: `scripts/test-visual-analysis-bounds.js`
+
+**Implementation checklist**
+- inject a same-turn system constraint whenever the latest visual context is:
+  - `screen-copyfromscreen`
+  - `fullscreen-fallback`
+  - or otherwise `captureTrusted: false`
+- distinguish “directly visible in the image” from “interpretive hypothesis” in TradingView analysis prompts
+- add an explicit rule for low-UIA chart apps:
+  - do not claim precise indicator values unless they are directly legible in the screenshot or surfaced via a stronger evidence path
+- preserve the existing continuity-state fields, but also make the current-turn model call see the degraded-evidence warning before it answers
+
+**Regression additions**
+- `scripts/test-chat-continuity-prompting.js`
+  - `same-turn degraded TradingView screenshot injects bounded-analysis rule`
+- likely new `scripts/test-visual-analysis-bounds.js`
+  - `degraded TradingView analysis prompt forbids precise unseen indicator claims`
+  - `trusted target-window capture allows stronger direct observation wording`
+
+**Acceptance criteria**
+- degraded same-turn analysis becomes explicitly uncertainty-aware
+- mixed-desktop fallback evidence no longer silently looks equivalent to a trusted target-window TradingView capture
+
+### Track C — Forced-observation recovery becomes useful, not just safe
+
+**Why this track exists**
+- Current loop-prevention in `src/cli/commands/chat.js` correctly blocks screenshot-only loops.
+- If the forced natural-language retry still returns JSON actions, the runtime currently stops rather than producing a bounded fallback answer.
+
+**Goal**
+- keep screenshot-loop protection, but turn failure-to-comply into a usable bounded response instead of a dead end.
+
+**Primary files**
+- `src/cli/commands/chat.js`
+- `src/main/ai-service.js`
+- `src/main/ai-service/message-builder.js`
+- `scripts/test-windows-observation-flow.js`
+- likely new: `scripts/test-chat-forced-observation-fallback.js`
+
+**Implementation checklist**
+- add a second-stage fallback when `buildForcedObservationAnswerPrompt(...)` still yields actions:
+  - either re-prompt once with stronger no-JSON instructions
+  - or generate a deterministic bounded answer template from continuity + latest visual metadata
+- include explicit fallback sections such as:
+  - what is verified
+  - what is degraded
+  - what cannot be claimed safely
+  - next safe options
+- keep the existing guard that prevents screenshot-only loops
+
+**Regression additions**
+- `scripts/test-windows-observation-flow.js`
+  - `forced observation retry that still returns actions falls back to bounded answer`
+- likely new `scripts/test-chat-forced-observation-fallback.js`
+  - `forced observation fallback does not emit additional screenshot actions`
+  - `bounded fallback answer includes degraded evidence explanation`
+
+**Acceptance criteria**
+- no screenshot-only loop
+- no silent dead-end stop when the model violates the no-JSON retry
+- user receives a bounded answer or safe next-step message
+
+### Track D — Pine-backed evidence gathering for concrete TradingView insight
+
+**Why this track exists**
+- Current Pine support is surface-oriented:
+  - `src/main/tradingview/pine-workflows.js` opens Pine Editor, Pine Logs, Profiler, and Version History with verification
+  - existing regressions only prove verified surface opening plus optional typing
+- Real analysis quality would improve materially if Liku could use Pine workflows to gather structured data instead of relying only on screenshot interpretation.
+
+**Goal**
+- extend Pine support from “open the surface” to “gather bounded, concrete chart evidence that can support a safer synthesis.”
+
+**Primary files**
+- `src/main/tradingview/pine-workflows.js`
+- `src/main/tradingview/verification.js`
+- `src/main/tradingview/app-profile.js`
+- `src/main/ai-service.js`
+- `src/main/system-automation.js`
+- `src/main/ai-service/system-prompt.js`
+- `scripts/test-tradingview-pine-workflows.js`
+- `scripts/test-windows-observation-flow.js`
+- likely new: `scripts/test-tradingview-pine-data-workflows.js`
+
+**Implementation checklist**
+- add a bounded Pine data-gathering workflow layer, for example:
+  - open Pine Editor or Logs with verification
+  - type or paste a user-approved indicator/strategy snippet
+  - trigger a non-destructive compile/run step
+  - gather resulting output from Pine Logs / Profiler / visible status text
+- explicitly separate safe evidence-gathering from unsafe authoring claims:
+  - opening/reading Pine surfaces should be automatable
+  - inventing or publishing scripts should remain opt-in and explicit
+- use existing read-only runtime tools where helpful:
+  - `run_command` for local file scaffolding or snippet preparation
+  - `grep_repo` / `semantic_search_repo` if Pine snippets/templates become repo-backed assets
+- prefer structured result capture when possible:
+  - `get_text`
+  - verified panel-open checks
+  - clipboard-safe copy flows if later implemented
+- add prompt guidance that Pine-derived output is stronger evidence than screenshot-only indicator guesses
+
+**Suggested first Pine slice**
+- `open pine logs in tradingview`
+- verify `pine-logs`
+- read visible error/output text
+- return a bounded summary instead of speculative chart analysis
+
+**Regression additions**
+- `scripts/test-tradingview-pine-workflows.js`
+  - `pine workflow recognizes pine logs evidence-gathering requests`
+  - `pine workflow does not hijack speculative chart-analysis prompts`
+- likely new `scripts/test-tradingview-pine-data-workflows.js`
+  - `open pine logs and read output stays verification-first`
+  - `pine evidence-gathering workflow preserves trailing get_text/read step`
+- `scripts/test-windows-observation-flow.js`
+  - `verified pine logs workflow allows bounded evidence gathering without screenshot loop`
+
+**Acceptance criteria**
+- Liku can gather concrete TradingView-adjacent evidence through Pine surfaces without pretending to have precise chart-state access it does not really have
+- Pine workflows strengthen analysis honesty instead of bypassing it
+
+### Track E — Honest drawing capability framing
+
+**Why this track exists**
+- `src/main/tradingview/drawing-workflows.js` already refuses unsafe placement prompts such as `draw a trend line on tradingview`.
+- Runtime responses can still imply more precise drawing capability than the current workflow actually guarantees.
+
+**Goal**
+- make the runtime honest about the difference between opening drawing tools and placing chart objects precisely.
+
+**Primary files**
+- `src/main/tradingview/drawing-workflows.js`
+- `src/main/ai-service/system-prompt.js`
+- `src/main/ai-service/message-builder.js`
+- `scripts/test-tradingview-drawing-workflows.js`
+- `scripts/test-windows-observation-flow.js`
+
+**Implementation checklist**
+- add prompt/routing language that distinguishes:
+  - opening drawing tools or drawing search
+  - opening object tree
+  - precise object placement on the chart
+- if the user requests exact trendline placement from screenshot-only evidence, respond with either:
+  - a safe tool-surface workflow, or
+  - an explicit honesty-bound refusal
+- preserve current refusal behavior for unsafe placement hijacks
+
+**Regression additions**
+- `scripts/test-tradingview-drawing-workflows.js`
+  - `drawing workflow keeps refusing unsafe placement prompts`
+  - likely add `drawing capability wording distinguishes tool access from placement`
+- `scripts/test-windows-observation-flow.js`
+  - `drawing assessment request does not claim precise placement from screenshot-only evidence`
+
+**Acceptance criteria**
+- Liku does not imply that a chart object was placed precisely unless it has a deterministic verified workflow for that placement
+
+## Recommended commit order for the next roadmap
+
+Use this order to maximize safety and minimize cross-branch churn:
+
+1. **Commit 1 — Launch rewrite hardening**
+  - Track A only
+  - lowest-risk behavioral fix with immediate user impact
+
+2. **Commit 2 — Same-turn degraded-visual contract**
+  - Track B only
+  - keeps model honesty aligned with the already-strong continuity state
+
+3. **Commit 3 — Forced observation fallback recovery**
+  - Track C only
+  - improves UX after Commit 2 makes bounded answers more important
+
+4. **Commit 4 — Pine evidence-gathering foundation**
+  - first slice of Track D
+  - start with `pine-logs` / `pine-editor` evidence gathering, not full strategy authoring
+
+5. **Commit 5 — Drawing capability framing hardening**
+  - Track E only
+  - mostly honesty/prompting/routing polish with targeted regressions
+
+6. **Commit 6+ — Broader Pine-derived analysis workflows**
+  - additional Track D slices after the foundation is stable
+  - examples: compile-result reading, profiler/log summarization, bounded indicator-script assistance
+
+## Practical recommendation
+
+If only one slice is started next, the best first implementation is:
+
+1. **Track A** — stop passive TradingView observation prompts from being rewritten into app launches
+2. **Track B** — prevent degraded same-turn screenshots from producing overconfident chart claims
+3. **Track D (first slice)** — use Pine Logs / Pine Editor as an evidence-gathering tool rather than screenshot-only inference
+
+That sequence directly addresses the most important issues surfaced by real TradingView testing while opening a credible path toward more concrete chart insight.

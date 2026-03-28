@@ -297,6 +297,22 @@ async function run() {
     assert.strictEqual(rewritten[2].verify.target, 'paper-trading-panel');
   });
 
+  await testAsync('passive TradingView observation prompt preserves concrete focus-and-screenshot plan', async () => {
+    const original = [
+      { type: 'focus_window', windowHandle: 264274 },
+      { type: 'wait', ms: 1000 },
+      { type: 'screenshot' }
+    ];
+
+    const rewritten = aiService.rewriteActionsForReliability(original, {
+      userMessage: 'I have tradingview open in the background, what do you think?'
+    });
+
+    assert.deepStrictEqual(rewritten, original, 'Passive TradingView observation prompts should preserve a concrete existing-window observation plan');
+    assert.strictEqual(rewritten[0].type, 'focus_window');
+    assert.strictEqual(rewritten[0].windowHandle, 264274);
+  });
+
   await testAsync('TradingView alert accelerator blocks follow-up typing when no dialog change is observed', async () => {
     const executed = [];
     const foregroundSequence = [
