@@ -452,7 +452,7 @@ Use this as the practical implementation tracker for the next passes.
 - **Milestone 4:** TradingView domain logic has been modularized into focused workflow modules (indicator, alert, chart, drawing, Pine, Paper Trading, DOM) with direct module regressions.
 - **Milestone 5:** multi-turn coherence regressions now cover verified, degraded, contradicted, cancelled, and explicit three-turn continuation paths.
 - **Milestone 6:** explicit repo/process grounding actions are implemented (`semantic_search_repo`, `grep_repo`, `pgrep_process`) with bounded output and contract/tooling coverage.
-- **Milestone 7:** non-disruptive capture is in progress with profile-aware capability matrixing and approval-pause evidence refresh integrated into continuity metadata.
+- **Milestone 7:** non-disruptive capture is implemented with profile-aware capability matrixing, approval-pause evidence refresh, continuity-state persistence, and validated proof coverage.
 
 ### Phase 1 — Structured continuity baseline
 
@@ -1072,7 +1072,7 @@ node scripts/test-session-intent-state.js
 
 ### Milestone 4 — TradingView domain modules replace one-off workflow logic
 
-**Status:** In progress in working tree
+**Status:** Completed in working tree
 
 **Delivered so far**
 - extracted TradingView app identity/profile normalization to `src/main/tradingview/app-profile.js`
@@ -1095,8 +1095,11 @@ node scripts/test-session-intent-state.js
 - added direct Pine workflow regression coverage in `scripts/test-tradingview-pine-workflows.js`
 - added direct Paper Trading workflow regression coverage in `scripts/test-tradingview-paper-workflows.js`
 - added direct DOM workflow regression coverage in `scripts/test-tradingview-dom-workflows.js`
-
 - added bounded Paper Trading assist rewrites so `open/connect/show Paper Trading` requests verify the paper surface before continuation while still refusing order execution
+- revalidated acceptance with:
+  - `node scripts/test-windows-observation-flow.js`
+  - `node scripts/test-chat-actionability.js`
+  - direct TradingView module regressions for app-profile, verification, indicator, alert, chart, drawing, Pine, Paper Trading, and DOM workflows
 
 **Objective**
 - formalize reusable TradingView workflow modules around alerts, indicators, and chart verification
@@ -1226,7 +1229,7 @@ node scripts/test-ai-service-contract.js
 
 ### Milestone 7 — Non-disruptive vision for approval-time continuity
 
-**Status:** In progress in working tree
+**Status:** Completed in working tree
 
 **Delivered so far**
 - added modular non-disruptive capture provider abstraction in `src/main/background-capture.js`
@@ -1255,6 +1258,12 @@ node scripts/test-ai-service-contract.js
   - `scripts/test-background-capture.js`
   - `scripts/test-session-intent-state.js`
   - `scripts/test-windows-observation-flow.js`
+  - `scripts/test-chat-continuity-prompting.js`
+- revalidated final proof command set together:
+  - `node scripts/test-background-capture.js`
+  - `node scripts/test-session-intent-state.js`
+  - `node scripts/test-chat-continuity-prompting.js`
+  - `node scripts/test-windows-observation-flow.js`
 
 **Objective**
 - allow Liku to preserve target-app observation during approval pauses without forcing focus changes when the platform/app supports it
@@ -1292,10 +1301,17 @@ node scripts/test-windows-observation-flow.js
 
 ## Recommended handoff into implementation work
 
-Once implementation begins, the strongest first coding slice is:
+Milestones 1–7 in this plan are now implemented in the working tree.
 
-1. **Milestone 1** — state-first continuation routing
-2. **Milestone 2** — evidence quality / degraded screenshot trust
-3. **Milestone 3** — reusable verification contracts
+If follow-on work is needed, it is no longer “finish the current plan,” but rather one of these next-step categories:
 
-That sequence gives the best implementation starting point because it directly addresses the transcript-proven failure modes before larger modularization or future platform work.
+1. **Closeout hygiene**
+  - keep status/acceptance text aligned with the latest passing proof commands
+  - preserve commit-level checkpoints for each milestone cluster
+2. **Polish and hardening**
+  - expand fixture breadth for newly added continuity and non-disruptive capture paths
+  - add more platform/app-profile coverage where evidence trust is conservative by design
+3. **Next roadmap generation**
+  - define new work beyond this plan rather than treating unfinished status text as implementation debt
+
+That means the remaining work after this document is not an open implementation gap inside Milestones 1–7; it is deciding what the next roadmap should be.
