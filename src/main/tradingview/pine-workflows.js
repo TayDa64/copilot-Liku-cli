@@ -20,7 +20,7 @@ function inferPineEvidenceReadIntent(raw = '', surfaceTarget = '') {
   if (!normalized) return false;
 
   const mentionsReadVerb = /\b(read|review|inspect|check|show|summarize|tell me|tell us|extract|gather)\b/.test(normalized);
-  const mentionsOutputTarget = /\b(output|log|logs|errors|messages|status|compiler|compile|results|result|text|profiler|performance|timings|timing|stats|statistics|metrics|history|version|versions|revision|revisions|changes|provenance)\b/.test(normalized);
+  const mentionsOutputTarget = /\b(output|log|logs|errors|error|messages|status|compiler|compile|results|result|text|diagnostic|diagnostics|warning|warnings|profiler|performance|timings|timing|stats|statistics|metrics|history|version|versions|revision|revisions|changes|provenance)\b/.test(normalized);
   const mentionsLineBudget = normalized.includes('500 line')
     || normalized.includes('500 lines')
     || normalized.includes('line count')
@@ -41,12 +41,42 @@ function inferPineEvidenceReadIntent(raw = '', surfaceTarget = '') {
   return surfaceTarget === 'pine-logs' && /\bwhat does|what do|what is in|what's in\b/.test(normalized) && /\b(log|logs|errors|messages|status)\b/.test(normalized);
 }
 
-function buildPineReadbackStep(surfaceTarget) {
+function inferPineEditorEvidenceMode(raw = '') {
+  const normalized = normalizeTextForMatch(raw);
+  if (!normalized) return 'generic-status';
+
+  const mentionsLineBudget = normalized.includes('500 line')
+    || normalized.includes('500 lines')
+    || normalized.includes('line count')
+    || normalized.includes('line budget')
+    || normalized.includes('script length')
+    || (/\blines?\b/.test(normalized) && /\b(limit|max|maximum|cap|capped|budget)\b/.test(normalized));
+  if (mentionsLineBudget) return 'line-budget';
+
+  const mentionsDiagnostics = /\b(diagnostic|diagnostics|warning|warnings|error list|compiler errors|compile errors|errors|warnings only)\b/.test(normalized);
+  if (mentionsDiagnostics) return 'diagnostics';
+
+  const mentionsCompileResult = /\b(compile result|compile status|compiler status|compilation result|build result|no errors|compiled successfully|compile summary|summarize compile|summarize compiler)\b/.test(normalized);
+  if (mentionsCompileResult) return 'compile-result';
+
+  return 'generic-status';
+}
+
+function buildPineReadbackStep(surfaceTarget, evidenceMode = null) {
   if (surfaceTarget === 'pine-editor') {
+    const mode = evidenceMode || 'generic-status';
+    const reason = mode === 'compile-result'
+      ? 'Read visible Pine Editor compile-result text for a bounded diagnostics summary'
+      : mode === 'diagnostics'
+        ? 'Read visible Pine Editor diagnostics and warnings text for bounded evidence gathering'
+        : mode === 'line-budget'
+          ? 'Read visible Pine Editor status/output or line-budget hints for bounded evidence gathering'
+          : 'Read visible Pine Editor status/output text for bounded evidence gathering';
     return {
       type: 'get_text',
       text: 'Pine Editor',
-      reason: 'Read visible Pine Editor status/output or line-budget hints for bounded evidence gathering'
+      reason,
+      pineEvidenceMode: mode
     };
   }
 
@@ -124,6 +154,9 @@ function inferTradingViewPineIntent(userMessage = '', actions = []) {
   if (!surface) return null;
 
   const wantsEvidenceReadback = inferPineEvidenceReadIntent(raw, surface.target);
+  const pineEvidenceMode = surface.target === 'pine-editor' && wantsEvidenceReadback
+    ? inferPineEditorEvidenceMode(raw)
+    : null;
 
   const existingWorkflowSignal = Array.isArray(actions) && actions.some((action) => /pine/.test(String(action?.verify?.target || '')));
 
@@ -135,6 +168,7 @@ function inferTradingViewPineIntent(userMessage = '', actions = []) {
     existingWorkflowSignal,
     requiresObservedChange: nextAction?.type === 'type',
     wantsEvidenceReadback,
+    pineEvidenceMode,
     reason: surface.target === 'pine-logs'
       ? 'Open TradingView Pine Logs with verification'
       : surface.target === 'pine-profiler'
@@ -195,7 +229,7 @@ function buildTradingViewPineWorkflowActions(intent = {}, actions = []) {
   const hasExplicitReadbackStep = trailing.some((action) => action?.type === 'get_text' || action?.type === 'find_element');
 
   if (intent.wantsEvidenceReadback && !hasExplicitReadbackStep) {
-    const readbackStep = buildPineReadbackStep(intent.surfaceTarget);
+    const readbackStep = buildPineReadbackStep(intent.surfaceTarget, intent.pineEvidenceMode);
     if (readbackStep) trailing.push(readbackStep);
   }
 

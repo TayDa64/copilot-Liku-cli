@@ -195,6 +195,9 @@ test('message-builder injects active app capability context', () => {
   assert(messageBuilderContent.includes('uia-rich'), 'Capability context should recognize UIA-rich apps');
   assert(messageBuilderContent.includes('namedInteractiveElementCount'), 'Capability context should include UIA inventory counts');
   assert(messageBuilderContent.includes('answer-shape:'), 'Capability context should shape control-surface answers');
+  assert(messageBuilderContent.includes('## Pine Evidence Bounds'), 'Message builder should inject a bounded Pine diagnostics evidence block when relevant');
+  assert(messageBuilderContent.includes('inferPineEvidenceRequestKind'), 'Message builder should classify Pine evidence request kinds');
+  assert(messageBuilderContent.includes('runtime correctness, strategy validity, profitability, or market insight'), 'Pine evidence bounds should prevent compile success from being overclaimed');
 });
 
 test('ai-service verifies focus continuity after action execution', () => {
@@ -232,6 +235,31 @@ test('rewriteActionsForReliability normalizes typoed app launches', () => {
   assert(launchAction.verifyTarget.chartKeywords.includes('timeframe'), 'verifyTarget should include TradingView chart-state keywords');
   assert(launchAction.verifyTarget.pineKeywords.includes('pine editor'), 'verifyTarget should include TradingView Pine Editor keywords');
   assert(launchAction.verifyTarget.domKeywords.includes('depth of market'), 'verifyTarget should include TradingView DOM keywords');
+});
+
+test('pine workflow encodes diagnostics and compile-result evidence modes', () => {
+  const pineWorkflowPath = path.join(__dirname, '..', 'src', 'main', 'tradingview', 'pine-workflows.js');
+  const fs = require('fs');
+
+  const pineWorkflowContent = fs.readFileSync(pineWorkflowPath, 'utf8');
+
+  assert(pineWorkflowContent.includes('function inferPineEditorEvidenceMode'), 'Pine workflows should classify Pine Editor evidence modes');
+  assert(pineWorkflowContent.includes("return 'compile-result'"), 'Pine workflows should support compile-result evidence mode');
+  assert(pineWorkflowContent.includes("return 'diagnostics'"), 'Pine workflows should support diagnostics evidence mode');
+  assert(pineWorkflowContent.includes('pineEvidenceMode'), 'Pine get_text steps should preserve evidence mode metadata');
+  assert(pineWorkflowContent.includes('compile-result text for a bounded diagnostics summary'), 'Pine workflows should use compile-result-specific readback wording');
+  assert(pineWorkflowContent.includes('diagnostics and warnings text'), 'Pine workflows should use diagnostics-specific readback wording');
+});
+
+test('system prompt includes Pine diagnostics guidance', () => {
+  const systemPromptPath = path.join(__dirname, '..', 'src', 'main', 'ai-service', 'system-prompt.js');
+  const fs = require('fs');
+
+  const systemPromptContent = fs.readFileSync(systemPromptPath, 'utf8');
+
+  assert(systemPromptContent.includes('TradingView Pine diagnostics rule'), 'System prompt should include Pine diagnostics guidance');
+  assert(systemPromptContent.includes('compile success'), 'System prompt should mention compile success bounds');
+  assert(systemPromptContent.includes('realtime rollback'), 'System prompt should mention Pine execution-model caveats');
 });
 
 test('rewriteActionsForReliability does not reinterpret passive TradingView open-state prompts as app launches', () => {

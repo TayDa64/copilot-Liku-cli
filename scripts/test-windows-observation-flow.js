@@ -278,6 +278,23 @@ async function run() {
     assert.strictEqual(rewritten[2].verify.target, 'pine-editor');
     assert.strictEqual(rewritten[4].type, 'get_text');
     assert.strictEqual(rewritten[4].text, 'Pine Editor');
+    assert.strictEqual(rewritten[4].pineEvidenceMode, 'compile-result');
+  });
+
+  await testAsync('low-signal TradingView Pine diagnostics request rewrites to panel verification plus diagnostics get_text', async () => {
+    const rewritten = aiService.rewriteActionsForReliability([
+      { type: 'key', key: 'ctrl+e' }
+    ], {
+      userMessage: 'open pine editor in tradingview and check diagnostics'
+    });
+
+    assert(Array.isArray(rewritten), 'pine diagnostics rewrite should return an action array');
+    assert.strictEqual(rewritten[0].type, 'bring_window_to_front');
+    assert.strictEqual(rewritten[2].type, 'key');
+    assert.strictEqual(rewritten[2].verify.target, 'pine-editor');
+    assert.strictEqual(rewritten[4].type, 'get_text');
+    assert.strictEqual(rewritten[4].text, 'Pine Editor');
+    assert.strictEqual(rewritten[4].pineEvidenceMode, 'diagnostics');
   });
 
   await testAsync('low-signal TradingView Pine line-budget request rewrites to panel verification plus get_text', async () => {
@@ -497,8 +514,9 @@ async function run() {
     });
   });
 
-  await testAsync('verified pine editor workflow allows bounded visible status gathering without screenshot loop', async () => {
+  await testAsync('verified pine editor diagnostics workflow gathers compile text without screenshot loop', async () => {
     const executed = [];
+    const evidenceModes = [];
     const foregroundSequence = [
       { success: true, hwnd: 777, title: 'TradingView', processName: 'tradingview', windowKind: 'main' },
       { success: true, hwnd: 892, title: 'Pine Editor - TradingView', processName: 'tradingview', windowKind: 'owned' },
@@ -521,12 +539,13 @@ async function run() {
         actions: [
           { type: 'focus_window', title: 'TradingView', processName: 'tradingview' },
           { type: 'key', key: 'ctrl+e', reason: 'Open Pine Editor', verify: { kind: 'panel-visible', appName: 'TradingView', target: 'pine-editor', keywords: ['pine editor', 'pine'] } },
-          { type: 'get_text', text: 'Pine Editor', reason: 'Read visible Pine Editor status/output text' }
+          { type: 'get_text', text: 'Pine Editor', reason: 'Read visible Pine Editor compile-result text for a bounded diagnostics summary', pineEvidenceMode: 'compile-result' }
         ]
       }, null, null, {
-        userMessage: 'open pine editor in tradingview and summarize the visible compiler status',
+        userMessage: 'open pine editor in tradingview and summarize the compile result',
         actionExecutor: async (action) => {
           executed.push(action.type);
+          if (action.type === 'get_text') evidenceModes.push(action.pineEvidenceMode || null);
           if (action.type === 'get_text') {
             return {
               success: true,
@@ -541,11 +560,67 @@ async function run() {
       });
 
       assert.strictEqual(execResult.success, true, 'Execution should proceed after Pine Editor is observed');
-      assert.deepStrictEqual(executed, ['focus_window', 'key', 'get_text'], 'Bounded Pine Editor status gathering should continue to read text after panel verification');
+      assert.deepStrictEqual(executed, ['focus_window', 'key', 'get_text'], 'Bounded Pine Editor diagnostics gathering should continue to read text after panel verification');
+      assert.deepStrictEqual(evidenceModes, ['compile-result'], 'Pine Editor diagnostics gathering should preserve compile-result evidence mode');
       assert.strictEqual(execResult.observationCheckpoints.length, 1, 'A post-key observation checkpoint should be returned');
       assert.strictEqual(execResult.observationCheckpoints[0].verified, true, 'Pine Editor panel observation should pass');
       assert.strictEqual(execResult.results[2].text, 'Compiler: no errors. Status: strategy loaded.', 'Pine Editor status text should be preserved on the get_text result');
-      assert(!execResult.screenshotCaptured, 'Pine Editor status gathering should not require a screenshot loop');
+      assert(!execResult.screenshotCaptured, 'Pine Editor diagnostics gathering should not require a screenshot loop');
+    });
+  });
+
+  await testAsync('verified pine editor diagnostics workflow preserves visible compiler errors text', async () => {
+    const executed = [];
+    const evidenceModes = [];
+    const foregroundSequence = [
+      { success: true, hwnd: 777, title: 'TradingView', processName: 'tradingview', windowKind: 'main' },
+      { success: true, hwnd: 892, title: 'Pine Editor - TradingView', processName: 'tradingview', windowKind: 'owned' },
+      { success: true, hwnd: 892, title: 'Pine Editor - TradingView', processName: 'tradingview', windowKind: 'owned' },
+      { success: true, hwnd: 892, title: 'Pine Editor - TradingView', processName: 'tradingview', windowKind: 'owned' }
+    ];
+
+    await withPatchedSystemAutomation({
+      resolveWindowHandle: async (action) => action?.processName === 'tradingview' ? 777 : 0,
+      getForegroundWindowHandle: async () => 777,
+      getForegroundWindowInfo: async () => {
+        return foregroundSequence.shift() || { success: true, hwnd: 892, title: 'Pine Editor - TradingView', processName: 'tradingview', windowKind: 'owned' };
+      },
+      focusWindow: async () => ({ success: true }),
+      getRunningProcessesByNames: async () => ([{ pid: 4242, processName: 'tradingview', mainWindowTitle: 'TradingView', startTime: '2026-03-23T00:00:00Z' }])
+    }, async () => {
+      const execResult = await aiService.executeActions({
+        thought: 'Open Pine Editor and check diagnostics',
+        verification: 'TradingView should show Pine Editor before text is read',
+        actions: [
+          { type: 'focus_window', title: 'TradingView', processName: 'tradingview' },
+          { type: 'key', key: 'ctrl+e', reason: 'Open Pine Editor', verify: { kind: 'panel-visible', appName: 'TradingView', target: 'pine-editor', keywords: ['pine editor', 'pine'] } },
+          { type: 'get_text', text: 'Pine Editor', reason: 'Read visible Pine Editor diagnostics and warnings text for bounded evidence gathering', pineEvidenceMode: 'diagnostics' }
+        ]
+      }, null, null, {
+        userMessage: 'open pine editor in tradingview and check diagnostics',
+        actionExecutor: async (action) => {
+          executed.push(action.type);
+          if (action.type === 'get_text') evidenceModes.push(action.pineEvidenceMode || null);
+          if (action.type === 'get_text') {
+            return {
+              success: true,
+              action: action.type,
+              text: 'Compiler error at line 42: mismatched input. Warning: script has unused variable.',
+              method: 'TextPattern',
+              message: 'Got text via TextPattern: "Compiler error at line 42: mismatched input. Warning: script has unused variable."'
+            };
+          }
+          return { success: true, action: action.type, message: 'executed' };
+        }
+      });
+
+      assert.strictEqual(execResult.success, true, 'Execution should proceed after Pine Editor diagnostics surface is observed');
+      assert.deepStrictEqual(executed, ['focus_window', 'key', 'get_text'], 'Bounded Pine Editor diagnostics should continue to read text after panel verification');
+      assert.deepStrictEqual(evidenceModes, ['diagnostics'], 'Pine diagnostics gathering should preserve diagnostics evidence mode');
+      assert.strictEqual(execResult.observationCheckpoints.length, 1, 'A post-key observation checkpoint should be returned');
+      assert.strictEqual(execResult.observationCheckpoints[0].verified, true, 'Pine Editor panel observation should pass');
+      assert.strictEqual(execResult.results[2].text, 'Compiler error at line 42: mismatched input. Warning: script has unused variable.', 'Pine Editor diagnostics text should be preserved on the get_text result');
+      assert(!execResult.screenshotCaptured, 'Pine Editor diagnostics gathering should not require a screenshot loop');
     });
   });
 

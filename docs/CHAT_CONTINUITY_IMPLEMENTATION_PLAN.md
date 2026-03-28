@@ -1501,6 +1501,7 @@ node scripts/test-windows-observation-flow.js
 - extended `src/main/tradingview/pine-workflows.js` so Pine Version History provenance requests can stay verification-first while preserving or auto-appending bounded `get_text` readback
 - extended `src/main/tradingview/pine-workflows.js` so Pine Editor visible status/output requests can stay verification-first while preserving or auto-appending bounded `get_text` readback
 - added Pine Editor line-budget awareness so `500-line limit` / line-count checks prefer verified Pine Editor readback and prompt guidance now explicitly treats Pine scripts as capped at 500 lines when reading/writing
+- refined Pine Editor readback into explicit `compile-result` and `diagnostics` evidence modes so visible compiler status, warnings, and errors can be summarized as bounded text evidence rather than generic status text
 - added dedicated Pine data-workflow regressions in `scripts/test-tradingview-pine-data-workflows.js`
 - extended `scripts/test-windows-observation-flow.js` with verified Pine Logs, Pine Profiler, Pine Version History, and Pine Editor status/output readback coverage that gathers text without re-entering a screenshot loop
 - updated `src/main/ai-service/system-prompt.js` so TradingView Pine output/error/provenance requests prefer verified Pine surfaces plus `get_text`, including Pine Editor visible status/output, over screenshot-only inference
@@ -1565,6 +1566,166 @@ node scripts/test-windows-observation-flow.js
 
 **Next best slice from here**
 - refine Pine Editor status/output readback into more structured visible compile-result / diagnostics summaries without implying chart-state insight
+
+**Concrete next Pine slice — structured diagnostics and provenance summaries**
+
+This is the next Pine-facing implementation slice after the current Logs / Profiler / Version History / Pine Editor readback foundation.
+
+**Grounded status of recent Pine follow-ups**
+- broader visible Pine status/output surfaces beyond Logs / Profiler / Version History are now implemented via verified `pine-editor` readback with bounded `get_text`
+- script-audit / provenance refinement is only partially complete:
+  - verified Pine Version History opening plus raw visible text readback is implemented
+  - structural extraction of the top visible revision metadata (for example revision label, relative time, author/source hints when visible, and compact summary formatting) is not implemented yet
+
+**Immediate next objective**
+- turn generic Pine Editor text readback into explicit visible diagnostics summaries
+- turn generic Pine Version History text readback into explicit visible revision/provenance summaries
+
+**Priority order**
+1. **Slice D-next-1 — Pine Editor compile-result / diagnostics summaries**
+2. **Slice D-next-2 — Pine Version History top visible revision metadata summaries**
+
+#### Slice D-next-1 — Pine Editor compile-result / diagnostics summaries
+
+**Status:** First slice completed in working tree
+
+**Delivered so far**
+- extended `src/main/tradingview/pine-workflows.js` so Pine Editor readback requests can classify bounded evidence modes:
+  - `compile-result`
+  - `diagnostics`
+  - `line-budget`
+  - `generic-status`
+- refined Pine Editor `get_text` readback reasons and mode metadata so compile-result and diagnostics requests carry explicit bounded-summary intent instead of generic status wording
+- updated `src/main/ai-service/system-prompt.js` with Pine diagnostics guidance that:
+  - prefers visible compiler/diagnostic text over screenshot interpretation
+  - treats `no errors` / compile success as compiler evidence only
+  - mentions Pine execution-model caveats before inferring runtime or strategy behavior
+- updated `src/main/ai-service/message-builder.js` to inject `## Pine Evidence Bounds` for Pine diagnostics-oriented requests
+- added focused prompt coverage in `scripts/test-pine-diagnostics-bounds.js`
+- extended workflow, seam, and execution regressions in:
+  - `scripts/test-tradingview-pine-data-workflows.js`
+  - `scripts/test-windows-observation-flow.js`
+  - `scripts/test-bug-fixes.js`
+
+**Why this slice should go first**
+- the current `pine-editor` workflow already opens the correct surface and gathers bounded text evidence
+- the remaining gap is interpretation structure, not UI access
+- this is the highest-value next step for Pine debugging because compile/result state is more actionable than generic visible text
+
+**Goal**
+- summarize visible Pine Editor output into bounded categories such as:
+  - compile success / no errors
+  - compile errors
+  - warnings / status-only output
+  - line-budget proximity hints
+- do this without claiming chart-state or runtime behavior that is not directly visible in the text evidence
+
+**Primary files**
+- `src/main/tradingview/pine-workflows.js`
+- `src/main/ai-service/system-prompt.js`
+- `src/main/ai-service/message-builder.js`
+- `scripts/test-tradingview-pine-data-workflows.js`
+- `scripts/test-windows-observation-flow.js`
+- `scripts/test-bug-fixes.js`
+
+**Exact changes to map in**
+- `src/main/tradingview/pine-workflows.js`
+  - extend Pine evidence-read intent shaping so requests such as:
+    - `summarize compile result`
+    - `read compiler errors`
+    - `check diagnostics`
+    - `summarize warnings`
+    route to `pine-editor` bounded readback with stronger compile/diagnostic wording
+  - add a small helper for Pine Editor evidence modes, for example:
+    - `diagnostics`
+    - `compile-result`
+    - `line-budget`
+    - `generic-status`
+  - preserve existing verification-first open/read behavior and only refine the `get_text.reason` / mode metadata
+- `src/main/ai-service/system-prompt.js`
+  - add explicit Pine diagnostics guidance:
+    - prefer visible compiler/diagnostic text over screenshot interpretation
+    - separate visible compile status from inferred runtime/chart conclusions
+    - mention Pine execution-model caveats when the user asks for strategy/runtime diagnosis
+  - keep Pine 500-line awareness as a practical guardrail, but avoid treating it as the only limit
+- `src/main/ai-service/message-builder.js`
+  - add a compact Pine evidence guard block when the active app capability is TradingView and the user request is Pine-diagnostic in nature
+  - include rules like:
+    - summarize only what the visible text proves
+    - do not turn `no errors` into market insight
+    - do not infer runtime correctness from compile success alone
+
+**Regression additions**
+- `scripts/test-tradingview-pine-data-workflows.js`
+  - `pine workflow recognizes compile-result requests`
+  - `pine workflow recognizes diagnostics requests`
+  - `open pine editor and summarize compile result stays verification-first`
+  - `open pine editor and summarize diagnostics preserves bounded get_text readback`
+- `scripts/test-windows-observation-flow.js`
+  - `verified pine editor diagnostics workflow gathers compile text without screenshot loop`
+  - `verified pine editor no-errors workflow preserves visible success text for bounded summary`
+- `scripts/test-bug-fixes.js`
+  - seam assertions that Pine prompt guidance includes compiler/diagnostic wording and that Pine workflows encode the new diagnostics mode hints
+
+**Acceptance criteria**
+- Liku can distinguish visible Pine Editor diagnostics from generic status text
+- compile success is summarized honestly without implying runtime/market validity
+- compile errors/warnings are surfaced as bounded evidence rather than screenshot-only speculation
+
+#### Slice D-next-2 — Pine Version History top visible revision metadata summaries
+
+**Why this is second**
+- the UI access path is already implemented, but the current behavior is still just raw visible text gathering
+- the next value is structural summarization of the top visible revisions, not merely reopening the panel
+
+**Goal**
+- summarize the top visible Pine Version History entries into compact provenance facts such as:
+  - latest visible revision label/number
+  - relative save time when visible
+  - count of visible revisions in the current panel snapshot
+  - whether the visible text implies recent churn or a stable revision list
+
+**Primary files**
+- `src/main/tradingview/pine-workflows.js`
+- `src/main/ai-service/system-prompt.js`
+- `src/main/ai-service/message-builder.js`
+- `scripts/test-tradingview-pine-data-workflows.js`
+- `scripts/test-windows-observation-flow.js`
+- `scripts/test-bug-fixes.js`
+
+**Exact changes to map in**
+- `src/main/tradingview/pine-workflows.js`
+  - extend evidence-read intent shaping so requests such as:
+    - `summarize latest revision metadata`
+    - `read top visible revisions`
+    - `show visible provenance details`
+    explicitly mark Version History as a provenance-summary workflow instead of a generic text readback
+  - add a `provenance-summary` evidence mode for `pine-version-history`
+- `src/main/ai-service/system-prompt.js`
+  - add explicit provenance guidance:
+    - summarize only visible revision metadata
+    - do not infer hidden diffs or full script history from the visible list alone
+    - treat Version History as audit/provenance evidence, not runtime/chart evidence
+- `src/main/ai-service/message-builder.js`
+  - add a compact Pine provenance guard block when the request is revision/history focused
+  - reinforce that visible history entries are bounded UI evidence only
+
+**Regression additions**
+- `scripts/test-tradingview-pine-data-workflows.js`
+  - `pine workflow recognizes visible revision metadata requests`
+  - `pine version history provenance-summary workflow stays verification-first`
+- `scripts/test-windows-observation-flow.js`
+  - `verified pine version history workflow preserves top visible revision metadata text for bounded provenance summary`
+- `scripts/test-bug-fixes.js`
+  - seam assertions that Version History prompt guidance distinguishes provenance from runtime/chart evidence
+
+**Acceptance criteria**
+- Liku can summarize top visible revision metadata without overclaiming hidden history
+- Version History output is framed as provenance/audit evidence only
+
+**Recommended commit order from here**
+1. `Track D: structure Pine Editor diagnostics summaries`
+2. `Track D: structure Pine Version History provenance summaries`
 
 ### Track E — Honest drawing capability framing
 

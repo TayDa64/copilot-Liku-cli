@@ -40,6 +40,28 @@ test('pine workflow recognizes pine editor status-output requests', () => {
   assert.strictEqual(intent.wantsEvidenceReadback, true);
 });
 
+test('pine workflow recognizes compile-result requests', () => {
+  const intent = inferTradingViewPineIntent('open pine editor in tradingview and summarize the compile result', [
+    { type: 'key', key: 'ctrl+e' }
+  ]);
+
+  assert(intent, 'intent should be inferred');
+  assert.strictEqual(intent.surfaceTarget, 'pine-editor');
+  assert.strictEqual(intent.wantsEvidenceReadback, true);
+  assert.strictEqual(intent.pineEvidenceMode, 'compile-result');
+});
+
+test('pine workflow recognizes diagnostics requests', () => {
+  const intent = inferTradingViewPineIntent('open pine editor in tradingview and check diagnostics', [
+    { type: 'key', key: 'ctrl+e' }
+  ]);
+
+  assert(intent, 'intent should be inferred');
+  assert.strictEqual(intent.surfaceTarget, 'pine-editor');
+  assert.strictEqual(intent.wantsEvidenceReadback, true);
+  assert.strictEqual(intent.pineEvidenceMode, 'diagnostics');
+});
+
 test('pine workflow recognizes pine editor line-budget requests', () => {
   const intent = inferTradingViewPineIntent('open pine editor in tradingview and check whether the script is close to the 500 line limit', [
     { type: 'key', key: 'ctrl+e' }
@@ -106,6 +128,45 @@ test('open pine editor and read visible status stays verification-first', () => 
   assert.strictEqual(rewritten[2].verify.target, 'pine-editor');
   assert.strictEqual(rewritten[4].type, 'get_text');
   assert.strictEqual(rewritten[4].text, 'Pine Editor');
+  assert.strictEqual(rewritten[4].pineEvidenceMode, 'generic-status');
+});
+
+test('open pine editor and summarize compile result stays verification-first', () => {
+  const rewritten = buildTradingViewPineWorkflowActions({
+    appName: 'TradingView',
+    surfaceTarget: 'pine-editor',
+    verifyKind: 'panel-visible',
+    openerIndex: 0,
+    wantsEvidenceReadback: true,
+    pineEvidenceMode: 'compile-result',
+    requiresObservedChange: false
+  }, [
+    { type: 'key', key: 'ctrl+e', reason: 'Open Pine Editor' }
+  ]);
+
+  assert.strictEqual(rewritten[4].type, 'get_text');
+  assert.strictEqual(rewritten[4].text, 'Pine Editor');
+  assert.strictEqual(rewritten[4].pineEvidenceMode, 'compile-result');
+  assert(/compile-result text/i.test(rewritten[4].reason), 'compile-result readback should use diagnostics-specific wording');
+});
+
+test('open pine editor and summarize diagnostics preserves bounded get_text readback', () => {
+  const rewritten = buildTradingViewPineWorkflowActions({
+    appName: 'TradingView',
+    surfaceTarget: 'pine-editor',
+    verifyKind: 'panel-visible',
+    openerIndex: 0,
+    wantsEvidenceReadback: true,
+    pineEvidenceMode: 'diagnostics',
+    requiresObservedChange: false
+  }, [
+    { type: 'key', key: 'ctrl+e', reason: 'Open Pine Editor' }
+  ]);
+
+  assert.strictEqual(rewritten[4].type, 'get_text');
+  assert.strictEqual(rewritten[4].text, 'Pine Editor');
+  assert.strictEqual(rewritten[4].pineEvidenceMode, 'diagnostics');
+  assert(/diagnostics and warnings/i.test(rewritten[4].reason), 'diagnostics readback should use diagnostics-specific wording');
 });
 
 test('open pine editor and check 500-line budget stays verification-first', () => {
@@ -115,6 +176,7 @@ test('open pine editor and check 500-line budget stays verification-first', () =
     verifyKind: 'panel-visible',
     openerIndex: 0,
     wantsEvidenceReadback: true,
+    pineEvidenceMode: 'line-budget',
     requiresObservedChange: false
   }, [
     { type: 'key', key: 'ctrl+e', reason: 'Open Pine Editor' }

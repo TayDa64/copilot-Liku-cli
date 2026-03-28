@@ -20,6 +20,68 @@ function isLikelyLowUiaChartContext({ capability, foreground, userMessage }) {
     || /tradingview|chart|ticker|candlestick|pine/.test(text);
 }
 
+function inferPineEvidenceRequestKind(userMessage = '') {
+  const text = String(userMessage || '').trim().toLowerCase();
+  if (!text) return null;
+  if (!/pine|tradingview/.test(text)) return null;
+
+  if (text.includes('500 line')
+    || text.includes('500 lines')
+    || text.includes('line count')
+    || text.includes('line budget')
+    || text.includes('script length')
+    || (/\blines?\b/.test(text) && /\b(limit|max|maximum|cap|capped|budget)\b/.test(text))) {
+    return 'line-budget';
+  }
+
+  if (/\b(diagnostic|diagnostics|warning|warnings|compiler errors|compile errors|error list|read errors|check diagnostics)\b/.test(text)) {
+    return 'diagnostics';
+  }
+
+  if (/\b(compile result|compile status|compiler status|compilation result|build result|no errors|compiled successfully|compile summary|summarize compile|summarize compiler)\b/.test(text)) {
+    return 'compile-result';
+  }
+
+  if (/\b(status|output)\b/.test(text) && /pine editor|pine/.test(text)) {
+    return 'generic-status';
+  }
+
+  return null;
+}
+
+function buildPineEvidenceConstraint({ foreground, userMessage }) {
+  const requestKind = inferPineEvidenceRequestKind(userMessage);
+  if (!requestKind) return '';
+
+  const processName = String(foreground?.processName || '').trim().toLowerCase();
+  const title = String(foreground?.title || '').trim().toLowerCase();
+  if (processName && processName !== 'tradingview' && !/tradingview/.test(title) && !/tradingview/.test(String(userMessage || '').toLowerCase())) {
+    return '';
+  }
+
+  const lines = [
+    '## Pine Evidence Bounds',
+    `- requestKind: ${requestKind}`,
+    '- Rule: Prefer visible Pine Editor compiler/diagnostic text over screenshot interpretation for Pine compile and diagnostics requests.',
+    '- Rule: Summarize only what the visible Pine text proves.'
+  ];
+
+  if (requestKind === 'compile-result') {
+    lines.push('- Rule: Treat `compile success`, `no errors`, or similar status text as compiler/editor evidence only, not proof of runtime correctness, strategy validity, profitability, or market insight.');
+  }
+
+  if (requestKind === 'diagnostics') {
+    lines.push('- Rule: Surface visible compiler errors and warnings as bounded diagnostics evidence; do not infer hidden causes or chart-state effects unless the visible text states them.');
+  }
+
+  if (requestKind === 'line-budget') {
+    lines.push('- Rule: Pine scripts are capped at 500 lines in TradingView. Treat visible line-count hints as bounded editor evidence, and prefer targeted edits over full rewrites when the budget is tight.');
+  }
+
+  lines.push('- Rule: If the user asks for Pine runtime or strategy diagnosis, mention Pine execution-model caveats such as realtime rollback, confirmed vs unconfirmed bars, and indicator vs strategy recalculation differences before inferring behavior from compile status alone.');
+  return lines.join('\n');
+}
+
 function buildCurrentTurnVisualEvidenceConstraint({ latestVisual, capability, foreground, userMessage }) {
   if (!latestVisual || typeof latestVisual !== 'object') return '';
 
@@ -292,6 +354,16 @@ function createMessageBuilder(dependencies) {
       });
       if (visualEvidenceConstraint) {
         messages.push({ role: 'system', content: visualEvidenceConstraint });
+      }
+    } catch {}
+
+    try {
+      const pineEvidenceConstraint = buildPineEvidenceConstraint({
+        foreground: currentForeground,
+        userMessage
+      });
+      if (pineEvidenceConstraint) {
+        messages.push({ role: 'system', content: pineEvidenceConstraint });
       }
     } catch {}
 
