@@ -1499,9 +1499,10 @@ node scripts/test-windows-observation-flow.js
 - extended `src/main/tradingview/pine-workflows.js` so Pine Logs evidence-gathering requests can stay verification-first while preserving or auto-appending bounded `get_text` readback
 - extended `src/main/tradingview/pine-workflows.js` so Pine Profiler evidence-gathering requests can also stay verification-first while preserving or auto-appending bounded `get_text` readback
 - extended `src/main/tradingview/pine-workflows.js` so Pine Version History provenance requests can stay verification-first while preserving or auto-appending bounded `get_text` readback
+- extended `src/main/tradingview/pine-workflows.js` so Pine Editor visible status/output requests can stay verification-first while preserving or auto-appending bounded `get_text` readback
 - added dedicated Pine data-workflow regressions in `scripts/test-tradingview-pine-data-workflows.js`
-- extended `scripts/test-windows-observation-flow.js` with verified Pine Logs, Pine Profiler, and Pine Version History readback coverage that gathers text without re-entering a screenshot loop
-- updated `src/main/ai-service/system-prompt.js` so TradingView Pine output/error/provenance requests prefer verified Pine surfaces plus `get_text` over screenshot-only inference
+- extended `scripts/test-windows-observation-flow.js` with verified Pine Logs, Pine Profiler, Pine Version History, and Pine Editor status/output readback coverage that gathers text without re-entering a screenshot loop
+- updated `src/main/ai-service/system-prompt.js` so TradingView Pine output/error/provenance requests prefer verified Pine surfaces plus `get_text`, including Pine Editor visible status/output, over screenshot-only inference
 
 **Why this track exists**
 - Current Pine support is surface-oriented:
@@ -1562,7 +1563,7 @@ node scripts/test-windows-observation-flow.js
 - Pine workflows strengthen analysis honesty instead of bypassing it
 
 **Next best slice from here**
-- extend the same bounded evidence-gathering pattern beyond Pine Version History into broader visible Pine status/output surfaces without implying chart-state insight
+- refine Pine Editor status/output readback into more structured visible compile-result / diagnostics summaries without implying chart-state insight
 
 ### Track E — Honest drawing capability framing
 

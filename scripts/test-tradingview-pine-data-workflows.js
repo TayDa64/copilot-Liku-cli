@@ -30,6 +30,16 @@ test('pine workflow recognizes pine logs evidence-gathering requests', () => {
   assert.strictEqual(intent.wantsEvidenceReadback, true);
 });
 
+test('pine workflow recognizes pine editor status-output requests', () => {
+  const intent = inferTradingViewPineIntent('open pine editor in tradingview and read the visible compiler status', [
+    { type: 'key', key: 'ctrl+e' }
+  ]);
+
+  assert(intent, 'intent should be inferred');
+  assert.strictEqual(intent.surfaceTarget, 'pine-editor');
+  assert.strictEqual(intent.wantsEvidenceReadback, true);
+});
+
 test('pine workflow recognizes pine profiler evidence-gathering requests', () => {
   const intent = inferTradingViewPineIntent('open pine profiler in tradingview and summarize the metrics', [
     { type: 'key', key: 'ctrl+shift+p' }
@@ -67,6 +77,25 @@ test('open pine logs and read output stays verification-first', () => {
   assert.strictEqual(rewritten[2].verify.target, 'pine-logs');
   assert.strictEqual(rewritten[4].type, 'get_text');
   assert.strictEqual(rewritten[4].text, 'Pine Logs');
+});
+
+test('open pine editor and read visible status stays verification-first', () => {
+  const rewritten = buildTradingViewPineWorkflowActions({
+    appName: 'TradingView',
+    surfaceTarget: 'pine-editor',
+    verifyKind: 'panel-visible',
+    openerIndex: 0,
+    wantsEvidenceReadback: true,
+    requiresObservedChange: false
+  }, [
+    { type: 'key', key: 'ctrl+e', reason: 'Open Pine Editor' }
+  ]);
+
+  assert.strictEqual(rewritten[0].type, 'bring_window_to_front');
+  assert.strictEqual(rewritten[2].type, 'key');
+  assert.strictEqual(rewritten[2].verify.target, 'pine-editor');
+  assert.strictEqual(rewritten[4].type, 'get_text');
+  assert.strictEqual(rewritten[4].text, 'Pine Editor');
 });
 
 test('open pine profiler and summarize metrics stays verification-first', () => {
@@ -120,6 +149,21 @@ test('pine evidence-gathering workflow preserves trailing get_text read step', (
   assert.strictEqual(readSteps.length, 1, 'explicit readback step should be preserved without duplication');
   assert.strictEqual(readSteps[0].text, 'Pine Logs');
   assert.strictEqual(rewritten[2].verify.target, 'pine-logs');
+});
+
+test('pine editor evidence workflow preserves trailing get_text read step', () => {
+  const rewritten = maybeRewriteTradingViewPineWorkflow([
+    { type: 'key', key: 'ctrl+e' },
+    { type: 'get_text', text: 'Pine Editor', reason: 'Read visible Pine Editor status text' }
+  ], {
+    userMessage: 'open pine editor in tradingview and summarize the visible compiler status'
+  });
+
+  assert(Array.isArray(rewritten), 'workflow should rewrite');
+  const readSteps = rewritten.filter((action) => action?.type === 'get_text');
+  assert.strictEqual(readSteps.length, 1, 'explicit pine editor readback step should be preserved without duplication');
+  assert.strictEqual(readSteps[0].text, 'Pine Editor');
+  assert.strictEqual(rewritten[2].verify.target, 'pine-editor');
 });
 
 test('pine profiler evidence workflow preserves trailing get_text read step', () => {

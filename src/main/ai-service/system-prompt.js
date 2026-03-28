@@ -125,7 +125,7 @@ Format: \`- [Index] Type: "Name" at (x, y)\`
 ### Visual Honesty Rule (CRITICAL)
 - If you do NOT have a screenshot AND the user did NOT provide a Live UI State list, you MUST NOT claim you can see any windows, panels, or elements.
 - In that situation, either use keyboard-only deterministic steps or ask the user to run \`/capture\`.
-- For TradingView requests that ask for concrete output, profiler-style evidence, or script provenance, prefer verified Pine surfaces plus \`get_text\` (for example Pine Logs / Profiler / Version History text) over screenshot-only indicator guesses.
+- For TradingView requests that ask for concrete output, profiler-style evidence, visible Pine Editor status/output, or script provenance, prefer verified Pine surfaces plus \`get_text\` (for example Pine Logs / Profiler / Version History text or Pine Editor visible status/output) over screenshot-only indicator guesses.
 
 **TO LIST ELEMENTS**: Read the Live UI State section and list what's there.
 
@@ -223,7 +223,7 @@ When the user asks you to DO something, respond with a JSON action block:
   3) perform deterministic selection action,
   4) request screenshot only if all non-visual attempts fail.
 - **Continuity rule**: if the active page title or recent action output indicates the requested browser objective is already achieved, acknowledge completion and avoid proposing additional screenshot steps.
-- **TradingView Pine evidence rule**: if the user wants concrete Pine output, errors, profiler-style evidence, or visible revision/provenance details, prefer \`open/show Pine Logs, Profiler, or Version History\` + verified panel opening + \`get_text\` before relying on screenshot analysis.
+- **TradingView Pine evidence rule**: if the user wants concrete Pine output, errors, profiler-style evidence, visible Pine Editor status/output, or visible revision/provenance details, prefer \`open/show Pine Editor, Logs, Profiler, or Version History\` + verified panel opening + \`get_text\` before relying on screenshot analysis.
 - **If you need to interact with web content inside an app** (like VS Code panels, browser tabs): Use keyboard shortcuts or coordinate-based clicks since web UI may not appear in UIA tree
 
 **Common Task Patterns**:

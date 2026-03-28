@@ -35,6 +35,14 @@ function inferPineEvidenceReadIntent(raw = '', surfaceTarget = '') {
 }
 
 function buildPineReadbackStep(surfaceTarget) {
+  if (surfaceTarget === 'pine-editor') {
+    return {
+      type: 'get_text',
+      text: 'Pine Editor',
+      reason: 'Read visible Pine Editor status/output text for bounded evidence gathering'
+    };
+  }
+
   if (surfaceTarget === 'pine-logs') {
     return {
       type: 'get_text',
@@ -126,7 +134,9 @@ function inferTradingViewPineIntent(userMessage = '', actions = []) {
         ? 'Open TradingView Pine Profiler with verification'
         : surface.target === 'pine-version-history'
           ? 'Open TradingView Pine version history with verification'
-          : 'Open TradingView Pine Editor with verification'
+          : wantsEvidenceReadback
+            ? 'Open TradingView Pine Editor with verification and read visible status/output'
+            : 'Open TradingView Pine Editor with verification'
   };
 }
 
