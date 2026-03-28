@@ -40,6 +40,16 @@ test('pine workflow recognizes pine editor status-output requests', () => {
   assert.strictEqual(intent.wantsEvidenceReadback, true);
 });
 
+test('pine workflow recognizes pine editor line-budget requests', () => {
+  const intent = inferTradingViewPineIntent('open pine editor in tradingview and check whether the script is close to the 500 line limit', [
+    { type: 'key', key: 'ctrl+e' }
+  ]);
+
+  assert(intent, 'intent should be inferred');
+  assert.strictEqual(intent.surfaceTarget, 'pine-editor');
+  assert.strictEqual(intent.wantsEvidenceReadback, true);
+});
+
 test('pine workflow recognizes pine profiler evidence-gathering requests', () => {
   const intent = inferTradingViewPineIntent('open pine profiler in tradingview and summarize the metrics', [
     { type: 'key', key: 'ctrl+shift+p' }
@@ -96,6 +106,26 @@ test('open pine editor and read visible status stays verification-first', () => 
   assert.strictEqual(rewritten[2].verify.target, 'pine-editor');
   assert.strictEqual(rewritten[4].type, 'get_text');
   assert.strictEqual(rewritten[4].text, 'Pine Editor');
+});
+
+test('open pine editor and check 500-line budget stays verification-first', () => {
+  const rewritten = buildTradingViewPineWorkflowActions({
+    appName: 'TradingView',
+    surfaceTarget: 'pine-editor',
+    verifyKind: 'panel-visible',
+    openerIndex: 0,
+    wantsEvidenceReadback: true,
+    requiresObservedChange: false
+  }, [
+    { type: 'key', key: 'ctrl+e', reason: 'Open Pine Editor' }
+  ]);
+
+  assert.strictEqual(rewritten[0].type, 'bring_window_to_front');
+  assert.strictEqual(rewritten[2].type, 'key');
+  assert.strictEqual(rewritten[2].verify.target, 'pine-editor');
+  assert.strictEqual(rewritten[4].type, 'get_text');
+  assert.strictEqual(rewritten[4].text, 'Pine Editor');
+  assert(/line-budget hints/i.test(rewritten[4].reason), 'pine editor line-budget readback should mention line-budget hints');
 });
 
 test('open pine profiler and summarize metrics stays verification-first', () => {

@@ -21,7 +21,14 @@ function inferPineEvidenceReadIntent(raw = '', surfaceTarget = '') {
 
   const mentionsReadVerb = /\b(read|review|inspect|check|show|summarize|tell me|tell us|extract|gather)\b/.test(normalized);
   const mentionsOutputTarget = /\b(output|log|logs|errors|messages|status|compiler|compile|results|result|text|profiler|performance|timings|timing|stats|statistics|metrics|history|version|versions|revision|revisions|changes|provenance)\b/.test(normalized);
+  const mentionsLineBudget = normalized.includes('500 line')
+    || normalized.includes('500 lines')
+    || normalized.includes('line count')
+    || normalized.includes('line budget')
+    || normalized.includes('script length')
+    || (/\blines?\b/.test(normalized) && /\b(limit|max|maximum|cap|capped|budget)\b/.test(normalized));
   if (mentionsReadVerb && mentionsOutputTarget) return true;
+  if (surfaceTarget === 'pine-editor' && mentionsReadVerb && mentionsLineBudget) return true;
 
   if (surfaceTarget === 'pine-profiler' && mentionsReadVerb && /\b(profiler|performance|timings|timing|stats|statistics|metrics)\b/.test(normalized)) {
     return true;
@@ -39,7 +46,7 @@ function buildPineReadbackStep(surfaceTarget) {
     return {
       type: 'get_text',
       text: 'Pine Editor',
-      reason: 'Read visible Pine Editor status/output text for bounded evidence gathering'
+      reason: 'Read visible Pine Editor status/output or line-budget hints for bounded evidence gathering'
     };
   }
 

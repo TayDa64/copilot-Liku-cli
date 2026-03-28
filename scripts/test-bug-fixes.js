@@ -350,7 +350,18 @@ test('system prompt guides Pine evidence gathering toward get_text over screensh
   assert(content.includes('TradingView Pine evidence rule'), 'System prompt should include explicit TradingView Pine evidence guidance');
   assert(content.includes('Pine Logs / Profiler / Version History text'), 'System prompt should point the model toward Pine text and provenance evidence');
   assert(content.includes('Pine Editor visible status/output'), 'System prompt should mention Pine Editor status/output as bounded evidence');
+  assert(content.includes('500 lines'), 'System prompt should mention the Pine 500-line limit');
+  assert(content.includes('Do not propose pasting or generating Pine scripts longer than 500 lines'), 'System prompt should teach the Pine line-budget guard explicitly');
   assert(content.includes('get_text'), 'System prompt should mention get_text for Pine evidence gathering');
+});
+
+test('TradingView Pine workflows support bounded Pine Editor line-budget readback', () => {
+  const tradingViewPinePath = path.join(__dirname, '..', 'src', 'main', 'tradingview', 'pine-workflows.js');
+  const fs = require('fs');
+  const tradingViewPineContent = fs.readFileSync(tradingViewPinePath, 'utf8');
+
+  assert(tradingViewPineContent.includes("normalized.includes('500 line')"), 'TradingView Pine workflows should recognize 500-line budget hints');
+  assert(tradingViewPineContent.includes('line-budget hints'), 'TradingView Pine workflows should support bounded Pine Editor line-budget readback');
 });
 
 test('ai-service treats TradingView DOM order-entry actions as high risk', () => {

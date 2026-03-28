@@ -1500,6 +1500,7 @@ node scripts/test-windows-observation-flow.js
 - extended `src/main/tradingview/pine-workflows.js` so Pine Profiler evidence-gathering requests can also stay verification-first while preserving or auto-appending bounded `get_text` readback
 - extended `src/main/tradingview/pine-workflows.js` so Pine Version History provenance requests can stay verification-first while preserving or auto-appending bounded `get_text` readback
 - extended `src/main/tradingview/pine-workflows.js` so Pine Editor visible status/output requests can stay verification-first while preserving or auto-appending bounded `get_text` readback
+- added Pine Editor line-budget awareness so `500-line limit` / line-count checks prefer verified Pine Editor readback and prompt guidance now explicitly treats Pine scripts as capped at 500 lines when reading/writing
 - added dedicated Pine data-workflow regressions in `scripts/test-tradingview-pine-data-workflows.js`
 - extended `scripts/test-windows-observation-flow.js` with verified Pine Logs, Pine Profiler, Pine Version History, and Pine Editor status/output readback coverage that gathers text without re-entering a screenshot loop
 - updated `src/main/ai-service/system-prompt.js` so TradingView Pine output/error/provenance requests prefer verified Pine surfaces plus `get_text`, including Pine Editor visible status/output, over screenshot-only inference

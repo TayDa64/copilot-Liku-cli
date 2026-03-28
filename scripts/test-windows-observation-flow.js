@@ -280,6 +280,22 @@ async function run() {
     assert.strictEqual(rewritten[4].text, 'Pine Editor');
   });
 
+  await testAsync('low-signal TradingView Pine line-budget request rewrites to panel verification plus get_text', async () => {
+    const rewritten = aiService.rewriteActionsForReliability([
+      { type: 'key', key: 'ctrl+e' }
+    ], {
+      userMessage: 'open pine editor in tradingview and check whether the script is near the 500 line limit'
+    });
+
+    assert(Array.isArray(rewritten), 'pine line-budget rewrite should return an action array');
+    assert.strictEqual(rewritten[0].type, 'bring_window_to_front');
+    assert.strictEqual(rewritten[2].type, 'key');
+    assert.strictEqual(rewritten[2].verify.target, 'pine-editor');
+    assert.strictEqual(rewritten[4].type, 'get_text');
+    assert.strictEqual(rewritten[4].text, 'Pine Editor');
+    assert(/line-budget hints/i.test(rewritten[4].reason), 'pine line-budget readback should mention line-budget hints');
+  });
+
   await testAsync('low-signal TradingView Pine Logs evidence request rewrites to panel verification plus get_text', async () => {
     const rewritten = aiService.rewriteActionsForReliability([
       { type: 'key', key: 'ctrl+shift+l' }
