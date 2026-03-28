@@ -1,6 +1,64 @@
 const BROWSER_PROCESS_NAMES = new Set(['msedge', 'chrome', 'firefox', 'brave', 'opera', 'iexplore', 'safari']);
 const LOW_UIA_PROCESS_HINTS = new Set(['tradingview', 'electron', 'slack', 'discord', 'teams']);
 
+function isScreenLikeCaptureMode(captureMode) {
+  const normalized = String(captureMode || '').trim().toLowerCase();
+  return normalized === 'screen'
+    || normalized === 'fullscreen-fallback'
+    || normalized.startsWith('screen-')
+    || normalized.includes('fullscreen');
+}
+
+function isLikelyLowUiaChartContext({ capability, foreground, userMessage }) {
+  const mode = String(capability?.mode || '').trim().toLowerCase();
+  const processName = String(foreground?.processName || '').trim().toLowerCase();
+  const title = String(foreground?.title || '').trim().toLowerCase();
+  const text = String(userMessage || '').trim().toLowerCase();
+  return mode === 'visual-first-low-uia'
+    || /tradingview|chart|ticker|candlestick|pine/.test(processName)
+    || /tradingview|chart|ticker|candlestick|pine/.test(title)
+    || /tradingview|chart|ticker|candlestick|pine/.test(text);
+}
+
+function buildCurrentTurnVisualEvidenceConstraint({ latestVisual, capability, foreground, userMessage }) {
+  if (!latestVisual || typeof latestVisual !== 'object') return '';
+
+  const captureMode = String(latestVisual.captureMode || latestVisual.scope || '').trim() || 'unknown';
+  const captureTrusted = typeof latestVisual.captureTrusted === 'boolean'
+    ? latestVisual.captureTrusted
+    : !isScreenLikeCaptureMode(captureMode);
+  const lowUiaChartContext = isLikelyLowUiaChartContext({ capability, foreground, userMessage });
+  const activeApp = String(foreground?.title || foreground?.processName || '').trim();
+
+  const lines = [
+    '## Current Visual Evidence Bounds',
+    `- captureMode: ${captureMode}`,
+    `- captureTrusted: ${captureTrusted ? 'yes' : 'no'}`
+  ];
+
+  if (activeApp) {
+    lines.push(`- activeApp: ${activeApp}`);
+  }
+
+  if (!captureTrusted || isScreenLikeCaptureMode(captureMode)) {
+    lines.push('- evidenceQuality: degraded-mixed-desktop');
+    lines.push('- Rule: Treat the current screenshot as degraded mixed-desktop evidence, not a trusted target-window capture.');
+    lines.push('- Rule: Distinguish directly visible facts in the image from interpretive hypotheses or trading ideas.');
+    if (lowUiaChartContext) {
+      lines.push('- Rule: For TradingView or other low-UIA chart apps, do not claim precise indicator values, exact trendline coordinates, or exact support/resistance numbers unless they are directly legible in the screenshot or supplied by a stronger evidence path.');
+    }
+    lines.push('- Rule: If a detail is not directly legible, state uncertainty explicitly and offer bounded next steps.');
+    return lines.join('\n');
+  }
+
+  lines.push('- evidenceQuality: trusted-target-window');
+  lines.push('- Rule: Describe directly visible facts from the current screenshot first, then clearly separate any interpretation or trading hypothesis.');
+  if (lowUiaChartContext) {
+    lines.push('- Rule: Even with trusted capture, only state precise chart indicator values when they are directly legible in the screenshot or supported by a stronger evidence path.');
+  }
+  return lines.join('\n');
+}
+
 function classifyActiveAppCapability({ foreground, watcherSnapshot, browserState }) {
   const processName = String(foreground?.processName || watcherSnapshot?.activeWindow?.processName || '').toLowerCase();
   const title = String(foreground?.title || watcherSnapshot?.activeWindow?.title || '').toLowerCase();
@@ -117,6 +175,8 @@ function createMessageBuilder(dependencies) {
   async function buildMessages(userMessage, includeVisual = false, options = {}) {
     const messages = [{ role: 'system', content: systemPrompt }];
     const { extraSystemMessages = [], skillsContext = '', memoryContext = '', sessionIntentContext = '', chatContinuityContext = '' } = options || {};
+    let currentForeground = null;
+    let activeAppCapability = null;
 
     try {
       let prefText = '';
@@ -194,25 +254,24 @@ function createMessageBuilder(dependencies) {
     try {
       const watcher = getUIWatcher();
       const browserState = getBrowserSessionState();
-      let foreground = null;
       if (typeof getForegroundWindowInfo === 'function') {
-        foreground = await getForegroundWindowInfo();
+        currentForeground = await getForegroundWindowInfo();
       }
       const watcherSnapshot = watcher && typeof watcher.getCapabilitySnapshot === 'function'
         ? watcher.getCapabilitySnapshot()
         : null;
-      const capability = classifyActiveAppCapability({ foreground, watcherSnapshot, browserState });
-      if (capability) {
+      activeAppCapability = classifyActiveAppCapability({ foreground: currentForeground, watcherSnapshot, browserState });
+      if (activeAppCapability) {
         const capabilityBlock = [
           '## Active App Capability',
-          `- mode: ${capability.mode}`,
-          `- confidence: ${capability.confidence}`,
-          `- rationale: ${capability.rationale}`,
-          `- activeWindowElementCount: ${Number(capability.inventory?.activeWindowElementCount || 0)}`,
-          `- interactiveElementCount: ${Number(capability.inventory?.interactiveElementCount || 0)}`,
-          `- namedInteractiveElementCount: ${Number(capability.inventory?.namedInteractiveElementCount || 0)}`,
-          ...(Array.isArray(capability.directives) ? capability.directives.map((line) => `- directive: ${line}`) : [])
-          ,...(Array.isArray(capability.responseShape) ? capability.responseShape.map((line) => `- answer-shape: ${line}`) : [])
+          `- mode: ${activeAppCapability.mode}`,
+          `- confidence: ${activeAppCapability.confidence}`,
+          `- rationale: ${activeAppCapability.rationale}`,
+          `- activeWindowElementCount: ${Number(activeAppCapability.inventory?.activeWindowElementCount || 0)}`,
+          `- interactiveElementCount: ${Number(activeAppCapability.inventory?.interactiveElementCount || 0)}`,
+          `- namedInteractiveElementCount: ${Number(activeAppCapability.inventory?.namedInteractiveElementCount || 0)}`,
+          ...(Array.isArray(activeAppCapability.directives) ? activeAppCapability.directives.map((line) => `- directive: ${line}`) : [])
+          ,...(Array.isArray(activeAppCapability.responseShape) ? activeAppCapability.responseShape.map((line) => `- answer-shape: ${line}`) : [])
         ].join('\n');
         messages.push({ role: 'system', content: capabilityBlock });
       }
@@ -223,6 +282,18 @@ function createMessageBuilder(dependencies) {
     });
 
     const latestVisual = includeVisual ? getLatestVisualContext() : null;
+
+    try {
+      const visualEvidenceConstraint = buildCurrentTurnVisualEvidenceConstraint({
+        latestVisual,
+        capability: activeAppCapability,
+        foreground: currentForeground,
+        userMessage
+      });
+      if (visualEvidenceConstraint) {
+        messages.push({ role: 'system', content: visualEvidenceConstraint });
+      }
+    } catch {}
 
     let inspectContextText = '';
     try {

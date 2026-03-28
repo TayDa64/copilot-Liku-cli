@@ -1389,6 +1389,14 @@ The findings below are grounded in current repo seams, especially:
 
 ### Track B — Same-turn degraded visual evidence contract
 
+**Status:** First slice completed in working tree
+
+**Delivered so far**
+- injected a `## Current Visual Evidence Bounds` system block in `src/main/ai-service/message-builder.js`
+- current-turn prompts now distinguish degraded mixed-desktop fallback evidence from trusted target-window capture before the model answers
+- added focused same-turn visual-bounds regressions in `scripts/test-visual-analysis-bounds.js`
+- revalidated compatibility with `scripts/test-chat-continuity-prompting.js` and `scripts/test-message-builder-session-intent.js`
+
 **Why this track exists**
 - The continuity stack already degrades follow-up routing when screenshot trust falls back to full-screen capture.
 - Current same-turn visual analysis can still overclaim chart specifics after `screen-copyfromscreen` fallback because `message-builder.js` injects the image but not a strong current-turn evidence-trust contract.
@@ -1415,11 +1423,16 @@ The findings below are grounded in current repo seams, especially:
 - preserve the existing continuity-state fields, but also make the current-turn model call see the degraded-evidence warning before it answers
 
 **Regression additions**
-- `scripts/test-chat-continuity-prompting.js`
-  - `same-turn degraded TradingView screenshot injects bounded-analysis rule`
-- likely new `scripts/test-visual-analysis-bounds.js`
+- `scripts/test-visual-analysis-bounds.js`
   - `degraded TradingView analysis prompt forbids precise unseen indicator claims`
   - `trusted target-window capture allows stronger direct observation wording`
+
+**Acceptance proof (slice 1)**
+```powershell
+node scripts/test-visual-analysis-bounds.js
+node scripts/test-chat-continuity-prompting.js
+node scripts/test-message-builder-session-intent.js
+```
 
 **Acceptance criteria**
 - degraded same-turn analysis becomes explicitly uncertainty-aware
