@@ -265,6 +265,73 @@ async function run() {
     assert.strictEqual(rewritten[4].text, 'plot(close)');
   });
 
+  await testAsync('low-signal TradingView Pine Logs evidence request rewrites to panel verification plus get_text', async () => {
+    const rewritten = aiService.rewriteActionsForReliability([
+      { type: 'key', key: 'ctrl+shift+l' }
+    ], {
+      userMessage: 'open pine logs in tradingview and read output'
+    });
+
+    assert(Array.isArray(rewritten), 'pine logs evidence rewrite should return an action array');
+    assert.strictEqual(rewritten[0].type, 'bring_window_to_front');
+    assert.strictEqual(rewritten[2].type, 'key');
+    assert.strictEqual(rewritten[2].verify.target, 'pine-logs');
+    assert.strictEqual(rewritten[4].type, 'get_text');
+    assert.strictEqual(rewritten[4].text, 'Pine Logs');
+  });
+
+  await testAsync('verified pine logs workflow allows bounded evidence gathering without screenshot loop', async () => {
+    const executed = [];
+    const foregroundSequence = [
+      { success: true, hwnd: 777, title: 'TradingView', processName: 'tradingview', windowKind: 'main' },
+      { success: true, hwnd: 889, title: 'Pine Logs - TradingView', processName: 'tradingview', windowKind: 'owned' },
+      { success: true, hwnd: 889, title: 'Pine Logs - TradingView', processName: 'tradingview', windowKind: 'owned' },
+      { success: true, hwnd: 889, title: 'Pine Logs - TradingView', processName: 'tradingview', windowKind: 'owned' }
+    ];
+
+    await withPatchedSystemAutomation({
+      resolveWindowHandle: async (action) => action?.processName === 'tradingview' ? 777 : 0,
+      getForegroundWindowHandle: async () => 777,
+      getForegroundWindowInfo: async () => {
+        return foregroundSequence.shift() || { success: true, hwnd: 889, title: 'Pine Logs - TradingView', processName: 'tradingview', windowKind: 'owned' };
+      },
+      focusWindow: async () => ({ success: true }),
+      getRunningProcessesByNames: async () => ([{ pid: 4242, processName: 'tradingview', mainWindowTitle: 'TradingView', startTime: '2026-03-23T00:00:00Z' }])
+    }, async () => {
+      const execResult = await aiService.executeActions({
+        thought: 'Open Pine Logs and read the latest visible output',
+        verification: 'TradingView should show Pine Logs before text is read',
+        actions: [
+          { type: 'focus_window', title: 'TradingView', processName: 'tradingview' },
+          { type: 'key', key: 'ctrl+shift+l', reason: 'Open Pine Logs', verify: { kind: 'panel-visible', appName: 'TradingView', target: 'pine-logs', keywords: ['pine logs', 'pine'] } },
+          { type: 'get_text', text: 'Pine Logs', reason: 'Read visible Pine Logs output' }
+        ]
+      }, null, null, {
+        userMessage: 'open pine logs in tradingview and read output',
+        actionExecutor: async (action) => {
+          executed.push(action.type);
+          if (action.type === 'get_text') {
+            return {
+              success: true,
+              action: action.type,
+              text: 'Error at 12: mismatched input',
+              method: 'TextPattern',
+              message: 'Got text via TextPattern: "Error at 12: mismatched input"'
+            };
+          }
+          return { success: true, action: action.type, message: 'executed' };
+        }
+      });
+
+      assert.strictEqual(execResult.success, true, 'Execution should proceed after Pine Logs is observed');
+      assert.deepStrictEqual(executed, ['focus_window', 'key', 'get_text'], 'Bounded evidence gathering should continue to read text after panel verification');
+      assert.strictEqual(execResult.observationCheckpoints.length, 1, 'A post-key observation checkpoint should be returned');
+      assert.strictEqual(execResult.observationCheckpoints[0].verified, true, 'Pine Logs panel observation should pass');
+      assert.strictEqual(execResult.results[2].text, 'Error at 12: mismatched input', 'Text evidence should be preserved on the get_text result');
+      assert(!execResult.screenshotCaptured, 'Pine Logs evidence gathering should not require a screenshot loop');
+    });
+  });
+
   await testAsync('low-signal TradingView DOM request wraps the opener with bounded panel verification', async () => {
     const rewritten = aiService.rewriteActionsForReliability([
       { type: 'key', key: 'ctrl+d' },

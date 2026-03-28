@@ -328,11 +328,23 @@ test('ai-service gates TradingView follow-up typing on post-key observation chec
   assert(tradingViewDrawingContent.includes("kind: intent.verifyKind"), 'TradingView drawing workflows should preserve verification-first surface contracts');
   assert(tradingViewPineContent.includes("target: 'pine-editor'"), 'TradingView Pine workflows should encode pine-editor verification metadata');
   assert(tradingViewPineContent.includes('requiresObservedChange'), 'TradingView Pine workflows should gate follow-up typing on observed panel changes');
+  assert(tradingViewPineContent.includes("type: 'get_text'"), 'TradingView Pine workflows should support bounded Pine Logs readback');
+  assert(tradingViewPineContent.includes('wantsEvidenceReadback'), 'TradingView Pine workflows should detect Pine evidence-gathering requests');
   assert(tradingViewPaperContent.includes("target: 'paper-trading-panel'"), 'TradingView Paper workflows should encode paper-trading-panel verification metadata');
   assert(tradingViewPaperContent.includes('paper account'), 'TradingView Paper workflows should ground paper-assist keywords');
   assert(tradingViewDomContent.includes("surfaceTarget: 'dom-panel'"), 'TradingView DOM workflows should encode dom-panel verification metadata');
   assert(tradingViewDomContent.includes('mentionsRiskyTradeAction'), 'TradingView DOM workflows should refuse to rewrite risky trading prompts');
   assert(aiServiceContent.includes('result.tradingMode = tradingDomainRisk.tradingMode'), 'ai-service safety analysis should expose TradingView trading-mode metadata');
+});
+
+test('system prompt guides Pine evidence gathering toward get_text over screenshot-only inference', () => {
+  const systemPromptPath = path.join(__dirname, '..', 'src', 'main', 'ai-service', 'system-prompt.js');
+  const fs = require('fs');
+  const content = fs.readFileSync(systemPromptPath, 'utf8');
+
+  assert(content.includes('TradingView Pine evidence rule'), 'System prompt should include explicit TradingView Pine evidence guidance');
+  assert(content.includes('Pine Logs / Profiler text'), 'System prompt should point the model toward Pine text evidence');
+  assert(content.includes('get_text'), 'System prompt should mention get_text for Pine evidence gathering');
 });
 
 test('ai-service treats TradingView DOM order-entry actions as high risk', () => {

@@ -1493,6 +1493,14 @@ node scripts/test-windows-observation-flow.js
 
 ### Track D — Pine-backed evidence gathering for concrete TradingView insight
 
+**Status:** In progress in working tree
+
+**Delivered so far**
+- extended `src/main/tradingview/pine-workflows.js` so Pine Logs evidence-gathering requests can stay verification-first while preserving or auto-appending bounded `get_text` readback
+- added dedicated Pine data-workflow regressions in `scripts/test-tradingview-pine-data-workflows.js`
+- extended `scripts/test-windows-observation-flow.js` with verified Pine Logs readback coverage that gathers text without re-entering a screenshot loop
+- updated `src/main/ai-service/system-prompt.js` so TradingView Pine output/error requests prefer verified Pine surfaces plus `get_text` over screenshot-only inference
+
 **Why this track exists**
 - Current Pine support is surface-oriented:
   - `src/main/tradingview/pine-workflows.js` opens Pine Editor, Pine Logs, Profiler, and Version History with verification

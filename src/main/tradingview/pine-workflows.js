@@ -15,6 +15,17 @@ function mergeUnique(values = []) {
     .filter(Boolean)));
 }
 
+function inferPineEvidenceReadIntent(raw = '', surfaceTarget = '') {
+  const normalized = normalizeTextForMatch(raw);
+  if (!normalized) return false;
+
+  const mentionsReadVerb = /\b(read|review|inspect|check|show|summarize|tell me|tell us|extract|gather)\b/.test(normalized);
+  const mentionsOutputTarget = /\b(output|log|logs|errors|messages|status|compiler|compile|results|result|text)\b/.test(normalized);
+  if (mentionsReadVerb && mentionsOutputTarget) return true;
+
+  return surfaceTarget === 'pine-logs' && /\bwhat does|what do|what is in|what's in\b/.test(normalized) && /\b(log|logs|errors|messages|status)\b/.test(normalized);
+}
+
 function inferPineSurfaceTarget(raw = '') {
   const normalized = normalizeTextForMatch(raw);
   if (!normalized) return null;
@@ -61,6 +72,8 @@ function inferTradingViewPineIntent(userMessage = '', actions = []) {
   const surface = inferPineSurfaceTarget(raw);
   if (!surface) return null;
 
+  const wantsEvidenceReadback = inferPineEvidenceReadIntent(raw, surface.target);
+
   const existingWorkflowSignal = Array.isArray(actions) && actions.some((action) => /pine/.test(String(action?.verify?.target || '')));
 
   return {
@@ -70,6 +83,7 @@ function inferTradingViewPineIntent(userMessage = '', actions = []) {
     openerIndex,
     existingWorkflowSignal,
     requiresObservedChange: nextAction?.type === 'type',
+    wantsEvidenceReadback,
     reason: surface.target === 'pine-logs'
       ? 'Open TradingView Pine Logs with verification'
       : surface.target === 'pine-profiler'
@@ -125,6 +139,16 @@ function buildTradingViewPineWorkflowActions(intent = {}, actions = []) {
   const trailing = actions.slice(intent.openerIndex + 1)
     .filter((action) => action && typeof action === 'object' && action.type !== 'screenshot');
 
+  const hasExplicitReadbackStep = trailing.some((action) => action?.type === 'get_text' || action?.type === 'find_element');
+
+  if (intent.wantsEvidenceReadback && intent.surfaceTarget === 'pine-logs' && !hasExplicitReadbackStep) {
+    trailing.push({
+      type: 'get_text',
+      text: 'Pine Logs',
+      reason: 'Read visible Pine Logs output for bounded evidence gathering'
+    });
+  }
+
   if (trailing.length > 0 && trailing[0]?.type !== 'wait') {
     rewritten.push({ type: 'wait', ms: 220 });
   }
@@ -138,7 +162,7 @@ function maybeRewriteTradingViewPineWorkflow(actions, context = {}) {
   const intent = inferTradingViewPineIntent(context.userMessage || '', actions);
   if (!intent || intent.existingWorkflowSignal || intent.openerIndex < 0) return null;
 
-  const lowSignalTypes = new Set(['bring_window_to_front', 'focus_window', 'key', 'click', 'double_click', 'right_click', 'type', 'wait', 'screenshot']);
+  const lowSignalTypes = new Set(['bring_window_to_front', 'focus_window', 'key', 'click', 'double_click', 'right_click', 'type', 'wait', 'screenshot', 'get_text', 'find_element']);
   const lowSignal = actions.every((action) => lowSignalTypes.has(action?.type));
   const tinyOrFragmented = actions.length <= 4;
   const screenshotFirst = actions[0]?.type === 'screenshot';
