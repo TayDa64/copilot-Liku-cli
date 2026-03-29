@@ -9,7 +9,9 @@ const {
   buildTradingViewShortcutAction,
   getTradingViewShortcut,
   getTradingViewShortcutKey,
+  getTradingViewShortcutMatchTerms,
   listTradingViewShortcuts,
+  messageMentionsTradingViewShortcut,
   matchesTradingViewShortcutAction,
   resolveTradingViewShortcutId
 } = require(path.join(__dirname, '..', 'src', 'main', 'tradingview', 'shortcut-profile.js'));
@@ -103,4 +105,15 @@ test('shortcut profile resolves aliases and documents official shortcut referenc
   const indicatorSearch = getTradingViewShortcut('indicator-search');
   assert(indicatorSearch.sourceUrls.includes(TRADINGVIEW_SHORTCUTS_OFFICIAL_URL));
   assert(indicatorSearch.sourceUrls.includes(TRADINGVIEW_SHORTCUTS_SECONDARY_URL));
+});
+
+test('shortcut profile exposes reusable phrase matching helpers for workflow inference', () => {
+  const indicatorTerms = getTradingViewShortcutMatchTerms('indicator-search');
+  const alertTerms = getTradingViewShortcutMatchTerms('create-alert');
+
+  assert(indicatorTerms.includes('study search'));
+  assert(indicatorTerms.includes('indicators menu'));
+  assert(alertTerms.includes('new alert'));
+  assert(messageMentionsTradingViewShortcut('open the study search in tradingview', 'indicator-search'));
+  assert(messageMentionsTradingViewShortcut('open a new alert in tradingview', 'create-alert'));
 });

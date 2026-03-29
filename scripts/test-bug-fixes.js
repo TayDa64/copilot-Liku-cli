@@ -285,6 +285,8 @@ test('pine workflow encodes diagnostics and compile-result evidence modes', () =
   assert(shortcutProfileContent.includes('TRADINGVIEW_SHORTCUTS_OFFICIAL_URL'), 'TradingView shortcut profile should record the official support reference');
   assert(shortcutProfileContent.includes('TRADINGVIEW_SHORTCUTS_SECONDARY_URL'), 'TradingView shortcut profile should record the secondary Pineify reference');
   assert(shortcutProfileContent.includes('resolveTradingViewShortcutId'), 'TradingView shortcut profile should support alias-to-shortcut resolution');
+  assert(shortcutProfileContent.includes('getTradingViewShortcutMatchTerms'), 'TradingView shortcut profile should expose reusable shortcut match terms');
+  assert(shortcutProfileContent.includes('messageMentionsTradingViewShortcut'), 'TradingView shortcut profile should expose reusable shortcut phrase matching');
 });
 
 test('system prompt includes Pine diagnostics guidance', () => {
@@ -401,8 +403,10 @@ test('ai-service gates TradingView follow-up typing on post-key observation chec
   assert(tradingViewVerificationContent.includes('function inferTradingViewTradingMode'), 'TradingView verification should expose paper/live/unknown mode inference');
   assert(tradingViewVerificationContent.includes('Paper Trading was detected'), 'TradingView refusal messaging should mention Paper Trading guidance when relevant');
   assert(tradingViewIndicatorContent.includes("getTradingViewShortcutKey('indicator-search')"), 'TradingView indicator workflows should resolve indicator search key via the TradingView shortcut profile');
+  assert(tradingViewIndicatorContent.includes("messageMentionsTradingViewShortcut(raw, 'indicator-search')"), 'TradingView indicator workflows should use shortcut-profile aliases for indicator-search phrasing');
   assert(tradingViewIndicatorContent.includes('indicator-present'), 'TradingView indicator workflows should encode indicator-present verification metadata');
   assert(tradingViewAlertContent.includes("getTradingViewShortcutKey('create-alert')"), 'TradingView alert workflows should resolve Create Alert keys via the TradingView shortcut profile');
+  assert(tradingViewAlertContent.includes("messageMentionsTradingViewShortcut(raw, 'create-alert')"), 'TradingView alert workflows should use shortcut-profile aliases for create-alert phrasing');
   assert(tradingViewAlertContent.includes('create-alert'), 'TradingView alert workflows should encode create-alert verification metadata');
   assert(tradingViewChartContent.includes("kind: 'timeframe-updated'"), 'TradingView chart verification workflows should encode timeframe-updated verification metadata');
   assert(tradingViewChartContent.includes("kind: 'symbol-updated'"), 'TradingView chart verification workflows should encode symbol-updated verification metadata');
@@ -578,6 +582,9 @@ test('ai-service app launch detection treats TradingView shortcut surfaces as ap
 
   assert(aiServiceContent.includes('quick\\s+search'), 'TradingView quick-search phrasing should be treated as an app surface');
   assert(aiServiceContent.includes('command\\s+palette'), 'TradingView command-palette phrasing should be treated as an app surface');
+  assert(aiServiceContent.includes('study\\s+search'), 'TradingView study-search phrasing should be treated as an app surface');
+  assert(aiServiceContent.includes('new\\s+alert'), 'TradingView new-alert phrasing should be treated as an app surface');
+  assert(aiServiceContent.includes('version\\s+history'), 'TradingView version-history phrasing should be treated as an app surface');
   assert(aiServiceContent.includes('object(?:\\s+|-)tree'), 'TradingView object-tree variants should be treated as an app surface');
 });
 

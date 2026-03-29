@@ -1,9 +1,8 @@
 const { buildVerifyTargetHintFromAppName } = require('./app-profile');
 const { extractTradingViewObservationKeywords } = require('./verification');
 const {
-  getTradingViewShortcut,
+  messageMentionsTradingViewShortcut,
   matchesTradingViewShortcutAction,
-  resolveTradingViewShortcutId
 } = require('./shortcut-profile');
 
 const DRAWING_NAMES = [
@@ -38,25 +37,6 @@ function mergeUnique(values = []) {
     .flat()
     .map((value) => String(value || '').trim())
     .filter(Boolean)));
-}
-
-function getTradingViewShortcutMatchTerms(id) {
-  const shortcut = getTradingViewShortcut(id);
-  return mergeUnique([
-    shortcut?.id,
-    shortcut?.surface,
-    shortcut?.aliases
-  ]);
-}
-
-function messageMentionsTradingViewShortcut(value = '', id) {
-  const normalizedMessage = normalizeTextForMatch(value);
-  const resolvedId = resolveTradingViewShortcutId(id);
-  if (!normalizedMessage || !resolvedId) return false;
-
-  return getTradingViewShortcutMatchTerms(resolvedId)
-    .map((term) => normalizeTextForMatch(term))
-    .some((term) => term && normalizedMessage.includes(term));
 }
 
 function normalizeDrawingName(value = '') {

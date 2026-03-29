@@ -2,6 +2,8 @@ const { buildVerifyTargetHintFromAppName } = require('./app-profile');
 const {
   buildTradingViewShortcutAction,
   getTradingViewShortcutKey,
+  getTradingViewShortcutMatchTerms,
+  messageMentionsTradingViewShortcut,
   matchesTradingViewShortcutAction
 } = require('./shortcut-profile');
 
@@ -12,6 +14,13 @@ function normalizeTextForMatch(value) {
     .toLowerCase()
     .replace(/[^a-z0-9.$]+/g, ' ')
     .trim();
+}
+
+function mergeUnique(values = []) {
+  return Array.from(new Set((Array.isArray(values) ? values : [values])
+    .flat()
+    .map((value) => String(value || '').trim())
+    .filter(Boolean)));
 }
 
 function extractAlertPrice(userMessage = '') {
@@ -38,7 +47,9 @@ function inferTradingViewAlertIntent(userMessage = '', actions = []) {
   const normalized = normalizeTextForMatch(raw);
   const mentionsTradingView = /\btradingview|trading view\b/i.test(raw)
     || (Array.isArray(actions) && actions.some((action) => /tradingview/i.test(String(action?.title || '')) || /tradingview/i.test(String(action?.processName || ''))));
-  const mentionsAlertWorkflow = /\balert|alerts|create alert|price alert\b/i.test(raw);
+  const mentionsAlertSurface = messageMentionsTradingViewShortcut(raw, 'create-alert');
+  const mentionsAlertWorkflow = /\balert|alerts|create alert|price alert\b/i.test(raw)
+    || mentionsAlertSurface;
   if (!mentionsTradingView || !mentionsAlertWorkflow) return null;
 
   const existingWorkflowSignal = Array.isArray(actions) && actions.some((action) => {
@@ -57,6 +68,7 @@ function inferTradingViewAlertIntent(userMessage = '', actions = []) {
 
 function buildTradingViewAlertWorkflowActions(intent = {}) {
   const verifyTarget = buildVerifyTargetHintFromAppName(intent.appName || 'TradingView');
+  const alertTerms = getTradingViewShortcutMatchTerms('create-alert');
   const actions = [
     {
       type: 'bring_window_to_front',
@@ -72,7 +84,7 @@ function buildTradingViewAlertWorkflowActions(intent = {}) {
         kind: 'dialog-visible',
         appName: 'TradingView',
         target: 'create-alert',
-        keywords: ['create alert', 'alert']
+        keywords: mergeUnique(['create alert', 'alert', alertTerms])
       },
       verifyTarget
     }),

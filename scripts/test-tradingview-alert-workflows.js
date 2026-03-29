@@ -34,6 +34,13 @@ test('inferTradingViewAlertIntent recognizes create-alert workflows', () => {
   assert.strictEqual(intent.price, '20.02');
 });
 
+test('inferTradingViewAlertIntent recognizes shortcut-alias new-alert phrasing', () => {
+  const intent = inferTradingViewAlertIntent('open new alert in tradingview and type 25.5');
+  assert(intent, 'new-alert alias intent should be inferred');
+  assert.strictEqual(intent.appName, 'TradingView');
+  assert.strictEqual(intent.price, '25.5');
+});
+
 test('buildTradingViewAlertWorkflowActions emits deterministic alt+a flow', () => {
   const actions = buildTradingViewAlertWorkflowActions({ appName: 'TradingView', price: '20.02' });
   assert.strictEqual(actions[0].type, 'bring_window_to_front');
@@ -61,4 +68,31 @@ test('maybeRewriteTradingViewAlertWorkflow rewrites low-signal alert plans', () 
   assert(Array.isArray(rewritten), 'low-signal alert request should rewrite');
   assert.strictEqual(rewritten[2].key, 'alt+a');
   assert.strictEqual(rewritten[4].text, '20.02');
+});
+
+test('maybeRewriteTradingViewAlertWorkflow rewrites new-alert alias plans with alias-aware verification keywords', () => {
+  const rewritten = maybeRewriteTradingViewAlertWorkflow([
+    { type: 'screenshot' },
+    { type: 'wait', ms: 250 }
+  ], {
+    userMessage: 'open new alert in tradingview and type 25.5'
+  });
+
+  assert(Array.isArray(rewritten), 'new-alert alias request should rewrite');
+  assert.strictEqual(rewritten[2].key, getTradingViewShortcutKey('create-alert'));
+  assert(rewritten[2].verify.keywords.includes('new alert'));
+  assert(rewritten[2].verify.keywords.includes('alert dialog'));
+  assert.strictEqual(rewritten[4].text, '25.5');
+});
+
+test('maybeRewriteTradingViewAlertWorkflow does not replace plans already using create-alert shortcut', () => {
+  const rewritten = maybeRewriteTradingViewAlertWorkflow([
+    { type: 'bring_window_to_front', title: 'TradingView', processName: 'tradingview' },
+    { type: 'key', key: getTradingViewShortcutKey('create-alert') },
+    { type: 'type', text: '25.5' }
+  ], {
+    userMessage: 'open new alert in tradingview and type 25.5'
+  });
+
+  assert.strictEqual(rewritten, null);
 });

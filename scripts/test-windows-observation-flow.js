@@ -300,6 +300,20 @@ async function run() {
     assert.strictEqual(rewritten[6].verify.kind, 'indicator-present');
   });
 
+  await testAsync('low-signal TradingView study-search alias request rewrites to deterministic indicator workflow', async () => {
+    const rewritten = aiService.rewriteActionsForReliability([
+      { type: 'screenshot' },
+      { type: 'wait', ms: 250 }
+    ], {
+      userMessage: 'open study search in tradingview and add anchored vwap'
+    });
+
+    assert(Array.isArray(rewritten), 'study-search alias rewrite should return an action array');
+    assert.strictEqual(rewritten[2].type, 'key');
+    assert.strictEqual(rewritten[2].key, '/');
+    assert(rewritten[2].verify.keywords.includes('study search'), 'indicator rewrite should preserve study-search alias keywords');
+  });
+
   await testAsync('low-signal TradingView alert request rewrites to deterministic alert workflow', async () => {
     const rewritten = aiService.rewriteActionsForReliability([
       { type: 'screenshot' },
@@ -316,6 +330,21 @@ async function run() {
     assert.strictEqual(rewritten[2].verify.kind, 'dialog-visible');
     assert.strictEqual(rewritten[4].type, 'type');
     assert.strictEqual(rewritten[4].text, '20.02');
+  });
+
+  await testAsync('low-signal TradingView new-alert alias request rewrites to deterministic alert workflow', async () => {
+    const rewritten = aiService.rewriteActionsForReliability([
+      { type: 'screenshot' },
+      { type: 'wait', ms: 250 }
+    ], {
+      userMessage: 'open new alert in tradingview and type 25.5'
+    });
+
+    assert(Array.isArray(rewritten), 'new-alert alias rewrite should return an action array');
+    assert.strictEqual(rewritten[2].type, 'key');
+    assert.strictEqual(rewritten[2].key, 'alt+a');
+    assert(rewritten[2].verify.keywords.includes('new alert'), 'alert rewrite should preserve new-alert alias keywords');
+    assert.strictEqual(rewritten[4].text, '25.5');
   });
 
   await testAsync('low-signal TradingView timeframe request rewrites to bounded timeframe workflow', async () => {

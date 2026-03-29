@@ -219,6 +219,13 @@ function normalizeKey(value) {
   return String(value || '').trim().toLowerCase();
 }
 
+function normalizeShortcutPhrase(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
 function resolveTradingViewShortcutId(value) {
   const normalized = normalizeKey(value);
   if (!normalized) return null;
@@ -236,6 +243,25 @@ function resolveTradingViewShortcutId(value) {
 function getTradingViewShortcut(id) {
   const resolvedId = resolveTradingViewShortcutId(id);
   return cloneShortcut(resolvedId ? TRADINGVIEW_SHORTCUTS[resolvedId] : null);
+}
+
+function getTradingViewShortcutMatchTerms(id) {
+  const shortcut = getTradingViewShortcut(id);
+  return Array.from(new Set([
+    shortcut?.id,
+    shortcut?.surface,
+    ...(Array.isArray(shortcut?.aliases) ? shortcut.aliases : [])
+  ].map((value) => String(value || '').trim()).filter(Boolean)));
+}
+
+function messageMentionsTradingViewShortcut(value, id) {
+  const normalizedMessage = normalizeShortcutPhrase(value);
+  const resolvedId = resolveTradingViewShortcutId(id);
+  if (!normalizedMessage || !resolvedId) return false;
+
+  return getTradingViewShortcutMatchTerms(resolvedId)
+    .map((term) => normalizeShortcutPhrase(term))
+    .some((term) => term && normalizedMessage.includes(term));
 }
 
 function getTradingViewShortcutKey(id) {
@@ -273,7 +299,9 @@ module.exports = {
   buildTradingViewShortcutAction,
   getTradingViewShortcut,
   getTradingViewShortcutKey,
+  getTradingViewShortcutMatchTerms,
   listTradingViewShortcuts,
+  messageMentionsTradingViewShortcut,
   matchesTradingViewShortcutAction,
   resolveTradingViewShortcutId
 };

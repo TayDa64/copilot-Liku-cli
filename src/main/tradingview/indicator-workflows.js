@@ -2,6 +2,8 @@ const { buildVerifyTargetHintFromAppName } = require('./app-profile');
 const {
   buildTradingViewShortcutAction,
   getTradingViewShortcutKey,
+  getTradingViewShortcutMatchTerms,
+  messageMentionsTradingViewShortcut,
   matchesTradingViewShortcutAction
 } = require('./shortcut-profile');
 
@@ -63,7 +65,9 @@ function inferTradingViewIndicatorIntent(userMessage = '', actions = []) {
   const normalized = normalizeTextForMatch(raw);
   const mentionsTradingView = /\btradingview|trading view\b/i.test(raw)
     || (Array.isArray(actions) && actions.some((action) => /tradingview/i.test(String(action?.title || '')) || /tradingview/i.test(String(action?.processName || ''))));
-  const mentionsIndicatorWorkflow = /\bindicator|indicators|study|studies|overlay|oscillator|anchored vwap|volume profile|strategy tester|bollinger bands\b/i.test(raw);
+  const mentionsIndicatorSearchSurface = messageMentionsTradingViewShortcut(raw, 'indicator-search');
+  const mentionsIndicatorWorkflow = /\bindicator|indicators|study|studies|overlay|oscillator|anchored vwap|volume profile|strategy tester|bollinger bands\b/i.test(raw)
+    || mentionsIndicatorSearchSurface;
   if (!mentionsTradingView || !mentionsIndicatorWorkflow) return null;
 
   const indicatorName = extractIndicatorName(raw);
@@ -88,11 +92,13 @@ function inferTradingViewIndicatorIntent(userMessage = '', actions = []) {
 function buildTradingViewIndicatorWorkflowActions(intent = {}) {
   const verifyTarget = buildVerifyTargetHintFromAppName(intent.appName || 'TradingView');
   const indicatorName = String(intent.indicatorName || '').trim();
+  const indicatorSearchTerms = getTradingViewShortcutMatchTerms('indicator-search');
   const searchKeywords = mergeUnique([
     'indicator',
     'indicators',
     'indicator search',
     'study',
+    indicatorSearchTerms,
     indicatorName
   ]);
 
