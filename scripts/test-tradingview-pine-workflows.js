@@ -43,12 +43,16 @@ test('buildTradingViewPineWorkflowActions wraps the opener with panel verificati
     { type: 'type', text: 'strategy("test")', reason: 'Type script' }
   ]);
 
+  const opener = actions.find((action) => action?.verify?.target === 'pine-editor');
+  const typed = actions.find((action) => action?.type === 'type' && action?.text === 'strategy("test")');
+
   assert.strictEqual(actions[0].type, 'bring_window_to_front');
   assert.strictEqual(actions[2].type, 'key');
-  assert.strictEqual(actions[2].verify.kind, 'panel-visible');
-  assert.strictEqual(actions[2].verify.target, 'pine-editor');
-  assert.strictEqual(actions[2].verify.requiresObservedChange, true);
-  assert.strictEqual(actions[4].type, 'type');
+  assert.strictEqual(actions[2].key, 'ctrl+k');
+  assert.strictEqual(opener.verify.kind, 'panel-visible');
+  assert.strictEqual(opener.verify.target, 'pine-editor');
+  assert.strictEqual(opener.verify.requiresObservedChange, true);
+  assert(typed, 'typing should remain after the Pine Editor opener route');
 });
 
 test('maybeRewriteTradingViewPineWorkflow rewrites low-signal Pine Editor opener plans', () => {
@@ -59,13 +63,16 @@ test('maybeRewriteTradingViewPineWorkflow rewrites low-signal Pine Editor opener
     userMessage: 'open pine editor in tradingview and type plot(close)'
   });
 
+  const opener = rewritten.find((action) => action?.verify?.target === 'pine-editor');
+  const typed = rewritten.find((action) => action?.type === 'type' && action?.text === 'plot(close)');
+
   assert(Array.isArray(rewritten), 'pine rewrite should return an action array');
   assert.strictEqual(rewritten[0].type, 'bring_window_to_front');
   assert.strictEqual(rewritten[2].type, 'key');
-  assert.strictEqual(rewritten[2].verify.target, 'pine-editor');
-  assert.strictEqual(rewritten[2].verify.requiresObservedChange, true);
-  assert.strictEqual(rewritten[4].type, 'type');
-  assert.strictEqual(rewritten[4].text, 'plot(close)');
+  assert.strictEqual(rewritten[2].key, 'ctrl+k');
+  assert.strictEqual(opener.verify.target, 'pine-editor');
+  assert.strictEqual(opener.verify.requiresObservedChange, true);
+  assert(typed, 'typing should remain after the Pine Editor opener route');
 });
 
 test('TradingView Pine workflow rewrites generic authoring prompts into safe inspect-first flow', () => {
@@ -75,10 +82,13 @@ test('TradingView Pine workflow rewrites generic authoring prompts into safe ins
     userMessage: 'write a pine script for tradingview'
   });
 
+  const opener = rewritten.find((action) => action?.verify?.target === 'pine-editor');
+  const inspectStep = rewritten.find((action) => action?.type === 'get_text' && action?.pineEvidenceMode === 'safe-authoring-inspect');
+
   assert(Array.isArray(rewritten), 'authoring prompts should rewrite into a bounded safe authoring flow');
   assert.strictEqual(rewritten[0].type, 'bring_window_to_front');
   assert.strictEqual(rewritten[2].type, 'key');
-  assert.strictEqual(rewritten[2].verify.target, 'pine-editor');
-  assert.strictEqual(rewritten[4].type, 'get_text');
-  assert.strictEqual(rewritten[4].pineEvidenceMode, 'safe-authoring-inspect');
+  assert.strictEqual(rewritten[2].key, 'ctrl+k');
+  assert.strictEqual(opener.verify.target, 'pine-editor');
+  assert(inspectStep, 'safe authoring should inspect Pine Editor state after opening via quick search');
 });

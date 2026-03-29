@@ -280,6 +280,8 @@ test('pine workflow encodes diagnostics and compile-result evidence modes', () =
   assert(shortcutProfileContent.includes("'create-alert'"), 'TradingView shortcut profile should define stable alert guidance');
   assert(shortcutProfileContent.includes("'drawing-tool-binding'"), 'TradingView shortcut profile should mark drawing bindings as customizable');
   assert(shortcutProfileContent.includes("'open-dom-panel'"), 'TradingView shortcut profile should classify DOM shortcuts explicitly');
+  assert(shortcutProfileContent.includes('No stable native default should be assumed for opening Pine Editor'), 'TradingView shortcut profile should stop treating Pine Editor as a stable native shortcut');
+  assert(shortcutProfileContent.includes('buildTradingViewShortcutRoute'), 'TradingView shortcut profile should expose TradingView-specific route helpers for non-native shortcuts');
   assert(shortcutProfileContent.includes("'take-snapshot'"), 'TradingView shortcut profile should include grounded reference-only snapshot guidance');
   assert(shortcutProfileContent.includes("'add-symbol-to-watchlist'"), 'TradingView shortcut profile should include grounded watchlist shortcut guidance');
   assert(shortcutProfileContent.includes('TRADINGVIEW_SHORTCUTS_OFFICIAL_URL'), 'TradingView shortcut profile should record the official support reference');
@@ -303,6 +305,7 @@ test('system prompt includes Pine diagnostics guidance', () => {
   assert(systemPromptContent.includes('realtime rollback'), 'System prompt should mention Pine execution-model caveats');
   assert(systemPromptContent.includes('TradingView drawing capability rule'), 'System prompt should include TradingView drawing honesty guidance');
   assert(systemPromptContent.includes('TradingView shortcut profile rule'), 'System prompt should include TradingView shortcut-profile guidance');
+  assert(systemPromptContent.includes('do not assume') && systemPromptContent.includes('stable native TradingView shortcut for Pine Editor'), 'System prompt should explicitly reject ctrl+e as a stable native Pine Editor shortcut');
 });
 
 test('reflection trigger builds provider-compatible chat messages', () => {

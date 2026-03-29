@@ -173,12 +173,17 @@ test('open pine editor and read visible status stays verification-first', () => 
     { type: 'key', key: 'ctrl+e', reason: 'Open Pine Editor' }
   ]);
 
+  const opener = rewritten.find((action) => action?.verify?.target === 'pine-editor');
+  const readback = rewritten.find((action) => action?.type === 'get_text' && action?.text === 'Pine Editor');
+
   assert.strictEqual(rewritten[0].type, 'bring_window_to_front');
   assert.strictEqual(rewritten[2].type, 'key');
-  assert.strictEqual(rewritten[2].verify.target, 'pine-editor');
-  assert.strictEqual(rewritten[4].type, 'get_text');
-  assert.strictEqual(rewritten[4].text, 'Pine Editor');
-  assert.strictEqual(rewritten[4].pineEvidenceMode, 'generic-status');
+  assert.strictEqual(rewritten[2].key, 'ctrl+k');
+  assert.strictEqual(opener.type, 'key');
+  assert.strictEqual(opener.key, 'enter');
+  assert.strictEqual(opener.verify.target, 'pine-editor');
+  assert(readback, 'pine editor status workflow should gather Pine Editor text');
+  assert.strictEqual(readback.pineEvidenceMode, 'generic-status');
 });
 
 test('pine editor authoring workflow demands editor-active verification before typing', () => {
@@ -198,9 +203,11 @@ test('pine editor authoring workflow demands editor-active verification before t
     { type: 'type', text: 'plot(close)' }
   ]);
 
-  assert.strictEqual(rewritten[2].verify.kind, 'editor-active');
-  assert.strictEqual(rewritten[2].verify.target, 'pine-editor');
-  assert.strictEqual(rewritten[2].verify.requiresObservedChange, true);
+  const opener = rewritten.find((action) => action?.verify?.target === 'pine-editor');
+  assert.strictEqual(rewritten[2].key, 'ctrl+k');
+  assert.strictEqual(opener.verify.kind, 'editor-active');
+  assert.strictEqual(opener.verify.target, 'pine-editor');
+  assert.strictEqual(opener.verify.requiresObservedChange, true);
 });
 
 test('generic pine script creation prefers safe new-script workflow', () => {
@@ -215,9 +222,11 @@ test('generic pine script creation prefers safe new-script workflow', () => {
     userMessage: 'in tradingview, create a pine script that builds my confidence level when making decisions'
   });
 
+  const opener = rewritten.find((action) => action?.verify?.target === 'pine-editor');
   assert(Array.isArray(rewritten), 'workflow should rewrite');
   assert.strictEqual(rewritten[0].type, 'bring_window_to_front');
-  assert.strictEqual(rewritten[2].verify.kind, 'editor-active');
+  assert.strictEqual(rewritten[2].key, 'ctrl+k');
+  assert.strictEqual(opener.verify.kind, 'editor-active');
   assert(rewritten.some((action) => action?.type === 'get_text' && action?.text === 'Pine Editor'), 'safe authoring should inspect visible Pine Editor state first');
   assert(!rewritten.some((action) => String(action?.key || '').toLowerCase() === 'ctrl+a'), 'safe authoring should avoid select-all by default');
   assert(!rewritten.some((action) => String(action?.key || '').toLowerCase() === 'backspace'), 'safe authoring should avoid destructive clear-first behavior');
@@ -256,11 +265,13 @@ test('pine resume prerequisites re-establish editor activation before destructiv
     }
   });
 
+  const opener = prerequisites.find((action) => action?.verify?.target === 'pine-editor');
   assert(Array.isArray(prerequisites), 'resume prerequisites should be returned as an action array');
   assert.strictEqual(prerequisites[0].type, 'bring_window_to_front');
-  assert.strictEqual(prerequisites[2].key, 'ctrl+e');
-  assert.strictEqual(prerequisites[2].verify.kind, 'editor-active');
-  assert.strictEqual(prerequisites[4].key, 'ctrl+a');
+  assert.strictEqual(prerequisites[2].key, 'ctrl+k');
+  assert.strictEqual(opener.key, 'enter');
+  assert.strictEqual(opener.verify.kind, 'editor-active');
+  assert.strictEqual(prerequisites[8].key, 'ctrl+a');
 });
 
 test('open pine editor and summarize compile result stays verification-first', () => {
@@ -276,10 +287,10 @@ test('open pine editor and summarize compile result stays verification-first', (
     { type: 'key', key: 'ctrl+e', reason: 'Open Pine Editor' }
   ]);
 
-  assert.strictEqual(rewritten[4].type, 'get_text');
-  assert.strictEqual(rewritten[4].text, 'Pine Editor');
-  assert.strictEqual(rewritten[4].pineEvidenceMode, 'compile-result');
-  assert(/compile-result text/i.test(rewritten[4].reason), 'compile-result readback should use diagnostics-specific wording');
+  const readback = rewritten.find((action) => action?.type === 'get_text' && action?.text === 'Pine Editor');
+  assert(readback, 'compile-result workflow should gather Pine Editor text');
+  assert.strictEqual(readback.pineEvidenceMode, 'compile-result');
+  assert(/compile-result text/i.test(readback.reason), 'compile-result readback should use diagnostics-specific wording');
 });
 
 test('open pine editor and summarize diagnostics preserves bounded get_text readback', () => {
@@ -295,10 +306,10 @@ test('open pine editor and summarize diagnostics preserves bounded get_text read
     { type: 'key', key: 'ctrl+e', reason: 'Open Pine Editor' }
   ]);
 
-  assert.strictEqual(rewritten[4].type, 'get_text');
-  assert.strictEqual(rewritten[4].text, 'Pine Editor');
-  assert.strictEqual(rewritten[4].pineEvidenceMode, 'diagnostics');
-  assert(/diagnostics and warnings/i.test(rewritten[4].reason), 'diagnostics readback should use diagnostics-specific wording');
+  const readback = rewritten.find((action) => action?.type === 'get_text' && action?.text === 'Pine Editor');
+  assert(readback, 'diagnostics workflow should gather Pine Editor text');
+  assert.strictEqual(readback.pineEvidenceMode, 'diagnostics');
+  assert(/diagnostics and warnings/i.test(readback.reason), 'diagnostics readback should use diagnostics-specific wording');
 });
 
 test('open pine editor and check 500-line budget stays verification-first', () => {
@@ -314,12 +325,14 @@ test('open pine editor and check 500-line budget stays verification-first', () =
     { type: 'key', key: 'ctrl+e', reason: 'Open Pine Editor' }
   ]);
 
+  const opener = rewritten.find((action) => action?.verify?.target === 'pine-editor');
+  const readback = rewritten.find((action) => action?.type === 'get_text' && action?.text === 'Pine Editor');
   assert.strictEqual(rewritten[0].type, 'bring_window_to_front');
   assert.strictEqual(rewritten[2].type, 'key');
-  assert.strictEqual(rewritten[2].verify.target, 'pine-editor');
-  assert.strictEqual(rewritten[4].type, 'get_text');
-  assert.strictEqual(rewritten[4].text, 'Pine Editor');
-  assert(/line-budget hints/i.test(rewritten[4].reason), 'pine editor line-budget readback should mention line-budget hints');
+  assert.strictEqual(rewritten[2].key, 'ctrl+k');
+  assert.strictEqual(opener.verify.target, 'pine-editor');
+  assert(readback, 'line-budget workflow should gather Pine Editor text');
+  assert(/line-budget hints/i.test(readback.reason), 'pine editor line-budget readback should mention line-budget hints');
 });
 
 test('open pine profiler and summarize metrics stays verification-first', () => {
@@ -413,9 +426,11 @@ test('pine editor evidence workflow preserves trailing get_text read step', () =
 
   assert(Array.isArray(rewritten), 'workflow should rewrite');
   const readSteps = rewritten.filter((action) => action?.type === 'get_text');
+  const opener = rewritten.find((action) => action?.verify?.target === 'pine-editor');
   assert.strictEqual(readSteps.length, 1, 'explicit pine editor readback step should be preserved without duplication');
   assert.strictEqual(readSteps[0].text, 'Pine Editor');
-  assert.strictEqual(rewritten[2].verify.target, 'pine-editor');
+  assert.strictEqual(rewritten[2].key, 'ctrl+k');
+  assert.strictEqual(opener.verify.target, 'pine-editor');
 });
 
 test('pine profiler evidence workflow preserves trailing get_text read step', () => {

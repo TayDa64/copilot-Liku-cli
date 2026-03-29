@@ -79,13 +79,13 @@ const TRADINGVIEW_SHORTCUTS = Object.freeze({
   }),
   'open-pine-editor': createShortcut({
     id: 'open-pine-editor',
-    key: 'ctrl+e',
+    key: null,
     category: 'context-dependent',
     surface: 'pine-editor',
     safety: 'safe',
     aliases: ['pine editor', 'open pine editor', 'pine script editor'],
-    notes: ['Requires verified TradingView focus and should not be treated as a universal desktop shortcut.'],
-    sourceConfidence: 'internal-profile',
+    notes: ['No stable native default should be assumed for opening Pine Editor; prefer TradingView quick search / command palette or a user-confirmed custom binding after TradingView focus is verified.'],
+    sourceConfidence: 'official-page-family',
     sourceUrls: [TRADINGVIEW_SHORTCUTS_OFFICIAL_URL]
   }),
   'open-object-tree': createShortcut({
@@ -293,10 +293,56 @@ function buildTradingViewShortcutAction(id, overrides = {}) {
   };
 }
 
+function buildTradingViewShortcutRoute(id, overrides = {}) {
+  const shortcut = getTradingViewShortcut(id);
+  if (!shortcut) return null;
+
+  if (shortcut.id === 'open-pine-editor') {
+    const quickSearchAction = buildTradingViewShortcutAction('symbol-search', {
+      reason: overrides.searchReason || 'Open TradingView quick search before selecting Pine Editor'
+    });
+    if (!quickSearchAction) return null;
+
+    const routeMetadata = {
+      id: shortcut.id,
+      category: shortcut.category,
+      surface: shortcut.surface,
+      safety: shortcut.safety,
+      sourceConfidence: shortcut.sourceConfidence,
+      route: 'quick-search'
+    };
+
+    return [
+      quickSearchAction,
+      { type: 'wait', ms: Number.isFinite(Number(overrides.searchWaitMs)) ? Number(overrides.searchWaitMs) : 220 },
+      {
+        type: 'type',
+        text: overrides.searchText || 'Pine Editor',
+        reason: overrides.typeReason || 'Search for Pine Editor in TradingView quick search',
+        tradingViewShortcut: routeMetadata
+      },
+      { type: 'wait', ms: Number.isFinite(Number(overrides.commitWaitMs)) ? Number(overrides.commitWaitMs) : 180 },
+      {
+        type: 'key',
+        key: 'enter',
+        reason: overrides.enterReason || 'Open Pine Editor from TradingView quick search',
+        tradingViewShortcut: routeMetadata,
+        ...(overrides.enterActionOverrides && typeof overrides.enterActionOverrides === 'object'
+          ? overrides.enterActionOverrides
+          : {})
+      }
+    ];
+  }
+
+  const singleAction = buildTradingViewShortcutAction(id, overrides);
+  return singleAction ? [singleAction] : null;
+}
+
 module.exports = {
   TRADINGVIEW_SHORTCUTS_OFFICIAL_URL,
   TRADINGVIEW_SHORTCUTS_SECONDARY_URL,
   buildTradingViewShortcutAction,
+  buildTradingViewShortcutRoute,
   getTradingViewShortcut,
   getTradingViewShortcutKey,
   getTradingViewShortcutMatchTerms,

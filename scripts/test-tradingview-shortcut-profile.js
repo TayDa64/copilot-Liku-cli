@@ -7,6 +7,7 @@ const {
   TRADINGVIEW_SHORTCUTS_OFFICIAL_URL,
   TRADINGVIEW_SHORTCUTS_SECONDARY_URL,
   buildTradingViewShortcutAction,
+  buildTradingViewShortcutRoute,
   getTradingViewShortcut,
   getTradingViewShortcutKey,
   getTradingViewShortcutMatchTerms,
@@ -119,4 +120,21 @@ test('shortcut profile exposes reusable phrase matching helpers for workflow inf
   assert(messageMentionsTradingViewShortcut('open the study search in tradingview', 'indicator-search'));
   assert(messageMentionsTradingViewShortcut('open a new alert in tradingview', 'create-alert'));
   assert(messageMentionsTradingViewShortcut('open the pine script editor in tradingview', 'open-pine-editor'));
+});
+
+test('pine editor opener is routed through TradingView quick search instead of a hardcoded native shortcut', () => {
+  const pineEditor = getTradingViewShortcut('open-pine-editor');
+  const directAction = buildTradingViewShortcutAction('open-pine-editor');
+  const routeActions = buildTradingViewShortcutRoute('open-pine-editor');
+
+  assert(pineEditor, 'pine editor shortcut profile should exist');
+  assert.strictEqual(pineEditor.key, null, 'pine editor should not claim a stable native shortcut key');
+  assert(/quick search|command palette|custom binding/i.test(pineEditor.notes.join(' ')), 'pine editor notes should describe the TradingView-specific opener route');
+  assert.strictEqual(directAction, null, 'pine editor should not build a direct key action when there is no stable native shortcut');
+  assert(Array.isArray(routeActions) && routeActions.length >= 5, 'pine editor should expose a TradingView-specific route sequence');
+  assert.strictEqual(routeActions[0].key, 'ctrl+k');
+  assert.strictEqual(routeActions[2].type, 'type');
+  assert.strictEqual(routeActions[2].text, 'Pine Editor');
+  assert.strictEqual(routeActions[4].type, 'key');
+  assert.strictEqual(routeActions[4].key, 'enter');
 });

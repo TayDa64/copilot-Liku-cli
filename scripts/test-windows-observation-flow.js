@@ -442,15 +442,18 @@ async function run() {
       userMessage: 'open pine editor in tradingview and type plot(close)'
     });
 
+    const opener = rewritten.find((action) => action?.verify?.target === 'pine-editor');
+    const typed = rewritten.find((action) => action?.type === 'type' && action?.text === 'plot(close)');
+
     assert(Array.isArray(rewritten), 'pine rewrite should return an action array');
     assert.strictEqual(rewritten[0].type, 'bring_window_to_front');
     assert.strictEqual(rewritten[0].processName, 'tradingview');
     assert.strictEqual(rewritten[2].type, 'key');
-    assert.strictEqual(rewritten[2].verify.kind, 'editor-active');
-    assert.strictEqual(rewritten[2].verify.target, 'pine-editor');
-    assert.strictEqual(rewritten[2].verify.requiresObservedChange, true);
-    assert.strictEqual(rewritten[4].type, 'type');
-    assert.strictEqual(rewritten[4].text, 'plot(close)');
+    assert.strictEqual(rewritten[2].key, 'ctrl+k');
+    assert.strictEqual(opener.verify.kind, 'editor-active');
+    assert.strictEqual(opener.verify.target, 'pine-editor');
+    assert.strictEqual(opener.verify.requiresObservedChange, true);
+    assert(typed, 'pine rewrite should preserve typing after the Pine Editor opener route');
   });
 
   await testAsync('low-signal TradingView Pine Editor status request rewrites to panel verification plus get_text', async () => {
@@ -460,13 +463,16 @@ async function run() {
       userMessage: 'open pine editor in tradingview and read the visible compiler status'
     });
 
+    const opener = rewritten.find((action) => action?.verify?.target === 'pine-editor');
+    const readback = rewritten.find((action) => action?.type === 'get_text' && action?.text === 'Pine Editor');
+
     assert(Array.isArray(rewritten), 'pine editor status rewrite should return an action array');
     assert.strictEqual(rewritten[0].type, 'bring_window_to_front');
     assert.strictEqual(rewritten[2].type, 'key');
-    assert.strictEqual(rewritten[2].verify.target, 'pine-editor');
-    assert.strictEqual(rewritten[4].type, 'get_text');
-    assert.strictEqual(rewritten[4].text, 'Pine Editor');
-    assert.strictEqual(rewritten[4].pineEvidenceMode, 'compile-result');
+    assert.strictEqual(rewritten[2].key, 'ctrl+k');
+    assert.strictEqual(opener.verify.target, 'pine-editor');
+    assert(readback, 'pine editor status rewrite should gather Pine Editor text');
+    assert.strictEqual(readback.pineEvidenceMode, 'compile-result');
   });
 
   await testAsync('low-signal TradingView pine-script-editor alias request rewrites to panel verification plus get_text', async () => {
@@ -476,9 +482,11 @@ async function run() {
       userMessage: 'open pine script editor in tradingview and read the visible compiler status'
     });
 
+    const opener = rewritten.find((action) => action?.verify?.target === 'pine-editor');
     assert(Array.isArray(rewritten), 'pine editor alias rewrite should return an action array');
-    assert.strictEqual(rewritten[2].verify.target, 'pine-editor');
-    assert.strictEqual(rewritten[4].text, 'Pine Editor');
+    assert.strictEqual(rewritten[2].key, 'ctrl+k');
+    assert.strictEqual(opener.verify.target, 'pine-editor');
+    assert(rewritten.some((action) => action?.type === 'get_text' && action?.text === 'Pine Editor'));
   });
 
   await testAsync('low-signal TradingView Pine diagnostics request rewrites to panel verification plus diagnostics get_text', async () => {
@@ -488,13 +496,16 @@ async function run() {
       userMessage: 'open pine editor in tradingview and check diagnostics'
     });
 
+    const opener = rewritten.find((action) => action?.verify?.target === 'pine-editor');
+    const readback = rewritten.find((action) => action?.type === 'get_text' && action?.text === 'Pine Editor');
+
     assert(Array.isArray(rewritten), 'pine diagnostics rewrite should return an action array');
     assert.strictEqual(rewritten[0].type, 'bring_window_to_front');
     assert.strictEqual(rewritten[2].type, 'key');
-    assert.strictEqual(rewritten[2].verify.target, 'pine-editor');
-    assert.strictEqual(rewritten[4].type, 'get_text');
-    assert.strictEqual(rewritten[4].text, 'Pine Editor');
-    assert.strictEqual(rewritten[4].pineEvidenceMode, 'diagnostics');
+    assert.strictEqual(rewritten[2].key, 'ctrl+k');
+    assert.strictEqual(opener.verify.target, 'pine-editor');
+    assert(readback, 'pine diagnostics rewrite should gather Pine Editor text');
+    assert.strictEqual(readback.pineEvidenceMode, 'diagnostics');
   });
 
   await testAsync('low-signal TradingView Pine line-budget request rewrites to panel verification plus get_text', async () => {
@@ -504,13 +515,16 @@ async function run() {
       userMessage: 'open pine editor in tradingview and check whether the script is near the 500 line limit'
     });
 
+    const opener = rewritten.find((action) => action?.verify?.target === 'pine-editor');
+    const readback = rewritten.find((action) => action?.type === 'get_text' && action?.text === 'Pine Editor');
+
     assert(Array.isArray(rewritten), 'pine line-budget rewrite should return an action array');
     assert.strictEqual(rewritten[0].type, 'bring_window_to_front');
     assert.strictEqual(rewritten[2].type, 'key');
-    assert.strictEqual(rewritten[2].verify.target, 'pine-editor');
-    assert.strictEqual(rewritten[4].type, 'get_text');
-    assert.strictEqual(rewritten[4].text, 'Pine Editor');
-    assert(/line-budget hints/i.test(rewritten[4].reason), 'pine line-budget readback should mention line-budget hints');
+    assert.strictEqual(rewritten[2].key, 'ctrl+k');
+    assert.strictEqual(opener.verify.target, 'pine-editor');
+    assert(readback, 'pine line-budget rewrite should gather Pine Editor text');
+    assert(/line-budget hints/i.test(readback.reason), 'pine line-budget readback should mention line-budget hints');
   });
 
   await testAsync('low-signal TradingView Pine Logs evidence request rewrites to panel verification plus get_text', async () => {
@@ -1158,9 +1172,11 @@ async function run() {
       userMessage: 'tradingview application is showing LUNR, in tradingview, create a pine script that will build my confidence level when making decisions.'
     });
 
+    const opener = rewritten.find((action) => action?.verify?.target === 'pine-editor');
     assert(Array.isArray(rewritten), 'workflow should rewrite');
     assert.strictEqual(rewritten[0].type, 'bring_window_to_front');
-    assert.strictEqual(rewritten[2].verify.kind, 'editor-active');
+    assert.strictEqual(rewritten[2].key, 'ctrl+k');
+    assert.strictEqual(opener.verify.kind, 'editor-active');
     assert(rewritten.some((action) => action?.type === 'get_text' && action?.text === 'Pine Editor'), 'safe authoring should inspect the Pine Editor state first');
     assert(!rewritten.some((action) => String(action?.key || '').toLowerCase() === 'ctrl+a'), 'safe authoring should remove select-all by default');
     assert(!rewritten.some((action) => String(action?.key || '').toLowerCase() === 'backspace'), 'safe authoring should remove destructive clear-first steps by default');
@@ -1456,8 +1472,8 @@ async function run() {
       const pending = aiService.getPendingAction();
       assert(pending, 'Pending Pine overwrite should be stored');
       assert(Array.isArray(pending.resumePrerequisites), 'Pending Pine overwrite should store resume prerequisites');
-      assert.strictEqual(pending.resumePrerequisites[2].key, 'ctrl+e');
-      assert.strictEqual(pending.resumePrerequisites[4].key, 'ctrl+a');
+      assert.strictEqual(pending.resumePrerequisites[2].key, 'ctrl+k');
+      assert.strictEqual(pending.resumePrerequisites[8].key, 'ctrl+a');
 
       aiService.confirmPendingAction(pending.actionId);
       executed.length = 0;
@@ -1503,8 +1519,8 @@ async function run() {
       assert.strictEqual(resumed.success, true, 'Pine resume should succeed after editor prerequisites are re-established');
       assert.deepStrictEqual(
         executed,
-        ['bring_window_to_front', 'wait', 'key:ctrl+e', 'wait', 'key:ctrl+a', 'wait', 'key:backspace', 'type'],
-        'Pine resume should re-open the editor and re-select contents before destructive overwrite continues'
+        ['bring_window_to_front', 'wait', 'key:ctrl+k', 'wait', 'type', 'wait', 'key:enter', 'wait', 'key:ctrl+a', 'wait', 'key:backspace', 'type'],
+        'Pine resume should re-open the editor through TradingView quick search and re-select contents before destructive overwrite continues'
       );
       assert.strictEqual(resumed.observationCheckpoints.length, 1, 'Resume should verify the Pine Editor activation checkpoint');
       assert.strictEqual(resumed.observationCheckpoints[0].classification, 'editor-active');
