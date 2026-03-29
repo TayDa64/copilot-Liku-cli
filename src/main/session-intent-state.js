@@ -68,6 +68,50 @@ function normalizeTradingMode(tradingMode) {
   };
 }
 
+function normalizePineStructuredSummary(summary) {
+  if (!summary || typeof summary !== 'object') return null;
+
+  const topVisibleRevisions = Array.isArray(summary.topVisibleRevisions)
+    ? summary.topVisibleRevisions.slice(0, 3).map((entry) => ({
+        label: normalizeText(entry?.label, 80),
+        relativeTime: normalizeText(entry?.relativeTime, 80),
+        revisionNumber: Number.isFinite(Number(entry?.revisionNumber)) ? Number(entry.revisionNumber) : null
+      })).filter((entry) => entry.label || entry.relativeTime || entry.revisionNumber !== null)
+    : [];
+
+  const normalized = {
+    evidenceMode: normalizeText(summary.evidenceMode, 60),
+    compactSummary: normalizeText(summary.compactSummary, 160),
+    editorVisibleState: normalizeText(summary.editorVisibleState, 60),
+    visibleScriptKind: normalizeText(summary.visibleScriptKind, 40),
+    visibleLineCountEstimate: Number.isFinite(Number(summary.visibleLineCountEstimate)) ? Number(summary.visibleLineCountEstimate) : null,
+    visibleSignals: normalizeEvidenceList(summary.visibleSignals, 40),
+    latestVisibleRevisionLabel: normalizeText(summary.latestVisibleRevisionLabel, 80),
+    latestVisibleRevisionNumber: Number.isFinite(Number(summary.latestVisibleRevisionNumber)) ? Number(summary.latestVisibleRevisionNumber) : null,
+    latestVisibleRelativeTime: normalizeText(summary.latestVisibleRelativeTime, 80),
+    visibleRevisionCount: Number.isFinite(Number(summary.visibleRevisionCount)) ? Number(summary.visibleRevisionCount) : null,
+    visibleRecencySignal: normalizeText(summary.visibleRecencySignal, 60),
+    topVisibleRevisions
+  };
+
+  if (!normalized.evidenceMode
+    && !normalized.compactSummary
+    && !normalized.editorVisibleState
+    && !normalized.visibleScriptKind
+    && normalized.visibleLineCountEstimate === null
+    && normalized.visibleSignals.length === 0
+    && !normalized.latestVisibleRevisionLabel
+    && normalized.latestVisibleRevisionNumber === null
+    && !normalized.latestVisibleRelativeTime
+    && normalized.visibleRevisionCount === null
+    && !normalized.visibleRecencySignal
+    && topVisibleRevisions.length === 0) {
+    return null;
+  }
+
+  return normalized;
+}
+
 function normalizeActionTypes(actions) {
   if (!Array.isArray(actions)) return [];
   return actions
@@ -109,6 +153,7 @@ function normalizeActionResultEntries(results) {
     message: normalizeText(result?.message, 160),
     userConfirmed: !!result?.userConfirmed,
     blockedByPolicy: !!result?.blockedByPolicy,
+    pineStructuredSummary: normalizePineStructuredSummary(result?.pineStructuredSummary),
     observationCheckpoint: result?.observationCheckpoint
       ? {
           classification: normalizeText(result.observationCheckpoint.classification, 80),
@@ -268,10 +313,33 @@ function deriveExecutionStatus(turnRecord = {}) {
   return 'unknown';
 }
 
+function findLatestPineStructuredSummary(turnRecord = {}) {
+  const actionResults = Array.isArray(turnRecord?.actionResults)
+    ? turnRecord.actionResults
+    : normalizeActionResultEntries(turnRecord.results || turnRecord.executionResult?.actionResults);
+
+  for (let index = actionResults.length - 1; index >= 0; index--) {
+    const summary = actionResults[index]?.pineStructuredSummary;
+    if (summary && typeof summary === 'object') return summary;
+  }
+
+  return null;
+}
+
 function deriveNextRecommendedStep(turnRecord = {}) {
   if (turnRecord?.nextRecommendedStep) return normalizeText(turnRecord.nextRecommendedStep, 240);
   if (turnRecord?.cancelled) return 'Ask whether to retry the interrupted step or choose a different path.';
   if (turnRecord?.success === false) return 'Review the failed step and gather fresh evidence before continuing.';
+  const pineStructuredSummary = findLatestPineStructuredSummary(turnRecord);
+  if (pineStructuredSummary?.editorVisibleState === 'existing-script-visible') {
+    return 'Visible Pine script content is already present; avoid overwriting it implicitly and choose a new-script path or ask before editing.';
+  }
+  if (pineStructuredSummary?.editorVisibleState === 'empty-or-starter') {
+    return 'The Pine Editor looks empty or starter-like; continue with a bounded new-script draft instead of overwriting unseen content.';
+  }
+  if (pineStructuredSummary?.editorVisibleState === 'unknown-visible-state') {
+    return 'The visible Pine Editor state is ambiguous; inspect further or ask before overwriting content.';
+  }
   if (turnRecord?.postVerification?.needsFollowUp) return 'Continue with the detected follow-up flow for the current app state.';
   if (turnRecord?.screenshotCaptured) return 'Continue from the latest visual evidence and current app state.';
   if (deriveVerificationStatus(turnRecord) === 'unverified') return 'Gather fresh evidence before claiming the requested state change is complete.';
@@ -604,6 +672,17 @@ function formatChatContinuityContext(state, options = {}) {
   if (Array.isArray(lastTurn?.actionResults) && lastTurn.actionResults.length > 0) {
     const compactResults = lastTurn.actionResults.slice(0, 4).map((result) => `${result.type}:${result.success ? 'ok' : 'fail'}`).join(' | ');
     lines.push(`- actionOutcomes: ${compactResults}`);
+  }
+  const pineStructuredSummary = findLatestPineStructuredSummary(lastTurn);
+  if (pineStructuredSummary?.editorVisibleState) {
+    lines.push(`- pineAuthoringState: ${pineStructuredSummary.editorVisibleState}`);
+    if (pineStructuredSummary.visibleScriptKind) lines.push(`- pineVisibleScriptKind: ${pineStructuredSummary.visibleScriptKind}`);
+    if (pineStructuredSummary.visibleLineCountEstimate !== null && pineStructuredSummary.visibleLineCountEstimate !== undefined) {
+      lines.push(`- pineVisibleLineCountEstimate: ${pineStructuredSummary.visibleLineCountEstimate}`);
+    }
+    if (Array.isArray(pineStructuredSummary.visibleSignals) && pineStructuredSummary.visibleSignals.length > 0) {
+      lines.push(`- pineVisibleSignals: ${pineStructuredSummary.visibleSignals.join(' | ')}`);
+    }
   }
   if (lastTurn?.executionResult?.popupFollowUp?.attempted) {
     const popup = lastTurn.executionResult.popupFollowUp;

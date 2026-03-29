@@ -156,3 +156,51 @@ test('continuity mapper preserves observed paper trading mode facts', () => {
   assert.strictEqual(turnRecord.results[1].observationCheckpoint.tradingMode.mode, 'paper');
   assert.strictEqual(turnRecord.nextRecommendedStep, 'Continue with assist-only Paper Trading guidance without placing orders.');
 });
+
+test('continuity mapper preserves Pine safe-authoring structured summary facts', () => {
+  const turnRecord = buildChatContinuityTurnRecord({
+    actionData: {
+      thought: 'Inspect the current Pine Editor state before authoring',
+      actions: [
+        { type: 'bring_window_to_front', title: 'TradingView', processName: 'tradingview' },
+        { type: 'key', key: 'ctrl+i', reason: 'Open Pine Editor', verify: { kind: 'editor-active', target: 'pine-editor' } },
+        { type: 'get_text', text: 'Pine Editor', reason: 'Inspect current visible Pine Editor state' }
+      ]
+    },
+    execResult: {
+      success: true,
+      results: [
+        { success: true, action: 'bring_window_to_front', message: 'focused' },
+        { success: true, action: 'key', message: 'editor opened' },
+        {
+          success: true,
+          action: 'get_text',
+          message: 'editor inspected',
+          pineStructuredSummary: {
+            evidenceMode: 'safe-authoring-inspect',
+            editorVisibleState: 'existing-script-visible',
+            visibleScriptKind: 'indicator',
+            visibleLineCountEstimate: 9,
+            visibleSignals: ['pine-version-directive', 'indicator-declaration', 'script-body-visible'],
+            compactSummary: 'state=existing-script-visible | kind=indicator | lines=9'
+          }
+        }
+      ]
+    },
+    details: {
+      userMessage: 'write a pine script for me',
+      executionIntent: 'Inspect Pine Editor state before authoring.',
+      nextRecommendedStep: 'Choose a safe authoring path from the inspected editor state.'
+    }
+  });
+
+  assert.strictEqual(turnRecord.results[2].pineStructuredSummary.evidenceMode, 'safe-authoring-inspect');
+  assert.strictEqual(turnRecord.results[2].pineStructuredSummary.editorVisibleState, 'existing-script-visible');
+  assert.strictEqual(turnRecord.results[2].pineStructuredSummary.visibleScriptKind, 'indicator');
+  assert.strictEqual(turnRecord.results[2].pineStructuredSummary.visibleLineCountEstimate, 9);
+  assert.deepStrictEqual(turnRecord.results[2].pineStructuredSummary.visibleSignals, [
+    'pine-version-directive',
+    'indicator-declaration',
+    'script-body-visible'
+  ]);
+});

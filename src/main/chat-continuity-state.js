@@ -36,6 +36,50 @@ function extractTradingModeCandidate(value) {
   return normalizeTradingMode(value?.tradingMode || value);
 }
 
+function normalizePineStructuredSummary(summary) {
+  if (!summary || typeof summary !== 'object') return null;
+
+  const topVisibleRevisions = Array.isArray(summary.topVisibleRevisions)
+    ? summary.topVisibleRevisions.slice(0, 3).map((entry) => ({
+        label: normalizeText(entry?.label, 80),
+        relativeTime: normalizeText(entry?.relativeTime, 80),
+        revisionNumber: safeNumber(entry?.revisionNumber)
+      })).filter((entry) => entry.label || entry.relativeTime || entry.revisionNumber !== null)
+    : [];
+
+  const normalized = {
+    evidenceMode: normalizeText(summary.evidenceMode, 60),
+    compactSummary: normalizeText(summary.compactSummary, 160),
+    editorVisibleState: normalizeText(summary.editorVisibleState, 60),
+    visibleScriptKind: normalizeText(summary.visibleScriptKind, 40),
+    visibleLineCountEstimate: safeNumber(summary.visibleLineCountEstimate),
+    visibleSignals: normalizeEvidenceList(summary.visibleSignals, 40),
+    latestVisibleRevisionLabel: normalizeText(summary.latestVisibleRevisionLabel, 80),
+    latestVisibleRevisionNumber: safeNumber(summary.latestVisibleRevisionNumber),
+    latestVisibleRelativeTime: normalizeText(summary.latestVisibleRelativeTime, 80),
+    visibleRevisionCount: safeNumber(summary.visibleRevisionCount),
+    visibleRecencySignal: normalizeText(summary.visibleRecencySignal, 60),
+    topVisibleRevisions
+  };
+
+  if (!normalized.evidenceMode
+    && !normalized.compactSummary
+    && !normalized.editorVisibleState
+    && !normalized.visibleScriptKind
+    && normalized.visibleLineCountEstimate === null
+    && normalized.visibleSignals.length === 0
+    && !normalized.latestVisibleRevisionLabel
+    && normalized.latestVisibleRevisionNumber === null
+    && !normalized.latestVisibleRelativeTime
+    && normalized.visibleRevisionCount === null
+    && !normalized.visibleRecencySignal
+    && topVisibleRevisions.length === 0) {
+    return null;
+  }
+
+  return normalized;
+}
+
 function buildVisualReference(latestVisual) {
   const ts = safeNumber(latestVisual?.timestamp || latestVisual?.addedAt);
   const mode = normalizeText(latestVisual?.captureMode || latestVisual?.scope, 80) || 'visual';
@@ -69,6 +113,7 @@ function normalizeActionResults(results) {
     message: normalizeText(result?.message, 160),
     userConfirmed: !!result?.userConfirmed,
     blockedByPolicy: !!result?.blockedByPolicy,
+    pineStructuredSummary: normalizePineStructuredSummary(result?.pineStructuredSummary),
     observationCheckpoint: result?.observationCheckpoint
       ? {
           classification: normalizeText(result.observationCheckpoint.classification, 80),

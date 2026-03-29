@@ -320,3 +320,94 @@ test('session intent store persists richer execution facts for chat continuity',
 
   fs.rmSync(tempDir, { recursive: true, force: true });
 });
+
+test('session intent continuity surfaces Pine authoring state when existing script content is visible', () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'liku-session-intent-'));
+  const stateFile = path.join(tempDir, 'session-intent-state.json');
+  const store = createSessionIntentStateStore({ stateFile });
+
+  const recorded = store.recordExecutedTurn({
+    userMessage: 'write a pine script for me',
+    executionIntent: 'Inspect Pine Editor state before authoring.',
+    committedSubgoal: 'Inspect the visible Pine Editor state',
+    actionPlan: [
+      { type: 'bring_window_to_front', title: 'TradingView', processName: 'tradingview' },
+      { type: 'key', key: 'ctrl+i', verifyKind: 'editor-active', verifyTarget: 'pine-editor' },
+      { type: 'get_text', text: 'Pine Editor' }
+    ],
+    results: [
+      { type: 'bring_window_to_front', success: true, message: 'focused' },
+      { type: 'key', success: true, message: 'editor opened' },
+      {
+        type: 'get_text',
+        success: true,
+        message: 'editor inspected',
+        pineStructuredSummary: {
+          evidenceMode: 'safe-authoring-inspect',
+          editorVisibleState: 'existing-script-visible',
+          visibleScriptKind: 'indicator',
+          visibleLineCountEstimate: 9,
+          visibleSignals: ['pine-version-directive', 'indicator-declaration', 'script-body-visible'],
+          compactSummary: 'state=existing-script-visible | kind=indicator | lines=9'
+        }
+      }
+    ],
+    success: true,
+    verification: { status: 'verified' }
+  }, {
+    cwd: path.join(__dirname, '..')
+  });
+
+  assert.strictEqual(recorded.chatContinuity.lastTurn.actionResults[2].pineStructuredSummary.editorVisibleState, 'existing-script-visible');
+  assert(/avoid overwriting/i.test(recorded.chatContinuity.lastTurn.nextRecommendedStep));
+
+  const continuityContext = formatChatContinuityContext(recorded);
+  assert(continuityContext.includes('pineAuthoringState: existing-script-visible'));
+  assert(continuityContext.includes('pineVisibleScriptKind: indicator'));
+  assert(continuityContext.includes('pineVisibleLineCountEstimate: 9'));
+  assert(continuityContext.includes('pineVisibleSignals: pine-version-directive | indicator-declaration | script-body-visible'));
+
+  fs.rmSync(tempDir, { recursive: true, force: true });
+});
+
+test('session intent continuity recommends bounded new-script drafting for empty or starter Pine state', () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'liku-session-intent-'));
+  const stateFile = path.join(tempDir, 'session-intent-state.json');
+  const store = createSessionIntentStateStore({ stateFile });
+
+  const recorded = store.recordExecutedTurn({
+    userMessage: 'create a new pine indicator',
+    executionIntent: 'Inspect Pine Editor state before authoring.',
+    committedSubgoal: 'Inspect the visible Pine Editor state',
+    actionPlan: [
+      { type: 'bring_window_to_front', title: 'TradingView', processName: 'tradingview' },
+      { type: 'key', key: 'ctrl+i', verifyKind: 'editor-active', verifyTarget: 'pine-editor' },
+      { type: 'get_text', text: 'Pine Editor' }
+    ],
+    results: [
+      { type: 'bring_window_to_front', success: true, message: 'focused' },
+      { type: 'key', success: true, message: 'editor opened' },
+      {
+        type: 'get_text',
+        success: true,
+        message: 'editor inspected',
+        pineStructuredSummary: {
+          evidenceMode: 'safe-authoring-inspect',
+          editorVisibleState: 'empty-or-starter',
+          visibleScriptKind: 'indicator',
+          visibleLineCountEstimate: 3,
+          visibleSignals: ['pine-version-directive', 'indicator-declaration', 'starter-plot-close'],
+          compactSummary: 'state=empty-or-starter | kind=indicator | lines=3'
+        }
+      }
+    ],
+    success: true,
+    verification: { status: 'verified' }
+  }, {
+    cwd: path.join(__dirname, '..')
+  });
+
+  assert(/bounded new-script draft/i.test(recorded.chatContinuity.lastTurn.nextRecommendedStep));
+
+  fs.rmSync(tempDir, { recursive: true, force: true });
+});

@@ -347,6 +347,9 @@ test('ai-service gates TradingView follow-up typing on post-key observation chec
   const tradingViewPinePath = path.join(__dirname, '..', 'src', 'main', 'tradingview', 'pine-workflows.js');
   const tradingViewPaperPath = path.join(__dirname, '..', 'src', 'main', 'tradingview', 'paper-workflows.js');
   const tradingViewDomPath = path.join(__dirname, '..', 'src', 'main', 'tradingview', 'dom-workflows.js');
+  const sessionIntentStatePath = path.join(__dirname, '..', 'src', 'main', 'session-intent-state.js');
+  const chatContinuityStatePath = path.join(__dirname, '..', 'src', 'main', 'chat-continuity-state.js');
+  const systemAutomationPath = path.join(__dirname, '..', 'src', 'main', 'system-automation.js');
   const systemPromptPath = path.join(__dirname, '..', 'src', 'main', 'ai-service', 'system-prompt.js');
   const fs = require('fs');
 
@@ -360,6 +363,9 @@ test('ai-service gates TradingView follow-up typing on post-key observation chec
   const tradingViewPineContent = fs.readFileSync(tradingViewPinePath, 'utf8');
   const tradingViewPaperContent = fs.readFileSync(tradingViewPaperPath, 'utf8');
   const tradingViewDomContent = fs.readFileSync(tradingViewDomPath, 'utf8');
+  const sessionIntentStateContent = fs.readFileSync(sessionIntentStatePath, 'utf8');
+  const chatContinuityStateContent = fs.readFileSync(chatContinuityStatePath, 'utf8');
+  const systemAutomationContent = fs.readFileSync(systemAutomationPath, 'utf8');
   const systemPromptContent = fs.readFileSync(systemPromptPath, 'utf8');
 
   assert(aiServiceContent.includes("require('./ai-service/observation-checkpoints')"), 'ai-service should consume the extracted observation checkpoint helper module');
@@ -408,6 +414,11 @@ test('ai-service gates TradingView follow-up typing on post-key observation chec
   assert(tradingViewPineContent.includes("text: 'Pine Version History'"), 'TradingView Pine workflows should support bounded Pine Version History readback');
   assert(tradingViewPineContent.includes("text: 'Pine Editor'"), 'TradingView Pine workflows should support bounded Pine Editor status/output readback');
   assert(tradingViewPineContent.includes('wantsEvidenceReadback'), 'TradingView Pine workflows should detect Pine evidence-gathering requests');
+  assert(systemAutomationContent.includes('buildPineEditorSafeAuthoringSummary'), 'system-automation should structure Pine Editor safe-authoring inspection summaries');
+  assert(systemAutomationContent.includes("pineEvidenceMode === 'safe-authoring-inspect'"), 'system-automation should attach structured Pine summaries for safe-authoring-inspect readbacks');
+  assert(sessionIntentStateContent.includes('pineAuthoringState'), 'session intent continuity context should expose Pine authoring state');
+  assert(sessionIntentStateContent.includes('avoid overwriting it implicitly'), 'session intent continuity should recommend non-destructive Pine next steps when script content is already visible');
+  assert(chatContinuityStateContent.includes('normalizePineStructuredSummary'), 'chat continuity mapper should preserve Pine structured summary fields');
   assert(tradingViewPaperContent.includes("target: 'paper-trading-panel'"), 'TradingView Paper workflows should encode paper-trading-panel verification metadata');
   assert(tradingViewPaperContent.includes('paper account'), 'TradingView Paper workflows should ground paper-assist keywords');
   assert(tradingViewDomContent.includes("surfaceTarget: 'dom-panel'"), 'TradingView DOM workflows should encode dom-panel verification metadata');

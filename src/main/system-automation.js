@@ -411,6 +411,89 @@ function buildPineVersionHistoryStructuredSummary(text, summaryFields = []) {
   return structured;
 }
 
+function buildPineEditorSafeAuthoringSummary(text) {
+  const rawText = String(text || '').replace(/\r/g, '');
+  const compactText = normalizeCompactText(rawText, 2400);
+  if (!compactText) return null;
+
+  const visibleLines = rawText
+    .split('\n')
+    .map((line) => String(line || '').trim())
+    .filter(Boolean);
+
+  const addSignal = (signals, signal) => {
+    if (signal && !signals.includes(signal)) signals.push(signal);
+  };
+
+  const visibleSignals = [];
+  const declarationMatch = rawText.match(/\b(indicator|strategy|library)\s*\(/i);
+  const visibleScriptKind = declarationMatch ? declarationMatch[1].toLowerCase() : 'unknown';
+  const declarationNameMatch = rawText.match(/\b(?:indicator|strategy|library)\s*\(\s*["'`](.*?)["'`]/i);
+  const declarationName = normalizeCompactText(declarationNameMatch?.[1], 80);
+  const meaningfulLines = visibleLines.filter((line) => {
+    if (/^\/\/\s*@version\s*=\s*\d+/i.test(line)) return false;
+    if (/^(indicator|strategy|library)\s*\(/i.test(line)) return false;
+    if (/^\/\//.test(line)) return false;
+    return true;
+  });
+
+  if (/\/\/\s*@version\s*=\s*\d+/i.test(rawText)) addSignal(visibleSignals, 'pine-version-directive');
+  if (visibleScriptKind !== 'unknown') addSignal(visibleSignals, `${visibleScriptKind}-declaration`);
+  if (declarationName && /^(my script|my strategy|my library|untitled(?: script)?)$/i.test(declarationName)) {
+    addSignal(visibleSignals, 'starter-default-name');
+  }
+  if (/\bplot\s*\(\s*close\s*\)/i.test(rawText)) addSignal(visibleSignals, 'starter-plot-close');
+  if (/\b(input|plot|plotshape|plotchar|hline|bgcolor|fill|alertcondition|strategy\.)\s*\(/i.test(rawText)) {
+    addSignal(visibleSignals, 'script-body-visible');
+  }
+  if (/\b(start writing|write your script|new script|empty editor|untitled script)\b/i.test(compactText)) {
+    addSignal(visibleSignals, 'editor-empty-hint');
+  }
+
+  const starterLike = (
+    visibleScriptKind !== 'unknown'
+    && (
+      meaningfulLines.length === 0
+      || (
+        visibleScriptKind === 'indicator'
+        && meaningfulLines.length === 1
+        && /^plot\s*\(\s*close\s*\)\s*$/i.test(meaningfulLines[0])
+      )
+    )
+    && visibleSignals.includes('starter-default-name')
+  );
+
+  let editorVisibleState = 'unknown-visible-state';
+  if (visibleSignals.includes('editor-empty-hint') || starterLike) {
+    editorVisibleState = 'empty-or-starter';
+  } else if (
+    visibleScriptKind !== 'unknown'
+    && (
+      meaningfulLines.length > 0
+      || visibleLines.length >= 5
+      || visibleSignals.includes('script-body-visible')
+    )
+  ) {
+    editorVisibleState = 'existing-script-visible';
+  }
+
+  const visibleLineCountEstimate = visibleLines.length > 0 ? visibleLines.length : null;
+  const compactSummary = [
+    `state=${editorVisibleState}`,
+    visibleScriptKind !== 'unknown' ? `kind=${visibleScriptKind}` : null,
+    Number.isFinite(visibleLineCountEstimate) ? `lines=${visibleLineCountEstimate}` : null
+  ].filter(Boolean).join(' | ');
+
+  return {
+    evidenceMode: 'safe-authoring-inspect',
+    editorVisibleState,
+    visibleScriptKind,
+    visibleLineCountEstimate,
+    visibleSignals: visibleSignals.slice(0, 6),
+    compactSummary: compactSummary || null
+  };
+}
+
 /**
  * Focus the desktop / unfocus Electron windows before sending keyboard input
  * This is critical for SendKeys/SendInput to reach the correct target
@@ -2536,10 +2619,15 @@ async function executeAction(action) {
           action.criteria || { text: action.text, automationId: action.automationId, controlType: action.controlType }
         );
         result = { ...result, ...gtResult };
+        const pineTargetText = String(action?.text || action?.criteria?.text || '');
         if (gtResult.success
           && action?.pineEvidenceMode === 'provenance-summary'
-          && /pine version history/i.test(String(action?.text || action?.criteria?.text || ''))) {
+          && /pine version history/i.test(pineTargetText)) {
           result.pineStructuredSummary = buildPineVersionHistoryStructuredSummary(gtResult.text, action.pineSummaryFields);
+        } else if (gtResult.success
+          && action?.pineEvidenceMode === 'safe-authoring-inspect'
+          && /pine editor/i.test(pineTargetText)) {
+          result.pineStructuredSummary = buildPineEditorSafeAuthoringSummary(gtResult.text);
         }
         result.message = gtResult.success
           ? `Got text via ${gtResult.method}: "${(gtResult.text || '').slice(0, 50)}"${result.pineStructuredSummary?.compactSummary ? ` [${result.pineStructuredSummary.compactSummary}]` : ''}`
@@ -2914,4 +3002,6 @@ module.exports = {
   isCommandDangerous,
   truncateOutput,
   executeCommand,
+  buildPineVersionHistoryStructuredSummary,
+  buildPineEditorSafeAuthoringSummary,
 };
