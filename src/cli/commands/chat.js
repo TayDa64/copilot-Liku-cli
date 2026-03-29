@@ -246,7 +246,94 @@ function isTrustedCaptureMode(captureMode) {
     || normalized.startsWith('region-');
 }
 
+function findLatestPineStructuredSummaryInContinuity(continuity) {
+  const actionResults = Array.isArray(continuity?.lastTurn?.actionResults)
+    ? continuity.lastTurn.actionResults
+    : [];
+
+  for (let index = actionResults.length - 1; index >= 0; index--) {
+    const summary = actionResults[index]?.pineStructuredSummary;
+    if (summary && typeof summary === 'object') return summary;
+  }
+
+  return null;
+}
+
+function summarizeVisiblePineDiagnostics(pineStructuredSummary) {
+  const diagnostics = Array.isArray(pineStructuredSummary?.topVisibleDiagnostics)
+    ? pineStructuredSummary.topVisibleDiagnostics
+      .map((entry) => String(entry || '').trim())
+      .filter(Boolean)
+      .slice(0, 2)
+    : [];
+
+  return diagnostics.length > 0 ? ` Visible diagnostics: ${diagnostics.join(' | ')}.` : '';
+}
+
+function formatLatestVisiblePineRevision(pineStructuredSummary) {
+  const parts = [
+    String(pineStructuredSummary?.latestVisibleRevisionLabel || '').trim(),
+    String(pineStructuredSummary?.latestVisibleRelativeTime || '').trim()
+  ].filter(Boolean);
+
+  if (parts.length > 0) return parts.join(' ');
+
+  const revisionNumber = pineStructuredSummary?.latestVisibleRevisionNumber;
+  if (revisionNumber !== null && revisionNumber !== undefined && revisionNumber !== '') {
+    return `Revision #${revisionNumber}`;
+  }
+
+  return '';
+}
+
+function buildPineContinuationIntentFromState(continuity) {
+  const pineStructuredSummary = findLatestPineStructuredSummaryInContinuity(continuity);
+  if (!pineStructuredSummary) return '';
+
+  const diagnosticsSuffix = summarizeVisiblePineDiagnostics(pineStructuredSummary);
+  const latestVisibleRevision = formatLatestVisiblePineRevision(pineStructuredSummary);
+  const editorVisibleState = String(pineStructuredSummary.editorVisibleState || '').trim().toLowerCase();
+  const evidenceMode = String(pineStructuredSummary.evidenceMode || '').trim().toLowerCase();
+  const compileStatus = String(pineStructuredSummary.compileStatus || '').trim().toLowerCase();
+  const lineBudgetSignal = String(pineStructuredSummary.lineBudgetSignal || '').trim().toLowerCase();
+
+  if (editorVisibleState === 'existing-script-visible') {
+    return 'Continue the Pine authoring workflow from the visible editor state; avoid overwriting the existing visible script implicitly and choose a new-script path or ask before editing.';
+  }
+  if (editorVisibleState === 'empty-or-starter') {
+    return 'Continue the Pine authoring workflow from the visible editor state; keep the draft bounded to the visible starter script instead of overwriting unseen content.';
+  }
+  if (editorVisibleState === 'unknown-visible-state') {
+    return 'Continue the Pine authoring workflow cautiously; the visible editor state is ambiguous, so inspect further or ask before editing.';
+  }
+  if (compileStatus === 'errors-visible') {
+    return `Continue the Pine diagnostics workflow by fixing the visible compiler errors before inferring runtime or chart behavior.${diagnosticsSuffix}`;
+  }
+  if (
+    lineBudgetSignal === 'near-limit-visible'
+    || lineBudgetSignal === 'at-limit-visible'
+    || lineBudgetSignal === 'over-budget-visible'
+  ) {
+    return `Continue the Pine diagnostics workflow with targeted edits under visible line-budget pressure; avoid broad rewrites.${diagnosticsSuffix}`;
+  }
+  if (compileStatus === 'success') {
+    return 'Continue the Pine verification workflow from the visible compile success only; use logs, profiler, or chart evidence before inferring runtime behavior.';
+  }
+  if (evidenceMode === 'diagnostics' || evidenceMode === 'line-budget' || evidenceMode === 'compile-result') {
+    return `Continue the Pine diagnostics workflow from the visible compiler output only; keep the next step bounded to the visible status and diagnostics.${diagnosticsSuffix}`;
+  }
+  if (evidenceMode === 'provenance-summary') {
+    const revisionSuffix = latestVisibleRevision ? ` Latest visible revision: ${latestVisibleRevision}.` : '';
+    return `Continue the Pine version-history workflow by summarizing or comparing only the visible revision metadata; do not infer hidden revisions, script content, or runtime behavior.${revisionSuffix}`;
+  }
+
+  return '';
+}
+
 function buildContinuationIntentFromState(continuity, fallbackText = '') {
+  const pineContinuationIntent = buildPineContinuationIntentFromState(continuity);
+  if (pineContinuationIntent) return pineContinuationIntent;
+
   return String(
     continuity?.lastTurn?.nextRecommendedStep
     || continuity?.currentSubgoal

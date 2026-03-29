@@ -755,6 +755,34 @@ function formatChatContinuityContext(state, options = {}) {
   if (lastTurn?.tradingMode?.mode === 'paper') {
     lines.push('- Rule: Paper Trading was observed; continue with assist-only verification and guidance, not order execution.');
   }
+  if (pineStructuredSummary?.evidenceMode === 'safe-authoring-inspect') {
+    lines.push('- Rule: Pine authoring continuity is limited to the visible editor state; do not overwrite unseen script content implicitly.');
+    if (pineStructuredSummary?.editorVisibleState === 'existing-script-visible') {
+      lines.push('- Rule: Existing visible Pine script content is already present; prefer a new-script path or ask before editing in place.');
+    }
+    if (pineStructuredSummary?.editorVisibleState === 'empty-or-starter') {
+      lines.push('- Rule: The visible Pine script looks empty or starter-like; keep any drafting bounded to that visible starter state.');
+    }
+  }
+  if (
+    pineStructuredSummary?.evidenceMode === 'diagnostics'
+    || pineStructuredSummary?.evidenceMode === 'line-budget'
+    || pineStructuredSummary?.evidenceMode === 'compile-result'
+  ) {
+    lines.push('- Rule: Pine diagnostics continuity is limited to the visible compiler status, warnings, errors, and line-budget hints.');
+    lines.push('- Rule: Fix or summarize only the visible Pine diagnostics before inferring runtime behavior or broader chart effects.');
+    if (
+      pineStructuredSummary?.lineBudgetSignal === 'near-limit-visible'
+      || pineStructuredSummary?.lineBudgetSignal === 'at-limit-visible'
+      || pineStructuredSummary?.lineBudgetSignal === 'over-budget-visible'
+    ) {
+      lines.push('- Rule: Visible Pine line-budget pressure favors targeted edits over broad rewrites.');
+    }
+  }
+  if (pineStructuredSummary?.evidenceMode === 'provenance-summary') {
+    lines.push('- Rule: Pine Version History continuity is provenance-only; use only the visible revision metadata.');
+    lines.push('- Rule: Do not infer hidden revisions, full script content, or runtime/chart behavior from Version History alone.');
+  }
   if (lastTurn?.verificationStatus && lastTurn.verificationStatus !== 'verified') {
     lines.push('- Rule: Do not claim the requested UI change is complete unless the latest evidence verifies it.');
   }

@@ -302,6 +302,83 @@ async function main() {
   assert(stateBackedContinuation.output.includes('EXECUTE_COUNT:1'), 'state-backed continuation should execute emitted actions');
   assert(stateBackedContinuation.output.includes('SEEN_MESSAGES:["continue"]'), 'state-backed continuation should still send the minimal prompt while execution routing relies on saved continuity');
 
+  const pineDiagnosticsContinuation = await runScenarioWithContinuity(['continue'], {
+    activeGoal: 'Diagnose the visible Pine script errors in TradingView',
+    currentSubgoal: 'Inspect the visible Pine diagnostics state',
+    continuationReady: true,
+    degradedReason: null,
+    lastTurn: {
+      actionSummary: 'focus_window -> key -> get_text',
+      verificationStatus: 'verified',
+      actionResults: [{
+        type: 'get_text',
+        success: true,
+        pineStructuredSummary: {
+          evidenceMode: 'diagnostics',
+          compileStatus: 'errors-visible',
+          errorCountEstimate: 1,
+          warningCountEstimate: 1,
+          topVisibleDiagnostics: [
+            'Compiler error at line 42: mismatched input.',
+            'Warning: script has unused variable.'
+          ]
+        }
+      }]
+    }
+  });
+  assert.strictEqual(pineDiagnosticsContinuation.exitCode, 0, 'pine diagnostics continuation should exit successfully');
+  assert(pineDiagnosticsContinuation.output.includes('EXECUTE_COUNT:1'), 'pine diagnostics continuation should execute emitted actions');
+  assert(pineDiagnosticsContinuation.output.includes('SEEN_MESSAGES:["continue"]'), 'pine diagnostics continuation should keep the user turn minimal');
+  assert(
+    pineDiagnosticsContinuation.output.includes('PREFLIGHT_USER_MESSAGES:["Continue the Pine diagnostics workflow by fixing the visible compiler errors before inferring runtime or chart behavior.'),
+    'pine diagnostics continuation should route through Pine-specific execution intent'
+  );
+  assert(
+    pineDiagnosticsContinuation.output.includes('Compiler error at line 42: mismatched input. | Warning: script has unused variable.'),
+    'pine diagnostics continuation should preserve the visible diagnostics inside the execution intent'
+  );
+  assert(
+    pineDiagnosticsContinuation.output.includes('"executionIntent":"Continue the Pine diagnostics workflow by fixing the visible compiler errors before inferring runtime or chart behavior.'),
+    'pine diagnostics continuation should persist the Pine-specific execution intent'
+  );
+
+  const pineProvenanceContinuation = await runScenarioWithContinuity(['continue'], {
+    activeGoal: 'Summarize recent Pine revisions in TradingView',
+    currentSubgoal: 'Inspect top visible Pine Version History metadata',
+    continuationReady: true,
+    degradedReason: null,
+    lastTurn: {
+      actionSummary: 'focus_window -> key -> get_text',
+      verificationStatus: 'verified',
+      actionResults: [{
+        type: 'get_text',
+        success: true,
+        pineStructuredSummary: {
+          evidenceMode: 'provenance-summary',
+          latestVisibleRevisionLabel: 'Revision 12',
+          latestVisibleRevisionNumber: 12,
+          latestVisibleRelativeTime: '5 minutes ago',
+          visibleRevisionCount: 3
+        }
+      }]
+    }
+  });
+  assert.strictEqual(pineProvenanceContinuation.exitCode, 0, 'pine provenance continuation should exit successfully');
+  assert(pineProvenanceContinuation.output.includes('EXECUTE_COUNT:1'), 'pine provenance continuation should execute emitted actions');
+  assert(pineProvenanceContinuation.output.includes('SEEN_MESSAGES:["continue"]'), 'pine provenance continuation should keep the user turn minimal');
+  assert(
+    pineProvenanceContinuation.output.includes('PREFLIGHT_USER_MESSAGES:["Continue the Pine version-history workflow by summarizing or comparing only the visible revision metadata; do not infer hidden revisions, script content, or runtime behavior.'),
+    'pine provenance continuation should route through provenance-only execution intent'
+  );
+  assert(
+    pineProvenanceContinuation.output.includes('Latest visible revision: Revision 12 5 minutes ago.'),
+    'pine provenance continuation should preserve the visible revision metadata inside the execution intent'
+  );
+  assert(
+    pineProvenanceContinuation.output.includes('"executionIntent":"Continue the Pine version-history workflow by summarizing or comparing only the visible revision metadata; do not infer hidden revisions, script content, or runtime behavior.'),
+    'pine provenance continuation should persist the provenance-specific execution intent'
+  );
+
   const persistedContinuation = await runScenarioWithContinuity([
     'help me make a confident synthesis of ticker LUNR in tradingview',
     'continue'

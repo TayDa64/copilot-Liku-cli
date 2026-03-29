@@ -366,6 +366,8 @@ test('session intent continuity surfaces Pine authoring state when existing scri
   assert(continuityContext.includes('pineVisibleScriptKind: indicator'));
   assert(continuityContext.includes('pineVisibleLineCountEstimate: 9'));
   assert(continuityContext.includes('pineVisibleSignals: pine-version-directive | indicator-declaration | script-body-visible'));
+  assert(continuityContext.includes('Rule: Pine authoring continuity is limited to the visible editor state; do not overwrite unseen script content implicitly.'));
+  assert(continuityContext.includes('Rule: Existing visible Pine script content is already present; prefer a new-script path or ask before editing in place.'));
 
   fs.rmSync(tempDir, { recursive: true, force: true });
 });
@@ -458,6 +460,8 @@ test('session intent continuity surfaces Pine diagnostics state and recovery gui
   assert(continuityContext.includes('pineErrorCountEstimate: 1'));
   assert(continuityContext.includes('pineWarningCountEstimate: 1'));
   assert(continuityContext.includes('pineTopVisibleDiagnostics: Compiler error at line 42: mismatched input. | Warning: script has unused variable.'));
+  assert(continuityContext.includes('Rule: Pine diagnostics continuity is limited to the visible compiler status, warnings, errors, and line-budget hints.'));
+  assert(continuityContext.includes('Rule: Fix or summarize only the visible Pine diagnostics before inferring runtime behavior or broader chart effects.'));
 
   fs.rmSync(tempDir, { recursive: true, force: true });
 });
@@ -558,6 +562,8 @@ test('session intent continuity surfaces Pine provenance summaries for continuat
   assert(continuityContext.includes('pineVisibleRevisionCount: 3'));
   assert(continuityContext.includes('pineVisibleRecencySignal: recent-visible'));
   assert(continuityContext.includes('pineTopVisibleRevisions: Revision 12 5 minutes ago #12 | Revision 11 1 hour ago #11'));
+  assert(continuityContext.includes('Rule: Pine Version History continuity is provenance-only; use only the visible revision metadata.'));
+  assert(continuityContext.includes('Rule: Do not infer hidden revisions, full script content, or runtime/chart behavior from Version History alone.'));
 
   fs.rmSync(tempDir, { recursive: true, force: true });
 });
