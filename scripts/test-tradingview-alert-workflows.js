@@ -9,6 +9,7 @@ const {
   buildTradingViewAlertWorkflowActions,
   maybeRewriteTradingViewAlertWorkflow
 } = require(path.join(__dirname, '..', 'src', 'main', 'tradingview', 'alert-workflows.js'));
+const { getTradingViewShortcutKey } = require(path.join(__dirname, '..', 'src', 'main', 'tradingview', 'shortcut-profile.js'));
 
 function test(name, fn) {
   try {
@@ -41,6 +42,12 @@ test('buildTradingViewAlertWorkflowActions emits deterministic alt+a flow', () =
   assert.strictEqual(actions[2].verify.kind, 'dialog-visible');
   assert.strictEqual(actions[4].type, 'type');
   assert.strictEqual(actions[4].text, '20.02');
+});
+
+test('alert workflow uses the TradingView shortcut profile for create-alert access', () => {
+  const actions = buildTradingViewAlertWorkflowActions({ appName: 'TradingView', price: '20.02' });
+  assert.strictEqual(actions[2].key, getTradingViewShortcutKey('create-alert'));
+  assert.strictEqual(actions[2].tradingViewShortcut.id, 'create-alert');
 });
 
 test('maybeRewriteTradingViewAlertWorkflow rewrites low-signal alert plans', () => {

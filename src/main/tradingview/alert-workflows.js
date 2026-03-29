@@ -1,4 +1,11 @@
 const { buildVerifyTargetHintFromAppName } = require('./app-profile');
+const {
+  buildTradingViewShortcutAction,
+  getTradingViewShortcutKey,
+  matchesTradingViewShortcutAction
+} = require('./shortcut-profile');
+
+const CREATE_ALERT_SHORTCUT = getTradingViewShortcutKey('create-alert') || 'alt+a';
 
 function normalizeTextForMatch(value) {
   return String(value || '')
@@ -35,9 +42,8 @@ function inferTradingViewAlertIntent(userMessage = '', actions = []) {
   if (!mentionsTradingView || !mentionsAlertWorkflow) return null;
 
   const existingWorkflowSignal = Array.isArray(actions) && actions.some((action) => {
-    const key = String(action?.key || '').trim().toLowerCase();
     const verifyTarget = String(action?.verify?.target || '').trim().toLowerCase();
-    return key === 'alt+a' || /create-alert|alert/.test(verifyTarget);
+    return matchesTradingViewShortcutAction(action, 'create-alert') || /create-alert|alert/.test(verifyTarget);
   });
 
   return {
@@ -60,9 +66,7 @@ function buildTradingViewAlertWorkflowActions(intent = {}) {
       verifyTarget
     },
     { type: 'wait', ms: 650 },
-    {
-      type: 'key',
-      key: 'alt+a',
+    buildTradingViewShortcutAction('create-alert', {
       reason: 'Open the TradingView Create Alert dialog',
       verify: {
         kind: 'dialog-visible',
@@ -71,7 +75,7 @@ function buildTradingViewAlertWorkflowActions(intent = {}) {
         keywords: ['create alert', 'alert']
       },
       verifyTarget
-    },
+    }),
     { type: 'wait', ms: 220 }
   ];
 
@@ -96,7 +100,7 @@ function maybeRewriteTradingViewAlertWorkflow(actions, context = {}) {
   const lowSignal = actions.every((action) => lowSignalTypes.has(action?.type));
   const tinyOrFragmented = actions.length <= 4;
   const screenshotFirst = actions[0]?.type === 'screenshot';
-  const lacksAlertSurface = !actions.some((action) => String(action?.key || '').trim().toLowerCase() === 'alt+a' || /alert/i.test(String(action?.verify?.target || '')));
+  const lacksAlertSurface = !actions.some((action) => matchesTradingViewShortcutAction(action, 'create-alert') || /alert/i.test(String(action?.verify?.target || '')));
 
   if (!lowSignal || (!tinyOrFragmented && !screenshotFirst && !lacksAlertSurface)) {
     return null;

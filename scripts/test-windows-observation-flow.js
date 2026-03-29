@@ -1202,6 +1202,15 @@ async function run() {
     assert(chatContent.includes('using a bounded fallback answer instead of continuing the screenshot loop'), 'Chat loop should warn that it is using a bounded fallback answer instead of dead-ending');
   });
 
+  await testAsync('drawing assessment requests keep bounded capability framing for screenshot-only evidence', async () => {
+    const messageBuilderPath = path.join(__dirname, '..', 'src', 'main', 'ai-service', 'message-builder.js');
+    const messageBuilderContent = fs.readFileSync(messageBuilderPath, 'utf8');
+
+    assert(messageBuilderContent.includes('## Drawing Capability Bounds'), 'Message builder should inject explicit drawing capability bounds');
+    assert(messageBuilderContent.includes('Distinguish TradingView drawing surface access from precise chart-object placement'), 'Drawing bounds should distinguish tool access from precise placement claims');
+    assert(messageBuilderContent.includes('safe surface workflow or explicitly refuse precise-placement claims'), 'Drawing bounds should require safe workflow fallback or bounded refusal under degraded evidence');
+  });
+
   await testAsync('screenshot module reports fallback capture mode markers', async () => {
     const screenshotPath = path.join(__dirname, '..', 'src', 'main', 'ui-automation', 'screenshot.js');
     const screenshotContent = fs.readFileSync(screenshotPath, 'utf8');
@@ -1252,6 +1261,165 @@ async function run() {
     } finally {
       aiService.systemAutomation.executeAction = originalExecuteAction;
       aiService.systemAutomation.getForegroundWindowInfo = originalGetForegroundWindowInfo;
+      aiService.systemAutomation.focusWindow = originalFocusWindow;
+      aiService.clearPendingAction();
+    }
+  });
+
+  await testAsync('pine confirmation resume re-establishes editor state before destructive edit', async () => {
+    aiService.clearPendingAction();
+    const executed = [];
+    const originalExecuteAction = aiService.systemAutomation.executeAction;
+    const originalGetForegroundWindowInfo = aiService.systemAutomation.getForegroundWindowInfo;
+    const originalResolveWindowHandle = aiService.systemAutomation.resolveWindowHandle;
+    const originalFocusWindow = aiService.systemAutomation.focusWindow;
+
+    try {
+      aiService.systemAutomation.executeAction = async (action) => ({ success: true, action: action.type, message: 'ok' });
+      aiService.systemAutomation.getForegroundWindowInfo = async () => ({
+        success: true,
+        hwnd: 777,
+        title: 'Pine Editor - TradingView',
+        processName: 'tradingview',
+        windowKind: 'main'
+      });
+      aiService.systemAutomation.resolveWindowHandle = async (action) => action?.processName === 'tradingview' ? 777 : 0;
+      aiService.systemAutomation.focusWindow = async (hwnd) => ({
+        success: true,
+        requestedWindowHandle: hwnd,
+        actualForegroundHandle: 777,
+        actualForeground: {
+          success: true,
+          hwnd: 777,
+          title: 'Pine Editor - TradingView',
+          processName: 'tradingview',
+          windowKind: 'main'
+        },
+        exactMatch: true,
+        outcome: 'exact'
+      });
+
+      const initial = await aiService.executeActions({
+        thought: 'Overwrite the current Pine script',
+        verification: 'TradingView should keep the Pine Editor active before the overwrite continues',
+        actions: [
+          { type: 'focus_window', title: 'TradingView', processName: 'tradingview' },
+          {
+            type: 'key',
+            key: 'ctrl+e',
+            reason: 'Open TradingView Pine Editor',
+            verify: {
+              kind: 'editor-active',
+              appName: 'TradingView',
+              target: 'pine-editor',
+              keywords: ['pine', 'pine editor', 'script'],
+              requiresObservedChange: true
+            }
+          },
+          { type: 'key', key: 'ctrl+a', reason: 'Select all existing code' },
+          { type: 'key', key: 'backspace', reason: 'Clear editor for replacement script' },
+          { type: 'type', text: 'indicator("Replacement")', reason: 'Type replacement Pine script' }
+        ]
+      }, null, null, {
+        userMessage: 'overwrite the current pine script in tradingview with a replacement version',
+        onRequireConfirmation: () => {},
+        actionExecutor: async (action) => {
+          executed.push(action.type === 'key' ? `${action.type}:${action.key}` : action.type);
+          if (action.type === 'focus_window') {
+            return {
+              success: true,
+              action: action.type,
+              message: 'focused',
+              requestedWindowHandle: 777,
+              actualForegroundHandle: 777,
+              actualForeground: {
+                success: true,
+                hwnd: 777,
+                title: 'TradingView',
+                processName: 'tradingview',
+                windowKind: 'main'
+              },
+              focusTarget: {
+                requestedWindowHandle: 777,
+                requestedTarget: { title: 'TradingView', processName: 'tradingview', className: null },
+                actualForegroundHandle: 777,
+                actualForeground: {
+                  success: true,
+                  hwnd: 777,
+                  title: 'TradingView',
+                  processName: 'tradingview',
+                  windowKind: 'main'
+                },
+                exactMatch: true,
+                outcome: 'exact'
+              }
+            };
+          }
+          return { success: true, action: action.type, message: 'executed' };
+        }
+      });
+
+      assert.strictEqual(initial.pendingConfirmation, true, 'Destructive Pine overwrite should pause for confirmation');
+      const pending = aiService.getPendingAction();
+      assert(pending, 'Pending Pine overwrite should be stored');
+      assert(Array.isArray(pending.resumePrerequisites), 'Pending Pine overwrite should store resume prerequisites');
+      assert.strictEqual(pending.resumePrerequisites[2].key, 'ctrl+e');
+      assert.strictEqual(pending.resumePrerequisites[4].key, 'ctrl+a');
+
+      aiService.confirmPendingAction(pending.actionId);
+      executed.length = 0;
+
+      const resumed = await aiService.resumeAfterConfirmation(null, null, {
+        userMessage: 'yes, continue overwriting the current pine script',
+        actionExecutor: async (action) => {
+          executed.push(action.type === 'key' ? `${action.type}:${action.key}` : action.type);
+          if (action.type === 'bring_window_to_front') {
+            return {
+              success: true,
+              action: action.type,
+              message: 'focused',
+              requestedWindowHandle: 777,
+              actualForegroundHandle: 777,
+              actualForeground: {
+                success: true,
+                hwnd: 777,
+                title: 'Pine Editor - TradingView',
+                processName: 'tradingview',
+                windowKind: 'main'
+              },
+              focusTarget: {
+                requestedWindowHandle: 777,
+                requestedTarget: { title: action.title, processName: 'tradingview', className: null },
+                actualForegroundHandle: 777,
+                actualForeground: {
+                  success: true,
+                  hwnd: 777,
+                  title: 'Pine Editor - TradingView',
+                  processName: 'tradingview',
+                  windowKind: 'main'
+                },
+                exactMatch: true,
+                outcome: 'exact'
+              }
+            };
+          }
+          return { success: true, action: action.type, message: 'executed' };
+        }
+      });
+
+      assert.strictEqual(resumed.success, true, 'Pine resume should succeed after editor prerequisites are re-established');
+      assert.deepStrictEqual(
+        executed,
+        ['bring_window_to_front', 'wait', 'key:ctrl+e', 'wait', 'key:ctrl+a', 'wait', 'key:backspace', 'type'],
+        'Pine resume should re-open the editor and re-select contents before destructive overwrite continues'
+      );
+      assert.strictEqual(resumed.observationCheckpoints.length, 1, 'Resume should verify the Pine Editor activation checkpoint');
+      assert.strictEqual(resumed.observationCheckpoints[0].classification, 'editor-active');
+      assert.strictEqual(resumed.observationCheckpoints[0].verified, true);
+    } finally {
+      aiService.systemAutomation.executeAction = originalExecuteAction;
+      aiService.systemAutomation.getForegroundWindowInfo = originalGetForegroundWindowInfo;
+      aiService.systemAutomation.resolveWindowHandle = originalResolveWindowHandle;
       aiService.systemAutomation.focusWindow = originalFocusWindow;
       aiService.clearPendingAction();
     }

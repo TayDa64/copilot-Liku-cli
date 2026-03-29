@@ -1,5 +1,12 @@
 const { buildVerifyTargetHintFromAppName } = require('./app-profile');
 const { extractTradingViewObservationKeywords } = require('./verification');
+const {
+  buildTradingViewShortcutAction,
+  getTradingViewShortcutKey,
+  matchesTradingViewShortcutAction
+} = require('./shortcut-profile');
+
+const PINE_EDITOR_SHORTCUT = getTradingViewShortcutKey('open-pine-editor') || 'ctrl+e';
 
 function normalizeTextForMatch(value) {
   return String(value || '')
@@ -46,6 +53,12 @@ function isPineDestructiveAuthoringStep(action) {
   const key = String(action.key || '').trim().toLowerCase();
   if (type !== 'key') return false;
   return key === 'ctrl+a' || key === 'backspace' || key === 'delete';
+}
+
+function isPineSelectionStep(action) {
+  if (!action || typeof action !== 'object') return false;
+  return String(action.type || '').trim().toLowerCase() === 'key'
+    && String(action.key || '').trim().toLowerCase() === 'ctrl+a';
 }
 
 function inferPineAuthoringMode(raw = '') {
@@ -218,7 +231,7 @@ function inferTradingViewPineIntent(userMessage = '', actions = []) {
   if (!mentionsPineSurface || mentionsUnsafeAuthoringOnly) {
     const surface = inferPineSurfaceTarget(raw);
     if (!surface || surface.target !== 'pine-editor') return null;
-    if (!Array.isArray(actions) || !actions.some((action) => String(action?.key || '').trim().toLowerCase() === 'ctrl+e')) {
+    if (!Array.isArray(actions) || !actions.some((action) => matchesTradingViewShortcutAction(action, 'open-pine-editor'))) {
       return null;
     }
   }
@@ -375,7 +388,79 @@ function maybeRewriteTradingViewPineWorkflow(actions, context = {}) {
   return buildTradingViewPineWorkflowActions(intent, actions);
 }
 
+function buildTradingViewPineResumePrerequisites(actions = [], pauseIndex = -1, context = {}) {
+  if (!Array.isArray(actions) || pauseIndex < 0 || pauseIndex >= actions.length) return [];
+
+  const pausedAction = actions[pauseIndex];
+  const priorActions = actions.slice(0, pauseIndex);
+  const hasPriorPineEditorActivation = priorActions.some((action) =>
+    matchesTradingViewShortcutAction(action, 'open-pine-editor')
+    || /pine-editor/.test(String(action?.verify?.target || ''))
+  );
+
+  if (!hasPriorPineEditorActivation) {
+    return [];
+  }
+
+  const resumeNeedsEditor = isPineAuthoringStep(pausedAction)
+    || String(pausedAction?.type || '').trim().toLowerCase() === 'type';
+  if (!resumeNeedsEditor) {
+    return [];
+  }
+
+  const verifyTarget = buildVerifyTargetHintFromAppName('TradingView');
+  const expectedKeywords = mergeUnique([
+    'pine',
+    'pine editor',
+    'script',
+    verifyTarget.pineKeywords,
+    verifyTarget.dialogKeywords,
+    verifyTarget.titleHints
+  ]);
+
+  const titleHint = String(context.lastTargetWindowProfile?.title || '').trim() || 'TradingView';
+  const processName = String(context.lastTargetWindowProfile?.processName || '').trim() || 'tradingview';
+  const prerequisites = [
+    {
+      type: 'bring_window_to_front',
+      title: titleHint,
+      processName,
+      reason: 'Re-focus TradingView before resuming Pine authoring after confirmation',
+      verifyTarget
+    },
+    { type: 'wait', ms: 650 },
+    buildTradingViewShortcutAction('open-pine-editor', {
+      reason: 'Re-open or re-activate TradingView Pine Editor after confirmation before continuing authoring',
+      verify: {
+        kind: 'editor-active',
+        appName: 'TradingView',
+        target: 'pine-editor',
+        keywords: expectedKeywords,
+        requiresObservedChange: true
+      },
+      verifyTarget
+    })
+  ].filter(Boolean);
+
+  if (prerequisites.length > 0) {
+    prerequisites.push({ type: 'wait', ms: 220 });
+  }
+
+  const hadSelectionBeforePause = priorActions.some((action) => isPineSelectionStep(action));
+  if (isPineDestructiveAuthoringStep(pausedAction) && hadSelectionBeforePause) {
+    prerequisites.push({
+      type: 'key',
+      key: 'ctrl+a',
+      reason: 'Re-select current Pine Editor contents after confirmation before destructive edit'
+    });
+    prerequisites.push({ type: 'wait', ms: 120 });
+  }
+
+  return prerequisites;
+}
+
 module.exports = {
+  buildTradingViewPineResumePrerequisites,
   inferTradingViewPineIntent,
   buildTradingViewPineWorkflowActions,
   maybeRewriteTradingViewPineWorkflow,

@@ -54,6 +54,22 @@ function inferPineEvidenceRequestKind(userMessage = '') {
   return null;
 }
 
+function inferDrawingRequestKind(userMessage = '') {
+  const text = String(userMessage || '').trim().toLowerCase();
+  if (!text) return null;
+  if (!/tradingview|drawing|drawings|trend\s*line|fibonacci|fib|object tree|ray|pitchfork|rectangle|ellipse|path|polyline|anchored text|anchored vwap/.test(text)) {
+    return null;
+  }
+
+  const asksSurfaceAccess = /\b(open|show|focus|switch|search|find|object tree|drawing tools?|drawings toolbar)\b/.test(text);
+  const asksPlacement = /\b(draw|place|position|anchor|set\b.*trend|plot\b.*trend)\b/.test(text)
+    && /\b(trend\s*line|ray|pitchfork|fibonacci|fib|rectangle|ellipse|path|polyline|drawing)\b/.test(text);
+
+  if (asksPlacement) return 'placement-request';
+  if (asksSurfaceAccess) return 'surface-access';
+  return null;
+}
+
 function buildPineEvidenceConstraint({ foreground, userMessage }) {
   const requestKind = inferPineEvidenceRequestKind(userMessage);
   if (!requestKind) return '';
@@ -90,6 +106,82 @@ function buildPineEvidenceConstraint({ foreground, userMessage }) {
   }
 
   lines.push('- Rule: If the user asks for Pine runtime or strategy diagnosis, mention Pine execution-model caveats such as realtime rollback, confirmed vs unconfirmed bars, and indicator vs strategy recalculation differences before inferring behavior from compile status alone.');
+  return lines.join('\n');
+}
+
+function inferTradingViewDrawingRequestKind(userMessage = '') {
+  const text = String(userMessage || '').trim().toLowerCase();
+  if (!text || !/tradingview/.test(text)) return null;
+  if (!/\bdraw|drawing|drawings|trend line|trendline|ray|pitchfork|fibonacci|fib|brush|rectangle|ellipse|path|polyline|object tree\b/.test(text)) {
+    return null;
+  }
+
+  const asksSurfaceAccess = /\b(open|show|focus|search|find|object tree|drawing tools|drawing toolbar|drawings toolbar)\b/.test(text);
+  const asksPrecisePlacement = /\b(draw|place|position|anchor|put)\b/.test(text)
+    && /\b(on|onto|between|from|to|at|through)\b/.test(text)
+    && !asksSurfaceAccess;
+
+  if (asksPrecisePlacement) return 'precise-placement';
+  if (asksSurfaceAccess) return 'surface-access';
+  return 'general-drawing';
+}
+
+function buildTradingViewDrawingConstraint({ foreground, userMessage }) {
+  const requestKind = inferTradingViewDrawingRequestKind(userMessage);
+  if (!requestKind) return '';
+
+  const processName = String(foreground?.processName || '').trim().toLowerCase();
+  const title = String(foreground?.title || '').trim().toLowerCase();
+  if (processName && processName !== 'tradingview' && !/tradingview/.test(title) && !/tradingview/.test(String(userMessage || '').toLowerCase())) {
+    return '';
+  }
+
+  const lines = [
+    '## Drawing Capability Bounds',
+    `- requestKind: ${requestKind}`,
+    '- Rule: Distinguish TradingView drawing surface access from precise chart-object placement.',
+    '- Rule: Do not claim a TradingView drawing was placed precisely unless a deterministic verified placement workflow actually established the anchors.'
+  ];
+
+  if (requestKind === 'precise-placement') {
+    lines.push('- Rule: For exact trendline or anchor placement requests, use a safe surface workflow or explicitly refuse precise-placement claims when the evidence does not directly verify the anchors.');
+  } else {
+    lines.push('- Rule: Tool-surface access is acceptable to automate when verified, but that does not by itself prove chart-object placement.');
+  }
+
+  return lines.join('\n');
+}
+
+function buildDrawingEvidenceConstraint({ foreground, latestVisual, userMessage }) {
+  const requestKind = inferDrawingRequestKind(userMessage);
+  if (!requestKind) return '';
+
+  const processName = String(foreground?.processName || '').trim().toLowerCase();
+  const title = String(foreground?.title || '').trim().toLowerCase();
+  const messageText = String(userMessage || '').toLowerCase();
+  if (processName && processName !== 'tradingview' && !/tradingview/.test(title) && !/tradingview/.test(messageText)) {
+    return '';
+  }
+
+  const captureMode = String(latestVisual?.captureMode || latestVisual?.scope || '').trim() || 'unknown';
+  const captureTrusted = typeof latestVisual?.captureTrusted === 'boolean'
+    ? latestVisual.captureTrusted
+    : !isScreenLikeCaptureMode(captureMode);
+
+  const lines = [
+    '## Drawing Capability Bounds',
+    `- requestKind: ${requestKind}`,
+    '- Rule: Distinguish TradingView drawing surface access from precise chart-object placement.',
+    '- Rule: Opening drawing tools, drawing search, or Object Tree can be automated and verified as UI-surface transitions.',
+    '- Rule: Do not claim a trendline or other chart object was placed precisely unless deterministic placement evidence is directly verified.'
+  ];
+
+  if (!captureTrusted || isScreenLikeCaptureMode(captureMode)) {
+    lines.push('- Rule: With screenshot-only or degraded visual evidence, placement confidence is bounded. Use a safe surface workflow or explicitly refuse precise-placement claims.');
+  } else {
+    lines.push('- Rule: Even with trusted capture, treat exact anchor placement as uncertain unless a deterministic verified placement workflow confirms it.');
+  }
+
   return lines.join('\n');
 }
 
@@ -375,6 +467,27 @@ function createMessageBuilder(dependencies) {
       });
       if (pineEvidenceConstraint) {
         messages.push({ role: 'system', content: pineEvidenceConstraint });
+      }
+    } catch {}
+
+    try {
+      const drawingConstraint = buildTradingViewDrawingConstraint({
+        foreground: currentForeground,
+        userMessage
+      });
+      if (drawingConstraint) {
+        messages.push({ role: 'system', content: drawingConstraint });
+      }
+    } catch {}
+
+    try {
+      const drawingEvidenceConstraint = buildDrawingEvidenceConstraint({
+        foreground: currentForeground,
+        latestVisual,
+        userMessage
+      });
+      if (drawingEvidenceConstraint) {
+        messages.push({ role: 'system', content: drawingEvidenceConstraint });
       }
     } catch {}
 

@@ -110,6 +110,7 @@ const {
   maybeRewriteTradingViewDrawingWorkflow
 } = require('./tradingview/drawing-workflows');
 const {
+  buildTradingViewPineResumePrerequisites,
   maybeRewriteTradingViewPineWorkflow
 } = require('./tradingview/pine-workflows');
 const {
@@ -4455,6 +4456,10 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
         }
       }
       
+      const resumePrerequisites = buildTradingViewPineResumePrerequisites(actionData.actions, i, {
+        lastTargetWindowProfile
+      });
+
       // Store as pending action
       setPendingAction({
         ...safety,
@@ -4465,6 +4470,7 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
         verification: actionData.verification,
         lastTargetWindowHandle,
         lastTargetWindowProfile,
+        resumePrerequisites,
         approvalPauseCapture
       });
       
@@ -4933,10 +4939,14 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
   let focusRecoveryTarget = null;
   let postVerification = { applicable: false, verified: true, healed: false, attempts: 0 };
   const observationCheckpoints = [];
+  const resumePrerequisites = Array.isArray(pending.resumePrerequisites)
+    ? pending.resumePrerequisites.filter((action) => action && typeof action === 'object')
+    : [];
+  const actionsToResume = resumePrerequisites.concat(Array.isArray(pending.remainingActions) ? pending.remainingActions : []);
   
   // Execute the confirmed action and remaining actions
-  for (let i = 0; i < pending.remainingActions.length; i++) {
-    const action = pending.remainingActions[i];
+  for (let i = 0; i < actionsToResume.length; i++) {
+    const action = actionsToResume[i];
 
     if (action.type === 'focus_window' || action.type === 'bring_window_to_front') {
       try {
@@ -4992,13 +5002,13 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
         action: action.type,
         error: resumeSafety.blockReason || 'Action blocked by advisory-only safety rail',
         reason: action.reason || '',
-        userConfirmed: i === 0,
+        userConfirmed: resumePrerequisites.length === 0 && i === 0,
         safety: resumeSafety,
         blockedByPolicy: true
       };
       results.push(blockedResult);
       if (onAction) {
-        onAction(blockedResult, i, pending.remainingActions.length);
+        onAction(blockedResult, i, actionsToResume.length);
       }
       break;
     }
@@ -5011,11 +5021,11 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
           action: action.type,
           error: prevalidation.error,
           reason: action.reason || '',
-          userConfirmed: i === 0
+          userConfirmed: resumePrerequisites.length === 0 && i === 0
         };
         results.push(blockedResult);
         if (onAction) {
-          onAction(blockedResult, i, pending.remainingActions.length);
+          onAction(blockedResult, i, actionsToResume.length);
         }
         break;
       }
@@ -5045,9 +5055,9 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
       if (smart.handled) {
         const smartResult = smart.result;
         smartResult.reason = action.reason || '';
-        smartResult.userConfirmed = i === 0;
+        smartResult.userConfirmed = resumePrerequisites.length === 0 && i === 0;
         results.push(smartResult);
-        if (onAction) onAction(smartResult, pending.actionIndex + i, pending.actionIndex + pending.remainingActions.length);
+        if (onAction) onAction(smartResult, pending.actionIndex + i, pending.actionIndex + actionsToResume.length);
         if (!smartResult.success && !action.continue_on_error) break;
         continue;
       }
@@ -5057,7 +5067,7 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
     const resumeActionData = {
       thought: pending.thought,
       verification: pending.verification,
-      actions: pending.remainingActions || []
+      actions: actionsToResume
     };
     const checkpointSpec = inferKeyObservationCheckpoint(action, resumeActionData, i, {
       userMessage,
@@ -5069,7 +5079,7 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
 
     const result = await (actionExecutor ? actionExecutor(action) : systemAutomation.executeAction(action));
     result.reason = action.reason || '';
-    result.userConfirmed = i === 0; // First one was confirmed
+    result.userConfirmed = resumePrerequisites.length === 0 && i === 0;
 
     if (result.success && (action.type === 'focus_window' || action.type === 'bring_window_to_front')) {
       const classifiedFocus = classifyActionFocusTargetResult(action, result);
@@ -5143,7 +5153,7 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
     }
     
     if (onAction) {
-      onAction(result, pending.actionIndex + i, pending.actionIndex + pending.remainingActions.length);
+      onAction(result, pending.actionIndex + i, pending.actionIndex + actionsToResume.length);
     }
     
     if (!result.success && !action.continue_on_error) {
@@ -5172,7 +5182,7 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
       error = 'Focus verification could not keep the target window in the foreground';
     }
     postVerification = await verifyAndSelfHealPostActions(
-      { actions: pending.remainingActions || [] },
+      { actions: actionsToResume },
       { userMessage, actionExecutor, enablePopupRecipes }
     );
     if (postVerification.applicable && !postVerification.verified) {
@@ -5184,7 +5194,7 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
     error = 'One or more actions failed';
   }
 
-  updateBrowserSessionAfterExecution({ actions: pending.remainingActions || [] }, {
+  updateBrowserSessionAfterExecution({ actions: actionsToResume }, {
     success: success && !error,
     results,
     postVerification,

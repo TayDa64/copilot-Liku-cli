@@ -9,6 +9,7 @@ const {
   buildTradingViewIndicatorWorkflowActions,
   maybeRewriteTradingViewIndicatorWorkflow
 } = require(path.join(__dirname, '..', 'src', 'main', 'tradingview', 'indicator-workflows.js'));
+const { getTradingViewShortcutKey } = require(path.join(__dirname, '..', 'src', 'main', 'tradingview', 'shortcut-profile.js'));
 
 function test(name, fn) {
   try {
@@ -48,6 +49,17 @@ test('buildTradingViewIndicatorWorkflowActions emits deterministic slash-search 
   assert.strictEqual(actions[4].type, 'type');
   assert.strictEqual(actions[4].text, 'Anchored VWAP');
   assert.strictEqual(actions[6].verify.kind, 'indicator-present');
+});
+
+test('indicator workflow uses the TradingView shortcut profile for indicator search', () => {
+  const actions = buildTradingViewIndicatorWorkflowActions({
+    appName: 'TradingView',
+    indicatorName: 'Anchored VWAP',
+    openSearchOnly: false
+  });
+
+  assert.strictEqual(actions[2].key, getTradingViewShortcutKey('indicator-search'));
+  assert.strictEqual(actions[2].tradingViewShortcut.id, 'indicator-search');
 });
 
 test('maybeRewriteTradingViewIndicatorWorkflow rewrites low-signal indicator plans', () => {

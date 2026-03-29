@@ -68,12 +68,17 @@ test('maybeRewriteTradingViewPineWorkflow rewrites low-signal Pine Editor opener
   assert.strictEqual(rewritten[4].text, 'plot(close)');
 });
 
-test('TradingView Pine workflow does not hijack authoring-only prompts', () => {
+test('TradingView Pine workflow rewrites generic authoring prompts into safe inspect-first flow', () => {
   const rewritten = maybeRewriteTradingViewPineWorkflow([
     { type: 'key', key: 'ctrl+e' }
   ], {
     userMessage: 'write a pine script for tradingview'
   });
 
-  assert.strictEqual(rewritten, null, 'authoring-only prompts should not be auto-rewritten into an opener flow');
+  assert(Array.isArray(rewritten), 'authoring prompts should rewrite into a bounded safe authoring flow');
+  assert.strictEqual(rewritten[0].type, 'bring_window_to_front');
+  assert.strictEqual(rewritten[2].type, 'key');
+  assert.strictEqual(rewritten[2].verify.target, 'pine-editor');
+  assert.strictEqual(rewritten[4].type, 'get_text');
+  assert.strictEqual(rewritten[4].pineEvidenceMode, 'safe-authoring-inspect');
 });

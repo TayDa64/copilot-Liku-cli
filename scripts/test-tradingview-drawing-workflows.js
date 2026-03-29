@@ -110,3 +110,14 @@ test('drawing workflow does not hijack unsafe placement prompts', () => {
 
   assert.strictEqual(rewritten, null);
 });
+
+test('drawing workflow keeps refusing precise placement requests from screenshot-only prompts', () => {
+  const rewritten = maybeRewriteTradingViewDrawingWorkflow([
+    { type: 'screenshot' },
+    { type: 'wait', ms: 250 }
+  ], {
+    userMessage: 'place the trend line exactly where the screenshot suggests in tradingview'
+  });
+
+  assert.strictEqual(rewritten, null);
+});

@@ -43,6 +43,12 @@ async function buildVisualEvidenceMessage({ latestVisual, foreground, watcherSna
   return messages.find((entry) => entry.role === 'system' && entry.content.includes('## Current Visual Evidence Bounds'));
 }
 
+async function buildDrawingEvidenceMessage({ latestVisual, foreground, watcherSnapshot, userMessage }) {
+  const builder = createBuilder({ latestVisual, foreground, watcherSnapshot });
+  const messages = await builder.buildMessages(userMessage, true);
+  return messages.find((entry) => entry.role === 'system' && entry.content.includes('## Drawing Capability Bounds'));
+}
+
 async function main() {
   await test('degraded TradingView analysis prompt forbids precise unseen indicator claims', async () => {
     const visualMessage = await buildVisualEvidenceMessage({
@@ -109,6 +115,47 @@ async function main() {
     assert(visualMessage.content.includes('evidenceQuality: trusted-target-window'));
     assert(visualMessage.content.includes('Rule: Describe directly visible facts from the current screenshot first, then clearly separate any interpretation or trading hypothesis.'));
     assert(visualMessage.content.includes('Rule: Even with trusted capture, only state precise chart indicator values when they are directly legible in the screenshot or supported by a stronger evidence path.'));
+  });
+
+  await test('drawing placement requests inject explicit capability bounds', async () => {
+    const drawingMessage = await buildDrawingEvidenceMessage({
+      latestVisual: {
+        dataURL: 'data:image/png;base64,AAAA',
+        captureMode: 'screen-copyfromscreen',
+        captureTrusted: false,
+        scope: 'screen'
+      },
+      foreground: {
+        success: true,
+        processName: 'tradingview',
+        title: 'TradingView - LUNR'
+      },
+      watcherSnapshot: {
+        activeWindowElementCount: 4,
+        interactiveElementCount: 2,
+        namedInteractiveElementCount: 1,
+        activeWindow: {
+          processName: 'tradingview',
+          title: 'TradingView - LUNR'
+        }
+      },
+      userMessage: 'draw and place a trend line exactly on tradingview'
+    });
+
+    assert(drawingMessage, 'drawing evidence block should be injected');
+    assert(
+      drawingMessage.content.includes('requestKind: placement-request')
+      || drawingMessage.content.includes('requestKind: precise-placement')
+    );
+    assert(drawingMessage.content.includes('Distinguish TradingView drawing surface access from precise chart-object placement'));
+    assert(
+      drawingMessage.content.includes('Do not claim a trendline or other chart object was placed precisely')
+      || drawingMessage.content.includes('Do not claim a TradingView drawing was placed precisely')
+    );
+    assert(
+      drawingMessage.content.includes('screenshot-only or degraded visual evidence')
+      || drawingMessage.content.includes('explicitly refuse precise-placement claims')
+    );
   });
 }
 

@@ -215,6 +215,9 @@ test('message-builder injects active app capability context', () => {
   assert(messageBuilderContent.includes('## Pine Evidence Bounds'), 'Message builder should inject a bounded Pine diagnostics evidence block when relevant');
   assert(messageBuilderContent.includes('inferPineEvidenceRequestKind'), 'Message builder should classify Pine evidence request kinds');
   assert(messageBuilderContent.includes('runtime correctness, strategy validity, profitability, or market insight'), 'Pine evidence bounds should prevent compile success from being overclaimed');
+  assert(messageBuilderContent.includes('## Drawing Capability Bounds'), 'Message builder should inject explicit TradingView drawing capability bounds');
+  assert(messageBuilderContent.includes('Distinguish TradingView drawing surface access from precise chart-object placement'), 'Drawing bounds should distinguish surface access from precise placement');
+  assert(messageBuilderContent.includes('safe surface workflow or explicitly refuse precise-placement claims'), 'Drawing bounds should require safe workflow fallback or explicit limitation for exact placement requests');
 });
 
 test('ai-service verifies focus continuity after action execution', () => {
@@ -256,9 +259,11 @@ test('rewriteActionsForReliability normalizes typoed app launches', () => {
 
 test('pine workflow encodes diagnostics and compile-result evidence modes', () => {
   const pineWorkflowPath = path.join(__dirname, '..', 'src', 'main', 'tradingview', 'pine-workflows.js');
+  const shortcutProfilePath = path.join(__dirname, '..', 'src', 'main', 'tradingview', 'shortcut-profile.js');
   const fs = require('fs');
 
   const pineWorkflowContent = fs.readFileSync(pineWorkflowPath, 'utf8');
+  const shortcutProfileContent = fs.readFileSync(shortcutProfilePath, 'utf8');
 
   assert(pineWorkflowContent.includes('function inferPineEditorEvidenceMode'), 'Pine workflows should classify Pine Editor evidence modes');
   assert(pineWorkflowContent.includes("return 'compile-result'"), 'Pine workflows should support compile-result evidence mode');
@@ -269,6 +274,12 @@ test('pine workflow encodes diagnostics and compile-result evidence modes', () =
   assert(pineWorkflowContent.includes('provenance-summary'), 'Pine workflows should support version-history provenance-summary evidence mode');
   assert(pineWorkflowContent.includes('top visible Pine Version History revision metadata'), 'Pine workflows should use provenance-summary-specific readback wording');
   assert(pineWorkflowContent.includes('pineSummaryFields'), 'Pine workflows should carry explicit structured summary fields for provenance summaries');
+  assert(pineWorkflowContent.includes('buildTradingViewPineResumePrerequisites'), 'Pine workflows should expose resume prerequisite shaping for confirmation-resume flows');
+  assert(pineWorkflowContent.includes('Re-open or re-activate TradingView Pine Editor after confirmation'), 'Pine resume prerequisite shaping should re-establish editor activation after confirmation');
+  assert(shortcutProfileContent.includes("'indicator-search'"), 'TradingView shortcut profile should define stable indicator search guidance');
+  assert(shortcutProfileContent.includes("'create-alert'"), 'TradingView shortcut profile should define stable alert guidance');
+  assert(shortcutProfileContent.includes("'drawing-tool-binding'"), 'TradingView shortcut profile should mark drawing bindings as customizable');
+  assert(shortcutProfileContent.includes("'open-dom-panel'"), 'TradingView shortcut profile should classify DOM shortcuts explicitly');
 });
 
 test('system prompt includes Pine diagnostics guidance', () => {
@@ -283,6 +294,8 @@ test('system prompt includes Pine diagnostics guidance', () => {
   assert(systemPromptContent.includes('latest visible revision label'), 'Pine provenance guidance should mention structured visible revision fields');
   assert(systemPromptContent.includes('compile success'), 'System prompt should mention compile success bounds');
   assert(systemPromptContent.includes('realtime rollback'), 'System prompt should mention Pine execution-model caveats');
+  assert(systemPromptContent.includes('TradingView drawing capability rule'), 'System prompt should include TradingView drawing honesty guidance');
+  assert(systemPromptContent.includes('TradingView shortcut profile rule'), 'System prompt should include TradingView shortcut-profile guidance');
 });
 
 test('rewriteActionsForReliability does not reinterpret passive TradingView open-state prompts as app launches', () => {
@@ -376,9 +389,9 @@ test('ai-service gates TradingView follow-up typing on post-key observation chec
   assert(tradingViewVerificationContent.includes('paper trading'), 'TradingView checkpoints should ground Paper Trading workflows');
   assert(tradingViewVerificationContent.includes('function inferTradingViewTradingMode'), 'TradingView verification should expose paper/live/unknown mode inference');
   assert(tradingViewVerificationContent.includes('Paper Trading was detected'), 'TradingView refusal messaging should mention Paper Trading guidance when relevant');
-  assert(tradingViewIndicatorContent.includes("key: '/'"), 'TradingView indicator workflows should open indicator search with the slash surface');
+  assert(tradingViewIndicatorContent.includes("getTradingViewShortcutKey('indicator-search')"), 'TradingView indicator workflows should resolve indicator search key via the TradingView shortcut profile');
   assert(tradingViewIndicatorContent.includes('indicator-present'), 'TradingView indicator workflows should encode indicator-present verification metadata');
-  assert(tradingViewAlertContent.includes("key: 'alt+a'"), 'TradingView alert workflows should open the Create Alert dialog with alt+a');
+  assert(tradingViewAlertContent.includes("getTradingViewShortcutKey('create-alert')"), 'TradingView alert workflows should resolve Create Alert keys via the TradingView shortcut profile');
   assert(tradingViewAlertContent.includes('create-alert'), 'TradingView alert workflows should encode create-alert verification metadata');
   assert(tradingViewChartContent.includes("kind: 'timeframe-updated'"), 'TradingView chart verification workflows should encode timeframe-updated verification metadata');
   assert(tradingViewChartContent.includes("kind: 'symbol-updated'"), 'TradingView chart verification workflows should encode symbol-updated verification metadata');
@@ -500,6 +513,35 @@ test('system prompt explains control-surface boundaries honestly', () => {
   assert(promptContent.includes('reliable window or keyboard controls'), 'System prompt should distinguish reliable keyboard/window controls');
   assert(promptContent.includes('visible but screenshot-only controls'), 'System prompt should distinguish screenshot-only visible controls');
   assert(promptContent.includes('prefer \\`find_element\\` or \\`get_text\\` evidence') || promptContent.includes('prefer find_element or get_text evidence'), 'System prompt should prefer semantic reads before denying direct control');
+});
+
+test('TradingView shortcut profile and drawing bounds are wired through prompting/workflows', () => {
+  const shortcutProfilePath = path.join(__dirname, '..', 'src', 'main', 'tradingview', 'shortcut-profile.js');
+  const indicatorWorkflowPath = path.join(__dirname, '..', 'src', 'main', 'tradingview', 'indicator-workflows.js');
+  const alertWorkflowPath = path.join(__dirname, '..', 'src', 'main', 'tradingview', 'alert-workflows.js');
+  const pineWorkflowPath = path.join(__dirname, '..', 'src', 'main', 'tradingview', 'pine-workflows.js');
+  const messageBuilderPath = path.join(__dirname, '..', 'src', 'main', 'ai-service', 'message-builder.js');
+  const systemPromptPath = path.join(__dirname, '..', 'src', 'main', 'ai-service', 'system-prompt.js');
+  const fs = require('fs');
+
+  const shortcutProfileContent = fs.readFileSync(shortcutProfilePath, 'utf8');
+  const indicatorWorkflowContent = fs.readFileSync(indicatorWorkflowPath, 'utf8');
+  const alertWorkflowContent = fs.readFileSync(alertWorkflowPath, 'utf8');
+  const pineWorkflowContent = fs.readFileSync(pineWorkflowPath, 'utf8');
+  const messageBuilderContent = fs.readFileSync(messageBuilderPath, 'utf8');
+  const systemPromptContent = fs.readFileSync(systemPromptPath, 'utf8');
+
+  assert(shortcutProfileContent.includes('stable-default'), 'TradingView shortcut profile should expose stable shortcut metadata');
+  assert(shortcutProfileContent.includes('context-dependent'), 'TradingView shortcut profile should expose context-dependent shortcut metadata');
+  assert(shortcutProfileContent.includes('customizable'), 'TradingView shortcut profile should expose customizable shortcut classes');
+  assert(shortcutProfileContent.includes('paper-test-only'), 'TradingView shortcut profile should expose unsafe trading shortcut classes');
+  assert(indicatorWorkflowContent.includes("require('./shortcut-profile')"), 'Indicator workflow should consume TradingView shortcut profile');
+  assert(alertWorkflowContent.includes("require('./shortcut-profile')"), 'Alert workflow should consume TradingView shortcut profile');
+  assert(pineWorkflowContent.includes("require('./shortcut-profile')"), 'Pine workflow should consume TradingView shortcut profile');
+  assert(messageBuilderContent.includes('## Drawing Capability Bounds'), 'Message builder should inject drawing capability bounds for placement requests');
+  assert(messageBuilderContent.includes('inferDrawingRequestKind'), 'Message builder should classify drawing request kinds');
+  assert(systemPromptContent.includes('TradingView drawing capability rule'), 'System prompt should include drawing capability honesty guidance');
+  assert(systemPromptContent.includes('TradingView shortcut profile rule'), 'System prompt should include TradingView shortcut profile guidance');
 });
 
 // Test DANGEROUS_COMMAND_PATTERNS covers critical cases

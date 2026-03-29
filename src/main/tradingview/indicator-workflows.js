@@ -1,4 +1,11 @@
 const { buildVerifyTargetHintFromAppName } = require('./app-profile');
+const {
+  buildTradingViewShortcutAction,
+  getTradingViewShortcutKey,
+  matchesTradingViewShortcutAction
+} = require('./shortcut-profile');
+
+const INDICATOR_SEARCH_SHORTCUT = getTradingViewShortcutKey('indicator-search') || '/';
 
 function normalizeTextForMatch(value) {
   return String(value || '')
@@ -62,9 +69,8 @@ function inferTradingViewIndicatorIntent(userMessage = '', actions = []) {
   const indicatorName = extractIndicatorName(raw);
   const openSearchOnly = !/\b(add|apply|insert|use|enable)\b/i.test(raw) || !indicatorName;
   const existingWorkflowSignal = Array.isArray(actions) && actions.some((action) => {
-    const key = String(action?.key || '').trim().toLowerCase();
     const verifyTarget = String(action?.verify?.target || '').trim().toLowerCase();
-    return key === '/' || /indicator/.test(verifyTarget);
+    return matchesTradingViewShortcutAction(action, 'indicator-search') || /indicator/.test(verifyTarget);
   });
 
   return {
@@ -99,9 +105,7 @@ function buildTradingViewIndicatorWorkflowActions(intent = {}) {
       verifyTarget
     },
     { type: 'wait', ms: 650 },
-    {
-      type: 'key',
-      key: '/',
+    buildTradingViewShortcutAction('indicator-search', {
       reason: indicatorName
         ? `Open TradingView indicator search for ${indicatorName}`
         : 'Open TradingView indicator search',
@@ -112,7 +116,7 @@ function buildTradingViewIndicatorWorkflowActions(intent = {}) {
         keywords: searchKeywords
       },
       verifyTarget
-    },
+    }),
     { type: 'wait', ms: 220 }
   ];
 
@@ -155,7 +159,7 @@ function maybeRewriteTradingViewIndicatorWorkflow(actions, context = {}) {
   const lowSignal = actions.every((action) => lowSignalTypes.has(action?.type));
   const tinyOrFragmented = actions.length <= 4;
   const screenshotFirst = actions[0]?.type === 'screenshot';
-  const lacksSearchSurface = !actions.some((action) => String(action?.key || '').trim() === '/' || /indicator/i.test(String(action?.verify?.target || '')));
+  const lacksSearchSurface = !actions.some((action) => matchesTradingViewShortcutAction(action, 'indicator-search') || /indicator/i.test(String(action?.verify?.target || '')));
 
   if (!lowSignal || (!tinyOrFragmented && !screenshotFirst && !lacksSearchSurface)) {
     return null;

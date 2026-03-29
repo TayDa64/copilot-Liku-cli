@@ -4,6 +4,7 @@ const assert = require('assert');
 const path = require('path');
 
 const {
+  buildTradingViewPineResumePrerequisites,
   inferTradingViewPineIntent,
   buildTradingViewPineWorkflowActions,
   maybeRewriteTradingViewPineWorkflow,
@@ -206,6 +207,29 @@ test('destructive clear remains reserved for explicit overwrite intent', () => {
   assert(rewritten.some((action) => String(action?.key || '').toLowerCase() === 'ctrl+a'), 'explicit overwrite should preserve select-all');
   assert(rewritten.some((action) => String(action?.key || '').toLowerCase() === 'backspace'), 'explicit overwrite should preserve destructive clear');
   assert(rewritten.some((action) => action?.type === 'type'), 'explicit overwrite should preserve typing after the clear');
+});
+
+test('pine resume prerequisites re-establish editor activation before destructive overwrite resumes', () => {
+  const prerequisites = buildTradingViewPineResumePrerequisites([
+    { type: 'bring_window_to_front', title: 'TradingView', processName: 'tradingview' },
+    { type: 'wait', ms: 650 },
+    { type: 'key', key: 'ctrl+e', reason: 'Open Pine Editor' },
+    { type: 'wait', ms: 220 },
+    { type: 'key', key: 'ctrl+a', reason: 'Select all existing code' },
+    { type: 'key', key: 'backspace', reason: 'Clear editor for replacement script' },
+    { type: 'type', text: 'indicator("Replacement")' }
+  ], 5, {
+    lastTargetWindowProfile: {
+      title: 'TradingView - LUNR',
+      processName: 'tradingview'
+    }
+  });
+
+  assert(Array.isArray(prerequisites), 'resume prerequisites should be returned as an action array');
+  assert.strictEqual(prerequisites[0].type, 'bring_window_to_front');
+  assert.strictEqual(prerequisites[2].key, 'ctrl+e');
+  assert.strictEqual(prerequisites[2].verify.kind, 'editor-active');
+  assert.strictEqual(prerequisites[4].key, 'ctrl+a');
 });
 
 test('open pine editor and summarize compile result stays verification-first', () => {
