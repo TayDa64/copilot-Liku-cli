@@ -567,3 +567,110 @@ test('session intent continuity surfaces Pine provenance summaries for continuat
 
   fs.rmSync(tempDir, { recursive: true, force: true });
 });
+
+test('session intent continuity surfaces Pine Logs summaries for continuation context', () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'liku-session-intent-'));
+  const stateFile = path.join(tempDir, 'session-intent-state.json');
+  const store = createSessionIntentStateStore({ stateFile });
+
+  const recorded = store.recordExecutedTurn({
+    userMessage: 'open pine logs in tradingview and read output',
+    executionIntent: 'Inspect visible Pine Logs output.',
+    committedSubgoal: 'Inspect visible Pine Logs output',
+    actionPlan: [
+      { type: 'focus_window', title: 'TradingView', processName: 'tradingview' },
+      { type: 'key', key: 'ctrl+shift+l', verifyKind: 'panel-visible', verifyTarget: 'pine-logs' },
+      { type: 'get_text', text: 'Pine Logs' }
+    ],
+    results: [
+      { type: 'focus_window', success: true, message: 'focused' },
+      { type: 'key', success: true, message: 'logs opened' },
+      {
+        type: 'get_text',
+        success: true,
+        message: 'logs inspected',
+        pineStructuredSummary: {
+          evidenceMode: 'logs-summary',
+          outputSurface: 'pine-logs',
+          outputSignal: 'errors-visible',
+          visibleOutputEntryCount: 2,
+          topVisibleOutputs: ['Runtime error at bar 12: division by zero.', 'Warning: fallback branch used.'],
+          compactSummary: 'signal=errors-visible | entries=2 | errors=1 | warnings=1'
+        }
+      }
+    ],
+    success: true,
+    verification: { status: 'verified' }
+  }, {
+    cwd: path.join(__dirname, '..')
+  });
+
+  assert(/log errors/i.test(recorded.chatContinuity.lastTurn.nextRecommendedStep));
+
+  const continuityContext = formatChatContinuityContext(recorded);
+  assert(continuityContext.includes('pineEvidenceMode: logs-summary'));
+  assert(continuityContext.includes('pineOutputSurface: pine-logs'));
+  assert(continuityContext.includes('pineOutputSignal: errors-visible'));
+  assert(continuityContext.includes('pineVisibleOutputEntryCount: 2'));
+  assert(continuityContext.includes('pineTopVisibleOutputs: Runtime error at bar 12: division by zero. | Warning: fallback branch used.'));
+  assert(continuityContext.includes('Rule: Pine Logs continuity is limited to the visible log output and visible error or warning lines only.'));
+  assert(continuityContext.includes('Rule: Do not infer hidden stack traces, hidden runtime state, or broader chart behavior from Pine Logs alone.'));
+
+  fs.rmSync(tempDir, { recursive: true, force: true });
+});
+
+test('session intent continuity surfaces Pine Profiler summaries for continuation context', () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'liku-session-intent-'));
+  const stateFile = path.join(tempDir, 'session-intent-state.json');
+  const store = createSessionIntentStateStore({ stateFile });
+
+  const recorded = store.recordExecutedTurn({
+    userMessage: 'open pine profiler in tradingview and summarize the visible metrics',
+    executionIntent: 'Inspect visible Pine Profiler metrics.',
+    committedSubgoal: 'Inspect visible Pine Profiler metrics',
+    actionPlan: [
+      { type: 'focus_window', title: 'TradingView', processName: 'tradingview' },
+      { type: 'key', key: 'ctrl+shift+p', verifyKind: 'panel-visible', verifyTarget: 'pine-profiler' },
+      { type: 'get_text', text: 'Pine Profiler' }
+    ],
+    results: [
+      { type: 'focus_window', success: true, message: 'focused' },
+      { type: 'key', success: true, message: 'profiler opened' },
+      {
+        type: 'get_text',
+        success: true,
+        message: 'profiler inspected',
+        pineStructuredSummary: {
+          evidenceMode: 'profiler-summary',
+          outputSurface: 'pine-profiler',
+          outputSignal: 'metrics-visible',
+          visibleOutputEntryCount: 2,
+          functionCallCountEstimate: 12,
+          avgTimeMs: 1.3,
+          maxTimeMs: 3.8,
+          topVisibleOutputs: ['Profiler: 12 calls, avg 1.3ms, max 3.8ms.', 'Slowest block: request.security'],
+          compactSummary: 'signal=metrics-visible | calls=12 | avgMs=1.3 | maxMs=3.8 | entries=2'
+        }
+      }
+    ],
+    success: true,
+    verification: { status: 'verified' }
+  }, {
+    cwd: path.join(__dirname, '..')
+  });
+
+  assert(/performance evidence only/i.test(recorded.chatContinuity.lastTurn.nextRecommendedStep));
+
+  const continuityContext = formatChatContinuityContext(recorded);
+  assert(continuityContext.includes('pineEvidenceMode: profiler-summary'));
+  assert(continuityContext.includes('pineOutputSurface: pine-profiler'));
+  assert(continuityContext.includes('pineOutputSignal: metrics-visible'));
+  assert(continuityContext.includes('pineFunctionCallCountEstimate: 12'));
+  assert(continuityContext.includes('pineAvgTimeMs: 1.3'));
+  assert(continuityContext.includes('pineMaxTimeMs: 3.8'));
+  assert(continuityContext.includes('pineTopVisibleOutputs: Profiler: 12 calls, avg 1.3ms, max 3.8ms. | Slowest block: request.security'));
+  assert(continuityContext.includes('Rule: Pine Profiler continuity is limited to the visible performance metrics and hotspots only.'));
+  assert(continuityContext.includes('Rule: Treat profiler output as performance evidence, not proof of runtime correctness or chart behavior.'));
+
+  fs.rmSync(tempDir, { recursive: true, force: true });
+});

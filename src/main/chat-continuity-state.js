@@ -50,6 +50,12 @@ function normalizePineStructuredSummary(summary) {
   const normalized = {
     evidenceMode: normalizeText(summary.evidenceMode, 60),
     compactSummary: normalizeText(summary.compactSummary, 160),
+    outputSurface: normalizeText(summary.outputSurface, 60),
+    outputSignal: normalizeText(summary.outputSignal, 60),
+    visibleOutputEntryCount: safeNumber(summary.visibleOutputEntryCount),
+    functionCallCountEstimate: safeNumber(summary.functionCallCountEstimate),
+    avgTimeMs: safeNumber(summary.avgTimeMs),
+    maxTimeMs: safeNumber(summary.maxTimeMs),
     editorVisibleState: normalizeText(summary.editorVisibleState, 60),
     visibleScriptKind: normalizeText(summary.visibleScriptKind, 40),
     visibleLineCountEstimate: safeNumber(summary.visibleLineCountEstimate),
@@ -60,6 +66,7 @@ function normalizePineStructuredSummary(summary) {
     visibleSignals: normalizeEvidenceList(summary.visibleSignals, 40),
     statusSignals: normalizeEvidenceList(summary.statusSignals, 40),
     topVisibleDiagnostics: normalizeEvidenceList(summary.topVisibleDiagnostics, 140),
+    topVisibleOutputs: normalizeEvidenceList(summary.topVisibleOutputs, 140),
     latestVisibleRevisionLabel: normalizeText(summary.latestVisibleRevisionLabel, 80),
     latestVisibleRevisionNumber: safeNumber(summary.latestVisibleRevisionNumber),
     latestVisibleRelativeTime: normalizeText(summary.latestVisibleRelativeTime, 80),
@@ -70,6 +77,12 @@ function normalizePineStructuredSummary(summary) {
 
   if (!normalized.evidenceMode
     && !normalized.compactSummary
+    && !normalized.outputSurface
+    && !normalized.outputSignal
+    && normalized.visibleOutputEntryCount === null
+    && normalized.functionCallCountEstimate === null
+    && normalized.avgTimeMs === null
+    && normalized.maxTimeMs === null
     && !normalized.editorVisibleState
     && !normalized.visibleScriptKind
     && normalized.visibleLineCountEstimate === null
@@ -80,6 +93,7 @@ function normalizePineStructuredSummary(summary) {
     && normalized.visibleSignals.length === 0
     && normalized.statusSignals.length === 0
     && normalized.topVisibleDiagnostics.length === 0
+    && normalized.topVisibleOutputs.length === 0
     && !normalized.latestVisibleRevisionLabel
     && normalized.latestVisibleRevisionNumber === null
     && !normalized.latestVisibleRelativeTime

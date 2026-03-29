@@ -270,6 +270,17 @@ function summarizeVisiblePineDiagnostics(pineStructuredSummary) {
   return diagnostics.length > 0 ? ` Visible diagnostics: ${diagnostics.join(' | ')}.` : '';
 }
 
+function summarizeVisiblePineOutputs(pineStructuredSummary) {
+  const outputs = Array.isArray(pineStructuredSummary?.topVisibleOutputs)
+    ? pineStructuredSummary.topVisibleOutputs
+      .map((entry) => String(entry || '').trim())
+      .filter(Boolean)
+      .slice(0, 2)
+    : [];
+
+  return outputs.length > 0 ? ` Visible output: ${outputs.join(' | ')}.` : '';
+}
+
 function formatLatestVisiblePineRevision(pineStructuredSummary) {
   const parts = [
     String(pineStructuredSummary?.latestVisibleRevisionLabel || '').trim(),
@@ -291,11 +302,13 @@ function buildPineContinuationIntentFromState(continuity) {
   if (!pineStructuredSummary) return '';
 
   const diagnosticsSuffix = summarizeVisiblePineDiagnostics(pineStructuredSummary);
+  const outputSuffix = summarizeVisiblePineOutputs(pineStructuredSummary);
   const latestVisibleRevision = formatLatestVisiblePineRevision(pineStructuredSummary);
   const editorVisibleState = String(pineStructuredSummary.editorVisibleState || '').trim().toLowerCase();
   const evidenceMode = String(pineStructuredSummary.evidenceMode || '').trim().toLowerCase();
   const compileStatus = String(pineStructuredSummary.compileStatus || '').trim().toLowerCase();
   const lineBudgetSignal = String(pineStructuredSummary.lineBudgetSignal || '').trim().toLowerCase();
+  const outputSignal = String(pineStructuredSummary.outputSignal || '').trim().toLowerCase();
 
   if (editorVisibleState === 'existing-script-visible') {
     return 'Continue the Pine authoring workflow from the visible editor state; avoid overwriting the existing visible script implicitly and choose a new-script path or ask before editing.';
@@ -325,6 +338,18 @@ function buildPineContinuationIntentFromState(continuity) {
   if (evidenceMode === 'provenance-summary') {
     const revisionSuffix = latestVisibleRevision ? ` Latest visible revision: ${latestVisibleRevision}.` : '';
     return `Continue the Pine version-history workflow by summarizing or comparing only the visible revision metadata; do not infer hidden revisions, script content, or runtime behavior.${revisionSuffix}`;
+  }
+  if (evidenceMode === 'logs-summary') {
+    if (outputSignal === 'errors-visible') {
+      return `Continue the Pine logs workflow by addressing only the visible log errors before inferring runtime or chart behavior.${outputSuffix}`;
+    }
+    if (outputSignal === 'warnings-visible') {
+      return `Continue the Pine logs workflow by reviewing only the visible warning lines before trusting runtime behavior.${outputSuffix}`;
+    }
+    return `Continue the Pine logs workflow from the visible log output only; do not infer hidden runtime state or chart behavior.${outputSuffix}`;
+  }
+  if (evidenceMode === 'profiler-summary') {
+    return `Continue the Pine profiler workflow by summarizing only the visible performance metrics and hotspots; do not infer runtime correctness or chart behavior from profiler output alone.${outputSuffix}`;
   }
 
   return '';

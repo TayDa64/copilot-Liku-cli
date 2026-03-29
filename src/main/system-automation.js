@@ -585,6 +585,115 @@ function buildPineEditorDiagnosticsStructuredSummary(text, evidenceMode = 'gener
   };
 }
 
+function buildPineLogsStructuredSummary(text) {
+  const rawText = String(text || '').replace(/\r/g, '');
+  const compactText = normalizeCompactText(rawText, 2400);
+  if (!compactText) return null;
+
+  const visibleSegments = rawText
+    .split(/[\n;]+/)
+    .map((segment) => normalizeCompactText(segment, 180))
+    .filter(Boolean);
+
+  const topVisibleOutputs = visibleSegments.slice(0, 4);
+  const errorSegments = visibleSegments.filter((segment) => /\b(error|exception|failed|failure|runtime error)\b/i.test(segment));
+  const warningSegments = visibleSegments.filter((segment) => /\bwarning|warn\b/i.test(segment));
+  const emptyVisible = /\b(no logs|no log output|no output|empty log|nothing to show)\b/i.test(compactText);
+
+  let outputSignal = 'output-visible';
+  if (errorSegments.length > 0) {
+    outputSignal = 'errors-visible';
+  } else if (warningSegments.length > 0) {
+    outputSignal = 'warnings-visible';
+  } else if (emptyVisible || topVisibleOutputs.length === 0) {
+    outputSignal = 'empty-visible';
+  }
+
+  const compactSummary = [
+    `signal=${outputSignal}`,
+    `entries=${visibleSegments.length}`,
+    errorSegments.length > 0 ? `errors=${errorSegments.length}` : null,
+    warningSegments.length > 0 ? `warnings=${warningSegments.length}` : null
+  ].filter(Boolean).join(' | ');
+
+  return {
+    evidenceMode: 'logs-summary',
+    outputSurface: 'pine-logs',
+    outputSignal,
+    visibleOutputEntryCount: visibleSegments.length,
+    topVisibleOutputs,
+    compactSummary: compactSummary || null
+  };
+}
+
+function parseVisibleProfilerMetric(text, patterns = []) {
+  for (const pattern of patterns) {
+    const match = String(text || '').match(pattern);
+    if (!match) continue;
+    const parsed = Number(match[1]);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
+}
+
+function buildPineProfilerStructuredSummary(text) {
+  const rawText = String(text || '').replace(/\r/g, '');
+  const compactText = normalizeCompactText(rawText, 2400);
+  if (!compactText) return null;
+
+  const visibleSegments = rawText
+    .split(/[\n;]+/)
+    .map((segment) => normalizeCompactText(segment, 180))
+    .filter(Boolean);
+
+  const visibleOutputEntryCount = visibleSegments.length;
+  const topVisibleOutputs = visibleSegments.slice(0, 4);
+  const functionCallCountEstimate = parseVisibleProfilerMetric(compactText, [
+    /\b(\d{1,7})\s+calls?\b/i,
+    /\bcalls?\s*[:=]?\s*(\d{1,7})\b/i
+  ]);
+  const avgTimeMs = parseVisibleProfilerMetric(compactText, [
+    /\bavg(?:erage)?\s*[:=]?\s*(\d+(?:\.\d+)?)\s*ms\b/i,
+    /\b(\d+(?:\.\d+)?)\s*ms\s+avg\b/i
+  ]);
+  const maxTimeMs = parseVisibleProfilerMetric(compactText, [
+    /\bmax(?:imum)?(?:\s+time)?\s*[:=]?\s*(\d+(?:\.\d+)?)\s*ms\b/i,
+    /\b(\d+(?:\.\d+)?)\s*ms\s+max\b/i
+  ]);
+  const emptyVisible = /\b(no profiler data|no data|no metrics|empty profiler|nothing to show)\b/i.test(compactText);
+  const metricsVisible = Number.isFinite(functionCallCountEstimate)
+    || Number.isFinite(avgTimeMs)
+    || Number.isFinite(maxTimeMs)
+    || /\b(call|calls|avg|average|max|slow|slowest|hotspot|time|timing|ms)\b/i.test(compactText);
+
+  let outputSignal = 'output-visible';
+  if (emptyVisible || topVisibleOutputs.length === 0) {
+    outputSignal = 'empty-visible';
+  } else if (metricsVisible) {
+    outputSignal = 'metrics-visible';
+  }
+
+  const compactSummary = [
+    `signal=${outputSignal}`,
+    Number.isFinite(functionCallCountEstimate) ? `calls=${functionCallCountEstimate}` : null,
+    Number.isFinite(avgTimeMs) ? `avgMs=${avgTimeMs}` : null,
+    Number.isFinite(maxTimeMs) ? `maxMs=${maxTimeMs}` : null,
+    `entries=${visibleOutputEntryCount}`
+  ].filter(Boolean).join(' | ');
+
+  return {
+    evidenceMode: 'profiler-summary',
+    outputSurface: 'pine-profiler',
+    outputSignal,
+    visibleOutputEntryCount,
+    functionCallCountEstimate,
+    avgTimeMs,
+    maxTimeMs,
+    topVisibleOutputs,
+    compactSummary: compactSummary || null
+  };
+}
+
 /**
  * Focus the desktop / unfocus Electron windows before sending keyboard input
  * This is critical for SendKeys/SendInput to reach the correct target
@@ -2715,6 +2824,10 @@ async function executeAction(action) {
           && action?.pineEvidenceMode === 'provenance-summary'
           && /pine version history/i.test(pineTargetText)) {
           result.pineStructuredSummary = buildPineVersionHistoryStructuredSummary(gtResult.text, action.pineSummaryFields);
+        } else if (gtResult.success && /pine logs/i.test(pineTargetText)) {
+          result.pineStructuredSummary = buildPineLogsStructuredSummary(gtResult.text);
+        } else if (gtResult.success && /pine profiler/i.test(pineTargetText)) {
+          result.pineStructuredSummary = buildPineProfilerStructuredSummary(gtResult.text);
         } else if (gtResult.success && /pine editor/i.test(pineTargetText)) {
           if (action?.pineEvidenceMode === 'safe-authoring-inspect') {
             result.pineStructuredSummary = buildPineEditorSafeAuthoringSummary(gtResult.text);
@@ -3103,4 +3216,6 @@ module.exports = {
   buildPineVersionHistoryStructuredSummary,
   buildPineEditorSafeAuthoringSummary,
   buildPineEditorDiagnosticsStructuredSummary,
+  buildPineLogsStructuredSummary,
+  buildPineProfilerStructuredSummary,
 };

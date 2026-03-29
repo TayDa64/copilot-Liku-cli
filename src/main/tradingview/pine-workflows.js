@@ -191,7 +191,8 @@ function buildPineReadbackStep(surfaceTarget, evidenceMode = null) {
     return {
       type: 'get_text',
       text: 'Pine Logs',
-      reason: 'Read visible Pine Logs output for bounded evidence gathering'
+      reason: 'Read visible Pine Logs output for a bounded structured summary',
+      pineEvidenceMode: 'logs-summary'
     };
   }
 
@@ -199,7 +200,8 @@ function buildPineReadbackStep(surfaceTarget, evidenceMode = null) {
     return {
       type: 'get_text',
       text: 'Pine Profiler',
-      reason: 'Read visible Pine Profiler output for bounded evidence gathering'
+      reason: 'Read visible Pine Profiler output for a bounded structured summary',
+      pineEvidenceMode: 'profiler-summary'
     };
   }
 
@@ -380,10 +382,18 @@ function buildTradingViewPineWorkflowActions(intent = {}, actions = []) {
     }
   }
 
-  if (intent.surfaceTarget === 'pine-version-history' && intent.pineEvidenceMode === 'provenance-summary') {
+  if (intent.wantsEvidenceReadback) {
+    const inferredReadbackStep = buildPineReadbackStep(intent.surfaceTarget, intent.pineEvidenceMode);
     trailing.forEach((action) => {
-      if (action?.type === 'get_text' && !Array.isArray(action.pineSummaryFields)) {
-        action.pineSummaryFields = [...PINE_VERSION_HISTORY_SUMMARY_FIELDS];
+      if (action?.type !== 'get_text' || !inferredReadbackStep) return;
+      if (!action.pineEvidenceMode && inferredReadbackStep.pineEvidenceMode) {
+        action.pineEvidenceMode = inferredReadbackStep.pineEvidenceMode;
+      }
+      if (!action.reason && inferredReadbackStep.reason) {
+        action.reason = inferredReadbackStep.reason;
+      }
+      if (!Array.isArray(action.pineSummaryFields) && Array.isArray(inferredReadbackStep.pineSummaryFields)) {
+        action.pineSummaryFields = [...inferredReadbackStep.pineSummaryFields];
       }
     });
   }

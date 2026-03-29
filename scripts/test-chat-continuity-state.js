@@ -253,3 +253,98 @@ test('continuity mapper preserves Pine diagnostics structured summary facts', ()
     'Warning: script has unused variable.'
   ]);
 });
+
+test('continuity mapper preserves Pine Logs structured summary facts', () => {
+  const turnRecord = buildChatContinuityTurnRecord({
+    actionData: {
+      thought: 'Inspect Pine Logs output',
+      actions: [
+        { type: 'focus_window', title: 'TradingView', processName: 'tradingview' },
+        { type: 'key', key: 'ctrl+shift+l', reason: 'Open Pine Logs', verify: { kind: 'panel-visible', target: 'pine-logs' } },
+        { type: 'get_text', text: 'Pine Logs', reason: 'Read visible logs' }
+      ]
+    },
+    execResult: {
+      success: true,
+      results: [
+        { success: true, action: 'focus_window', message: 'focused' },
+        { success: true, action: 'key', message: 'logs opened' },
+        {
+          success: true,
+          action: 'get_text',
+          message: 'logs inspected',
+          pineStructuredSummary: {
+            evidenceMode: 'logs-summary',
+            outputSurface: 'pine-logs',
+            outputSignal: 'errors-visible',
+            visibleOutputEntryCount: 2,
+            topVisibleOutputs: ['Runtime error at bar 12: division by zero.', 'Warning: fallback branch used.'],
+            compactSummary: 'signal=errors-visible | entries=2 | errors=1 | warnings=1'
+          }
+        }
+      ]
+    },
+    details: {
+      userMessage: 'open pine logs in tradingview and read output',
+      executionIntent: 'Inspect Pine Logs output.',
+      nextRecommendedStep: 'Review the visible Pine Logs errors before continuing.'
+    }
+  });
+
+  assert.strictEqual(turnRecord.results[2].pineStructuredSummary.evidenceMode, 'logs-summary');
+  assert.strictEqual(turnRecord.results[2].pineStructuredSummary.outputSurface, 'pine-logs');
+  assert.strictEqual(turnRecord.results[2].pineStructuredSummary.outputSignal, 'errors-visible');
+  assert.strictEqual(turnRecord.results[2].pineStructuredSummary.visibleOutputEntryCount, 2);
+  assert.deepStrictEqual(turnRecord.results[2].pineStructuredSummary.topVisibleOutputs, [
+    'Runtime error at bar 12: division by zero.',
+    'Warning: fallback branch used.'
+  ]);
+});
+
+test('continuity mapper preserves Pine Profiler structured summary facts', () => {
+  const turnRecord = buildChatContinuityTurnRecord({
+    actionData: {
+      thought: 'Inspect Pine Profiler metrics',
+      actions: [
+        { type: 'focus_window', title: 'TradingView', processName: 'tradingview' },
+        { type: 'key', key: 'ctrl+shift+p', reason: 'Open Pine Profiler', verify: { kind: 'panel-visible', target: 'pine-profiler' } },
+        { type: 'get_text', text: 'Pine Profiler', reason: 'Read visible profiler metrics' }
+      ]
+    },
+    execResult: {
+      success: true,
+      results: [
+        { success: true, action: 'focus_window', message: 'focused' },
+        { success: true, action: 'key', message: 'profiler opened' },
+        {
+          success: true,
+          action: 'get_text',
+          message: 'profiler inspected',
+          pineStructuredSummary: {
+            evidenceMode: 'profiler-summary',
+            outputSurface: 'pine-profiler',
+            outputSignal: 'metrics-visible',
+            visibleOutputEntryCount: 2,
+            functionCallCountEstimate: 12,
+            avgTimeMs: 1.3,
+            maxTimeMs: 3.8,
+            topVisibleOutputs: ['Profiler: 12 calls, avg 1.3ms, max 3.8ms.', 'Slowest block: request.security'],
+            compactSummary: 'signal=metrics-visible | calls=12 | avgMs=1.3 | maxMs=3.8 | entries=2'
+          }
+        }
+      ]
+    },
+    details: {
+      userMessage: 'open pine profiler in tradingview and summarize the visible metrics',
+      executionIntent: 'Inspect Pine Profiler metrics.',
+      nextRecommendedStep: 'Use the visible metrics to target performance bottlenecks only.'
+    }
+  });
+
+  assert.strictEqual(turnRecord.results[2].pineStructuredSummary.evidenceMode, 'profiler-summary');
+  assert.strictEqual(turnRecord.results[2].pineStructuredSummary.outputSurface, 'pine-profiler');
+  assert.strictEqual(turnRecord.results[2].pineStructuredSummary.outputSignal, 'metrics-visible');
+  assert.strictEqual(turnRecord.results[2].pineStructuredSummary.functionCallCountEstimate, 12);
+  assert.strictEqual(turnRecord.results[2].pineStructuredSummary.avgTimeMs, 1.3);
+  assert.strictEqual(turnRecord.results[2].pineStructuredSummary.maxTimeMs, 3.8);
+});

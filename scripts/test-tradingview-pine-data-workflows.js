@@ -158,6 +158,7 @@ test('open pine logs and read output stays verification-first', () => {
   assert.strictEqual(rewritten[2].verify.target, 'pine-logs');
   assert.strictEqual(rewritten[4].type, 'get_text');
   assert.strictEqual(rewritten[4].text, 'Pine Logs');
+  assert.strictEqual(rewritten[4].pineEvidenceMode, 'logs-summary');
 });
 
 test('open pine editor and read visible status stays verification-first', () => {
@@ -338,6 +339,7 @@ test('open pine profiler and summarize metrics stays verification-first', () => 
   assert.strictEqual(rewritten[2].verify.target, 'pine-profiler');
   assert.strictEqual(rewritten[4].type, 'get_text');
   assert.strictEqual(rewritten[4].text, 'Pine Profiler');
+  assert.strictEqual(rewritten[4].pineEvidenceMode, 'profiler-summary');
 });
 
 test('open pine version history and read revisions stays verification-first', () => {
@@ -397,6 +399,7 @@ test('pine evidence-gathering workflow preserves trailing get_text read step', (
   const readSteps = rewritten.filter((action) => action?.type === 'get_text');
   assert.strictEqual(readSteps.length, 1, 'explicit readback step should be preserved without duplication');
   assert.strictEqual(readSteps[0].text, 'Pine Logs');
+  assert.strictEqual(readSteps[0].pineEvidenceMode, 'logs-summary');
   assert.strictEqual(rewritten[2].verify.target, 'pine-logs');
 });
 
@@ -427,6 +430,7 @@ test('pine profiler evidence workflow preserves trailing get_text read step', ()
   const readSteps = rewritten.filter((action) => action?.type === 'get_text');
   assert.strictEqual(readSteps.length, 1, 'explicit profiler readback step should be preserved without duplication');
   assert.strictEqual(readSteps[0].text, 'Pine Profiler');
+  assert.strictEqual(readSteps[0].pineEvidenceMode, 'profiler-summary');
   assert.strictEqual(rewritten[2].verify.target, 'pine-profiler');
 });
 

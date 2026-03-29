@@ -526,6 +526,7 @@ async function run() {
     assert.strictEqual(rewritten[2].verify.target, 'pine-logs');
     assert.strictEqual(rewritten[4].type, 'get_text');
     assert.strictEqual(rewritten[4].text, 'Pine Logs');
+    assert.strictEqual(rewritten[4].pineEvidenceMode, 'logs-summary');
   });
 
   await testAsync('low-signal TradingView Pine Profiler evidence request rewrites to panel verification plus get_text', async () => {
@@ -541,6 +542,7 @@ async function run() {
     assert.strictEqual(rewritten[2].verify.target, 'pine-profiler');
     assert.strictEqual(rewritten[4].type, 'get_text');
     assert.strictEqual(rewritten[4].text, 'Pine Profiler');
+    assert.strictEqual(rewritten[4].pineEvidenceMode, 'profiler-summary');
   });
 
   await testAsync('low-signal TradingView performance-profiler alias request rewrites to panel verification plus get_text', async () => {
@@ -553,6 +555,7 @@ async function run() {
     assert(Array.isArray(rewritten), 'pine profiler alias rewrite should return an action array');
     assert.strictEqual(rewritten[2].verify.target, 'pine-profiler');
     assert.strictEqual(rewritten[4].text, 'Pine Profiler');
+    assert.strictEqual(rewritten[4].pineEvidenceMode, 'profiler-summary');
   });
 
   await testAsync('low-signal TradingView Pine Version History request rewrites to panel verification plus get_text', async () => {
@@ -620,7 +623,7 @@ async function run() {
         actions: [
           { type: 'focus_window', title: 'TradingView', processName: 'tradingview' },
           { type: 'key', key: 'ctrl+shift+l', reason: 'Open Pine Logs', verify: { kind: 'panel-visible', appName: 'TradingView', target: 'pine-logs', keywords: ['pine logs', 'pine'] } },
-          { type: 'get_text', text: 'Pine Logs', reason: 'Read visible Pine Logs output' }
+          { type: 'get_text', text: 'Pine Logs', reason: 'Read visible Pine Logs output', pineEvidenceMode: 'logs-summary' }
         ]
       }, null, null, {
         userMessage: 'open pine logs in tradingview and read output',
@@ -632,7 +635,15 @@ async function run() {
               action: action.type,
               text: 'Error at 12: mismatched input',
               method: 'TextPattern',
-              message: 'Got text via TextPattern: "Error at 12: mismatched input"'
+              message: 'Got text via TextPattern: "Error at 12: mismatched input"',
+              pineStructuredSummary: {
+                evidenceMode: 'logs-summary',
+                outputSurface: 'pine-logs',
+                outputSignal: 'errors-visible',
+                visibleOutputEntryCount: 1,
+                topVisibleOutputs: ['Error at 12: mismatched input'],
+                compactSummary: 'signal=errors-visible | entries=1 | errors=1'
+              }
             };
           }
           return { success: true, action: action.type, message: 'executed' };
@@ -644,6 +655,8 @@ async function run() {
       assert.strictEqual(execResult.observationCheckpoints.length, 1, 'A post-key observation checkpoint should be returned');
       assert.strictEqual(execResult.observationCheckpoints[0].verified, true, 'Pine Logs panel observation should pass');
       assert.strictEqual(execResult.results[2].text, 'Error at 12: mismatched input', 'Text evidence should be preserved on the get_text result');
+      assert.strictEqual(execResult.results[2].pineStructuredSummary.evidenceMode, 'logs-summary', 'Pine Logs readback should attach a structured logs summary');
+      assert.strictEqual(execResult.results[2].pineStructuredSummary.outputSignal, 'errors-visible', 'Pine Logs summary should classify visible errors');
       assert(!execResult.screenshotCaptured, 'Pine Logs evidence gathering should not require a screenshot loop');
     });
   });
@@ -672,7 +685,7 @@ async function run() {
         actions: [
           { type: 'focus_window', title: 'TradingView', processName: 'tradingview' },
           { type: 'key', key: 'ctrl+shift+p', reason: 'Open Pine Profiler', verify: { kind: 'panel-visible', appName: 'TradingView', target: 'pine-profiler', keywords: ['pine profiler', 'profiler', 'pine'] } },
-          { type: 'get_text', text: 'Pine Profiler', reason: 'Read visible Pine Profiler output' }
+          { type: 'get_text', text: 'Pine Profiler', reason: 'Read visible Pine Profiler output', pineEvidenceMode: 'profiler-summary' }
         ]
       }, null, null, {
         userMessage: 'open pine profiler in tradingview and summarize the visible metrics',
@@ -684,7 +697,18 @@ async function run() {
               action: action.type,
               text: 'Profiler: 12 calls, avg 1.3ms, max 3.8ms',
               method: 'TextPattern',
-              message: 'Got text via TextPattern: "Profiler: 12 calls, avg 1.3ms, max 3.8ms"'
+              message: 'Got text via TextPattern: "Profiler: 12 calls, avg 1.3ms, max 3.8ms"',
+              pineStructuredSummary: {
+                evidenceMode: 'profiler-summary',
+                outputSurface: 'pine-profiler',
+                outputSignal: 'metrics-visible',
+                visibleOutputEntryCount: 1,
+                functionCallCountEstimate: 12,
+                avgTimeMs: 1.3,
+                maxTimeMs: 3.8,
+                topVisibleOutputs: ['Profiler: 12 calls, avg 1.3ms, max 3.8ms'],
+                compactSummary: 'signal=metrics-visible | calls=12 | avgMs=1.3 | maxMs=3.8 | entries=1'
+              }
             };
           }
           return { success: true, action: action.type, message: 'executed' };
@@ -696,6 +720,10 @@ async function run() {
       assert.strictEqual(execResult.observationCheckpoints.length, 1, 'A post-key observation checkpoint should be returned');
       assert.strictEqual(execResult.observationCheckpoints[0].verified, true, 'Pine Profiler panel observation should pass');
       assert.strictEqual(execResult.results[2].text, 'Profiler: 12 calls, avg 1.3ms, max 3.8ms', 'Profiler text evidence should be preserved on the get_text result');
+      assert.strictEqual(execResult.results[2].pineStructuredSummary.evidenceMode, 'profiler-summary', 'Pine Profiler readback should attach a structured profiler summary');
+      assert.strictEqual(execResult.results[2].pineStructuredSummary.functionCallCountEstimate, 12, 'Pine Profiler summary should expose the visible function call count');
+      assert.strictEqual(execResult.results[2].pineStructuredSummary.avgTimeMs, 1.3, 'Pine Profiler summary should expose the visible average timing');
+      assert.strictEqual(execResult.results[2].pineStructuredSummary.maxTimeMs, 3.8, 'Pine Profiler summary should expose the visible maximum timing');
       assert(!execResult.screenshotCaptured, 'Pine Profiler evidence gathering should not require a screenshot loop');
     });
   });

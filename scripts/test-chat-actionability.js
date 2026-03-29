@@ -379,6 +379,79 @@ async function main() {
     'pine provenance continuation should persist the provenance-specific execution intent'
   );
 
+  const pineLogsContinuation = await runScenarioWithContinuity(['continue'], {
+    activeGoal: 'Diagnose Pine runtime output in TradingView',
+    currentSubgoal: 'Inspect visible Pine Logs output',
+    continuationReady: true,
+    degradedReason: null,
+    lastTurn: {
+      actionSummary: 'focus_window -> key -> get_text',
+      verificationStatus: 'verified',
+      actionResults: [{
+        type: 'get_text',
+        success: true,
+        pineStructuredSummary: {
+          evidenceMode: 'logs-summary',
+          outputSurface: 'pine-logs',
+          outputSignal: 'errors-visible',
+          topVisibleOutputs: [
+            'Runtime error at bar 12: division by zero.',
+            'Warning: fallback branch used.'
+          ]
+        }
+      }]
+    }
+  });
+  assert.strictEqual(pineLogsContinuation.exitCode, 0, 'pine logs continuation should exit successfully');
+  assert(pineLogsContinuation.output.includes('EXECUTE_COUNT:1'), 'pine logs continuation should execute emitted actions');
+  assert(pineLogsContinuation.output.includes('SEEN_MESSAGES:["continue"]'), 'pine logs continuation should keep the user turn minimal');
+  assert(
+    pineLogsContinuation.output.includes('PREFLIGHT_USER_MESSAGES:["Continue the Pine logs workflow by addressing only the visible log errors before inferring runtime or chart behavior.'),
+    'pine logs continuation should route through logs-specific execution intent'
+  );
+  assert(
+    pineLogsContinuation.output.includes('Runtime error at bar 12: division by zero. | Warning: fallback branch used.'),
+    'pine logs continuation should preserve the visible log output inside the execution intent'
+  );
+
+  const pineProfilerContinuation = await runScenarioWithContinuity(['continue'], {
+    activeGoal: 'Review Pine profiler output in TradingView',
+    currentSubgoal: 'Inspect visible Pine Profiler metrics',
+    continuationReady: true,
+    degradedReason: null,
+    lastTurn: {
+      actionSummary: 'focus_window -> key -> get_text',
+      verificationStatus: 'verified',
+      actionResults: [{
+        type: 'get_text',
+        success: true,
+        pineStructuredSummary: {
+          evidenceMode: 'profiler-summary',
+          outputSurface: 'pine-profiler',
+          outputSignal: 'metrics-visible',
+          functionCallCountEstimate: 12,
+          avgTimeMs: 1.3,
+          maxTimeMs: 3.8,
+          topVisibleOutputs: [
+            'Profiler: 12 calls, avg 1.3ms, max 3.8ms.',
+            'Slowest block: request.security'
+          ]
+        }
+      }]
+    }
+  });
+  assert.strictEqual(pineProfilerContinuation.exitCode, 0, 'pine profiler continuation should exit successfully');
+  assert(pineProfilerContinuation.output.includes('EXECUTE_COUNT:1'), 'pine profiler continuation should execute emitted actions');
+  assert(pineProfilerContinuation.output.includes('SEEN_MESSAGES:["continue"]'), 'pine profiler continuation should keep the user turn minimal');
+  assert(
+    pineProfilerContinuation.output.includes('PREFLIGHT_USER_MESSAGES:["Continue the Pine profiler workflow by summarizing only the visible performance metrics and hotspots; do not infer runtime correctness or chart behavior from profiler output alone.'),
+    'pine profiler continuation should route through profiler-specific execution intent'
+  );
+  assert(
+    pineProfilerContinuation.output.includes('Profiler: 12 calls, avg 1.3ms, max 3.8ms. | Slowest block: request.security'),
+    'pine profiler continuation should preserve the visible profiler output inside the execution intent'
+  );
+
   const persistedContinuation = await runScenarioWithContinuity([
     'help me make a confident synthesis of ticker LUNR in tradingview',
     'continue'

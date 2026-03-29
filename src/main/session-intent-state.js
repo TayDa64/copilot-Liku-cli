@@ -82,6 +82,12 @@ function normalizePineStructuredSummary(summary) {
   const normalized = {
     evidenceMode: normalizeText(summary.evidenceMode, 60),
     compactSummary: normalizeText(summary.compactSummary, 160),
+    outputSurface: normalizeText(summary.outputSurface, 60),
+    outputSignal: normalizeText(summary.outputSignal, 60),
+    visibleOutputEntryCount: Number.isFinite(Number(summary.visibleOutputEntryCount)) ? Number(summary.visibleOutputEntryCount) : null,
+    functionCallCountEstimate: Number.isFinite(Number(summary.functionCallCountEstimate)) ? Number(summary.functionCallCountEstimate) : null,
+    avgTimeMs: Number.isFinite(Number(summary.avgTimeMs)) ? Number(summary.avgTimeMs) : null,
+    maxTimeMs: Number.isFinite(Number(summary.maxTimeMs)) ? Number(summary.maxTimeMs) : null,
     editorVisibleState: normalizeText(summary.editorVisibleState, 60),
     visibleScriptKind: normalizeText(summary.visibleScriptKind, 40),
     visibleLineCountEstimate: Number.isFinite(Number(summary.visibleLineCountEstimate)) ? Number(summary.visibleLineCountEstimate) : null,
@@ -92,6 +98,7 @@ function normalizePineStructuredSummary(summary) {
     visibleSignals: normalizeEvidenceList(summary.visibleSignals, 40),
     statusSignals: normalizeEvidenceList(summary.statusSignals, 40),
     topVisibleDiagnostics: normalizeEvidenceList(summary.topVisibleDiagnostics, 140),
+    topVisibleOutputs: normalizeEvidenceList(summary.topVisibleOutputs, 140),
     latestVisibleRevisionLabel: normalizeText(summary.latestVisibleRevisionLabel, 80),
     latestVisibleRevisionNumber: Number.isFinite(Number(summary.latestVisibleRevisionNumber)) ? Number(summary.latestVisibleRevisionNumber) : null,
     latestVisibleRelativeTime: normalizeText(summary.latestVisibleRelativeTime, 80),
@@ -102,6 +109,12 @@ function normalizePineStructuredSummary(summary) {
 
   if (!normalized.evidenceMode
     && !normalized.compactSummary
+    && !normalized.outputSurface
+    && !normalized.outputSignal
+    && normalized.visibleOutputEntryCount === null
+    && normalized.functionCallCountEstimate === null
+    && normalized.avgTimeMs === null
+    && normalized.maxTimeMs === null
     && !normalized.editorVisibleState
     && !normalized.visibleScriptKind
     && normalized.visibleLineCountEstimate === null
@@ -112,6 +125,7 @@ function normalizePineStructuredSummary(summary) {
     && normalized.visibleSignals.length === 0
     && normalized.statusSignals.length === 0
     && normalized.topVisibleDiagnostics.length === 0
+    && normalized.topVisibleOutputs.length === 0
     && !normalized.latestVisibleRevisionLabel
     && normalized.latestVisibleRevisionNumber === null
     && !normalized.latestVisibleRelativeTime
@@ -365,6 +379,18 @@ function deriveNextRecommendedStep(turnRecord = {}) {
   }
   if (pineStructuredSummary?.compileStatus === 'success') {
     return 'Visible Pine compile success is only compiler evidence; use logs, profiler, or chart evidence before inferring runtime behavior.';
+  }
+  if (pineStructuredSummary?.evidenceMode === 'logs-summary') {
+    if (pineStructuredSummary.outputSignal === 'errors-visible') {
+      return 'Visible Pine Logs errors are present; address the visible log errors before inferring runtime or chart behavior.';
+    }
+    if (pineStructuredSummary.outputSignal === 'warnings-visible') {
+      return 'Visible Pine Logs warnings are present; review the visible warnings before trusting the script behavior.';
+    }
+    return 'Visible Pine Logs output is bounded evidence only; continue from the visible log lines without inferring hidden runtime state.';
+  }
+  if (pineStructuredSummary?.evidenceMode === 'profiler-summary') {
+    return 'Visible Pine Profiler metrics are performance evidence only; use them to target bottlenecks without inferring chart or strategy behavior.';
   }
   if (turnRecord?.postVerification?.needsFollowUp) return 'Continue with the detected follow-up flow for the current app state.';
   if (turnRecord?.screenshotCaptured) return 'Continue from the latest visual evidence and current app state.';
@@ -712,6 +738,23 @@ function formatChatContinuityContext(state, options = {}) {
   }
   if (pineStructuredSummary?.evidenceMode) lines.push(`- pineEvidenceMode: ${pineStructuredSummary.evidenceMode}`);
   if (pineStructuredSummary?.compactSummary) lines.push(`- pineCompactSummary: ${pineStructuredSummary.compactSummary}`);
+  if (pineStructuredSummary?.outputSurface) lines.push(`- pineOutputSurface: ${pineStructuredSummary.outputSurface}`);
+  if (pineStructuredSummary?.outputSignal) lines.push(`- pineOutputSignal: ${pineStructuredSummary.outputSignal}`);
+  if (pineStructuredSummary?.visibleOutputEntryCount !== null && pineStructuredSummary?.visibleOutputEntryCount !== undefined) {
+    lines.push(`- pineVisibleOutputEntryCount: ${pineStructuredSummary.visibleOutputEntryCount}`);
+  }
+  if (pineStructuredSummary?.functionCallCountEstimate !== null && pineStructuredSummary?.functionCallCountEstimate !== undefined) {
+    lines.push(`- pineFunctionCallCountEstimate: ${pineStructuredSummary.functionCallCountEstimate}`);
+  }
+  if (pineStructuredSummary?.avgTimeMs !== null && pineStructuredSummary?.avgTimeMs !== undefined) {
+    lines.push(`- pineAvgTimeMs: ${pineStructuredSummary.avgTimeMs}`);
+  }
+  if (pineStructuredSummary?.maxTimeMs !== null && pineStructuredSummary?.maxTimeMs !== undefined) {
+    lines.push(`- pineMaxTimeMs: ${pineStructuredSummary.maxTimeMs}`);
+  }
+  if (Array.isArray(pineStructuredSummary?.topVisibleOutputs) && pineStructuredSummary.topVisibleOutputs.length > 0) {
+    lines.push(`- pineTopVisibleOutputs: ${pineStructuredSummary.topVisibleOutputs.join(' | ')}`);
+  }
   if (pineStructuredSummary?.compileStatus) {
     lines.push(`- pineCompileStatus: ${pineStructuredSummary.compileStatus}`);
     if (pineStructuredSummary.errorCountEstimate !== null && pineStructuredSummary.errorCountEstimate !== undefined) {
@@ -782,6 +825,14 @@ function formatChatContinuityContext(state, options = {}) {
   if (pineStructuredSummary?.evidenceMode === 'provenance-summary') {
     lines.push('- Rule: Pine Version History continuity is provenance-only; use only the visible revision metadata.');
     lines.push('- Rule: Do not infer hidden revisions, full script content, or runtime/chart behavior from Version History alone.');
+  }
+  if (pineStructuredSummary?.evidenceMode === 'logs-summary') {
+    lines.push('- Rule: Pine Logs continuity is limited to the visible log output and visible error or warning lines only.');
+    lines.push('- Rule: Do not infer hidden stack traces, hidden runtime state, or broader chart behavior from Pine Logs alone.');
+  }
+  if (pineStructuredSummary?.evidenceMode === 'profiler-summary') {
+    lines.push('- Rule: Pine Profiler continuity is limited to the visible performance metrics and hotspots only.');
+    lines.push('- Rule: Treat profiler output as performance evidence, not proof of runtime correctness or chart behavior.');
   }
   if (lastTurn?.verificationStatus && lastTurn.verificationStatus !== 'verified') {
     lines.push('- Rule: Do not claim the requested UI change is complete unless the latest evidence verifies it.');
