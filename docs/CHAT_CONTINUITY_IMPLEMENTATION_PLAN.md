@@ -2316,6 +2316,15 @@ The most credible next roadmap is:
 - stale continuity does not masquerade as fresh proof
 - continuation recovery becomes deterministic when freshness expires
 
+**Status — first slice implemented**
+- continuity state now derives dynamic freshness (`fresh`, `stale-recoverable`, `expired`) from recorded turn age
+- prompt/system continuity context now surfaces freshness state, age, budgets, and re-observation rules
+- short `continue` turns now auto-recapture fresh visual evidence when continuity is stale-but-recoverable, and block when continuity is expired
+- covered by focused regressions in:
+  - `scripts/test-session-intent-state.js`
+  - `scripts/test-chat-continuity-prompting.js`
+  - `scripts/test-chat-actionability.js`
+
 ### Roadmap N4 — Capability-policy matrix by app and surface class
 
 **Why this should be next**

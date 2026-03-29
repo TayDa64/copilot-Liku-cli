@@ -218,6 +218,66 @@ test('background capture degraded reason is persisted and blocks continuation', 
   fs.rmSync(tempDir, { recursive: true, force: true });
 });
 
+test('timestamped trusted continuity becomes stale-recoverable in formatter output', () => {
+  const continuityState = {
+    chatContinuity: {
+      activeGoal: 'Produce a confident synthesis of ticker LUNR in TradingView',
+      currentSubgoal: 'Inspect the active TradingView chart',
+      continuationReady: true,
+      degradedReason: null,
+      lastTurn: {
+        recordedAt: new Date(Date.now() - (4 * 60 * 1000)).toISOString(),
+        actionSummary: 'focus_window -> screenshot',
+        executionStatus: 'succeeded',
+        verificationStatus: 'verified',
+        captureMode: 'window-copyfromscreen',
+        captureTrusted: true,
+        targetWindowHandle: 777,
+        windowTitle: 'TradingView - LUNR',
+        nextRecommendedStep: 'Continue from the latest chart evidence.'
+      }
+    }
+  };
+
+  const continuityContext = formatChatContinuityContext(continuityState);
+  assert(continuityContext.includes('continuityFreshness: stale-recoverable'));
+  assert(continuityContext.includes('continuationReady: no'));
+  assert(/Stored continuity is stale/i.test(continuityContext));
+  assert(continuityContext.includes('Rule: Stored continuity is stale-but-recoverable; re-observe the target window before treating prior UI facts as current.'));
+
+  const continuitySummary = formatChatContinuitySummary(continuityState);
+  assert(continuitySummary.includes('Continuation freshness: stale-recoverable'));
+  assert(continuitySummary.includes('Continuation ready: no'));
+});
+
+test('timestamped continuity eventually expires and demands fresh evidence', () => {
+  const continuityState = {
+    chatContinuity: {
+      activeGoal: 'Produce a confident synthesis of ticker LUNR in TradingView',
+      currentSubgoal: 'Inspect the active TradingView chart',
+      continuationReady: true,
+      degradedReason: null,
+      lastTurn: {
+        recordedAt: new Date(Date.now() - (20 * 60 * 1000)).toISOString(),
+        actionSummary: 'focus_window -> screenshot',
+        executionStatus: 'succeeded',
+        verificationStatus: 'verified',
+        captureMode: 'window-copyfromscreen',
+        captureTrusted: true,
+        targetWindowHandle: 777,
+        windowTitle: 'TradingView - LUNR',
+        nextRecommendedStep: 'Continue from the latest chart evidence.'
+      }
+    }
+  };
+
+  const continuityContext = formatChatContinuityContext(continuityState);
+  assert(continuityContext.includes('continuityFreshness: expired'));
+  assert(continuityContext.includes('continuationReady: no'));
+  assert(/Stored continuity is expired/i.test(continuityContext));
+  assert(continuityContext.includes('Rule: Stored continuity is expired; do not continue from prior UI-specific state until fresh evidence is gathered.'));
+});
+
 test('contradicted verification blocks continuity readiness', () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'liku-session-intent-'));
   const stateFile = path.join(tempDir, 'session-intent-state.json');

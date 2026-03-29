@@ -402,6 +402,15 @@ function buildContinuityRecoveryMessage(continuity, pendingRequestedTask = null)
     ? ` The last requested task was: ${pendingTaskSummary}. Ask me to retry that task, recapture the target window, or continue with a bounded explanation only.`
     : '';
 
+  const freshnessState = String(continuity?.freshnessState || '').trim().toLowerCase();
+  const freshnessReason = String(continuity?.freshnessReason || continuity?.degradedReason || '').trim();
+  if (freshnessState === 'expired') {
+    return `${freshnessReason || 'Stored continuity is expired and must be rebuilt from fresh evidence before continuing.'}${pendingTaskSuffix || ' Ask me to recapture the target window or retry the last step from fresh evidence.'}`;
+  }
+  if (freshnessState === 'stale-recoverable') {
+    return `${freshnessReason || 'Stored continuity is stale and should be re-observed before continuing.'}${pendingTaskSuffix || ' Ask me to recapture the target window or retry the last step before continuing.'}`;
+  }
+
   const verificationStatus = String(continuity?.lastTurn?.verificationStatus || '').trim().toLowerCase();
   if (verificationStatus === 'contradicted') {
     return `The last step is contradicted by the latest evidence, so I will not continue blindly. Retry the step or gather fresh evidence first.${pendingTaskSuffix}`.trim();
@@ -422,12 +431,25 @@ function buildContinuityRecoveryMessage(continuity, pendingRequestedTask = null)
   return 'There is not enough verified continuity state to continue safely. Retry the last step or gather fresh evidence first.';
 }
 
+function hasHardContinuationBlock(continuity) {
+  const verificationStatus = String(continuity?.lastTurn?.verificationStatus || '').trim().toLowerCase();
+  const executionStatus = String(continuity?.lastTurn?.executionStatus || '').trim().toLowerCase();
+  return verificationStatus === 'contradicted'
+    || verificationStatus === 'unverified'
+    || executionStatus === 'cancelled'
+    || executionStatus === 'failed';
+}
+
 function getContinuationDecision(userInput, continuity, pendingRequestedTask = null) {
   if (!isMinimalContinuationInput(userInput)) {
     return { block: false, useContinuityState: false, reason: null };
   }
 
-  if (pendingRequestedTask && (!hasUsableChatContinuity(continuity) || !continuity.continuationReady || continuity.degradedReason)) {
+  const freshnessState = String(continuity?.freshnessState || '').trim().toLowerCase();
+  const recoverWithReobserve = freshnessState === 'stale-recoverable';
+  const hardBlocked = hasHardContinuationBlock(continuity);
+
+  if (pendingRequestedTask && (!hasUsableChatContinuity(continuity) || hardBlocked || freshnessState === 'expired' || (!continuity.continuationReady && !recoverWithReobserve) || (continuity.degradedReason && !recoverWithReobserve))) {
     return {
       block: true,
       useContinuityState: false,
@@ -437,6 +459,16 @@ function getContinuationDecision(userInput, continuity, pendingRequestedTask = n
 
   if (!hasUsableChatContinuity(continuity)) {
     return { block: false, useContinuityState: false, reason: null };
+  }
+
+  if (recoverWithReobserve && !hardBlocked && hasUsableChatContinuity(continuity)) {
+    return {
+      block: false,
+      useContinuityState: true,
+      recoverWithReobserve: true,
+      effectiveIntent: buildContinuationIntentFromState(continuity, userInput),
+      reason: continuity?.freshnessReason || buildContinuityRecoveryMessage(continuity, pendingRequestedTask)
+    };
   }
 
   if (continuity.continuationReady && !continuity.degradedReason) {
@@ -1235,7 +1267,8 @@ async function runChatLoop(ai, options) {
       continue;
     }
 
-    const includeVisualUsed = includeVisualNext;
+    let includeVisualUsed = includeVisualNext;
+    const extraSystemMessages = [];
     const planMacro = extractPlanMacro(line);
 
     if (planMacro.requested) {
@@ -1254,10 +1287,35 @@ async function runChatLoop(ai, options) {
       }
     }
 
+    if (continuationDecision.recoverWithReobserve) {
+      const recoveryWindowHandle = Number(
+        chatContinuity?.lastTurn?.targetWindowHandle
+        || chatContinuity?.lastTurn?.observationEvidence?.windowHandle
+        || 0
+      ) || 0;
+
+      info('Continuity is stale but recoverable; recapturing the target window before continuing.');
+      const recovered = await autoCapture(ai, {
+        scope: 'active-window',
+        windowHandle: recoveryWindowHandle || undefined
+      });
+
+      if (!recovered) {
+        warn('Fresh continuity recovery capture failed. Retry after refocusing the target window or use /capture manually.');
+        continue;
+      }
+
+      includeVisualUsed = true;
+      extraSystemMessages.push(
+        `CONTINUITY RECOVERY: The user requested a minimal continuation turn. Prior continuity had become stale but recoverable, and a fresh visual recapture was gathered immediately before this turn. Continue from the saved subgoal using the fresh visual context first. Saved continuation intent: ${continuationDecision.effectiveIntent || executionIntent}`
+      );
+    }
+
     // Send message
     let resp = await ai.sendMessage(line, {
       includeVisualContext: includeVisualUsed,
-      model
+      model,
+      extraSystemMessages
     });
 
     // One-shot visual: include in next message only.

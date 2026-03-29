@@ -19,6 +19,9 @@ let seenMessages = [];
 let continuityState = process.env.__CHAT_CONTINUITY__ ? JSON.parse(process.env.__CHAT_CONTINUITY__) : null;
 let pendingRequestedTask = process.env.__PENDING_REQUESTED_TASK__ ? JSON.parse(process.env.__PENDING_REQUESTED_TASK__) : null;
 const scriptedVisualStates = process.env.__LATEST_VISUAL_SEQUENCE__ ? JSON.parse(process.env.__LATEST_VISUAL_SEQUENCE__) : [];
+const allowRecoveryCapture = process.env.__ALLOW_CAPTURE_RECOVERY__ === '1';
+let visualContexts = [];
+let latestVisualContext = null;
 let lastRecordedTurn = null;
 let preflightUserMessages = [];
 
@@ -56,12 +59,24 @@ function deriveContinuityState(turnRecord) {
     currentSubgoal: turnRecord?.currentSubgoal || turnRecord?.committedSubgoal || turnRecord?.thought || null,
     continuationReady: !degradedReason && !(turnRecord?.cancelled || turnRecord?.executionResult?.cancelled) && turnRecord?.executionStatus !== 'failed',
     degradedReason,
+    freshnessState: degradedReason ? null : 'fresh',
+    freshnessAgeMs: 0,
+    freshnessBudgetMs: 90000,
+    freshnessRecoverableBudgetMs: 900000,
+    freshnessReason: null,
+    requiresReobserve: false,
     lastTurn: {
+      recordedAt: turnRecord?.recordedAt || new Date().toISOString(),
       actionSummary,
       nextRecommendedStep: turnRecord?.nextRecommendedStep || null,
       verificationStatus,
+      executionStatus: turnRecord?.executionStatus || (turnRecord?.cancelled ? 'cancelled' : (turnRecord?.success === false ? 'failed' : 'succeeded')),
       captureMode,
-      captureTrusted
+      captureTrusted,
+      targetWindowHandle: turnRecord?.targetWindowHandle || null,
+      observationEvidence: {
+        windowHandle: turnRecord?.observationEvidence?.windowHandle || turnRecord?.targetWindowHandle || null
+      }
     }
   };
 }
@@ -154,8 +169,46 @@ const aiStub = {
   parsePreferenceCorrection: async () => ({ success: false, error: 'not needed' })
 };
 
+aiStub.addVisualContext = (entry) => {
+  latestVisualContext = entry;
+  visualContexts.push(entry);
+};
+
+aiStub.getLatestVisualContext = () => {
+  if (Array.isArray(scriptedVisualStates) && scriptedVisualStates.length > 0) {
+    return scriptedVisualStates[Math.max(0, executeCount - 1)] || scriptedVisualStates[scriptedVisualStates.length - 1] || null;
+  }
+  return latestVisualContext;
+};
+
 const watcherStub = {
   getUIWatcher: () => ({ isPolling: false, start() {}, stop() {} })
+};
+
+const screenshotStub = {
+  screenshot: async (options = {}) => {
+    if (!(allowRecoveryCapture && executeCount === 0)) return { success: false };
+    return {
+      success: true,
+      base64: 'stub-image',
+      captureMode: options.windowHwnd ? 'window-copyfromscreen' : 'screen-copyfromscreen'
+    };
+  },
+  screenshotActiveWindow: async () => {
+    if (!(allowRecoveryCapture && executeCount === 0)) return { success: false };
+    return {
+      success: true,
+      base64: 'stub-image',
+      captureMode: 'window-copyfromscreen'
+    };
+  }
+};
+
+const backgroundCaptureStub = {
+  captureBackgroundWindow: async () => ({
+    success: false,
+    degradedReason: 'background capture unavailable in harness'
+  })
 };
 
 const systemAutomationStub = {
@@ -195,6 +248,8 @@ Module._load = function(request, parent, isMain) {
   if (request === '../../main/system-automation') return systemAutomationStub;
   if (request === '../../main/preferences') return preferencesStub;
   if (request === '../../main/session-intent-state') return sessionIntentStateStub;
+  if (request === '../../main/ui-automation/screenshot') return screenshotStub;
+  if (request === '../../main/background-capture') return backgroundCaptureStub;
   return originalLoad.apply(this, arguments);
 };
 
@@ -207,6 +262,7 @@ Module._load = function(request, parent, isMain) {
   console.log('PENDING_REQUESTED_TASK:' + JSON.stringify(pendingRequestedTask));
   console.log('RECORDED_CONTINUITY:' + JSON.stringify(continuityState));
   console.log('LAST_TURN:' + JSON.stringify(lastRecordedTurn));
+  console.log('VISUAL_CONTEXTS:' + JSON.stringify(visualContexts));
   process.exit(result && result.success === false ? 1 : 0);
 })().catch((error) => {
   console.error(error.stack || error.message);
@@ -218,7 +274,7 @@ async function runScenario(inputs) {
   return runScenarioWithContinuity(inputs, null, null);
 }
 
-async function runScenarioWithContinuity(inputs, continuityState, latestVisualSequence, pendingTask = null) {
+async function runScenarioWithContinuity(inputs, continuityState, latestVisualSequence, pendingTask = null, options = {}) {
   const repoRoot = path.join(__dirname, '..');
   const chatModulePath = path.join(repoRoot, 'src', 'cli', 'commands', 'chat.js').replace(/\\/g, '\\\\');
   const child = spawn(process.execPath, ['-e', buildHarnessScript(chatModulePath)], {
@@ -228,7 +284,8 @@ async function runScenarioWithContinuity(inputs, continuityState, latestVisualSe
       ...process.env,
       __CHAT_CONTINUITY__: continuityState ? JSON.stringify(continuityState) : '',
       __PENDING_REQUESTED_TASK__: pendingTask ? JSON.stringify(pendingTask) : '',
-      __LATEST_VISUAL_SEQUENCE__: latestVisualSequence ? JSON.stringify(latestVisualSequence) : ''
+      __LATEST_VISUAL_SEQUENCE__: latestVisualSequence ? JSON.stringify(latestVisualSequence) : '',
+      __ALLOW_CAPTURE_RECOVERY__: options.allowRecoveryCapture ? '1' : ''
     }
   });
 
@@ -546,6 +603,61 @@ async function main() {
   assert.strictEqual(taskAwareDegradedContinuation.exitCode, 0, 'task-aware degraded continuation scenario should exit successfully');
   assert(taskAwareDegradedContinuation.output.includes('EXECUTE_COUNT:0'), 'task-aware degraded continuation should not execute emitted actions');
   assert(/The last requested task was: Apply Volume Profile in TradingView/i.test(taskAwareDegradedContinuation.output), 'task-aware degraded continuation should reference the pending requested task');
+
+  const staleRecoverableContinuation = await runScenarioWithContinuity(['continue'], {
+    activeGoal: 'Produce a confident synthesis of ticker LUNR in TradingView',
+    currentSubgoal: 'Inspect the active TradingView chart',
+    continuationReady: false,
+    degradedReason: 'Stored continuity is stale (4m) and should be re-observed before continuing.',
+    freshnessState: 'stale-recoverable',
+    freshnessAgeMs: 240000,
+    freshnessBudgetMs: 90000,
+    freshnessRecoverableBudgetMs: 900000,
+    freshnessReason: 'Stored continuity is stale (4m) and should be re-observed before continuing.',
+    requiresReobserve: true,
+    lastTurn: {
+      recordedAt: new Date(Date.now() - (4 * 60 * 1000)).toISOString(),
+      verificationStatus: 'verified',
+      executionStatus: 'succeeded',
+      captureMode: 'window-copyfromscreen',
+      captureTrusted: true,
+      targetWindowHandle: 458868,
+      observationEvidence: {
+        windowHandle: 458868
+      },
+      nextRecommendedStep: 'Continue from the latest chart evidence.'
+    }
+  }, null, null, { allowRecoveryCapture: true });
+  assert.strictEqual(staleRecoverableContinuation.exitCode, 0, 'stale-recoverable continuation scenario should exit successfully');
+  assert(staleRecoverableContinuation.output.includes('EXECUTE_COUNT:1'), 'stale-recoverable continuation should reobserve and then execute emitted actions');
+  assert(/Continuity is stale but recoverable; recapturing the target window before continuing/i.test(staleRecoverableContinuation.output), 'stale-recoverable continuation should announce the recovery capture');
+  assert(/Auto-captured target window 458868 for visual context/i.test(staleRecoverableContinuation.output), 'stale-recoverable continuation should recapture the target window before continuing');
+  assert(/VISUAL_CONTEXTS:\[\{/i.test(staleRecoverableContinuation.output), 'stale-recoverable continuation should populate fresh visual context before sending the turn');
+
+  const expiredContinuation = await runScenarioWithContinuity(['continue'], {
+    activeGoal: 'Produce a confident synthesis of ticker LUNR in TradingView',
+    currentSubgoal: 'Inspect the active TradingView chart',
+    continuationReady: false,
+    degradedReason: 'Stored continuity is expired (20m) and must be rebuilt from fresh evidence before continuing.',
+    freshnessState: 'expired',
+    freshnessAgeMs: 1200000,
+    freshnessBudgetMs: 90000,
+    freshnessRecoverableBudgetMs: 900000,
+    freshnessReason: 'Stored continuity is expired (20m) and must be rebuilt from fresh evidence before continuing.',
+    requiresReobserve: true,
+    lastTurn: {
+      recordedAt: new Date(Date.now() - (20 * 60 * 1000)).toISOString(),
+      verificationStatus: 'verified',
+      executionStatus: 'succeeded',
+      captureMode: 'window-copyfromscreen',
+      captureTrusted: true,
+      targetWindowHandle: 458868,
+      nextRecommendedStep: 'Continue from the latest chart evidence.'
+    }
+  });
+  assert.strictEqual(expiredContinuation.exitCode, 0, 'expired continuation scenario should exit successfully');
+  assert(expiredContinuation.output.includes('EXECUTE_COUNT:0'), 'expired continuity should block emitted actions until fresh evidence is gathered');
+  assert(/Stored continuity is expired/i.test(expiredContinuation.output), 'expired continuity should explain the expiry reason instead of continuing blindly');
 
   const paperStateBackedContinuation = await runScenarioWithContinuity(['continue'], PAPER_AWARE_CONTINUITY_FIXTURES.verifiedPaperAssistContinuation);
   assert.strictEqual(paperStateBackedContinuation.exitCode, 0, 'paper-aware continuation scenario should exit successfully');

@@ -6,6 +6,9 @@ const { normalizeName, resolveProjectIdentity } = require('../shared/project-ide
 
 const SESSION_INTENT_SCHEMA_VERSION = 'session-intent.v1';
 const SESSION_INTENT_FILE = path.join(LIKU_HOME, 'session-intent-state.json');
+const CONTINUITY_FRESH_MS = 90 * 1000;
+const CONTINUITY_UI_WATCHER_FRESH_MS = 3 * 60 * 1000;
+const CONTINUITY_RECOVERABLE_MS = 15 * 60 * 1000;
 
 function defaultChatContinuity() {
   return {
@@ -13,7 +16,13 @@ function defaultChatContinuity() {
     currentSubgoal: null,
     lastTurn: null,
     continuationReady: false,
-    degradedReason: null
+    degradedReason: null,
+    freshnessState: null,
+    freshnessAgeMs: null,
+    freshnessBudgetMs: null,
+    freshnessRecoverableBudgetMs: null,
+    freshnessReason: null,
+    requiresReobserve: false
   };
 }
 
@@ -303,6 +312,110 @@ function isScreenLikeCaptureMode(captureMode) {
     || normalized.includes('fullscreen');
 }
 
+function formatDurationMs(durationMs) {
+  if (!Number.isFinite(Number(durationMs)) || Number(durationMs) < 0) return 'unknown age';
+  const totalSeconds = Math.max(0, Math.round(Number(durationMs) / 1000));
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const totalMinutes = Math.round(totalSeconds / 60);
+  if (totalMinutes < 60) return `${totalMinutes}m`;
+  const totalHours = Math.round(totalMinutes / 60);
+  return `${totalHours}h`;
+}
+
+function parseContinuityRecordedAtMs(continuity = {}) {
+  const recordedAt = continuity?.lastTurn?.recordedAt;
+  const parsed = Date.parse(String(recordedAt || '').trim());
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function deriveContinuityFreshness(continuity = {}) {
+  const lastTurn = continuity?.lastTurn || null;
+  if (!lastTurn) {
+    return {
+      freshnessState: null,
+      freshnessAgeMs: null,
+      freshnessBudgetMs: null,
+      freshnessRecoverableBudgetMs: null,
+      freshnessReason: null,
+      requiresReobserve: false
+    };
+  }
+
+  const recordedAtMs = parseContinuityRecordedAtMs(continuity);
+  const freshnessAgeMs = recordedAtMs !== null
+    ? Math.max(0, Date.now() - recordedAtMs)
+    : null;
+  const watcherFresh = lastTurn?.observationEvidence?.uiWatcherFresh === true;
+  const watcherAgeMs = Number.isFinite(Number(lastTurn?.observationEvidence?.uiWatcherAgeMs))
+    ? Number(lastTurn.observationEvidence.uiWatcherAgeMs)
+    : null;
+  const trustedCapture = lastTurn.captureTrusted === true || isTrustedCaptureMode(lastTurn.captureMode);
+  const freshBudgetMs = trustedCapture && watcherFresh && (watcherAgeMs === null || watcherAgeMs <= 5000)
+    ? CONTINUITY_UI_WATCHER_FRESH_MS
+    : CONTINUITY_FRESH_MS;
+  const recoverableBudgetMs = CONTINUITY_RECOVERABLE_MS;
+
+  if (freshnessAgeMs === null) {
+    const baseReady = continuity?.continuationReady === true && !continuity?.degradedReason;
+    return {
+      freshnessState: baseReady ? 'fresh' : null,
+      freshnessAgeMs: null,
+      freshnessBudgetMs: freshBudgetMs,
+      freshnessRecoverableBudgetMs: recoverableBudgetMs,
+      freshnessReason: null,
+      requiresReobserve: false
+    };
+  }
+
+  if (freshnessAgeMs <= freshBudgetMs) {
+    return {
+      freshnessState: 'fresh',
+      freshnessAgeMs,
+      freshnessBudgetMs: freshBudgetMs,
+      freshnessRecoverableBudgetMs: recoverableBudgetMs,
+      freshnessReason: null,
+      requiresReobserve: false
+    };
+  }
+
+  if (trustedCapture && freshnessAgeMs <= recoverableBudgetMs) {
+    return {
+      freshnessState: 'stale-recoverable',
+      freshnessAgeMs,
+      freshnessBudgetMs: freshBudgetMs,
+      freshnessRecoverableBudgetMs: recoverableBudgetMs,
+      freshnessReason: `Stored continuity is stale (${formatDurationMs(freshnessAgeMs)}) and should be re-observed before continuing.`,
+      requiresReobserve: true
+    };
+  }
+
+  return {
+    freshnessState: 'expired',
+    freshnessAgeMs,
+    freshnessBudgetMs: freshBudgetMs,
+    freshnessRecoverableBudgetMs: recoverableBudgetMs,
+    freshnessReason: `Stored continuity is expired (${formatDurationMs(freshnessAgeMs)}) and must be rebuilt from fresh evidence before continuing.`,
+    requiresReobserve: true
+  };
+}
+
+function hydrateChatContinuity(continuity = defaultChatContinuity()) {
+  const base = {
+    ...defaultChatContinuity(),
+    ...(continuity && typeof continuity === 'object' ? continuity : {})
+  };
+  const freshness = deriveContinuityFreshness(base);
+  const baseDegradedReason = base.degradedReason || null;
+  const freshnessBlocksContinuation = !baseDegradedReason && (freshness.freshnessState === 'stale-recoverable' || freshness.freshnessState === 'expired');
+
+  return {
+    ...base,
+    ...freshness,
+    continuationReady: base.continuationReady === true && freshness.freshnessState !== 'stale-recoverable' && freshness.freshnessState !== 'expired',
+    degradedReason: baseDegradedReason || (freshnessBlocksContinuation ? freshness.freshnessReason : null)
+  };
+}
+
 function deriveVerificationStatus(turnRecord = {}) {
   if (turnRecord?.verification?.status) return normalizeText(turnRecord.verification.status, 60);
   if (turnRecord?.cancelled) return 'cancelled';
@@ -466,13 +579,13 @@ function normalizeTurnRecord(turnRecord = {}, previousContinuity = defaultChatCo
 
   const degradedReason = deriveDegradedReason(normalizedTurn);
 
-  return {
+  return hydrateChatContinuity({
     activeGoal,
     currentSubgoal,
     lastTurn: normalizedTurn,
     continuationReady: normalizedTurn.executionStatus === 'succeeded' && !degradedReason,
     degradedReason
-  };
+  });
 }
 
 function sanitizeFeatureLabel(value) {
@@ -630,7 +743,7 @@ function formatSessionIntentContext(state) {
 }
 
 function formatChatContinuitySummary(state) {
-  const continuity = state?.chatContinuity || state || defaultChatContinuity();
+  const continuity = hydrateChatContinuity(state?.chatContinuity || state || defaultChatContinuity());
   const lines = [];
   if (continuity.activeGoal) lines.push(`Active goal: ${continuity.activeGoal}`);
   if (continuity.currentSubgoal) lines.push(`Current subgoal: ${continuity.currentSubgoal}`);
@@ -642,6 +755,8 @@ function formatChatContinuitySummary(state) {
   if (continuity.lastTurn?.targetWindowHandle) lines.push(`Target window: ${continuity.lastTurn.targetWindowHandle}`);
   if (continuity.lastTurn?.captureMode) lines.push(`Capture mode: ${continuity.lastTurn.captureMode}`);
   if (typeof continuity.lastTurn?.captureTrusted === 'boolean') lines.push(`Capture trusted: ${continuity.lastTurn.captureTrusted ? 'yes' : 'no'}`);
+  if (continuity.freshnessState) lines.push(`Continuation freshness: ${continuity.freshnessState}`);
+  if (continuity.freshnessAgeMs !== null && continuity.freshnessAgeMs !== undefined) lines.push(`Continuity age: ${continuity.freshnessAgeMs}ms`);
   if (typeof continuity.continuationReady === 'boolean') lines.push(`Continuation ready: ${continuity.continuationReady ? 'yes' : 'no'}`);
   if (continuity.degradedReason) lines.push(`Continuity caution: ${continuity.degradedReason}`);
   return lines.join('\n').trim() || 'No chat continuity recorded.';
@@ -657,7 +772,8 @@ function isBroadAdvisoryPivotInput(message) {
 }
 
 function formatScopedAdvisoryContinuityContext(continuity) {
-  const lastTurn = continuity?.lastTurn || null;
+  const hydratedContinuity = hydrateChatContinuity(continuity);
+  const lastTurn = hydratedContinuity?.lastTurn || null;
   const lines = [
     '- continuityScope: advisory-pivot'
   ];
@@ -667,8 +783,9 @@ function formatScopedAdvisoryContinuityContext(continuity) {
   }
   if (lastTurn?.captureMode) lines.push(`- priorCaptureMode: ${lastTurn.captureMode}`);
   if (typeof lastTurn?.captureTrusted === 'boolean') lines.push(`- priorCaptureTrusted: ${lastTurn.captureTrusted ? 'yes' : 'no'}`);
-  if (typeof continuity?.continuationReady === 'boolean') lines.push(`- priorContinuationReady: ${continuity.continuationReady ? 'yes' : 'no'}`);
-  if (continuity?.degradedReason) lines.push(`- priorDegradedReason: ${continuity.degradedReason}`);
+  if (hydratedContinuity?.freshnessState) lines.push(`- priorContinuityFreshness: ${hydratedContinuity.freshnessState}`);
+  if (typeof hydratedContinuity?.continuationReady === 'boolean') lines.push(`- priorContinuationReady: ${hydratedContinuity.continuationReady ? 'yes' : 'no'}`);
+  if (hydratedContinuity?.degradedReason) lines.push(`- priorDegradedReason: ${hydratedContinuity.degradedReason}`);
   lines.push('- Rule: The current user turn is broad advisory planning, not an explicit continuation of the prior chart-analysis step.');
   lines.push('- Rule: Do not restate prior chart-specific observations, indicator readings, or price-level claims as current facts unless fresh trusted evidence is gathered or the user explicitly resumes that analysis branch.');
   lines.push('- Rule: You may reuse only high-level domain context and safe next-step options from the prior TradingView workflow.');
@@ -676,7 +793,7 @@ function formatScopedAdvisoryContinuityContext(continuity) {
 }
 
 function formatChatContinuityContext(state, options = {}) {
-  const continuity = state?.chatContinuity || state || defaultChatContinuity();
+  const continuity = hydrateChatContinuity(state?.chatContinuity || state || defaultChatContinuity());
   const lastTurn = continuity.lastTurn || null;
   if (!continuity.activeGoal && !lastTurn) return '';
 
@@ -720,6 +837,16 @@ function formatChatContinuityContext(state, options = {}) {
   }
   if (lastTurn?.observationEvidence?.uiWatcherAgeMs !== null && lastTurn?.observationEvidence?.uiWatcherAgeMs !== undefined) {
     lines.push(`- uiWatcherAgeMs: ${lastTurn.observationEvidence.uiWatcherAgeMs}`);
+  }
+  if (continuity.freshnessState) lines.push(`- continuityFreshness: ${continuity.freshnessState}`);
+  if (continuity.freshnessAgeMs !== null && continuity.freshnessAgeMs !== undefined) {
+    lines.push(`- continuityAgeMs: ${continuity.freshnessAgeMs}`);
+  }
+  if (continuity.freshnessBudgetMs !== null && continuity.freshnessBudgetMs !== undefined) {
+    lines.push(`- continuityFreshBudgetMs: ${continuity.freshnessBudgetMs}`);
+  }
+  if (continuity.freshnessRecoverableBudgetMs !== null && continuity.freshnessRecoverableBudgetMs !== undefined) {
+    lines.push(`- continuityRecoverableBudgetMs: ${continuity.freshnessRecoverableBudgetMs}`);
   }
   if (Array.isArray(lastTurn?.actionResults) && lastTurn.actionResults.length > 0) {
     const compactResults = lastTurn.actionResults.slice(0, 4).map((result) => `${result.type}:${result.success ? 'ok' : 'fail'}`).join(' | ');
@@ -795,6 +922,12 @@ function formatChatContinuityContext(state, options = {}) {
   if (continuity.degradedReason) lines.push(`- degradedReason: ${continuity.degradedReason}`);
   if (lastTurn?.nextRecommendedStep) lines.push(`- nextRecommendedStep: ${lastTurn.nextRecommendedStep}`);
   lines.push('- Rule: If the user asks to continue, continue from the current subgoal and these execution facts instead of inventing a new branch.');
+  if (continuity.freshnessState === 'stale-recoverable') {
+    lines.push('- Rule: Stored continuity is stale-but-recoverable; re-observe the target window before treating prior UI facts as current.');
+  }
+  if (continuity.freshnessState === 'expired') {
+    lines.push('- Rule: Stored continuity is expired; do not continue from prior UI-specific state until fresh evidence is gathered.');
+  }
   if (lastTurn?.tradingMode?.mode === 'paper') {
     lines.push('- Rule: Paper Trading was observed; continue with assist-only verification and guidance, not order execution.');
   }
@@ -887,16 +1020,14 @@ function createSessionIntentStateStore(options = {}) {
   }
 
   function saveState(nextState) {
+    const hydratedChatContinuity = hydrateChatContinuity(nextState.chatContinuity);
     const state = {
       ...defaultState(),
       ...nextState,
       updatedAt: nowIso(),
       forgoneFeatures: limitList(nextState.forgoneFeatures || [], 12),
       explicitCorrections: limitList(nextState.explicitCorrections || [], 12),
-      chatContinuity: {
-        ...defaultChatContinuity(),
-        ...(nextState.chatContinuity && typeof nextState.chatContinuity === 'object' ? nextState.chatContinuity : {})
-      }
+      chatContinuity: hydratedChatContinuity
     };
     cachedState = state;
     ensureParentDir(stateFile);
@@ -922,6 +1053,7 @@ function createSessionIntentStateStore(options = {}) {
     if (syncCurrentRepo(state, options.cwd)) {
       return saveState(state);
     }
+    state.chatContinuity = hydrateChatContinuity(state.chatContinuity);
     return state;
   }
 

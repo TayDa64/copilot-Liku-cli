@@ -283,6 +283,36 @@ await test('prompting scopes stale chart continuity on fresh advisory pivots', a
 
   fs.rmSync(tempDir, { recursive: true, force: true });
 });
+
+await test('prompting surfaces stale-but-recoverable freshness before minimal continuation', async () => {
+  const continuityMessage = await buildContinuitySystemMessage(
+    formatChatContinuityContext({
+      chatContinuity: {
+        activeGoal: 'Produce a confident synthesis of ticker LUNR in TradingView',
+        currentSubgoal: 'Inspect the active TradingView chart',
+        continuationReady: true,
+        degradedReason: null,
+        lastTurn: {
+          recordedAt: new Date(Date.now() - (4 * 60 * 1000)).toISOString(),
+          actionSummary: 'focus_window -> screenshot',
+          executionStatus: 'succeeded',
+          verificationStatus: 'verified',
+          captureMode: 'window-copyfromscreen',
+          captureTrusted: true,
+          targetWindowHandle: 777,
+          windowTitle: 'TradingView - LUNR',
+          nextRecommendedStep: 'Continue from the latest chart evidence.'
+        }
+      }
+    })
+  );
+
+  assert(continuityMessage, 'continuity section is injected');
+  assert(continuityMessage.content.includes('continuityFreshness: stale-recoverable'));
+  assert(continuityMessage.content.includes('continuationReady: no'));
+  assert(/Stored continuity is stale/i.test(continuityMessage.content));
+  assert(continuityMessage.content.includes('Rule: Stored continuity is stale-but-recoverable; re-observe the target window before treating prior UI facts as current.'));
+});
 }
 
 main().catch((error) => {
