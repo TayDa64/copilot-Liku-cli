@@ -149,6 +149,65 @@ test('open pine editor and read visible status stays verification-first', () => 
   assert.strictEqual(rewritten[4].pineEvidenceMode, 'generic-status');
 });
 
+test('pine editor authoring workflow demands editor-active verification before typing', () => {
+  const rewritten = buildTradingViewPineWorkflowActions({
+    appName: 'TradingView',
+    surfaceTarget: 'pine-editor',
+    verifyKind: 'panel-visible',
+    openerIndex: 0,
+    requiresObservedChange: true,
+    requiresEditorActivation: true,
+    wantsEvidenceReadback: false
+  }, [
+    { type: 'key', key: 'ctrl+e', reason: 'Open Pine Editor' },
+    { type: 'wait', ms: 1000 },
+    { type: 'key', key: 'ctrl+a', reason: 'Select all existing code' },
+    { type: 'key', key: 'backspace', reason: 'Clear editor' },
+    { type: 'type', text: 'plot(close)' }
+  ]);
+
+  assert.strictEqual(rewritten[2].verify.kind, 'editor-active');
+  assert.strictEqual(rewritten[2].verify.target, 'pine-editor');
+  assert.strictEqual(rewritten[2].verify.requiresObservedChange, true);
+});
+
+test('generic pine script creation prefers safe new-script workflow', () => {
+  const rewritten = maybeRewriteTradingViewPineWorkflow([
+    { type: 'key', key: 'ctrl+e', reason: 'Open Pine Editor' },
+    { type: 'wait', ms: 1000 },
+    { type: 'key', key: 'ctrl+a', reason: 'Select all existing code' },
+    { type: 'key', key: 'backspace', reason: 'Clear editor for new script' },
+    { type: 'type', text: 'indicator("LUNR Confidence")' },
+    { type: 'key', key: 'ctrl+enter', reason: 'Add to chart' }
+  ], {
+    userMessage: 'in tradingview, create a pine script that builds my confidence level when making decisions'
+  });
+
+  assert(Array.isArray(rewritten), 'workflow should rewrite');
+  assert.strictEqual(rewritten[0].type, 'bring_window_to_front');
+  assert.strictEqual(rewritten[2].verify.kind, 'editor-active');
+  assert(rewritten.some((action) => action?.type === 'get_text' && action?.text === 'Pine Editor'), 'safe authoring should inspect visible Pine Editor state first');
+  assert(!rewritten.some((action) => String(action?.key || '').toLowerCase() === 'ctrl+a'), 'safe authoring should avoid select-all by default');
+  assert(!rewritten.some((action) => String(action?.key || '').toLowerCase() === 'backspace'), 'safe authoring should avoid destructive clear-first behavior');
+});
+
+test('destructive clear remains reserved for explicit overwrite intent', () => {
+  const rewritten = maybeRewriteTradingViewPineWorkflow([
+    { type: 'key', key: 'ctrl+e', reason: 'Open Pine Editor' },
+    { type: 'wait', ms: 1000 },
+    { type: 'key', key: 'ctrl+a', reason: 'Select all existing code' },
+    { type: 'key', key: 'backspace', reason: 'Clear editor for replacement script' },
+    { type: 'type', text: 'indicator("Replacement")' }
+  ], {
+    userMessage: 'in tradingview, overwrite the current pine script with a replacement version'
+  });
+
+  assert(Array.isArray(rewritten), 'workflow should rewrite');
+  assert(rewritten.some((action) => String(action?.key || '').toLowerCase() === 'ctrl+a'), 'explicit overwrite should preserve select-all');
+  assert(rewritten.some((action) => String(action?.key || '').toLowerCase() === 'backspace'), 'explicit overwrite should preserve destructive clear');
+  assert(rewritten.some((action) => action?.type === 'type'), 'explicit overwrite should preserve typing after the clear');
+});
+
 test('open pine editor and summarize compile result stays verification-first', () => {
   const rewritten = buildTradingViewPineWorkflowActions({
     appName: 'TradingView',

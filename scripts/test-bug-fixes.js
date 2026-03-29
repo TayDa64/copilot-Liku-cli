@@ -171,6 +171,23 @@ test('system-automation preserves pid after process sorting', () => {
   assert(systemAutomationContent.includes('Select-Object -First 15 -Property pid, processName, mainWindowTitle, startTime'), 'Process enumeration should keep projected pid fields after sorting');
 });
 
+test('focus results preserve requested-vs-actual target metadata', () => {
+  const sysAutoPath = path.join(__dirname, '..', 'src', 'main', 'system-automation.js');
+  const aiServicePath = path.join(__dirname, '..', 'src', 'main', 'ai-service.js');
+  const fs = require('fs');
+
+  const systemAutomationContent = fs.readFileSync(sysAutoPath, 'utf8');
+  const aiServiceContent = fs.readFileSync(aiServicePath, 'utf8');
+
+  assert(systemAutomationContent.includes('requestedWindowHandle'), 'System automation focus actions should preserve the requested target handle');
+  assert(systemAutomationContent.includes('actualForegroundHandle'), 'System automation focus actions should preserve the actual foreground handle');
+  assert(systemAutomationContent.includes('focusTarget'), 'System automation focus actions should expose structured focus target metadata');
+  assert(aiServiceContent.includes('classifyActionFocusTargetResult'), 'ai-service should classify focus outcomes before updating target handles');
+  assert(aiServiceContent.includes('result.focusTarget = {'), 'ai-service should enrich focus results with accepted/mismatch outcome metadata');
+  assert(aiServiceContent.includes("action.type === 'click' ||"), 'ai-service should still snapshot actual foreground handles for click-style actions');
+  assert(!aiServiceContent.includes("action.type === 'right_click' ||\n        action.type === 'focus_window' ||\n        action.type === 'bring_window_to_front'"), 'ai-service should no longer treat focus actions as unconditional foreground snapshots');
+});
+
 test('ui-watcher exposes active window capability snapshot', () => {
   const uiWatcherPath = path.join(__dirname, '..', 'src', 'main', 'ui-watcher.js');
   const fs = require('fs');
@@ -317,6 +334,7 @@ test('ai-service gates TradingView follow-up typing on post-key observation chec
   const tradingViewPinePath = path.join(__dirname, '..', 'src', 'main', 'tradingview', 'pine-workflows.js');
   const tradingViewPaperPath = path.join(__dirname, '..', 'src', 'main', 'tradingview', 'paper-workflows.js');
   const tradingViewDomPath = path.join(__dirname, '..', 'src', 'main', 'tradingview', 'dom-workflows.js');
+  const systemPromptPath = path.join(__dirname, '..', 'src', 'main', 'ai-service', 'system-prompt.js');
   const fs = require('fs');
 
   const aiServiceContent = fs.readFileSync(aiServicePath, 'utf8');
@@ -329,6 +347,7 @@ test('ai-service gates TradingView follow-up typing on post-key observation chec
   const tradingViewPineContent = fs.readFileSync(tradingViewPinePath, 'utf8');
   const tradingViewPaperContent = fs.readFileSync(tradingViewPaperPath, 'utf8');
   const tradingViewDomContent = fs.readFileSync(tradingViewDomPath, 'utf8');
+  const systemPromptContent = fs.readFileSync(systemPromptPath, 'utf8');
 
   assert(aiServiceContent.includes("require('./ai-service/observation-checkpoints')"), 'ai-service should consume the extracted observation checkpoint helper module');
   assert(observationCheckpointContent.includes('inferKeyObservationCheckpoint'), 'Observation checkpoint module should infer TradingView post-key checkpoints');
@@ -345,6 +364,13 @@ test('ai-service gates TradingView follow-up typing on post-key observation chec
   assert(aiServiceContent.includes("require('./tradingview/paper-workflows')"), 'ai-service should consume the extracted TradingView Paper Trading workflow helper');
   assert(aiServiceContent.includes("require('./tradingview/dom-workflows')"), 'ai-service should consume the extracted TradingView DOM workflow helper');
   assert(tradingViewVerificationContent.includes("classification === 'panel-open'"), 'TradingView checkpoints should recognize panel-open flows such as Pine or DOM');
+  assert(observationCheckpointContent.includes("kind === 'editor-active' || kind === 'editor-ready'"), 'Observation checkpoint module should recognize editor-active/editor-ready verification kinds');
+  assert(observationCheckpointContent.includes("classification === 'editor-active'"), 'Observation checkpoint module should preserve editor-active classification');
+  assert(tradingViewPineContent.includes('safe-new-script'), 'pine workflow should classify safe new-script authoring mode');
+  assert(tradingViewPineContent.includes('safe-authoring-inspect'), 'pine workflow should inspect visible Pine Editor state before safe authoring');
+  assert(systemPromptContent.includes('safe new-script / bounded-edit paths'), 'system prompt should guide Pine authoring toward safe new-script flows');
+  assert(observationCheckpointContent.includes('active Pine Editor surface before continuing'), 'Observation checkpoint failures should explain missing active Pine Editor state');
+  assert(tradingViewPineContent.includes('requiresEditorActivation'), 'TradingView Pine workflows should distinguish editor activation from generic panel visibility');
   assert(tradingViewVerificationContent.includes('pine editor'), 'TradingView checkpoints should ground Pine Editor workflows');
   assert(tradingViewVerificationContent.includes('depth of market'), 'TradingView checkpoints should ground DOM workflows');
   assert(tradingViewVerificationContent.includes('paper trading'), 'TradingView checkpoints should ground Paper Trading workflows');

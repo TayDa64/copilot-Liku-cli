@@ -693,7 +693,16 @@ public class ClickThrough {
  * Focus a specific window by its handle
  */
 async function focusWindow(hwnd) {
-    if (!hwnd) return;
+    if (!hwnd) {
+      return {
+        success: false,
+        requestedWindowHandle: 0,
+        actualForegroundHandle: 0,
+        actualForeground: null,
+        exactMatch: false,
+        outcome: 'missing-target'
+      };
+    }
     
     const script = `
 Add-Type -TypeDefinition @"
@@ -792,12 +801,30 @@ public class WindowFocus {
       await sleep(50);
     }
 
+    let actualForeground = null;
+    try {
+      actualForeground = await getForegroundWindowInfo();
+    } catch {
+      actualForeground = null;
+    }
+
+    const actualForegroundHandle = Number(actualForeground?.hwnd || 0) || 0;
+
     if (verified) {
       console.log(`[AUTOMATION] Focused window handle (verified): ${hwnd}`);
     } else {
       const fg = await getForegroundWindowHandle();
       console.warn(`[AUTOMATION] Focus requested for ${hwnd} but foreground is ${fg}`);
     }
+
+    return {
+      success: true,
+      requestedWindowHandle: hwnd,
+      actualForegroundHandle,
+      actualForeground: actualForeground?.success ? actualForeground : null,
+      exactMatch: verified,
+      outcome: verified ? 'exact' : 'mismatch'
+    };
 }
 
 /**
@@ -2395,8 +2422,30 @@ async function executeAction(action) {
           const hint = enriched.title || enriched.processName || 'unknown';
           throw new Error(`Window "${hint}" not found. Make sure the application is running and visible.`);
         }
-        await focusWindow(hwnd);
-        result.message = `Brought window ${hwnd} to front`;
+        const focusResult = await focusWindow(hwnd);
+        result = {
+          ...result,
+          requestedWindowHandle: hwnd,
+          actualForegroundHandle: Number(focusResult?.actualForegroundHandle || 0) || 0,
+          actualForeground: focusResult?.actualForeground || null,
+          focusTarget: {
+            requestedWindowHandle: hwnd,
+            requestedTarget: {
+              title: enriched.title || null,
+              processName: enriched.processName || null,
+              className: enriched.className || null
+            },
+            actualForegroundHandle: Number(focusResult?.actualForegroundHandle || 0) || 0,
+            actualForeground: focusResult?.actualForeground || null,
+            exactMatch: !!focusResult?.exactMatch,
+            outcome: focusResult?.exactMatch ? 'exact' : 'mismatch'
+          }
+        };
+        if (focusResult?.exactMatch) {
+          result.message = `Brought window ${hwnd} to front`;
+        } else {
+          result.message = `Focus requested for ${hwnd} but foreground is ${result.actualForegroundHandle || 'unknown'}`;
+        }
         break;
       }
 

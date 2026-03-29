@@ -88,6 +88,7 @@ function createObservationCheckpointRuntime(deps = {}) {
     const target = String(verify?.target || '').trim().toLowerCase();
 
     if (kind === 'panel-visible' || kind === 'panel-open') return 'panel-open';
+    if (kind === 'editor-active' || kind === 'editor-ready') return 'editor-active';
     if (kind === 'input-surface-open' || kind === 'menu-open' || kind === 'text-visible') return 'input-surface-open';
     if (kind === 'dialog-visible') {
       return /indicator|search|input|picker/.test(target) ? 'input-surface-open' : 'dialog-open';
@@ -129,14 +130,14 @@ function createObservationCheckpointRuntime(deps = {}) {
         verify.target
       ].filter(Boolean).join(' ')),
       classification === 'dialog-open' ? verifyTarget.dialogKeywords : [],
-      classification === 'panel-open' ? verifyTarget.pineKeywords : [],
+      (classification === 'panel-open' || classification === 'editor-active') ? verifyTarget.pineKeywords : [],
       classification === 'chart-state' ? verifyTarget.chartKeywords : [],
       /indicator/.test(verify.target || '') ? verifyTarget.indicatorKeywords : []
     );
 
     const expectedWindowKinds = verify.windowKinds.length > 0
       ? verify.windowKinds
-      : (classification === 'chart-state' || classification === 'panel-open')
+      : (classification === 'chart-state' || classification === 'panel-open' || classification === 'editor-active')
         ? (verifyTarget.preferredWindowKinds || ['main'])
         : (verifyTarget.dialogWindowKinds || ['owned', 'palette', 'main']);
 
@@ -157,7 +158,7 @@ function createObservationCheckpointRuntime(deps = {}) {
         keywords: expectedKeywords
       }),
       requiresObservedChange: verify.requiresObservedChange === null
-        ? (classification === 'dialog-open' || classification === 'input-surface-open')
+        ? (classification === 'dialog-open' || classification === 'input-surface-open' || classification === 'editor-active')
         : verify.requiresObservedChange,
       allowWindowHandleChange: classification === 'dialog-open' || classification === 'input-surface-open',
       timeoutMs: keyCheckpointTimeoutMs,
@@ -291,8 +292,13 @@ function createObservationCheckpointRuntime(deps = {}) {
 
       const freshObservation = !!watcherFreshness?.fresh;
       const surfaceChangeObserved = observedChange || keywordMatched || titleHintMatched;
+      const editorActiveMatched = spec.classification === 'editor-active'
+        ? !!(foreground?.success && evalResult.matched && windowKindMatched && surfaceChangeObserved && (keywordMatched || titleHintMatched || freshObservation))
+        : false;
       const verified = spec.requiresObservedChange
-        ? !!(foreground?.success && evalResult.matched && windowKindMatched && surfaceChangeObserved)
+        ? (spec.classification === 'editor-active'
+          ? editorActiveMatched
+          : !!(foreground?.success && evalResult.matched && windowKindMatched && surfaceChangeObserved))
         : !!(foreground?.success && evalResult.matched && windowKindMatched && (surfaceChangeObserved || freshObservation || !spec.requiresObservedChange));
 
       if (verified) {
@@ -306,6 +312,7 @@ function createObservationCheckpointRuntime(deps = {}) {
           keywordMatched,
           titleHintMatched,
           windowKindMatched,
+          editorActiveMatched,
           tradingMode,
           beforeForeground: beforeForeground || null,
           foreground,
@@ -328,6 +335,7 @@ function createObservationCheckpointRuntime(deps = {}) {
       keywordMatched,
       titleHintMatched,
       windowKindMatched,
+      editorActiveMatched: false,
       tradingMode,
       beforeForeground: beforeForeground || null,
       foreground,
@@ -337,7 +345,9 @@ function createObservationCheckpointRuntime(deps = {}) {
       popupHint: evalResult.popupHint || null,
       reason: spec.reason || '',
       error: spec.requiresObservedChange
-        ? 'Post-key observation checkpoint could not confirm a TradingView surface change before continuing'
+        ? (spec.classification === 'editor-active'
+          ? 'Post-key observation checkpoint could not confirm an active Pine Editor surface before continuing'
+          : 'Post-key observation checkpoint could not confirm a TradingView surface change before continuing')
         : 'Post-key observation checkpoint could not confirm fresh TradingView state'
     };
   }

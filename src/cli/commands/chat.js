@@ -8,7 +8,13 @@ const { success, error, info, warn, highlight, dim, bold } = require('../util/ou
 const systemAutomation = require('../../main/system-automation');
 const preferences = require('../../main/preferences');
 const { buildChatContinuityTurnRecord } = require('../../main/chat-continuity-state');
-const { getChatContinuityState, recordChatContinuityTurn } = require('../../main/session-intent-state');
+const {
+  clearPendingRequestedTask,
+  getChatContinuityState,
+  getPendingRequestedTask,
+  recordChatContinuityTurn,
+  setPendingRequestedTask
+} = require('../../main/session-intent-state');
 const {
   getLogLevel: getUiAutomationLogLevel,
   resetLogSettings: resetUiAutomationLogSettings,
@@ -250,26 +256,66 @@ function buildContinuationIntentFromState(continuity, fallbackText = '') {
   ).trim();
 }
 
-function buildContinuityRecoveryMessage(continuity) {
+function buildPendingRequestedTaskRecord({ userMessage, executionIntent, actionData, targetProcessName = null, targetWindowTitle = null }) {
+  const actions = Array.isArray(actionData?.actions) ? actionData.actions : [];
+  const actionSummary = actions
+    .map((action) => String(action?.type || '').trim())
+    .filter(Boolean)
+    .slice(0, 4)
+    .join(' -> ');
+
+  return {
+    recordedAt: new Date().toISOString(),
+    userMessage,
+    executionIntent,
+    taskSummary: String(actionData?.thought || actionData?.verification || executionIntent || actionSummary || userMessage || '').trim() || null,
+    targetApp: targetProcessName || null,
+    targetWindowTitle: targetWindowTitle || null
+  };
+}
+
+function buildContinuityRecoveryMessage(continuity, pendingRequestedTask = null) {
+  const pendingTaskSummary = String(
+    pendingRequestedTask?.taskSummary
+    || pendingRequestedTask?.executionIntent
+    || pendingRequestedTask?.userMessage
+    || ''
+  ).trim();
+  const pendingTaskSuffix = pendingTaskSummary
+    ? ` The last requested task was: ${pendingTaskSummary}. Ask me to retry that task, recapture the target window, or continue with a bounded explanation only.`
+    : '';
+
   const verificationStatus = String(continuity?.lastTurn?.verificationStatus || '').trim().toLowerCase();
   if (verificationStatus === 'contradicted') {
-    return 'The last step is contradicted by the latest evidence, so I will not continue blindly. Retry the step or gather fresh evidence first.';
+    return `The last step is contradicted by the latest evidence, so I will not continue blindly. Retry the step or gather fresh evidence first.${pendingTaskSuffix}`.trim();
   }
   if (verificationStatus === 'unverified') {
-    return 'The last step is not fully verified yet, so I need fresh evidence or an explicit bounded retry before continuing.';
+    return `The last step is not fully verified yet, so I need fresh evidence or an explicit bounded retry before continuing.${pendingTaskSuffix}`.trim();
   }
 
   const reason = String(continuity?.degradedReason || '').trim();
   if (reason) {
-    return `Continuity is currently degraded: ${reason} Ask me to recapture the target window, retry the last step, or confirm a bounded continuation.`;
+    return `Continuity is currently degraded: ${reason}${pendingTaskSuffix || ' Ask me to recapture the target window, retry the last step, or confirm a bounded continuation.'}`;
+  }
+
+  if (pendingTaskSuffix) {
+    return `There is not enough verified continuity state to continue safely.${pendingTaskSuffix}`;
   }
 
   return 'There is not enough verified continuity state to continue safely. Retry the last step or gather fresh evidence first.';
 }
 
-function getContinuationDecision(userInput, continuity) {
+function getContinuationDecision(userInput, continuity, pendingRequestedTask = null) {
   if (!isMinimalContinuationInput(userInput)) {
     return { block: false, useContinuityState: false, reason: null };
+  }
+
+  if (pendingRequestedTask && (!hasUsableChatContinuity(continuity) || !continuity.continuationReady || continuity.degradedReason)) {
+    return {
+      block: true,
+      useContinuityState: false,
+      reason: buildContinuityRecoveryMessage(continuity, pendingRequestedTask)
+    };
   }
 
   if (!hasUsableChatContinuity(continuity)) {
@@ -287,7 +333,7 @@ function getContinuationDecision(userInput, continuity) {
   return {
     block: true,
     useContinuityState: false,
-    reason: buildContinuityRecoveryMessage(continuity)
+    reason: buildContinuityRecoveryMessage(continuity, pendingRequestedTask)
   };
 }
 
@@ -992,8 +1038,9 @@ async function runChatLoop(ai, options) {
     const isContinueLike = isLikelyApprovalOrContinuationInput(lowerLine);
     const isAffirmativeExplicitOperation = isAffirmativeExplicitOperationInput(line);
     const chatContinuity = isContinueLike ? getChatContinuityState({ cwd: process.cwd() }) : null;
+    const pendingRequestedTask = isContinueLike ? getPendingRequestedTask({ cwd: process.cwd() }) : null;
     const continuationDecision = isContinueLike
-      ? getContinuationDecision(line, chatContinuity)
+      ? getContinuationDecision(line, chatContinuity, pendingRequestedTask)
       : { block: false, useContinuityState: false, reason: null };
 
     if (continuationDecision.block) {
@@ -1003,6 +1050,7 @@ async function runChatLoop(ai, options) {
 
     if (!line.startsWith('/') && !isContinueLike) {
       lastNonTrivialUserMessage = line;
+      clearPendingRequestedTask({ cwd: process.cwd() });
     }
 
     const executionIntent = continuationDecision.useContinuityState
@@ -1169,9 +1217,16 @@ async function runChatLoop(ai, options) {
     if (!hasActions) continue;
 
     if (!shouldExecuteDetectedActions(line, executionIntent, actionData)) {
+      setPendingRequestedTask(buildPendingRequestedTaskRecord({
+        userMessage: line,
+        executionIntent,
+        actionData
+      }), { cwd: process.cwd() });
       info('Parsed action plan withheld because this turn looks like acknowledgement-only or non-executable text.');
       continue;
     }
+
+    clearPendingRequestedTask({ cwd: process.cwd() });
 
     if (typeof ai.preflightActions === 'function') {
       const rewritten = ai.preflightActions(actionData, { userMessage: executionIntent });

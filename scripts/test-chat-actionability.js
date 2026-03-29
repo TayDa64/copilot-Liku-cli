@@ -17,6 +17,7 @@ const originalLoad = Module._load;
 let executeCount = 0;
 let seenMessages = [];
 let continuityState = process.env.__CHAT_CONTINUITY__ ? JSON.parse(process.env.__CHAT_CONTINUITY__) : null;
+let pendingRequestedTask = process.env.__PENDING_REQUESTED_TASK__ ? JSON.parse(process.env.__PENDING_REQUESTED_TASK__) : null;
 const scriptedVisualStates = process.env.__LATEST_VISUAL_SEQUENCE__ ? JSON.parse(process.env.__LATEST_VISUAL_SEQUENCE__) : [];
 let lastRecordedTurn = null;
 let preflightUserMessages = [];
@@ -172,10 +173,19 @@ const preferencesStub = {
 
 const sessionIntentStateStub = {
   getChatContinuityState: () => continuityState,
+  getPendingRequestedTask: () => pendingRequestedTask,
   recordChatContinuityTurn: (turnRecord) => {
     lastRecordedTurn = turnRecord;
     continuityState = deriveContinuityState(turnRecord);
     return continuityState;
+  },
+  setPendingRequestedTask: (taskRecord) => {
+    pendingRequestedTask = taskRecord;
+    return { pendingRequestedTask };
+  },
+  clearPendingRequestedTask: () => {
+    pendingRequestedTask = null;
+    return { pendingRequestedTask };
   }
 };
 
@@ -194,6 +204,7 @@ Module._load = function(request, parent, isMain) {
   console.log('EXECUTE_COUNT:' + executeCount);
   console.log('SEEN_MESSAGES:' + JSON.stringify(seenMessages));
   console.log('PREFLIGHT_USER_MESSAGES:' + JSON.stringify(preflightUserMessages));
+  console.log('PENDING_REQUESTED_TASK:' + JSON.stringify(pendingRequestedTask));
   console.log('RECORDED_CONTINUITY:' + JSON.stringify(continuityState));
   console.log('LAST_TURN:' + JSON.stringify(lastRecordedTurn));
   process.exit(result && result.success === false ? 1 : 0);
@@ -207,7 +218,7 @@ async function runScenario(inputs) {
   return runScenarioWithContinuity(inputs, null, null);
 }
 
-async function runScenarioWithContinuity(inputs, continuityState, latestVisualSequence) {
+async function runScenarioWithContinuity(inputs, continuityState, latestVisualSequence, pendingTask = null) {
   const repoRoot = path.join(__dirname, '..');
   const chatModulePath = path.join(repoRoot, 'src', 'cli', 'commands', 'chat.js').replace(/\\/g, '\\\\');
   const child = spawn(process.execPath, ['-e', buildHarnessScript(chatModulePath)], {
@@ -216,6 +227,7 @@ async function runScenarioWithContinuity(inputs, continuityState, latestVisualSe
     env: {
       ...process.env,
       __CHAT_CONTINUITY__: continuityState ? JSON.stringify(continuityState) : '',
+      __PENDING_REQUESTED_TASK__: pendingTask ? JSON.stringify(pendingTask) : '',
       __LATEST_VISUAL_SEQUENCE__: latestVisualSequence ? JSON.stringify(latestVisualSequence) : ''
     }
   });
@@ -365,6 +377,26 @@ async function main() {
   assert(degradedContinuation.output.includes('EXECUTE_COUNT:0'), 'degraded continuation should not execute emitted actions');
   assert(/Continuity is currently degraded/i.test(degradedContinuation.output), 'degraded continuation should explain recovery-oriented continuity blocking');
 
+  const taskAwareDegradedContinuation = await runScenarioWithContinuity(['continue'], {
+    activeGoal: 'Assess LUNR in TradingView',
+    currentSubgoal: 'Inspect the active TradingView chart',
+    continuationReady: false,
+    degradedReason: 'Background/non-disruptive capture was unavailable; fell back to full-screen capture.',
+    lastTurn: {
+      verificationStatus: 'verified',
+      captureMode: 'screen-copyfromscreen',
+      captureTrusted: false,
+      nextRecommendedStep: 'Continue from the latest chart evidence.'
+    }
+  }, null, {
+    taskSummary: 'Apply Volume Profile in TradingView',
+    executionIntent: 'yes, lets apply the volume profile',
+    userMessage: 'yes, lets apply the volume profile'
+  });
+  assert.strictEqual(taskAwareDegradedContinuation.exitCode, 0, 'task-aware degraded continuation scenario should exit successfully');
+  assert(taskAwareDegradedContinuation.output.includes('EXECUTE_COUNT:0'), 'task-aware degraded continuation should not execute emitted actions');
+  assert(/The last requested task was: Apply Volume Profile in TradingView/i.test(taskAwareDegradedContinuation.output), 'task-aware degraded continuation should reference the pending requested task');
+
   const paperStateBackedContinuation = await runScenarioWithContinuity(['continue'], PAPER_AWARE_CONTINUITY_FIXTURES.verifiedPaperAssistContinuation);
   assert.strictEqual(paperStateBackedContinuation.exitCode, 0, 'paper-aware continuation scenario should exit successfully');
   assert(paperStateBackedContinuation.output.includes('EXECUTE_COUNT:1'), 'paper-aware continuation should execute emitted actions when verified continuity says it is safe');
@@ -405,6 +437,15 @@ async function main() {
   assert.strictEqual(acknowledgement.exitCode, 0, 'acknowledgement-style scenario should exit successfully');
   assert(acknowledgement.output.includes('EXECUTE_COUNT:0'), 'acknowledgement-style scenario should not execute emitted actions');
   assert(acknowledgement.output.includes('Parsed action plan withheld'), 'acknowledgement-style scenario should be withheld as acknowledgement-only text');
+
+  const pendingTaskWithoutContinuity = await runScenarioWithContinuity(['continue'], null, null, {
+    taskSummary: 'Open Pine Logs in TradingView',
+    executionIntent: 'yes, open Pine Logs',
+    userMessage: 'yes, open Pine Logs'
+  });
+  assert.strictEqual(pendingTaskWithoutContinuity.exitCode, 0, 'pending-task-only continuation scenario should exit successfully');
+  assert(pendingTaskWithoutContinuity.output.includes('EXECUTE_COUNT:0'), 'pending-task-only continuation should not execute emitted actions');
+  assert(/The last requested task was: Open Pine Logs in TradingView/i.test(pendingTaskWithoutContinuity.output), 'pending-task-only continuation should still guide recovery toward the pending task');
 
   console.log('PASS chat actionability');
 }

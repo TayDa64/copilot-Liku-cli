@@ -122,6 +122,165 @@ async function run() {
     });
   });
 
+  await testAsync('tradingview focus mismatch is not reported as clean success', async () => {
+    let focusCalls = 0;
+
+    await withPatchedSystemAutomation({
+      resolveWindowHandle: async (action) => action?.processName === 'tradingview' ? 264274 : 0,
+      getForegroundWindowHandle: async () => 1969552,
+      getForegroundWindowInfo: async () => ({
+        success: true,
+        hwnd: 1969552,
+        title: 'README.md - Visual Studio Code',
+        processName: 'code',
+        windowKind: 'main'
+      })
+    }, async () => {
+      const execResult = await aiService.executeActions({
+        thought: 'Focus TradingView before continuing',
+        verification: 'TradingView should become the foreground window',
+        actions: [
+          { type: 'bring_window_to_front', title: 'TradingView', processName: 'tradingview' }
+        ]
+      }, null, null, {
+        userMessage: 'focus tradingview',
+        actionExecutor: async (action) => {
+          focusCalls++;
+          return {
+            success: true,
+            action: action.type,
+            message: 'Focus requested for 264274 but foreground is 1969552',
+            requestedWindowHandle: 264274,
+            actualForegroundHandle: 1969552,
+            actualForeground: {
+              success: true,
+              hwnd: 1969552,
+              title: 'README.md - Visual Studio Code',
+              processName: 'code',
+              windowKind: 'main'
+            },
+            focusTarget: {
+              requestedWindowHandle: 264274,
+              requestedTarget: {
+                title: 'TradingView',
+                processName: 'tradingview',
+                className: null
+              },
+              actualForegroundHandle: 1969552,
+              actualForeground: {
+                success: true,
+                hwnd: 1969552,
+                title: 'README.md - Visual Studio Code',
+                processName: 'code',
+                windowKind: 'main'
+              },
+              exactMatch: false,
+              outcome: 'mismatch'
+            }
+          };
+        }
+      });
+
+      assert.strictEqual(execResult.success, false, 'Persistent focus mismatch should fail bounded verification');
+      assert.strictEqual(execResult.results[0].focusTarget.requestedWindowHandle, 264274, 'Focus result should preserve the requested target handle');
+      assert.strictEqual(execResult.results[0].focusTarget.actualForegroundHandle, 1969552, 'Focus result should preserve the actual foreground handle');
+      assert.strictEqual(execResult.results[0].focusTarget.outcome, 'mismatch', 'Focus result should expose mismatch outcome');
+      assert.strictEqual(execResult.results[0].focusTarget.accepted, false, 'Mismatch focus should not be treated as an accepted target update');
+      assert(/foreground is 1969552/i.test(execResult.results[0].message), 'Focus mismatch message should mention the actual foreground window');
+      assert(focusCalls >= 1, 'Focus attempt should still be executed');
+    });
+  });
+
+  await testAsync('last target window only updates on exact or recovered tradingview focus', async () => {
+    const focusCalls = [];
+    const foregroundSequence = [
+      { success: true, hwnd: 264274, title: 'TradingView', processName: 'tradingview', windowKind: 'main' }
+    ];
+
+    await withPatchedSystemAutomation({
+      resolveWindowHandle: async (action) => action?.processName === 'tradingview' ? 264274 : 0,
+      getForegroundWindowHandle: async () => 1969552,
+      getForegroundWindowInfo: async () => {
+        return foregroundSequence.shift() || { success: true, hwnd: 264274, title: 'TradingView', processName: 'tradingview', windowKind: 'main' };
+      },
+      focusWindow: async (hwnd) => {
+        focusCalls.push(hwnd);
+        return {
+          success: true,
+          requestedWindowHandle: hwnd,
+          actualForegroundHandle: 264274,
+          actualForeground: {
+            success: true,
+            hwnd: 264274,
+            title: 'TradingView',
+            processName: 'tradingview',
+            windowKind: 'main'
+          },
+          exactMatch: true,
+          outcome: 'exact'
+        };
+      }
+    }, async () => {
+      const execResult = await aiService.executeActions({
+        thought: 'Focus TradingView and type into the active surface',
+        verification: 'Typing should remain routed to TradingView',
+        actions: [
+          { type: 'bring_window_to_front', title: 'TradingView', processName: 'tradingview', verifyTarget: { appName: 'TradingView', processNames: ['tradingview'], titleHints: ['TradingView'] } },
+          { type: 'type', text: 'plot(close)' }
+        ]
+      }, null, null, {
+        userMessage: 'focus tradingview and type plot(close)',
+        actionExecutor: async (action) => {
+          if (action.type === 'bring_window_to_front') {
+            return {
+              success: true,
+              action: action.type,
+              message: 'Focus requested for 264274 but foreground is 1969552',
+              requestedWindowHandle: 264274,
+              actualForegroundHandle: 1969552,
+              actualForeground: {
+                success: true,
+                hwnd: 1969552,
+                title: 'README.md - Visual Studio Code',
+                processName: 'code',
+                windowKind: 'main'
+              },
+              focusTarget: {
+                requestedWindowHandle: 264274,
+                requestedTarget: {
+                  title: 'TradingView',
+                  processName: 'tradingview',
+                  className: null
+                },
+                actualForegroundHandle: 1969552,
+                actualForeground: {
+                  success: true,
+                  hwnd: 1969552,
+                  title: 'README.md - Visual Studio Code',
+                  processName: 'code',
+                  windowKind: 'main'
+                },
+                exactMatch: false,
+                outcome: 'mismatch'
+              }
+            };
+          }
+          if (action.type === 'type') {
+            return { success: true, action: action.type, message: 'typed' };
+          }
+          return aiService.systemAutomation.executeAction(action);
+        }
+      });
+
+      assert.strictEqual(execResult.success, true, 'Typing flow should recover after re-focusing the requested TradingView target');
+      assert.deepStrictEqual(focusCalls, [264274], 'Pre-typing refocus should stay on the requested TradingView handle instead of drifting to the accidental foreground window');
+      assert.strictEqual(execResult.results[0].focusTarget.outcome, 'mismatch', 'Initial focus action should record the mismatch outcome');
+      assert.strictEqual(execResult.results[0].focusTarget.accepted, false, 'Initial focus mismatch should not be treated as an accepted target update');
+      assert.strictEqual(execResult.focusVerification.verified, true, 'Final focus verification should succeed after the guarded re-focus');
+      assert.strictEqual(execResult.focusVerification.expectedWindowHandle, 264274, 'Focus verification should stay pinned to the requested TradingView handle');
+    });
+  });
+
   await testAsync('low-signal TradingView indicator request rewrites to deterministic indicator workflow', async () => {
     const rewritten = aiService.rewriteActionsForReliability([
       { type: 'screenshot' },
@@ -258,7 +417,7 @@ async function run() {
     assert.strictEqual(rewritten[0].type, 'bring_window_to_front');
     assert.strictEqual(rewritten[0].processName, 'tradingview');
     assert.strictEqual(rewritten[2].type, 'key');
-    assert.strictEqual(rewritten[2].verify.kind, 'panel-visible');
+    assert.strictEqual(rewritten[2].verify.kind, 'editor-active');
     assert.strictEqual(rewritten[2].verify.target, 'pine-editor');
     assert.strictEqual(rewritten[2].verify.requiresObservedChange, true);
     assert.strictEqual(rewritten[4].type, 'type');
@@ -565,6 +724,16 @@ async function run() {
               success: true,
               action: action.type,
               text: 'Revision 18 saved 2m ago; Revision 17 saved 18m ago; showing 2 visible revisions',
+              pineStructuredSummary: {
+                latestVisibleRevisionLabel: 'Revision 18',
+                latestVisibleRelativeTime: '2m ago',
+                visibleRevisionCount: 2,
+                visibleRecencySignal: 'recent-churn-visible',
+                topVisibleRevisions: [
+                  { label: 'Revision 18', relativeTime: '2m ago', revisionNumber: 18 },
+                  { label: 'Revision 17', relativeTime: '18m ago', revisionNumber: 17 }
+                ]
+              },
               method: 'TextPattern',
               message: 'Got text via TextPattern: "Revision 18 saved 2m ago; Revision 17 saved 18m ago; showing 2 visible revisions"'
             };
@@ -879,6 +1048,29 @@ async function run() {
       assert.strictEqual(execResult.observationCheckpoints[0].classification, 'dialog-open', 'Explicit verify metadata should map to a reusable dialog-open checkpoint');
       assert.strictEqual(execResult.observationCheckpoints[0].verified, true, 'Explicit verify metadata should drive the bounded post-key verification');
     });
+  });
+
+  await testAsync('pine creation flow avoids clear-first behavior without explicit overwrite request', async () => {
+    const original = [
+      { type: 'focus_window', windowHandle: 264274 },
+      { type: 'wait', ms: 1000 },
+      { type: 'key', key: 'ctrl+e', reason: 'Open Pine Editor' },
+      { type: 'wait', ms: 1000 },
+      { type: 'key', key: 'ctrl+a', reason: 'Select all existing code' },
+      { type: 'key', key: 'backspace', reason: 'Clear editor for new script' },
+      { type: 'type', text: 'indicator("LUNR Confidence")' }
+    ];
+
+    const rewritten = aiService.rewriteActionsForReliability(original, {
+      userMessage: 'tradingview application is showing LUNR, in tradingview, create a pine script that will build my confidence level when making decisions.'
+    });
+
+    assert(Array.isArray(rewritten), 'workflow should rewrite');
+    assert.strictEqual(rewritten[0].type, 'bring_window_to_front');
+    assert.strictEqual(rewritten[2].verify.kind, 'editor-active');
+    assert(rewritten.some((action) => action?.type === 'get_text' && action?.text === 'Pine Editor'), 'safe authoring should inspect the Pine Editor state first');
+    assert(!rewritten.some((action) => String(action?.key || '').toLowerCase() === 'ctrl+a'), 'safe authoring should remove select-all by default');
+    assert(!rewritten.some((action) => String(action?.key || '').toLowerCase() === 'backspace'), 'safe authoring should remove destructive clear-first steps by default');
   });
 
   await testAsync('explicit TradingView indicator contracts allow bounded add-indicator continuation', async () => {
@@ -1382,7 +1574,7 @@ async function run() {
             key: 'ctrl+e',
             reason: 'Open TradingView Pine Editor',
             verify: {
-              kind: 'panel-visible',
+              kind: 'editor-active',
               appName: 'TradingView',
               target: 'pine-editor',
               keywords: ['pine', 'pine editor', 'script'],
@@ -1403,8 +1595,60 @@ async function run() {
       assert.deepStrictEqual(executed, ['focus_window', 'key', 'type'], 'Typing should continue only after the Pine panel transition is verified');
       assert.strictEqual(execResult.observationCheckpoints.length, 1, 'A post-key observation checkpoint should be returned');
       assert.strictEqual(execResult.observationCheckpoints[0].verified, true, 'The Pine checkpoint should pass after panel observation');
-      assert.strictEqual(execResult.observationCheckpoints[0].classification, 'panel-open', 'Pine Editor should verify as a panel-open checkpoint');
+      assert.strictEqual(execResult.observationCheckpoints[0].classification, 'editor-active', 'Pine Editor should verify as an editor-active checkpoint');
+      assert.strictEqual(execResult.observationCheckpoints[0].editorActiveMatched, true, 'Pine Editor checkpoint should record editor-active matching');
       assert.strictEqual(execResult.observationCheckpoints[0].foreground.hwnd, 777, 'Checkpoint should preserve the TradingView main window handle');
+    });
+  });
+
+  await testAsync('pine editor typing waits for editor-active verification', async () => {
+    const executed = [];
+    const foregroundSequence = [
+      { success: true, hwnd: 777, title: 'TradingView', processName: 'tradingview', windowKind: 'main' },
+      { success: true, hwnd: 777, title: 'TradingView', processName: 'tradingview', windowKind: 'main' },
+      { success: true, hwnd: 777, title: 'TradingView', processName: 'tradingview', windowKind: 'main' },
+      { success: true, hwnd: 777, title: 'TradingView', processName: 'tradingview', windowKind: 'main' }
+    ];
+
+    await withPatchedSystemAutomation({
+      resolveWindowHandle: async (action) => action?.processName === 'tradingview' ? 777 : 0,
+      getForegroundWindowInfo: async () => foregroundSequence.shift() || { success: true, hwnd: 777, title: 'TradingView', processName: 'tradingview', windowKind: 'main' },
+      focusWindow: async () => ({ success: true }),
+      getRunningProcessesByNames: async () => ([{ pid: 4242, processName: 'tradingview', mainWindowTitle: 'TradingView', startTime: '2026-03-23T00:00:00Z' }])
+    }, async () => {
+      const execResult = await aiService.executeActions({
+        thought: 'Open TradingView Pine Editor and type a script',
+        verification: 'TradingView should show an active Pine Editor before typing',
+        actions: [
+          { type: 'focus_window', title: 'TradingView', processName: 'tradingview' },
+          {
+            type: 'key',
+            key: 'ctrl+e',
+            reason: 'Open TradingView Pine Editor',
+            verify: {
+              kind: 'editor-active',
+              appName: 'TradingView',
+              target: 'pine-editor',
+              keywords: ['pine', 'pine editor', 'script'],
+              requiresObservedChange: true
+            }
+          },
+          { type: 'type', text: 'plot(close)', reason: 'Type Pine script' }
+        ]
+      }, null, null, {
+        userMessage: 'open pine editor in tradingview and type plot(close)',
+        actionExecutor: async (action) => {
+          executed.push(action.type);
+          return { success: true, action: action.type, message: 'executed' };
+        }
+      });
+
+      assert.strictEqual(execResult.success, false, 'Typing should not continue when Pine Editor activation is not observed');
+      assert.deepStrictEqual(executed, ['focus_window', 'key'], 'Typing should stop after an unverified editor-active checkpoint');
+      assert.strictEqual(execResult.observationCheckpoints.length, 1, 'An editor-active checkpoint should be recorded');
+      assert.strictEqual(execResult.observationCheckpoints[0].classification, 'editor-active', 'Pine authoring should classify the checkpoint as editor-active');
+      assert.strictEqual(execResult.observationCheckpoints[0].verified, false, 'Editor-active checkpoint should fail without a visible Pine Editor activation');
+      assert(/active Pine Editor surface/i.test(execResult.observationCheckpoints[0].error || ''), 'Failure should explain that an active Pine Editor surface was not confirmed');
     });
   });
 

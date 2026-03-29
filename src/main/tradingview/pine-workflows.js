@@ -15,6 +15,54 @@ function mergeUnique(values = []) {
     .filter(Boolean)));
 }
 
+function getNextMeaningfulAction(actions = [], startIndex = 0) {
+  if (!Array.isArray(actions)) return null;
+  for (let index = Math.max(0, startIndex); index < actions.length; index++) {
+    const action = actions[index];
+    if (!action || typeof action !== 'object') continue;
+    if (String(action.type || '').trim().toLowerCase() === 'wait') continue;
+    return action;
+  }
+  return null;
+}
+
+function isPineAuthoringStep(action) {
+  if (!action || typeof action !== 'object') return false;
+  const type = String(action.type || '').trim().toLowerCase();
+  const key = String(action.key || '').trim().toLowerCase();
+  if (type === 'type') return true;
+  if (type !== 'key') return false;
+  return key === 'ctrl+a'
+    || key === 'backspace'
+    || key === 'delete'
+    || key === 'ctrl+v'
+    || key === 'ctrl+enter'
+    || key === 'enter';
+}
+
+function isPineDestructiveAuthoringStep(action) {
+  if (!action || typeof action !== 'object') return false;
+  const type = String(action.type || '').trim().toLowerCase();
+  const key = String(action.key || '').trim().toLowerCase();
+  if (type !== 'key') return false;
+  return key === 'ctrl+a' || key === 'backspace' || key === 'delete';
+}
+
+function inferPineAuthoringMode(raw = '') {
+  const normalized = normalizeTextForMatch(raw);
+  if (!normalized) return null;
+
+  const explicitOverwriteIntent = /\b(overwrite|replace|rewrite current|rewrite existing|clear current|clear existing|erase current|erase existing|wipe current|wipe existing|delete current|delete existing)\b/.test(normalized)
+    || (/\bfrom scratch\b/.test(normalized) && /\b(current|existing)\b/.test(normalized));
+
+  const mentionsPineArtifact = /\bpine\b/.test(normalized)
+    && /\b(script|indicator|strategy|study)\b/.test(normalized);
+  const mentionsAuthoringIntent = /\b(write|create|generate|build|draft|make)\b/.test(normalized) && mentionsPineArtifact;
+  if (!mentionsAuthoringIntent && !explicitOverwriteIntent) return null;
+
+  return explicitOverwriteIntent ? 'explicit-overwrite' : 'safe-new-script';
+}
+
 const PINE_VERSION_HISTORY_SUMMARY_FIELDS = Object.freeze([
   'latest-revision-label',
   'latest-relative-time',
@@ -164,10 +212,15 @@ function inferTradingViewPineIntent(userMessage = '', actions = []) {
 
   const mentionsPineSurface = /\bpine editor\b|\bpine logs\b|\bprofiler\b|\bversion history\b|\bpine\s+script\b|\bpine\b/i.test(raw);
   const mentionsSafeOpenIntent = /\b(open|show|focus|switch|activate|bring up|display|launch)\b/i.test(raw);
-  const mentionsUnsafeAuthoringOnly = /\b(write|create|generate|build|draft)\b/i.test(raw) && !mentionsSafeOpenIntent;
+  const pineAuthoringMode = inferPineAuthoringMode(raw);
+  const mentionsUnsafeAuthoringOnly = !!pineAuthoringMode && !mentionsSafeOpenIntent;
 
   if (!mentionsPineSurface || mentionsUnsafeAuthoringOnly) {
-    return null;
+    const surface = inferPineSurfaceTarget(raw);
+    if (!surface || surface.target !== 'pine-editor') return null;
+    if (!Array.isArray(actions) || !actions.some((action) => String(action?.key || '').trim().toLowerCase() === 'ctrl+e')) {
+      return null;
+    }
   }
 
   const openerTypes = new Set(['key', 'click', 'double_click', 'right_click']);
@@ -176,7 +229,7 @@ function inferTradingViewPineIntent(userMessage = '', actions = []) {
     : -1;
   if (openerIndex < 0) return null;
 
-  const nextAction = openerIndex >= 0 ? actions[openerIndex + 1] || null : null;
+  const nextAction = openerIndex >= 0 ? getNextMeaningfulAction(actions, openerIndex + 1) : null;
   const surface = inferPineSurfaceTarget(raw);
   if (!surface) return null;
 
@@ -186,6 +239,9 @@ function inferTradingViewPineIntent(userMessage = '', actions = []) {
     : surface.target === 'pine-version-history' && wantsEvidenceReadback
       ? inferPineVersionHistoryEvidenceMode(raw)
     : null;
+  const requiresEditorActivation = surface.target === 'pine-editor' && isPineAuthoringStep(nextAction);
+  const safeAuthoringDefault = surface.target === 'pine-editor' && pineAuthoringMode === 'safe-new-script';
+  const explicitOverwriteAuthoring = surface.target === 'pine-editor' && pineAuthoringMode === 'explicit-overwrite';
 
   const existingWorkflowSignal = Array.isArray(actions) && actions.some((action) => /pine/.test(String(action?.verify?.target || '')));
 
@@ -195,9 +251,12 @@ function inferTradingViewPineIntent(userMessage = '', actions = []) {
     verifyKind: surface.kind,
     openerIndex,
     existingWorkflowSignal,
-    requiresObservedChange: nextAction?.type === 'type',
+    requiresObservedChange: requiresEditorActivation || nextAction?.type === 'type',
+    requiresEditorActivation,
     wantsEvidenceReadback,
     pineEvidenceMode,
+    safeAuthoringDefault,
+    explicitOverwriteAuthoring,
     reason: surface.target === 'pine-logs'
       ? 'Open TradingView Pine Logs with verification'
       : surface.target === 'pine-profiler'
@@ -238,7 +297,7 @@ function buildTradingViewPineWorkflowActions(intent = {}, actions = []) {
       ...opener,
       reason: opener?.reason || intent.reason,
       verify: opener?.verify || {
-        kind: intent.verifyKind,
+        kind: intent.requiresEditorActivation ? 'editor-active' : intent.verifyKind,
         appName: 'TradingView',
         target: intent.surfaceTarget,
         keywords: expectedKeywords,
@@ -252,8 +311,28 @@ function buildTradingViewPineWorkflowActions(intent = {}, actions = []) {
     rewritten[2].verifyTarget = verifyTarget;
   }
 
+  if (intent.safeAuthoringDefault) {
+    return rewritten.concat([
+      { type: 'wait', ms: 220 },
+      {
+        type: 'get_text',
+        text: 'Pine Editor',
+        reason: 'Inspect the current visible Pine Editor state before choosing a safe new-script or bounded-edit path',
+        pineEvidenceMode: 'safe-authoring-inspect'
+      }
+    ]);
+  }
+
   const trailing = actions.slice(intent.openerIndex + 1)
     .filter((action) => action && typeof action === 'object' && action.type !== 'screenshot');
+
+  if (!intent.explicitOverwriteAuthoring) {
+    for (let index = trailing.length - 1; index >= 0; index--) {
+      if (isPineDestructiveAuthoringStep(trailing[index])) {
+        trailing.splice(index, 1);
+      }
+    }
+  }
 
   if (intent.surfaceTarget === 'pine-version-history' && intent.pineEvidenceMode === 'provenance-summary') {
     trailing.forEach((action) => {

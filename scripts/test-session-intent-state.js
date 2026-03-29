@@ -129,6 +129,32 @@ test('session intent store records and clears chat continuity state', () => {
   fs.rmSync(tempDir, { recursive: true, force: true });
 });
 
+test('session intent store persists and clears pending requested task state', () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'liku-session-intent-'));
+  const stateFile = path.join(tempDir, 'session-intent-state.json');
+  const store = createSessionIntentStateStore({ stateFile });
+
+  const recorded = store.setPendingRequestedTask({
+    userMessage: 'yes, lets apply the volume profile',
+    executionIntent: 'yes, lets apply the volume profile',
+    taskSummary: 'Apply Volume Profile in TradingView',
+    targetApp: 'tradingview'
+  }, {
+    cwd: path.join(__dirname, '..')
+  });
+
+  assert.strictEqual(recorded.pendingRequestedTask.taskSummary, 'Apply Volume Profile in TradingView');
+  assert.strictEqual(recorded.pendingRequestedTask.targetApp, 'tradingview');
+
+  const reloaded = createSessionIntentStateStore({ stateFile }).getPendingRequestedTask({ cwd: path.join(__dirname, '..') });
+  assert.strictEqual(reloaded.executionIntent, 'yes, lets apply the volume profile');
+
+  const cleared = store.clearPendingRequestedTask({ cwd: path.join(__dirname, '..') });
+  assert.strictEqual(cleared.pendingRequestedTask, null);
+
+  fs.rmSync(tempDir, { recursive: true, force: true });
+});
+
 test('screen-like fallback evidence degrades continuity readiness', () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'liku-session-intent-'));
   const stateFile = path.join(tempDir, 'session-intent-state.json');

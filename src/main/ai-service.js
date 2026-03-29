@@ -3858,6 +3858,100 @@ async function verifyForegroundFocus(expectedWindowHandle, options = {}) {
   };
 }
 
+function buildFocusTargetHint(action = {}) {
+  const target = {
+    appName: null,
+    processNames: [],
+    titleHints: []
+  };
+
+  if (action?.verifyTarget && typeof action.verifyTarget === 'object') {
+    const explicit = action.verifyTarget;
+    if (typeof explicit.appName === 'string' && explicit.appName.trim()) {
+      target.appName = explicit.appName.trim();
+    }
+    if (Array.isArray(explicit.processNames)) {
+      target.processNames.push(...explicit.processNames.map((value) => String(value || '').trim()).filter(Boolean));
+    }
+    if (Array.isArray(explicit.titleHints)) {
+      target.titleHints.push(...explicit.titleHints.map((value) => String(value || '').trim()).filter(Boolean));
+    }
+  }
+
+  if (typeof action?.processName === 'string' && action.processName.trim()) {
+    target.processNames.push(action.processName.trim());
+  }
+  if (typeof action?.title === 'string' && action.title.trim()) {
+    target.titleHints.push(action.title.trim());
+  }
+  if (typeof action?.windowTitle === 'string' && action.windowTitle.trim()) {
+    target.titleHints.push(action.windowTitle.trim());
+  }
+
+  target.processNames = Array.from(new Set(target.processNames.map((value) => String(value || '').trim().toLowerCase()).filter(Boolean)));
+  target.titleHints = Array.from(new Set(target.titleHints.map((value) => String(value || '').trim()).filter(Boolean)));
+
+  return target;
+}
+
+function classifyActionFocusTargetResult(action = {}, result = {}) {
+  const focusTarget = result?.focusTarget && typeof result.focusTarget === 'object'
+    ? result.focusTarget
+    : null;
+  if (!focusTarget) return null;
+
+  const requestedWindowHandle = Number(focusTarget.requestedWindowHandle || result.requestedWindowHandle || action.windowHandle || action.hwnd || 0) || 0;
+  const actualForegroundHandle = Number(focusTarget.actualForegroundHandle || result.actualForegroundHandle || 0) || 0;
+  const actualForeground = focusTarget.actualForeground || result.actualForeground || null;
+
+  if (!requestedWindowHandle && !actualForegroundHandle) return null;
+  if (requestedWindowHandle && actualForegroundHandle && requestedWindowHandle === actualForegroundHandle) {
+    return {
+      outcome: 'exact',
+      accepted: true,
+      targetWindowHandle: requestedWindowHandle,
+      foreground: actualForeground,
+      matchReason: 'hwnd-exact'
+    };
+  }
+
+  const target = buildFocusTargetHint(action);
+  const foregroundMatch = actualForeground
+    ? evaluateForegroundAgainstTarget(actualForeground, target)
+    : { matched: false, matchReason: 'no-foreground' };
+  const tradingViewLikeTarget = isTradingViewTargetHint(action?.verifyTarget || target)
+    || normalizeTextForMatch(action?.processName || '').includes('tradingview')
+    || normalizeTextForMatch(action?.title || action?.windowTitle || '').includes('tradingview');
+
+  if (actualForegroundHandle && foregroundMatch.matched && tradingViewLikeTarget) {
+    return {
+      outcome: 'recovered',
+      accepted: true,
+      targetWindowHandle: actualForegroundHandle,
+      foreground: actualForeground,
+      matchReason: foregroundMatch.matchReason || 'target-family-match'
+    };
+  }
+
+  return {
+    outcome: 'mismatch',
+    accepted: false,
+    targetWindowHandle: requestedWindowHandle || null,
+    foreground: actualForeground,
+    matchReason: foregroundMatch.matchReason || 'foreground-mismatch'
+  };
+}
+
+function buildWindowProfileFromForeground(foreground, fallbackProfile = null) {
+  if (!foreground || !foreground.success) return fallbackProfile;
+  return {
+    processName: foreground.processName || fallbackProfile?.processName || undefined,
+    className: foreground.className || fallbackProfile?.className || undefined,
+    windowKind: foreground.windowKind || fallbackProfile?.windowKind || undefined,
+    title: foreground.title || fallbackProfile?.title || undefined
+  };
+}
+
 function buildPopupFollowUpRecipe(target) {
   return buildPopupFollowUpRecipeSelection(target, '');
 }
@@ -4462,6 +4556,29 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
     const result = await (actionExecutor ? actionExecutor(action) : systemAutomation.executeAction(action));
     result.reason = action.reason || '';
     result.safety = safety;
+
+    if (result.success && (action.type === 'focus_window' || action.type === 'bring_window_to_front')) {
+      const classifiedFocus = classifyActionFocusTargetResult(action, result);
+      if (classifiedFocus) {
+        result.focusTarget = {
+          ...(result.focusTarget || {}),
+          outcome: classifiedFocus.outcome,
+          accepted: classifiedFocus.accepted,
+          matchReason: classifiedFocus.matchReason
+        };
+        if (classifiedFocus.accepted) {
+          if (classifiedFocus.targetWindowHandle) {
+            lastTargetWindowHandle = classifiedFocus.targetWindowHandle;
+          }
+          lastTargetWindowProfile = buildWindowProfileFromForeground(classifiedFocus.foreground, lastTargetWindowProfile);
+          focusRecoveryTarget = {
+            title: classifiedFocus.foreground?.title || focusRecoveryTarget?.title || action.title || undefined,
+            processName: classifiedFocus.foreground?.processName || focusRecoveryTarget?.processName || action.processName || undefined
+          };
+        }
+      }
+    }
+
     results.push(result);
 
     if (result.success && checkpointSpec?.applicable) {
@@ -4504,9 +4621,7 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
       if (
         action.type === 'click' ||
         action.type === 'double_click' ||
-        action.type === 'right_click' ||
-        action.type === 'focus_window' ||
-        action.type === 'bring_window_to_front'
+        action.type === 'right_click'
       ) {
         const fg = await systemAutomation.getForegroundWindowHandle();
         if (fg) {
@@ -4955,6 +5070,29 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
     const result = await (actionExecutor ? actionExecutor(action) : systemAutomation.executeAction(action));
     result.reason = action.reason || '';
     result.userConfirmed = i === 0; // First one was confirmed
+
+    if (result.success && (action.type === 'focus_window' || action.type === 'bring_window_to_front')) {
+      const classifiedFocus = classifyActionFocusTargetResult(action, result);
+      if (classifiedFocus) {
+        result.focusTarget = {
+          ...(result.focusTarget || {}),
+          outcome: classifiedFocus.outcome,
+          accepted: classifiedFocus.accepted,
+          matchReason: classifiedFocus.matchReason
+        };
+        if (classifiedFocus.accepted) {
+          if (classifiedFocus.targetWindowHandle) {
+            lastTargetWindowHandle = classifiedFocus.targetWindowHandle;
+          }
+          lastTargetWindowProfile = buildWindowProfileFromForeground(classifiedFocus.foreground, lastTargetWindowProfile);
+          focusRecoveryTarget = {
+            title: classifiedFocus.foreground?.title || focusRecoveryTarget?.title || action.title || undefined,
+            processName: classifiedFocus.foreground?.processName || focusRecoveryTarget?.processName || action.processName || undefined
+          };
+        }
+      }
+    }
+
     results.push(result);
 
     if (result.success && checkpointSpec?.applicable) {
@@ -4995,9 +5133,7 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
       if (
         action.type === 'click' ||
         action.type === 'double_click' ||
-        action.type === 'right_click' ||
-        action.type === 'focus_window' ||
-        action.type === 'bring_window_to_front'
+        action.type === 'right_click'
       ) {
         const fg = await systemAutomation.getForegroundWindowHandle();
         if (fg) {

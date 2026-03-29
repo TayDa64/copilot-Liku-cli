@@ -1568,6 +1568,276 @@ node scripts/test-message-builder-session-intent.js
 - explicit continuation behavior remains unchanged
 - continuity state is preserved without being over-injected into the wrong branch
 
+### Track G — Degraded recovery stays tied to the requested task
+
+**Status:** First slice completed in working tree
+
+**Delivered so far**
+- added lightweight `pendingRequestedTask` persistence in `src/main/session-intent-state.js` so a concrete requested TradingView/Pine step can survive a withheld or blocked execution branch
+- updated `src/cli/commands/chat.js` to record that pending task when an emitted action plan is intentionally withheld as non-executable text, clear it when a fresh branch or execution starts, and use it during minimal `continue` turns
+- made degraded/blocked continuation recovery task-aware so replies reference the actual pending request (for example Volume Profile or Pine Logs) instead of only replaying a generic stale-continuity warning
+- extended `scripts/test-chat-actionability.js` and `scripts/test-session-intent-state.js` with regressions for pending-task persistence and task-aware degraded recovery messaging
+
+**Why this track exists**
+- Real TradingView testing showed that after a blocked follow-through turn, repeated `continue` messages could keep replaying generic degraded continuity warnings without reconnecting the user to the task they had actually asked for.
+- The recovery path needs to preserve both safety and task specificity: block blind continuation, but keep pointing back to the last requested actionable step.
+
+**Goal**
+- make blocked/degraded continuation recovery explicitly reference the pending requested TradingView/Pine task so the user can retry the correct action instead of falling into a vague continuity loop.
+
+**Primary files**
+- `src/main/session-intent-state.js`
+- `src/cli/commands/chat.js`
+- `scripts/test-chat-actionability.js`
+- `scripts/test-session-intent-state.js`
+
+**Implementation checklist**
+- persist a compact pending-task record when a concrete requested action is withheld or cannot yet continue safely
+- clear stale pending-task state when the user starts a new non-continuation branch or the action proceeds into execution
+- teach degraded `continue` recovery to mention the pending task directly while preserving existing verification/degraded-safety language
+
+**Acceptance proof (slice 1)**
+```powershell
+node scripts/test-session-intent-state.js
+node scripts/test-chat-actionability.js
+node scripts/test-chat-continuity-prompting.js
+node scripts/test-message-builder-session-intent.js
+```
+
+**Acceptance criteria**
+- degraded `continue` replies mention the last requested TradingView/Pine task when one is pending
+- `continue` does not blindly execute when continuity is degraded or absent but a pending task exists
+- starting a fresh non-continuation branch clears stale pending-task recovery state
+
+### Track H — TradingView UI grounding becomes truthful before Pine authoring
+
+**Status:** Planned
+
+**Why this track exists**
+- Recent real TradingView/Pine testing showed Liku can generate plausible Pine authoring plans while still failing at the more basic UI truthfulness layers:
+  - requested TradingView window handle vs actual foreground handle drift
+  - app focused vs Pine panel visible vs editor actually active
+  - destructive editor actions being attempted before the UI state is truly established
+- Official TradingView shortcut references also reinforce that many shortcuts are contextual or customizable, so reliable TradingView automation must start from verified UI state rather than assuming one static hotkey layer always applies.
+
+**Goal**
+- make TradingView focus, surface activation, and editor readiness explicit and truthful before Liku attempts Pine authoring or chart-editing flows.
+
+**Primary files**
+- `src/main/system-automation.js`
+- `src/main/ai-service.js`
+- `src/main/tradingview/verification.js`
+- `src/main/tradingview/pine-workflows.js`
+- `scripts/test-windows-observation-flow.js`
+- `scripts/test-bug-fixes.js`
+
+**Commit order inside this track**
+1. **Track H / Slice 1 — Focus truthfulness and handle drift accounting**
+2. **Track H / Slice 2 — TradingView surface activation and editor-active verification**
+3. **Track H / Slice 3 — Safe Pine authoring defaults (`new script` / inspect-first) instead of destructive clear-first flows**
+4. **Track H / Slice 4 — Resume-after-confirmation re-establishes UI prerequisites**
+
+#### Track H / Slice 1 — Focus truthfulness and handle drift accounting
+
+**Status:** First slice completed in working tree
+
+**Delivered so far**
+- added requested-vs-actual focus metadata to `focus_window` / `bring_window_to_front` results in `src/main/system-automation.js`
+- updated `src/main/ai-service.js` so `last target window` only advances on exact or explicitly recovered TradingView focus, instead of blindly adopting whatever foreground hwnd happened after a focus attempt
+- added runtime regressions in `scripts/test-windows-observation-flow.js` for focus mismatch truthfulness and guarded target-window updates
+- added seam coverage in `scripts/test-bug-fixes.js` for structured focus target metadata and guarded focus-result classification
+
+**Goal**
+- stop reporting requested TradingView focus success when a different foreground window actually received focus.
+
+**Exact files to change**
+- `src/main/system-automation.js`
+  - tighten `focus_window` / `bring_window_to_front` result shaping so action results preserve:
+    - requested target handle/title/process
+    - actual foreground handle/title/process
+    - whether focus was exact, recovered, or mismatched
+- `src/main/ai-service.js`
+  - only bless `last target window` updates when the foreground result is:
+    - exact,
+    - or an explicitly accepted recovered TradingView target
+  - surface focus mismatch metadata in execution results instead of silently treating it as clean success
+- `scripts/test-windows-observation-flow.js`
+  - add a runtime regression where requested TradingView hwnd differs from the actual foreground hwnd and the result is marked as drift/mismatch rather than a plain success
+- `scripts/test-bug-fixes.js`
+  - add seam assertions for requested-vs-actual focus metadata and guarded last-target-window updates
+
+**Regression additions**
+- `scripts/test-windows-observation-flow.js`
+  - `tradingview focus mismatch is not reported as clean success`
+  - `last target window only updates on exact or recovered tradingview focus`
+- `scripts/test-bug-fixes.js`
+  - `focus results preserve requested and actual target metadata`
+
+**Acceptance proof**
+```powershell
+node scripts/test-windows-observation-flow.js
+node scripts/test-bug-fixes.js
+```
+
+#### Track H / Slice 2 — TradingView surface activation and editor-active verification
+
+**Status:** First slice completed in working tree
+
+**Delivered so far**
+- Pine authoring workflows now request stronger `editor-active` verification when the next meaningful step needs real editor control
+- the shared observation checkpoint runtime recognizes `editor-active` / `editor-ready` verification kinds and returns Pine-specific failure messaging when activation cannot be confirmed
+- focused regressions prove Pine typing is blocked until active-editor verification succeeds
+- seam coverage now protects editor-active/editor-ready checkpoint support from regression
+
+**Goal**
+- explicitly distinguish:
+  1. TradingView window focused
+  2. Pine Editor panel visible
+  3. Pine editor control active / ready for typing
+
+**Exact files to change**
+- `src/main/tradingview/verification.js`
+  - add editor-state verification kinds such as:
+    - `editor-visible`
+    - `editor-active`
+    - `editor-ready-for-typing`
+- `src/main/tradingview/pine-workflows.js`
+  - require stronger verification before allowing `ctrl+a`, destructive edit keys, or typing into Pine Editor workflows
+  - separate `open Pine Editor` from `editor ready for authoring`
+- `src/main/ai-service.js`
+  - wire the stronger verification kinds into post-key checkpoints and failure reasons
+- `scripts/test-windows-observation-flow.js`
+  - add execution tests proving `ctrl+e` alone is not enough to unlock typing unless editor-active verification succeeds
+
+**Regression additions**
+- `scripts/test-windows-observation-flow.js`
+  - `pine editor typing waits for editor-active verification`
+  - `pine editor destructive edit is blocked until editor-ready state is observed`
+- `scripts/test-bug-fixes.js`
+  - seam assertions that TradingView checkpoints recognize editor-active / editor-ready verification kinds
+
+**Acceptance proof**
+```powershell
+node scripts/test-windows-observation-flow.js
+node scripts/test-bug-fixes.js
+```
+
+#### Track H / Slice 3 — Safe Pine authoring defaults
+
+**Status:** First slice completed in working tree
+
+**Delivered so far**
+- generic TradingView Pine creation requests now rewrite into inspect-first Pine Editor flows instead of defaulting to `ctrl+a` + `backspace` clear-first behavior
+- explicit overwrite requests still preserve destructive clear steps when the user clearly asks to replace the current script
+- added focused workflow, observation-flow, and seam regressions for safe Pine authoring defaults
+
+**Goal**
+- make Pine authoring default to inspect-first and `new script`-style flows instead of `ctrl+a` + `backspace` as the baseline strategy.
+
+**Exact files to change**
+- `src/main/tradingview/pine-workflows.js`
+  - add safe authoring intent shaping for requests like:
+    - `create a pine script`
+    - `draft a new pine script`
+    - `build a pine script`
+  - prefer:
+    - open Pine Editor
+    - inspect visible state
+    - create/open a new script path when available
+    - only clear existing content for explicit overwrite intents
+- `src/main/ai-service/system-prompt.js`
+  - add guidance that Pine authoring should prefer safe new-script flows and bounded edits over destructive clear-first behavior
+- `scripts/test-tradingview-pine-data-workflows.js`
+  - add workflow-level regressions for safe new-script authoring intent
+- `scripts/test-windows-observation-flow.js`
+  - add execution-level regression that generic Pine creation requests do not default to destructive clear-first plans
+
+**Regression additions**
+- `scripts/test-tradingview-pine-data-workflows.js`
+  - `generic pine script creation prefers safe new-script workflow`
+  - `destructive clear remains reserved for explicit overwrite intent`
+- `scripts/test-windows-observation-flow.js`
+  - `pine creation flow avoids clear-first behavior without explicit overwrite request`
+
+**Acceptance proof**
+```powershell
+node scripts/test-tradingview-pine-data-workflows.js
+node scripts/test-windows-observation-flow.js
+node scripts/test-bug-fixes.js
+```
+
+#### Track H / Slice 4 — Resume-after-confirmation re-establishes prerequisites
+
+**Goal**
+- after confirmation pauses, re-verify TradingView focus, Pine surface visibility, and editor-active state instead of assuming ephemeral selection/focus survived.
+
+**Exact files to change**
+- `src/main/ai-service.js`
+  - make `resumeAfterConfirmation(...)` rehydrate editor prerequisites for TradingView Pine flows before destructive keys or typing
+- `src/main/tradingview/pine-workflows.js`
+  - add resume-safe prerequisite hints so Pine workflows can re-establish panel/editor readiness after confirmation
+- `scripts/test-windows-observation-flow.js`
+  - add behavioral coverage for Pine confirmation-resume flows that must re-open/re-activate the editor before continuing
+
+**Regression additions**
+- `scripts/test-windows-observation-flow.js`
+  - `pine confirmation resume re-establishes editor state before destructive edit`
+  - `confirmation pause does not assume ctrl+a selection survived`
+
+**Acceptance proof**
+```powershell
+node scripts/test-windows-observation-flow.js
+node scripts/test-bug-fixes.js
+```
+
+### Track I — TradingView shortcuts become app-specific tool knowledge
+
+**Status:** Planned
+
+**Why this track exists**
+- Official TradingView shortcut documentation and third-party workflow guides show an important distinction:
+  - some shortcuts are stable defaults across many layouts (`/`, `Alt+A`, `Esc`, `Ctrl+K`)
+  - some shortcuts are context-dependent (Trading Panel / DOM / Pine Editor)
+  - some shortcuts are customizable (especially drawing-tool bindings)
+- Those shortcuts should not live as generic desktop assumptions because they are specific to TradingView and may behave differently in other apps, browser contexts, layouts, or custom hotkey configurations.
+
+**Goal**
+- represent TradingView shortcut knowledge as TradingView-specific capability/profile data, not as a generic keyboard rule set.
+
+**Primary files**
+- likely new: `src/main/tradingview/shortcut-profile.js`
+- `src/main/tradingview/pine-workflows.js`
+- `src/main/tradingview/indicator-workflows.js`
+- `src/main/tradingview/alert-workflows.js`
+- `src/main/ai-service/system-prompt.js`
+- `scripts/test-bug-fixes.js`
+- likely new: `scripts/test-tradingview-shortcut-profile.js`
+
+**Implementation checklist**
+- define TradingView shortcut categories in a dedicated app-specific helper:
+  - **stable defaults**: `/`, `Alt+A`, `Esc`, `Ctrl+K`, etc.
+  - **context-dependent**: Pine Editor, Trading Panel, DOM, panel toggles
+  - **customizable**: drawing tool bindings and user-mapped tools
+  - **unsafe / paper-test only**: Trading Panel and DOM execution shortcuts
+- teach TradingView workflows to consult that shortcut profile instead of embedding broad shortcut assumptions inline
+- keep the system prompt honest:
+  - stable defaults can be used when the relevant TradingView surface is verified
+  - customizable shortcuts should be treated as unknown until user-confirmed
+  - Trading/DOM shortcuts remain advisory-safe and paper-test only
+
+**Regression additions**
+- likely new `scripts/test-tradingview-shortcut-profile.js`
+  - `stable default shortcuts are exposed as tradingview-specific helpers`
+  - `drawing shortcuts are marked customizable rather than universal`
+  - `trading panel shortcuts are marked context-dependent and unsafe-by-default`
+- `scripts/test-bug-fixes.js`
+  - seam assertions that system prompt and TradingView workflows use TradingView-specific shortcut guidance instead of generic assumptions
+
+**Acceptance criteria**
+- TradingView keyboard shortcut guidance is app-specific, not global desktop doctrine
+- Liku can distinguish stable defaults from customizable/contextual shortcuts before proposing automation
+- TradingView order/trading shortcuts remain explicitly non-generic and advisory-safe
+
 ### Track D — Pine-backed evidence gathering for concrete TradingView insight
 
 **Status:** In progress in working tree

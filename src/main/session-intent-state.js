@@ -31,6 +31,7 @@ function defaultState() {
     downstreamRepoIntent: null,
     forgoneFeatures: [],
     explicitCorrections: [],
+    pendingRequestedTask: null,
     chatContinuity: defaultChatContinuity()
   };
 }
@@ -621,6 +622,28 @@ function formatChatContinuityContext(state, options = {}) {
   return lines.join('\n').trim();
 }
 
+function normalizePendingRequestedTask(task = {}) {
+  if (!task || typeof task !== 'object') return null;
+
+  const taskSummary = normalizeText(
+    task.taskSummary
+      || task.executionIntent
+      || task.userMessage,
+    240
+  );
+
+  if (!taskSummary) return null;
+
+  return {
+    recordedAt: normalizeText(task.recordedAt, 60) || nowIso(),
+    userMessage: normalizeText(task.userMessage, 280),
+    executionIntent: normalizeText(task.executionIntent, 280),
+    taskSummary,
+    targetApp: normalizeText(task.targetApp, 80),
+    targetWindowTitle: normalizeText(task.targetWindowTitle, 160)
+  };
+}
+
 function createSessionIntentStateStore(options = {}) {
   const stateFile = options.stateFile || SESSION_INTENT_FILE;
   let cachedState = null;
@@ -694,6 +717,20 @@ function createSessionIntentStateStore(options = {}) {
     const state = cloneState(loadState());
     syncCurrentRepo(state, options.cwd || process.cwd());
     state.chatContinuity = defaultChatContinuity();
+    return saveState(state);
+  }
+
+  function setPendingRequestedTask(task, options = {}) {
+    const state = cloneState(loadState());
+    syncCurrentRepo(state, options.cwd || process.cwd());
+    state.pendingRequestedTask = normalizePendingRequestedTask(task);
+    return saveState(state);
+  }
+
+  function clearPendingRequestedTask(options = {}) {
+    const state = cloneState(loadState());
+    syncCurrentRepo(state, options.cwd || process.cwd());
+    state.pendingRequestedTask = null;
     return saveState(state);
   }
 
@@ -777,14 +814,21 @@ function createSessionIntentStateStore(options = {}) {
     return cloneState(getState(options).chatContinuity || defaultChatContinuity());
   }
 
+  function getPendingRequestedTask(options = {}) {
+    return cloneState(getState(options).pendingRequestedTask || null);
+  }
+
   return {
     clearChatContinuity,
+    clearPendingRequestedTask,
     clearState,
     getChatContinuity,
+    getPendingRequestedTask,
     getState,
     ingestUserMessage,
     recordExecutedTurn,
     saveState,
+    setPendingRequestedTask,
     stateFile
   };
 }
@@ -800,9 +844,12 @@ module.exports = {
   formatSessionIntentContext,
   formatSessionIntentSummary,
   getChatContinuityState: (options) => defaultStore.getChatContinuity(options),
+  getPendingRequestedTask: (options) => defaultStore.getPendingRequestedTask(options),
   getSessionIntentState: (options) => defaultStore.getState(options),
   clearChatContinuityState: (options) => defaultStore.clearChatContinuity(options),
+  clearPendingRequestedTask: (options) => defaultStore.clearPendingRequestedTask(options),
   clearSessionIntentState: (options) => defaultStore.clearState(options),
   ingestUserIntentState: (message, options) => defaultStore.ingestUserMessage(message, options),
-  recordChatContinuityTurn: (turnRecord, options) => defaultStore.recordExecutedTurn(turnRecord, options)
+  recordChatContinuityTurn: (turnRecord, options) => defaultStore.recordExecutedTurn(turnRecord, options),
+  setPendingRequestedTask: (task, options) => defaultStore.setPendingRequestedTask(task, options)
 };
