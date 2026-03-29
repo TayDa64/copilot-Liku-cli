@@ -56,7 +56,9 @@ test('buildTradingViewIndicatorWorkflowActions emits deterministic slash-search 
   assert.strictEqual(actions[2].verify.kind, 'dialog-visible');
   assert.strictEqual(actions[4].type, 'type');
   assert.strictEqual(actions[4].text, 'Anchored VWAP');
+  assert.strictEqual(actions[6].type, 'click_element');
   assert.strictEqual(actions[6].verify.kind, 'indicator-present');
+  assert.strictEqual(actions[6].searchSurfaceContract.surface, 'indicator-search');
 });
 
 test('indicator workflow uses the TradingView shortcut profile for indicator search', () => {
@@ -81,6 +83,7 @@ test('maybeRewriteTradingViewIndicatorWorkflow rewrites low-signal indicator pla
   assert(Array.isArray(rewritten), 'low-signal indicator request should rewrite');
   assert.strictEqual(rewritten[2].key, '/');
   assert.strictEqual(rewritten[4].text, 'anchored vwap');
+  assert.strictEqual(rewritten[6].type, 'click_element');
   assert.strictEqual(rewritten[6].verify.target, 'indicator-present');
 });
 

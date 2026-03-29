@@ -103,6 +103,7 @@ const preferencesStub = {
 };
 
 const sessionIntentStateStub = {
+  clearPendingRequestedTask: () => null,
   getChatContinuityState: () => ({
     activeGoal: 'Provide TradingView analysis',
     currentSubgoal: 'Analyze the latest TradingView chart capture',
@@ -114,7 +115,9 @@ const sessionIntentStateStub = {
       windowTitle: 'TradingView - LUNR'
     }
   }),
-  recordChatContinuityTurn: () => null
+  getPendingRequestedTask: () => null,
+  recordChatContinuityTurn: () => null,
+  setPendingRequestedTask: () => null
 };
 
 Module._load = function(request, parent, isMain) {
@@ -173,7 +176,11 @@ async function main() {
   assert(scenario.output.includes('EXECUTE_COUNT:1'), 'only the initial action batch should execute before the bounded fallback answer');
   assert(scenario.output.includes('using a bounded fallback answer instead of continuing the screenshot loop'), 'scenario should warn that it is using the bounded fallback answer');
   assert(scenario.output.includes('bounded-observation-fallback'), 'scenario should print the bounded fallback assistant block');
-  assert(scenario.output.includes('What I cannot claim safely: exact indicator values, exact trendline placement, exact support/resistance numbers, or other fine chart details that are not directly legible in the current image.'), 'bounded fallback should explain the unsafe claims it is avoiding');
+  assert(scenario.output.includes('Verified result:'), 'bounded fallback should emit proof-carrying verified-result section');
+  assert(scenario.output.includes('Bounded inference:'), 'bounded fallback should emit proof-carrying bounded-inference section');
+  assert(scenario.output.includes('Degraded evidence:'), 'bounded fallback should emit proof-carrying degraded-evidence section');
+  assert(scenario.output.includes('Unverified next step:'), 'bounded fallback should emit proof-carrying unverified-next-step section');
+  assert(scenario.output.includes('exact indicator values, exact drawing placement, hidden dialog state, or unseen controls'), 'bounded fallback should explain the unsafe claims it is avoiding');
   assert(!scenario.output.includes('stopping to avoid screenshot-only loops'), 'scenario should no longer dead-end after the forced answer still returns actions');
 
   console.log('PASS chat forced observation fallback');

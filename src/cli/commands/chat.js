@@ -16,6 +16,11 @@ const {
   setPendingRequestedTask
 } = require('../../main/session-intent-state');
 const {
+  buildProofCarryingAnswerPrompt,
+  buildProofCarryingObservationFallback,
+  isScreenLikeCaptureMode
+} = require('../../main/claim-bounds');
+const {
   getLogLevel: getUiAutomationLogLevel,
   resetLogSettings: resetUiAutomationLogSettings,
   setLogLevel: setUiAutomationLogLevel
@@ -501,24 +506,12 @@ function isScreenshotOnlyPlan(actionData) {
 }
 
 function buildForcedObservationAnswerPrompt(userMessage) {
-  const inventoryHint = isLikelyToolInventoryInput(userMessage)
-    ? 'For the available-tools portion, organize the answer into exactly three buckets: direct UIA controls, reliable keyboard/window controls, and visible but screenshot-only controls.'
-    : 'Answer as a direct observation of the current app/window state.';
-
-  return [
-    'You already have fresh visual context for the current target window.',
-    'Do NOT request or plan another screenshot unless the latest capture explicitly failed or the screen materially changed.',
-    'Respond now in natural language only — no JSON action block.',
-    inventoryHint
-  ].join(' ');
-}
-
-function isScreenLikeCaptureMode(captureMode) {
-  const normalized = String(captureMode || '').trim().toLowerCase();
-  return normalized === 'screen'
-    || normalized === 'fullscreen-fallback'
-    || normalized.startsWith('screen-')
-    || normalized.includes('fullscreen');
+  const continuity = getChatContinuityState({ cwd: process.cwd() });
+  return buildProofCarryingAnswerPrompt({
+    userMessage,
+    continuity,
+    inventoryMode: isLikelyToolInventoryInput(userMessage)
+  });
 }
 
 function buildBoundedObservationFallback(userMessage, ai) {
@@ -526,54 +519,12 @@ function buildBoundedObservationFallback(userMessage, ai) {
     ? ai.getLatestVisualContext()
     : null;
   const continuity = getChatContinuityState({ cwd: process.cwd() });
-  const captureMode = String(latestVisual?.captureMode || latestVisual?.scope || continuity?.lastTurn?.captureMode || 'unknown').trim() || 'unknown';
-  const captureTrusted = typeof latestVisual?.captureTrusted === 'boolean'
-    ? latestVisual.captureTrusted
-    : (typeof continuity?.lastTurn?.captureTrusted === 'boolean' ? continuity.lastTurn.captureTrusted : null);
-  const targetWindow = String(
-    latestVisual?.windowTitle
-    || continuity?.lastTurn?.windowTitle
-    || continuity?.currentSubgoal
-    || continuity?.activeGoal
-    || 'current target window'
-  ).trim();
-  const degraded = captureTrusted === false || isScreenLikeCaptureMode(captureMode);
-
-  if (isLikelyToolInventoryInput(userMessage)) {
-    return [
-      'I have fresh visual context, but I am switching to a bounded fallback answer because the assistant kept asking for more screenshot actions instead of answering directly.',
-      '',
-      'Direct UIA controls:',
-      '- Sparse or uncertain from the current low-UIA/visual-first context unless Live UI State explicitly lists them.',
-      '',
-      'Reliable keyboard/window controls:',
-      '- Focus or restore the target window, use known keyboard shortcuts, and capture verified screenshots or panel transitions.',
-      '',
-      'Visible but screenshot-only controls:',
-      degraded
-        ? `- The current image is degraded (${captureMode}), so visible controls may be mixed with other desktop content and should be treated as uncertain until re-captured.`
-        : `- The current image is a trusted ${captureMode} capture, so visible controls can be described, but they still should not be treated as directly targetable unless UIA or verified workflows support them.`
-    ].join('\n');
-  }
-
-  const lines = [
-    'I already have fresh visual context, but the model continued returning screenshot actions instead of a direct answer. Here is a bounded observation fallback instead.',
-    '',
-    `- Target: ${targetWindow}`,
-    `- Evidence quality: ${degraded ? 'degraded-mixed-desktop' : 'trusted-target-window'} (${captureMode})`
-  ];
-
-  if (degraded) {
-    lines.push('- What I can say safely: I have recent visual context for the target, but it is degraded or mixed-desktop evidence rather than a trusted target-window capture.');
-    lines.push('- What I cannot claim safely: exact indicator values, exact trendline placement, exact support/resistance numbers, or other fine chart details that are not directly legible in the current image.');
-    lines.push('- Next safe options: re-capture the target window, open a verified TradingView surface such as Pine Editor or Pine Logs for stronger evidence, or continue with a bounded high-level synthesis only.');
-  } else {
-    lines.push('- What I can say safely: I can describe directly visible facts from the latest target-window capture and keep interpretation separate from observation.');
-    lines.push('- What I still will not overclaim: details that are not directly legible, unverified UI state changes, or precise drawing placement that requires a stronger evidence path.');
-    lines.push('- Next safe options: continue with a bounded synthesis, open verified TradingView tools (for example Pine surfaces), or ask for a specific chart feature to inspect.');
-  }
-
-  return lines.join('\n');
+  return buildProofCarryingObservationFallback({
+    userMessage,
+    latestVisual,
+    continuity,
+    inventoryMode: isLikelyToolInventoryInput(userMessage)
+  });
 }
 
 function inferContinuationVerificationStatus(execResult) {

@@ -579,6 +579,8 @@ test('TradingView shortcut profile and drawing bounds are wired through promptin
   const pineWorkflowPath = path.join(__dirname, '..', 'src', 'main', 'tradingview', 'pine-workflows.js');
   const messageBuilderPath = path.join(__dirname, '..', 'src', 'main', 'ai-service', 'message-builder.js');
   const systemPromptPath = path.join(__dirname, '..', 'src', 'main', 'ai-service', 'system-prompt.js');
+  const claimBoundsPath = path.join(__dirname, '..', 'src', 'main', 'claim-bounds.js');
+  const searchSurfaceContractsPath = path.join(__dirname, '..', 'src', 'main', 'search-surface-contracts.js');
   const fs = require('fs');
 
   const shortcutProfileContent = fs.readFileSync(shortcutProfilePath, 'utf8');
@@ -587,6 +589,8 @@ test('TradingView shortcut profile and drawing bounds are wired through promptin
   const pineWorkflowContent = fs.readFileSync(pineWorkflowPath, 'utf8');
   const messageBuilderContent = fs.readFileSync(messageBuilderPath, 'utf8');
   const systemPromptContent = fs.readFileSync(systemPromptPath, 'utf8');
+  const claimBoundsContent = fs.readFileSync(claimBoundsPath, 'utf8');
+  const searchSurfaceContractsContent = fs.readFileSync(searchSurfaceContractsPath, 'utf8');
 
   assert(shortcutProfileContent.includes('stable-default'), 'TradingView shortcut profile should expose stable shortcut metadata');
   assert(shortcutProfileContent.includes('context-dependent'), 'TradingView shortcut profile should expose context-dependent shortcut metadata');
@@ -595,6 +599,11 @@ test('TradingView shortcut profile and drawing bounds are wired through promptin
   assert(indicatorWorkflowContent.includes("require('./shortcut-profile')"), 'Indicator workflow should consume TradingView shortcut profile');
   assert(alertWorkflowContent.includes("require('./shortcut-profile')"), 'Alert workflow should consume TradingView shortcut profile');
   assert(pineWorkflowContent.includes("require('./shortcut-profile')"), 'Pine workflow should consume TradingView shortcut profile');
+  assert(indicatorWorkflowContent.includes("buildSearchSurfaceSelectionContract"), 'Indicator workflow should consume the shared search-surface selection contract');
+  assert(shortcutProfileContent.includes("buildSearchSurfaceSelectionContract"), 'Shortcut profile should reuse the shared search-surface selection contract for Pine quick-search routes');
+  assert(searchSurfaceContractsContent.includes("type: 'click_element'"), 'Shared search-surface contracts should perform semantic result selection');
+  assert(claimBoundsContent.includes('buildProofCarryingAnswerPrompt'), 'Claim-bounds helper should build proof-carrying answer prompts');
+  assert(messageBuilderContent.includes('buildClaimBoundConstraint'), 'Message builder should inject the answer claim contract on degraded or low-trust paths');
   assert(messageBuilderContent.includes('## Drawing Capability Bounds'), 'Message builder should inject drawing capability bounds for placement requests');
   assert(messageBuilderContent.includes('inferDrawingRequestKind'), 'Message builder should classify drawing request kinds');
   assert(systemPromptContent.includes('TradingView drawing capability rule'), 'System prompt should include drawing capability honesty guidance');

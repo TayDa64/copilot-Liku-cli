@@ -2200,3 +2200,193 @@ If only one slice is started next, the best first implementation is:
 3. **Track D (first slice)** — use Pine Logs / Pine Editor as an evidence-gathering tool rather than screenshot-only inference
 
 That sequence directly addresses the most important issues surfaced by real TradingView testing while opening a credible path toward more concrete chart insight.
+
+## Proposed next roadmap generation (beyond the current continuity plan)
+
+The continuity roadmap and its immediate TradingView hardening tracks are now implemented. The next roadmap should stop treating continuity as the primary problem and instead treat it as infrastructure that enables higher-integrity automation.
+
+The most credible next roadmap is:
+
+### Roadmap N1 — Response claim binding and proof-carrying answers
+
+**Status (2026-03-29)**
+- initial slice implemented
+- landed via:
+  - `src/main/claim-bounds.js`
+  - `src/cli/commands/chat.js`
+  - `src/main/ai-service/message-builder.js`
+  - `scripts/test-claim-bounds.js`
+  - `scripts/test-chat-forced-observation-fallback.js`
+- current scope:
+  - forced-observation prompts now require explicit `Verified result`, `Bounded inference`, `Degraded evidence`, and `Unverified next step` sections
+  - bounded-fallback answers now emit that proof-carrying structure explicitly
+  - low-trust / degraded response paths now receive an `Answer Claim Contract` prompt scaffold
+
+**Why this should be next**
+- The execution and continuity layers now collect more truthful verification data than the final natural-language answers always surface.
+- The next quality gap is not just whether Liku executed safely, but whether its answer clearly separates:
+  - verified result,
+  - bounded inference,
+  - degraded evidence,
+  - and unverified next step.
+
+**Goal**
+- make final responses carry explicit claim provenance so Liku cannot silently overstate what execution or evidence actually proved.
+
+**Primary files**
+- `src/cli/commands/chat.js`
+- `src/main/ai-service.js`
+- `src/main/ai-service/message-builder.js`
+- likely new: `src/main/claim-bounds.js`
+- likely new: `scripts/test-claim-bounds.js`
+
+**Initial implementation slices**
+1. add a compact execution/evidence claim model (`verified`, `bounded`, `degraded`, `unverified`)
+2. require forced-observation and bounded-fallback answers to emit that model explicitly
+3. inject a proof-carrying answer scaffold into high-risk or low-trust response paths
+
+**Acceptance criteria**
+- answers no longer collapse verified UI state and speculative interpretation into one voice
+- degraded evidence is visible in the final answer, not only in internal state or logs
+
+### Roadmap N2 — Generalized searchable-surface selection contracts
+
+**Status (2026-03-29)**
+- first reusable slice implemented
+- landed via:
+  - `src/main/search-surface-contracts.js`
+  - `src/main/tradingview/shortcut-profile.js`
+  - `src/main/tradingview/indicator-workflows.js`
+  - `scripts/test-search-surface-contracts.js`
+  - `scripts/test-tradingview-indicator-workflows.js`
+  - `scripts/test-windows-observation-flow.js`
+- current scope:
+  - Pine quick-search routing now shares a reusable searchable-surface contract instead of bespoke route assembly
+  - TradingView indicator add flows now use `query -> visible result selection -> verification` instead of blind `Enter`
+  - execution regressions now prove semantic result selection in the broader Windows observation flow
+
+**Why this should be next**
+- Pine quick-search selection was only one instance of a broader pattern.
+- The same class of failure can recur anywhere Liku currently assumes `type + Enter` is equivalent to selecting the correct visible result.
+
+**Goal**
+- generalize the `search -> validate visible result -> select verified item` pattern across TradingView and other searchable surfaces.
+
+**Primary files**
+- `src/main/ai-service.js`
+- `src/main/system-automation.js`
+- `src/main/tradingview/shortcut-profile.js`
+- `src/main/tradingview/indicator-workflows.js`
+- `src/main/tradingview/alert-workflows.js`
+- `src/main/tradingview/drawing-workflows.js`
+- likely new: `src/main/search-surface-contracts.js`
+
+**Initial implementation slices**
+1. define a reusable contract for searchable surfaces (`query`, `expectedResultText`, `selectionAction`, `verification`)
+2. migrate TradingView indicator search, alert search, object-tree search, and remaining command-palette style flows onto that contract
+3. add execution regressions proving that visible-result validation outranks blind `Enter`
+
+**Acceptance criteria**
+- search-style workflows stop relying on implicit selection behavior
+- visible result validation becomes reusable instead of Pine-only logic
+
+### Roadmap N3 — Continuity freshness expiry and re-observation policy
+
+**Why this should be next**
+- Continuity is now persisted and routed well, but freshness is still mostly implicit.
+- The next real failure class is stale-but-plausible continuity: old verified state surviving longer than it should.
+
+**Goal**
+- make continuity age, freshness loss, and re-observation requirements first-class routing signals.
+
+**Primary files**
+- `src/main/session-intent-state.js`
+- `src/main/chat-continuity-state.js`
+- `src/cli/commands/chat.js`
+- `src/main/ai-service/ui-context.js`
+- `src/main/ai-service/visual-context.js`
+- likely new: `scripts/test-chat-continuity-freshness.js`
+
+**Initial implementation slices**
+1. add freshness budgets / expiry metadata to verified continuity facts
+2. distinguish `still fresh`, `stale but recoverable`, and `expired — must re-observe`
+3. make short `continue` turns auto-recover via re-observation when safe instead of either blindly continuing or only refusing
+
+**Acceptance criteria**
+- stale continuity does not masquerade as fresh proof
+- continuation recovery becomes deterministic when freshness expires
+
+### Roadmap N4 — Capability-policy matrix by app and surface class
+
+**Why this should be next**
+- Several current safety and honesty wins are still encoded as targeted TradingView or low-UIA heuristics.
+- The next architectural step is to formalize those rules into a reusable capability-policy layer.
+
+**Goal**
+- move from app-specific patches toward a shared capability matrix that expresses what each app/surface supports safely:
+  - semantic control,
+  - keyboard control,
+  - trustworthy background capture,
+  - precise placement,
+  - bounded text extraction,
+  - and approval-time recovery.
+
+**Primary files**
+- `src/main/tradingview/app-profile.js`
+- `src/main/ai-service/message-builder.js`
+- `src/main/background-capture.js`
+- `src/main/system-automation.js`
+- likely new: `src/main/capability-policy.js`
+- likely new: `scripts/test-capability-policy.js`
+
+**Initial implementation slices**
+1. define a normalized capability-policy schema
+2. migrate TradingView-specific trust rules onto it first
+3. extend coverage to browser, VS Code, and generic Electron surfaces
+
+**Acceptance criteria**
+- honesty and safety rules become explainable from policy data instead of scattered heuristics
+- app onboarding gets easier because trust behavior is declared, not rediscovered ad hoc
+
+### Roadmap N5 — Runtime transcript to regression pipeline
+
+**Why this should be next**
+- The strongest recent improvements all came from real runtime transcripts, then hand-converted into tests.
+- That workflow works, but it is still too manual and easy to delay.
+
+**Goal**
+- turn real `liku chat` runtime failures into a fast, repeatable regression-ingestion workflow.
+
+**Primary files**
+- `scripts/`
+- `scripts/fixtures/`
+- `scripts/test-windows-observation-flow.js`
+- likely new: `scripts/extract-transcript-regression.js`
+- likely new: `docs/RUNTIME_REGRESSION_WORKFLOW.md`
+
+**Initial implementation slices**
+1. define a transcript fixture format for action plans, observations, and failure claims
+2. add a helper that turns sanitized transcript snippets into regression skeletons
+3. document the `runtime finding -> fixture -> focused test -> commit` workflow
+
+**Acceptance criteria**
+- future runtime failures are cheaper to capture and less likely to be lost between sessions
+- hardening work stays grounded in observed behavior rather than imagined gaps
+
+## Recommended order for the next roadmap
+
+If the goal is maximum practical value with minimal churn, the next roadmap should be executed in this order:
+
+1. **N1 — Response claim binding and proof-carrying answers**
+2. **N2 — Generalized searchable-surface selection contracts**
+3. **N3 — Continuity freshness expiry and re-observation policy**
+4. **N5 — Runtime transcript to regression pipeline**
+5. **N4 — Capability-policy matrix by app and surface class**
+
+## Practical recommendation
+
+If only one new roadmap is started immediately, the best next roadmap is:
+
+1. **N1** if the priority is answer honesty and user trust
+2. **N2** if the priority is preventing more Pine-like UI selection failures
+3. **N3** if the priority is making short `continue` turns age-aware and safer over long pauses

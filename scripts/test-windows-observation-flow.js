@@ -1217,9 +1217,9 @@ async function run() {
           },
           { type: 'type', text: 'Anchored VWAP', reason: 'Search for Anchored VWAP' },
           {
-            type: 'key',
-            key: 'enter',
-            reason: 'Add Anchored VWAP to the chart',
+            type: 'click_element',
+            text: 'Anchored VWAP',
+            reason: 'Select Anchored VWAP from the visible indicator results',
             verify: {
               kind: 'indicator-present',
               appName: 'TradingView',
@@ -1237,7 +1237,7 @@ async function run() {
       });
 
       assert.strictEqual(execResult.success, true, 'Execution should proceed after bounded indicator workflow verification');
-      assert.deepStrictEqual(executed, ['focus_window', 'key', 'type', 'key'], 'Indicator workflow should continue through search and add actions');
+  assert.deepStrictEqual(executed, ['focus_window', 'key', 'type', 'click_element'], 'Indicator workflow should continue through semantic result selection and add actions');
       assert.strictEqual(execResult.observationCheckpoints[0].classification, 'input-surface-open', 'Indicator search should be treated as an input-surface checkpoint');
       assert.strictEqual(execResult.observationCheckpoints[0].verified, true, 'Indicator search surface should verify before typing');
       assert.strictEqual(execResult.observationCheckpoints[1].classification, 'chart-state', 'Indicator add should map to a chart-state checkpoint');
@@ -1306,7 +1306,7 @@ async function run() {
 
     assert(chatContent.includes('isLikelyObservationInput(effectiveUserMessage) && isScreenshotOnlyPlan(contActionData)'), 'Chat loop should detect screenshot-only observation detours');
     assert(chatContent.includes('buildForcedObservationAnswerPrompt(effectiveUserMessage)'), 'Chat loop should request a direct answer after screenshot-only detours');
-    assert(chatContent.includes('Respond now in natural language only — no JSON action block.'), 'Forced observation prompt should require a natural-language answer');
+    assert(chatContent.includes('buildProofCarryingAnswerPrompt({'), 'Forced observation prompt should delegate to the proof-carrying answer helper');
     assert(chatContent.includes('buildBoundedObservationFallback(effectiveUserMessage, ai)'), 'Chat loop should fall back to a bounded observation answer when the forced retry still returns actions');
     assert(chatContent.includes('using a bounded fallback answer instead of continuing the screenshot loop'), 'Chat loop should warn that it is using a bounded fallback answer instead of dead-ending');
   });

@@ -1,5 +1,6 @@
 const BROWSER_PROCESS_NAMES = new Set(['msedge', 'chrome', 'firefox', 'brave', 'opera', 'iexplore', 'safari']);
 const LOW_UIA_PROCESS_HINTS = new Set(['tradingview', 'electron', 'slack', 'discord', 'teams']);
+const { buildClaimBoundConstraint } = require('../claim-bounds');
 
 function isScreenLikeCaptureMode(captureMode) {
   const normalized = String(captureMode || '').trim().toLowerCase();
@@ -493,6 +494,19 @@ function createMessageBuilder(dependencies) {
       });
       if (drawingEvidenceConstraint) {
         messages.push({ role: 'system', content: drawingEvidenceConstraint });
+      }
+    } catch {}
+
+    try {
+      const claimBoundConstraint = buildClaimBoundConstraint({
+        latestVisual,
+        capability: activeAppCapability,
+        foreground: currentForeground,
+        userMessage,
+        chatContinuityContext
+      });
+      if (claimBoundConstraint) {
+        messages.push({ role: 'system', content: claimBoundConstraint });
       }
     } catch {}
 

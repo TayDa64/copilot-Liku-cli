@@ -6,6 +6,7 @@ const {
   messageMentionsTradingViewShortcut,
   matchesTradingViewShortcutAction
 } = require('./shortcut-profile');
+const { buildSearchSurfaceSelectionContract } = require('../search-surface-contracts');
 
 const INDICATOR_SEARCH_SHORTCUT = getTradingViewShortcutKey('indicator-search') || '/';
 
@@ -130,27 +131,27 @@ function buildTradingViewIndicatorWorkflowActions(intent = {}) {
     return actions;
   }
 
-  actions.push(
-    {
-      type: 'type',
-      text: indicatorName,
-      reason: `Search for TradingView indicator ${indicatorName}`
+  actions.push(...buildSearchSurfaceSelectionContract({
+    query: indicatorName,
+    queryReason: `Search for TradingView indicator ${indicatorName}`,
+    queryWaitMs: 180,
+    selectionText: indicatorName,
+    selectionExact: false,
+    selectionReason: `Select the visible TradingView indicator result for ${indicatorName}`,
+    selectionVerify: {
+      kind: 'indicator-present',
+      appName: 'TradingView',
+      target: 'indicator-present',
+      keywords: mergeUnique([indicatorName])
     },
-    { type: 'wait', ms: 180 },
-    {
-      type: 'key',
-      key: 'enter',
-      reason: `Add TradingView indicator ${indicatorName}`,
-      verify: {
-        kind: 'indicator-present',
-        appName: 'TradingView',
-        target: 'indicator-present',
-        keywords: mergeUnique([indicatorName])
-      },
-      verifyTarget
-    },
-    { type: 'wait', ms: 900 }
-  );
+    selectionVerifyTarget: verifyTarget,
+    selectionWaitMs: 900,
+    metadata: {
+      appName: 'TradingView',
+      surface: 'indicator-search',
+      contractKind: 'search-result-selection'
+    }
+  }));
 
   return actions;
 }
