@@ -2450,7 +2450,7 @@ function extractRequestedAppName(text) {
 
   // Reject when the sentence is about interacting with web content, not launching an app
   const webContentRe = /\b(website|web\s*site|link|results|search\s*results|page|tab|url|button|menu|element)\b/i;
-  const appSurfaceRe = /\b(dialog|panel|timeframe|time\s+frame|watchlist|symbol|chart|create\s+alert|alert\s+dialog|indicator(?:\s+search)?|pine\s+editor|pine\s+logs|dom|depth\s+of\s+market|paper\s+trading|drawing\s+tools?|object\s+tree|trading\s+panel)\b/i;
+  const appSurfaceRe = /\b(dialog|panel|timeframe|time\s+frame|watchlist|symbol|chart|create\s+alert|alert\s+dialog|indicator(?:\s+search)?|quick\s+search|command\s+palette|pine\s+editor|pine\s+logs|dom|depth\s+of\s+market|paper\s+trading|drawing\s+tools?|object(?:\s+|-)tree|trading\s+panel)\b/i;
 
   const intentPatterns = [
     /^(?:please\s+|hey\s+|ok(?:ay)?\s+|first\s+|then\s+)*(open|launch|start|run)\b\s+(?:the\s+)?(.+?)\s+\b(app|application|program|software)\b(?:[.!?]|$)/i,

@@ -407,8 +407,12 @@ test('ai-service gates TradingView follow-up typing on post-key observation chec
   assert(tradingViewChartContent.includes("kind: 'timeframe-updated'"), 'TradingView chart verification workflows should encode timeframe-updated verification metadata');
   assert(tradingViewChartContent.includes("kind: 'symbol-updated'"), 'TradingView chart verification workflows should encode symbol-updated verification metadata');
   assert(tradingViewChartContent.includes("kind: 'watchlist-updated'"), 'TradingView chart verification workflows should encode watchlist-updated verification metadata');
+  assert(tradingViewChartContent.includes("messageMentionsTradingViewShortcut(raw, 'symbol-search')"), 'TradingView chart verification should use shortcut-profile aliases for symbol-surface phrasing');
+  assert(tradingViewChartContent.includes("matchesTradingViewShortcutAction(action, 'symbol-search')"), 'TradingView chart verification should recognize existing symbol-search shortcut plans');
   assert(tradingViewChartContent.includes("key: 'enter'"), 'TradingView chart verification workflows should confirm timeframe changes with enter');
   assert(tradingViewDrawingContent.includes("target: 'object-tree'"), 'TradingView drawing workflows should encode object-tree verification metadata');
+  assert(tradingViewDrawingContent.includes("messageMentionsTradingViewShortcut(raw, 'open-object-tree')"), 'TradingView drawing workflows should use shortcut-profile aliases for object-tree surface phrasing');
+  assert(tradingViewDrawingContent.includes("matchesTradingViewShortcutAction(openerAction?.action, 'open-object-tree')"), 'TradingView drawing workflows should prioritize known object-tree shortcut openers');
   assert(tradingViewDrawingContent.includes("kind: intent.verifyKind"), 'TradingView drawing workflows should preserve verification-first surface contracts');
   assert(tradingViewPineContent.includes("target: 'pine-editor'"), 'TradingView Pine workflows should encode pine-editor verification metadata');
   assert(tradingViewPineContent.includes("target: 'pine-profiler'"), 'TradingView Pine workflows should encode pine-profiler verification metadata');
@@ -565,6 +569,16 @@ test('TradingView shortcut profile and drawing bounds are wired through promptin
   assert(messageBuilderContent.includes('inferDrawingRequestKind'), 'Message builder should classify drawing request kinds');
   assert(systemPromptContent.includes('TradingView drawing capability rule'), 'System prompt should include drawing capability honesty guidance');
   assert(systemPromptContent.includes('TradingView shortcut profile rule'), 'System prompt should include TradingView shortcut profile guidance');
+});
+
+test('ai-service app launch detection treats TradingView shortcut surfaces as app surfaces, not app names', () => {
+  const aiServicePath = path.join(__dirname, '..', 'src', 'main', 'ai-service.js');
+  const fs = require('fs');
+  const aiServiceContent = fs.readFileSync(aiServicePath, 'utf8');
+
+  assert(aiServiceContent.includes('quick\\s+search'), 'TradingView quick-search phrasing should be treated as an app surface');
+  assert(aiServiceContent.includes('command\\s+palette'), 'TradingView command-palette phrasing should be treated as an app surface');
+  assert(aiServiceContent.includes('object(?:\\s+|-)tree'), 'TradingView object-tree variants should be treated as an app surface');
 });
 
 // Test DANGEROUS_COMMAND_PATTERNS covers critical cases

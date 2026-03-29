@@ -2,6 +2,7 @@
 
 const assert = require('assert');
 const path = require('path');
+const { getTradingViewShortcutKey } = require(path.join(__dirname, '..', 'src', 'main', 'tradingview', 'shortcut-profile.js'));
 
 const {
   extractRequestedDrawingName,
@@ -38,6 +39,17 @@ test('inferTradingViewDrawingIntent recognizes object tree requests', () => {
   assert.strictEqual(intent.openerIndex, 0);
 });
 
+test('inferTradingViewDrawingIntent recognizes hyphenated object-tree shortcut phrasing', () => {
+  const intent = inferTradingViewDrawingIntent('open object-tree in tradingview', [
+    { type: 'key', key: 'ctrl+shift+o' },
+    { type: 'wait', ms: 250 }
+  ]);
+
+  assert(intent, 'hyphenated object-tree intent should be inferred');
+  assert.strictEqual(intent.surfaceTarget, 'object-tree');
+  assert.strictEqual(intent.verifyKind, 'panel-visible');
+});
+
 test('inferTradingViewDrawingIntent recognizes searchable drawing surfaces', () => {
   const intent = inferTradingViewDrawingIntent('search for trend line in tradingview drawing tools', [
     { type: 'key', key: '/' },
@@ -47,6 +59,17 @@ test('inferTradingViewDrawingIntent recognizes searchable drawing surfaces', () 
   assert(intent, 'searchable drawing intent should be inferred');
   assert.strictEqual(intent.drawingName, 'trend line');
   assert.strictEqual(intent.surfaceTarget, 'drawing-search');
+  assert.strictEqual(intent.verifyKind, 'input-surface-open');
+});
+
+test('inferTradingViewDrawingIntent prioritizes object-tree shortcut opener over generic drawing wording', () => {
+  const intent = inferTradingViewDrawingIntent('open drawing tools in tradingview', [
+    { type: 'key', key: getTradingViewShortcutKey('open-object-tree') },
+    { type: 'type', text: 'trend line' }
+  ]);
+
+  assert(intent, 'intent should be inferred');
+  assert.strictEqual(intent.surfaceTarget, 'object-tree-search');
   assert.strictEqual(intent.verifyKind, 'input-surface-open');
 });
 
@@ -83,6 +106,19 @@ test('maybeRewriteTradingViewDrawingWorkflow rewrites low-signal object tree ope
   assert.strictEqual(rewritten[2].verify.target, 'object-tree');
 });
 
+test('maybeRewriteTradingViewDrawingWorkflow rewrites hyphenated object-tree opener plans', () => {
+  const rewritten = maybeRewriteTradingViewDrawingWorkflow([
+    { type: 'key', key: 'ctrl+shift+o' },
+    { type: 'wait', ms: 250 }
+  ], {
+    userMessage: 'open object-tree in tradingview'
+  });
+
+  assert(Array.isArray(rewritten), 'hyphenated object-tree opener should be rewritten');
+  assert.strictEqual(rewritten[2].type, 'key');
+  assert.strictEqual(rewritten[2].verify.target, 'object-tree');
+});
+
 test('maybeRewriteTradingViewDrawingWorkflow rewrites searchable drawing flows without inventing shortcuts', () => {
   const rewritten = maybeRewriteTradingViewDrawingWorkflow([
     { type: 'key', key: '/' },
@@ -98,6 +134,19 @@ test('maybeRewriteTradingViewDrawingWorkflow rewrites searchable drawing flows w
   assert.strictEqual(rewritten[2].verify.target, 'drawing-search');
   assert.strictEqual(rewritten[4].type, 'type');
   assert.strictEqual(rewritten[4].text, 'trend line');
+});
+
+test('maybeRewriteTradingViewDrawingWorkflow verifies object-tree-search when opener is open-object-tree shortcut', () => {
+  const rewritten = maybeRewriteTradingViewDrawingWorkflow([
+    { type: 'key', key: getTradingViewShortcutKey('open-object-tree') },
+    { type: 'type', text: 'trend line' }
+  ], {
+    userMessage: 'open drawing tools in tradingview'
+  });
+
+  assert(Array.isArray(rewritten), 'workflow should rewrite');
+  assert.strictEqual(rewritten[2].verify.target, 'object-tree-search');
+  assert.strictEqual(rewritten[2].verify.kind, 'input-surface-open');
 });
 
 test('drawing workflow does not hijack unsafe placement prompts', () => {

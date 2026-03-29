@@ -2,6 +2,7 @@
 
 const assert = require('assert');
 const path = require('path');
+const { getTradingViewShortcutKey } = require(path.join(__dirname, '..', 'src', 'main', 'tradingview', 'shortcut-profile.js'));
 
 const {
   extractRequestedTimeframe,
@@ -54,6 +55,14 @@ test('inferTradingViewSymbolIntent recognizes symbol-change workflows', () => {
   assert(intent, 'symbol intent should be inferred');
   assert.strictEqual(intent.appName, 'TradingView');
   assert.strictEqual(intent.symbol, 'NVDA');
+});
+
+test('inferTradingViewSymbolIntent recognizes shortcut-alias quick-search phrasing', () => {
+  const intent = inferTradingViewSymbolIntent('open the command palette for NVDA in tradingview');
+  assert(intent, 'quick-search alias intent should be inferred');
+  assert.strictEqual(intent.appName, 'TradingView');
+  assert.strictEqual(intent.symbol, 'NVDA');
+  assert.strictEqual(intent.searchContext, true);
 });
 
 test('extractRequestedWatchlistSymbol normalizes common TradingView watchlist phrases', () => {
@@ -116,6 +125,34 @@ test('maybeRewriteTradingViewSymbolWorkflow rewrites low-signal symbol plans', (
   assert.strictEqual(rewritten[2].text, 'NVDA');
   assert.strictEqual(rewritten[4].key, 'enter');
   assert.strictEqual(rewritten[4].verify.target, 'symbol-updated');
+});
+
+test('maybeRewriteTradingViewSymbolWorkflow rewrites low-signal quick-search alias plans', () => {
+  const rewritten = maybeRewriteTradingViewSymbolWorkflow([
+    { type: 'screenshot' },
+    { type: 'wait', ms: 250 }
+  ], {
+    userMessage: 'open the quick search for MSFT in tradingview'
+  });
+
+  assert(Array.isArray(rewritten), 'quick-search alias request should rewrite');
+  assert.strictEqual(rewritten[2].text, 'MSFT');
+  assert.strictEqual(rewritten[4].key, 'enter');
+  assert(rewritten[4].verify.keywords.includes('quick-search'));
+  assert(rewritten[4].verify.keywords.includes('command palette'));
+});
+
+test('maybeRewriteTradingViewSymbolWorkflow does not replace plans already using symbol-search shortcut', () => {
+  const rewritten = maybeRewriteTradingViewSymbolWorkflow([
+    { type: 'bring_window_to_front', title: 'TradingView', processName: 'tradingview' },
+    { type: 'key', key: getTradingViewShortcutKey('symbol-search') },
+    { type: 'type', text: 'MSFT' },
+    { type: 'key', key: 'enter' }
+  ], {
+    userMessage: 'open the command palette for MSFT in tradingview'
+  });
+
+  assert.strictEqual(rewritten, null);
 });
 
 test('buildTradingViewWatchlistWorkflowActions emits bounded watchlist confirmation flow', () => {

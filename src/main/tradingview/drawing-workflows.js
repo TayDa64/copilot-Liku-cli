@@ -1,5 +1,10 @@
 const { buildVerifyTargetHintFromAppName } = require('./app-profile');
 const { extractTradingViewObservationKeywords } = require('./verification');
+const {
+  getTradingViewShortcut,
+  matchesTradingViewShortcutAction,
+  resolveTradingViewShortcutId
+} = require('./shortcut-profile');
 
 const DRAWING_NAMES = [
   'trend line',
@@ -35,6 +40,25 @@ function mergeUnique(values = []) {
     .filter(Boolean)));
 }
 
+function getTradingViewShortcutMatchTerms(id) {
+  const shortcut = getTradingViewShortcut(id);
+  return mergeUnique([
+    shortcut?.id,
+    shortcut?.surface,
+    shortcut?.aliases
+  ]);
+}
+
+function messageMentionsTradingViewShortcut(value = '', id) {
+  const normalizedMessage = normalizeTextForMatch(value);
+  const resolvedId = resolveTradingViewShortcutId(id);
+  if (!normalizedMessage || !resolvedId) return false;
+
+  return getTradingViewShortcutMatchTerms(resolvedId)
+    .map((term) => normalizeTextForMatch(term))
+    .some((term) => term && normalizedMessage.includes(term));
+}
+
 function normalizeDrawingName(value = '') {
   const normalized = normalizeTextForMatch(value);
   if (!normalized) return null;
@@ -66,14 +90,15 @@ function extractRequestedDrawingName(userMessage = '') {
 
 function resolveDrawingSurfaceTarget(raw = '', openerAction = null, drawingName = null) {
   const normalized = normalizeTextForMatch(raw);
-  const opensObjectTree = /\bobject tree\b/i.test(raw);
+  const opensObjectTree = /\bobject tree\b/i.test(raw) || messageMentionsTradingViewShortcut(raw, 'open-object-tree');
   const mentionsDrawingTools = /\bdrawing tools|drawings panel|drawing panel|drawings toolbar|drawing toolbar\b/i.test(raw);
+  const openerUsesObjectTreeShortcut = matchesTradingViewShortcutAction(openerAction?.action, 'open-object-tree');
   const hasTypedFollowUp = openerAction?.nextAction?.type === 'type';
 
-  if (opensObjectTree && hasTypedFollowUp) {
+  if ((opensObjectTree || openerUsesObjectTreeShortcut) && hasTypedFollowUp) {
     return { target: 'object-tree-search', kind: 'input-surface-open' };
   }
-  if (opensObjectTree) {
+  if (opensObjectTree || openerUsesObjectTreeShortcut) {
     return { target: 'object-tree', kind: 'panel-visible' };
   }
   if ((mentionsDrawingTools || drawingName) && hasTypedFollowUp) {
@@ -95,7 +120,7 @@ function inferTradingViewDrawingIntent(userMessage = '', actions = []) {
   if (!mentionsTradingView) return null;
 
   const drawingName = extractRequestedDrawingName(raw);
-  const mentionsObjectTree = /\bobject tree\b/i.test(raw);
+  const mentionsObjectTree = /\bobject tree\b/i.test(raw) || messageMentionsTradingViewShortcut(raw, 'open-object-tree');
   const mentionsDrawingSurface = /\bdrawing|drawings|trend\s*line|ray|pitchfork|fibonacci|fib|brush|rectangle|ellipse|path|polyline|measure|anchored text|note\b/i.test(raw);
   const mentionsSafeOpenIntent = /\b(open|show|focus|switch|select|choose|pick|search|find|use|activate)\b/i.test(raw);
   const mentionsUnsafePlacement = /\bdraw\b/i.test(raw) && !mentionsObjectTree && !mentionsSafeOpenIntent;
@@ -108,8 +133,9 @@ function inferTradingViewDrawingIntent(userMessage = '', actions = []) {
   const openerIndex = Array.isArray(actions)
     ? actions.findIndex((action) => openerTypes.has(action?.type))
     : -1;
+  const openerAction = openerIndex >= 0 ? actions[openerIndex] || null : null;
   const nextAction = openerIndex >= 0 ? actions[openerIndex + 1] || null : null;
-  const surface = resolveDrawingSurfaceTarget(raw, { nextAction }, drawingName);
+  const surface = resolveDrawingSurfaceTarget(raw, { action: openerAction, nextAction }, drawingName);
   if (!surface) return null;
 
   const existingWorkflowSignal = Array.isArray(actions) && actions.some((action) => /drawing|object-tree/.test(String(action?.verify?.target || '')));

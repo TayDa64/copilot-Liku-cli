@@ -1,5 +1,10 @@
 const { buildVerifyTargetHintFromAppName } = require('./app-profile');
 const { extractTradingViewObservationKeywords } = require('./verification');
+const {
+  getTradingViewShortcut,
+  matchesTradingViewShortcutAction,
+  resolveTradingViewShortcutId
+} = require('./shortcut-profile');
 
 const TIMEFRAME_UNIT_MAP = new Map([
   ['s', 's'],
@@ -43,6 +48,25 @@ function mergeUnique(values = []) {
     .flat()
     .map((value) => String(value || '').trim())
     .filter(Boolean)));
+}
+
+function getTradingViewShortcutMatchTerms(id) {
+  const shortcut = getTradingViewShortcut(id);
+  return mergeUnique([
+    shortcut?.id,
+    shortcut?.surface,
+    shortcut?.aliases
+  ]);
+}
+
+function messageMentionsTradingViewShortcut(value = '', id) {
+  const normalizedMessage = normalizeTextForMatch(value);
+  const resolvedId = resolveTradingViewShortcutId(id);
+  if (!normalizedMessage || !resolvedId) return false;
+
+  return getTradingViewShortcutMatchTerms(resolvedId)
+    .map((term) => normalizeTextForMatch(term))
+    .some((term) => term && normalizedMessage.includes(term));
 }
 
 function normalizeSymbolToken(value = '') {
@@ -170,20 +194,22 @@ function inferTradingViewSymbolIntent(userMessage = '', actions = []) {
   const normalized = normalizeTextForMatch(raw);
   const mentionsTradingView = /\btradingview|trading view\b/i.test(raw)
     || (Array.isArray(actions) && actions.some((action) => /tradingview/i.test(String(action?.title || '')) || /tradingview/i.test(String(action?.processName || ''))));
-  const mentionsSymbolFlow = /\b(symbol|ticker)\b/i.test(raw) && /\b(change|switch|set|open|search|find)\b/i.test(raw);
+  const mentionsQuickSearchSurface = messageMentionsTradingViewShortcut(raw, 'symbol-search');
+  const mentionsSymbolFlow = (/\b(symbol|ticker)\b/i.test(raw) && /\b(change|switch|set|open|search|find)\b/i.test(raw))
+    || (mentionsQuickSearchSurface && /\b(change|switch|set|open|search|find|use|focus)\b/i.test(raw));
   if (!mentionsTradingView || !mentionsSymbolFlow) return null;
 
   const symbol = extractRequestedSymbol(raw);
   const existingWorkflowSignal = Array.isArray(actions) && actions.some((action) => {
     const verifyTarget = String(action?.verify?.target || '').trim().toLowerCase();
-    return /symbol|ticker|chart-state/.test(verifyTarget);
+    return matchesTradingViewShortcutAction(action, 'symbol-search') || /symbol|ticker|chart-state/.test(verifyTarget);
   });
 
   return {
     appName: 'TradingView',
     symbol,
     existingWorkflowSignal,
-    searchContext: /\bsearch|find|open\b/i.test(raw),
+    searchContext: /\bsearch|find|open\b/i.test(raw) || mentionsQuickSearchSurface,
     normalizedUserMessage: normalized,
     reason: symbol
       ? `Apply TradingView symbol ${symbol} with verification`
@@ -268,11 +294,13 @@ function buildTradingViewTimeframeWorkflowActions(intent = {}) {
 function buildTradingViewSymbolWorkflowActions(intent = {}) {
   const verifyTarget = buildVerifyTargetHintFromAppName(intent.appName || 'TradingView');
   const symbol = String(intent.symbol || '').trim().toUpperCase();
+  const symbolSearchTerms = getTradingViewShortcutMatchTerms('symbol-search');
   const expectedKeywords = mergeUnique([
     'symbol',
     'symbol search',
     'ticker',
     symbol,
+    symbolSearchTerms,
     extractTradingViewObservationKeywords(`change tradingview symbol to ${symbol}`),
     verifyTarget.chartKeywords,
     verifyTarget.dialogKeywords
@@ -391,7 +419,10 @@ function maybeRewriteTradingViewSymbolWorkflow(actions, context = {}) {
   const lowSignal = actions.every((action) => lowSignalTypes.has(action?.type));
   const tinyOrFragmented = actions.length <= 4;
   const screenshotFirst = actions[0]?.type === 'screenshot';
-  const lacksSymbolVerification = !actions.some((action) => /symbol|ticker|chart-state/.test(String(action?.verify?.target || '')));
+  const lacksSymbolVerification = !actions.some((action) =>
+    matchesTradingViewShortcutAction(action, 'symbol-search')
+    || /symbol|ticker|chart-state/.test(String(action?.verify?.target || ''))
+  );
 
   if (!lowSignal || (!tinyOrFragmented && !screenshotFirst && !lacksSymbolVerification)) {
     return null;
