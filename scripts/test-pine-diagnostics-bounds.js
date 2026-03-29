@@ -73,6 +73,24 @@ async function main() {
     assert(evidenceMessage.content.includes('latest visible revision label, latest visible relative time, visible revision count, and visible recency signal'));
     assert(evidenceMessage.content.includes('Do not infer hidden diffs, full script history, authorship, or runtime/chart behavior from the visible revision list alone.'));
   });
+
+  await test('pine line-budget prompt bounds visible count-hint inferences', async () => {
+    const evidenceMessage = await buildPineEvidenceMessage('open pine editor in tradingview and check the line budget');
+
+    assert(evidenceMessage, 'pine evidence block should be injected');
+    assert(evidenceMessage.content.includes('requestKind: line-budget'));
+    assert(evidenceMessage.content.includes('Treat visible line-count hints as bounded editor evidence'));
+    assert(evidenceMessage.content.includes('do not infer hidden script size beyond what the editor text shows'));
+  });
+
+  await test('pine generic-status prompt keeps status-only claims bounded', async () => {
+    const evidenceMessage = await buildPineEvidenceMessage('open pine editor in tradingview and show the visible status text');
+
+    assert(evidenceMessage, 'pine evidence block should be injected');
+    assert(evidenceMessage.content.includes('requestKind: generic-status'));
+    assert(evidenceMessage.content.includes('bounded editor evidence only'));
+    assert(evidenceMessage.content.includes('do not turn generic status text into runtime, chart, or market claims'));
+  });
 }
 
 main().catch((error) => {

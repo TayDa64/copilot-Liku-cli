@@ -85,7 +85,13 @@ function normalizePineStructuredSummary(summary) {
     editorVisibleState: normalizeText(summary.editorVisibleState, 60),
     visibleScriptKind: normalizeText(summary.visibleScriptKind, 40),
     visibleLineCountEstimate: Number.isFinite(Number(summary.visibleLineCountEstimate)) ? Number(summary.visibleLineCountEstimate) : null,
+    compileStatus: normalizeText(summary.compileStatus, 40),
+    errorCountEstimate: Number.isFinite(Number(summary.errorCountEstimate)) ? Number(summary.errorCountEstimate) : null,
+    warningCountEstimate: Number.isFinite(Number(summary.warningCountEstimate)) ? Number(summary.warningCountEstimate) : null,
+    lineBudgetSignal: normalizeText(summary.lineBudgetSignal, 60),
     visibleSignals: normalizeEvidenceList(summary.visibleSignals, 40),
+    statusSignals: normalizeEvidenceList(summary.statusSignals, 40),
+    topVisibleDiagnostics: normalizeEvidenceList(summary.topVisibleDiagnostics, 140),
     latestVisibleRevisionLabel: normalizeText(summary.latestVisibleRevisionLabel, 80),
     latestVisibleRevisionNumber: Number.isFinite(Number(summary.latestVisibleRevisionNumber)) ? Number(summary.latestVisibleRevisionNumber) : null,
     latestVisibleRelativeTime: normalizeText(summary.latestVisibleRelativeTime, 80),
@@ -99,7 +105,13 @@ function normalizePineStructuredSummary(summary) {
     && !normalized.editorVisibleState
     && !normalized.visibleScriptKind
     && normalized.visibleLineCountEstimate === null
+    && !normalized.compileStatus
+    && normalized.errorCountEstimate === null
+    && normalized.warningCountEstimate === null
+    && !normalized.lineBudgetSignal
     && normalized.visibleSignals.length === 0
+    && normalized.statusSignals.length === 0
+    && normalized.topVisibleDiagnostics.length === 0
     && !normalized.latestVisibleRevisionLabel
     && normalized.latestVisibleRevisionNumber === null
     && !normalized.latestVisibleRelativeTime
@@ -339,6 +351,20 @@ function deriveNextRecommendedStep(turnRecord = {}) {
   }
   if (pineStructuredSummary?.editorVisibleState === 'unknown-visible-state') {
     return 'The visible Pine Editor state is ambiguous; inspect further or ask before overwriting content.';
+  }
+  if (pineStructuredSummary?.compileStatus === 'errors-visible') {
+    return 'Visible Pine compiler errors are present; fix the visible errors before inferring runtime or chart behavior.';
+  }
+  if (pineStructuredSummary?.lineBudgetSignal === 'near-limit-visible'
+    || pineStructuredSummary?.lineBudgetSignal === 'at-limit-visible'
+    || pineStructuredSummary?.lineBudgetSignal === 'over-budget-visible') {
+    return 'Visible Pine line-budget pressure is high; prefer targeted edits over a broad rewrite.';
+  }
+  if (typeof pineStructuredSummary?.warningCountEstimate === 'number' && pineStructuredSummary.warningCountEstimate > 0) {
+    return 'Visible Pine warnings are present; review those warnings before trusting the script behavior.';
+  }
+  if (pineStructuredSummary?.compileStatus === 'success') {
+    return 'Visible Pine compile success is only compiler evidence; use logs, profiler, or chart evidence before inferring runtime behavior.';
   }
   if (turnRecord?.postVerification?.needsFollowUp) return 'Continue with the detected follow-up flow for the current app state.';
   if (turnRecord?.screenshotCaptured) return 'Continue from the latest visual evidence and current app state.';
@@ -682,6 +708,22 @@ function formatChatContinuityContext(state, options = {}) {
     }
     if (Array.isArray(pineStructuredSummary.visibleSignals) && pineStructuredSummary.visibleSignals.length > 0) {
       lines.push(`- pineVisibleSignals: ${pineStructuredSummary.visibleSignals.join(' | ')}`);
+    }
+  }
+  if (pineStructuredSummary?.compileStatus) {
+    lines.push(`- pineCompileStatus: ${pineStructuredSummary.compileStatus}`);
+    if (pineStructuredSummary.errorCountEstimate !== null && pineStructuredSummary.errorCountEstimate !== undefined) {
+      lines.push(`- pineErrorCountEstimate: ${pineStructuredSummary.errorCountEstimate}`);
+    }
+    if (pineStructuredSummary.warningCountEstimate !== null && pineStructuredSummary.warningCountEstimate !== undefined) {
+      lines.push(`- pineWarningCountEstimate: ${pineStructuredSummary.warningCountEstimate}`);
+    }
+    if (pineStructuredSummary.lineBudgetSignal) lines.push(`- pineLineBudgetSignal: ${pineStructuredSummary.lineBudgetSignal}`);
+    if (Array.isArray(pineStructuredSummary.statusSignals) && pineStructuredSummary.statusSignals.length > 0) {
+      lines.push(`- pineStatusSignals: ${pineStructuredSummary.statusSignals.join(' | ')}`);
+    }
+    if (Array.isArray(pineStructuredSummary.topVisibleDiagnostics) && pineStructuredSummary.topVisibleDiagnostics.length > 0) {
+      lines.push(`- pineTopVisibleDiagnostics: ${pineStructuredSummary.topVisibleDiagnostics.join(' | ')}`);
     }
   }
   if (lastTurn?.executionResult?.popupFollowUp?.attempted) {

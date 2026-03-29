@@ -494,6 +494,97 @@ function buildPineEditorSafeAuthoringSummary(text) {
   };
 }
 
+function inferPineLineBudgetSignal(lineCountEstimate) {
+  if (!Number.isFinite(lineCountEstimate)) return 'unknown-line-budget';
+  if (lineCountEstimate > 500) return 'over-budget-visible';
+  if (lineCountEstimate >= 500) return 'at-limit-visible';
+  if (lineCountEstimate >= 450) return 'near-limit-visible';
+  return 'within-budget-visible';
+}
+
+function buildPineEditorDiagnosticsStructuredSummary(text, evidenceMode = 'generic-status') {
+  const rawText = String(text || '').replace(/\r/g, '');
+  const compactText = normalizeCompactText(rawText, 2400);
+  if (!compactText) return null;
+
+  const visibleSegments = rawText
+    .split(/[\n;]+/)
+    .map((segment) => normalizeCompactText(segment, 180))
+    .filter(Boolean);
+
+  const addSignal = (signals, signal) => {
+    if (signal && !signals.includes(signal)) signals.push(signal);
+  };
+
+  const statusSignals = [];
+  const noErrorsVisible = /\b(no errors|compiled successfully|compile success|successfully compiled|0 errors)\b/i.test(compactText);
+  const errorSegments = visibleSegments.filter((segment) => /\berror\b/i.test(segment) && !/\bno errors\b/i.test(segment));
+  const warningSegments = visibleSegments.filter((segment) => /\bwarning\b/i.test(segment));
+  const statusSegments = visibleSegments.filter((segment) => /\b(status|compiler|compiled|strategy loaded|indicator loaded|loaded)\b/i.test(segment));
+  const lineBudgetContextVisible = /\b(500\s*lines?|line count|line budget|script length|lines used|line limit|maximum lines|max lines|capped)\b/i.test(compactText);
+
+  let visibleLineCountEstimate = null;
+  const lineCountMatch = rawText.match(/(?:line count|script length|lines used|used)\s*[:=]?\s*(\d{1,4})(?:\s*\/\s*500|\s+of\s+500)?\s*lines?/i)
+    || rawText.match(/\b(\d{1,4})\s*\/\s*500\s*lines?\b/i)
+    || rawText.match(/\b(\d{1,4})\s+of\s+500\s*lines?\b/i);
+  if (lineCountMatch) {
+    const parsed = Number(lineCountMatch[1]);
+    visibleLineCountEstimate = Number.isFinite(parsed) ? parsed : null;
+  }
+
+  const errorCountEstimate = errorSegments.length;
+  const warningCountEstimate = warningSegments.length;
+  let compileStatus = 'unknown';
+  if (errorCountEstimate > 0) {
+    compileStatus = 'errors-visible';
+    addSignal(statusSignals, 'compile-errors-visible');
+  } else if (noErrorsVisible) {
+    compileStatus = 'success';
+    addSignal(statusSignals, 'compile-success-visible');
+  } else if (statusSegments.length > 0 || evidenceMode === 'generic-status' || evidenceMode === 'line-budget') {
+    compileStatus = 'status-only';
+  }
+
+  if (warningCountEstimate > 0) addSignal(statusSignals, 'warnings-visible');
+  if (statusSegments.length > 0) addSignal(statusSignals, 'status-text-visible');
+  if (lineBudgetContextVisible || Number.isFinite(visibleLineCountEstimate)) {
+    addSignal(statusSignals, 'line-budget-hint-visible');
+  }
+  if (evidenceMode === 'diagnostics') addSignal(statusSignals, 'diagnostics-request');
+  if (evidenceMode === 'compile-result') addSignal(statusSignals, 'compile-result-request');
+  if (evidenceMode === 'line-budget') addSignal(statusSignals, 'line-budget-request');
+  if (evidenceMode === 'generic-status') addSignal(statusSignals, 'generic-status-request');
+
+  const lineBudgetSignal = Number.isFinite(visibleLineCountEstimate)
+    ? inferPineLineBudgetSignal(visibleLineCountEstimate)
+    : 'unknown-line-budget';
+  if (lineBudgetSignal !== 'unknown-line-budget') addSignal(statusSignals, lineBudgetSignal);
+
+  const topVisibleDiagnostics = visibleSegments
+    .filter((segment) => /\b(error|warning|status|compiler|compiled|line count|line budget|lines used|strategy loaded|indicator loaded|loaded)\b/i.test(segment))
+    .slice(0, 4);
+
+  const compactSummary = [
+    `status=${compileStatus}`,
+    Number.isFinite(errorCountEstimate) ? `errors=${errorCountEstimate}` : null,
+    Number.isFinite(warningCountEstimate) ? `warnings=${warningCountEstimate}` : null,
+    Number.isFinite(visibleLineCountEstimate) ? `lines=${visibleLineCountEstimate}` : null,
+    lineBudgetSignal !== 'unknown-line-budget' ? `budget=${lineBudgetSignal}` : null
+  ].filter(Boolean).join(' | ');
+
+  return {
+    evidenceMode,
+    compileStatus,
+    errorCountEstimate,
+    warningCountEstimate,
+    visibleLineCountEstimate,
+    lineBudgetSignal,
+    statusSignals: statusSignals.slice(0, 8),
+    topVisibleDiagnostics,
+    compactSummary: compactSummary || null
+  };
+}
+
 /**
  * Focus the desktop / unfocus Electron windows before sending keyboard input
  * This is critical for SendKeys/SendInput to reach the correct target
@@ -2624,10 +2715,17 @@ async function executeAction(action) {
           && action?.pineEvidenceMode === 'provenance-summary'
           && /pine version history/i.test(pineTargetText)) {
           result.pineStructuredSummary = buildPineVersionHistoryStructuredSummary(gtResult.text, action.pineSummaryFields);
-        } else if (gtResult.success
-          && action?.pineEvidenceMode === 'safe-authoring-inspect'
-          && /pine editor/i.test(pineTargetText)) {
-          result.pineStructuredSummary = buildPineEditorSafeAuthoringSummary(gtResult.text);
+        } else if (gtResult.success && /pine editor/i.test(pineTargetText)) {
+          if (action?.pineEvidenceMode === 'safe-authoring-inspect') {
+            result.pineStructuredSummary = buildPineEditorSafeAuthoringSummary(gtResult.text);
+          } else if (
+            action?.pineEvidenceMode === 'compile-result'
+            || action?.pineEvidenceMode === 'diagnostics'
+            || action?.pineEvidenceMode === 'line-budget'
+            || action?.pineEvidenceMode === 'generic-status'
+          ) {
+            result.pineStructuredSummary = buildPineEditorDiagnosticsStructuredSummary(gtResult.text, action.pineEvidenceMode);
+          }
         }
         result.message = gtResult.success
           ? `Got text via ${gtResult.method}: "${(gtResult.text || '').slice(0, 50)}"${result.pineStructuredSummary?.compactSummary ? ` [${result.pineStructuredSummary.compactSummary}]` : ''}`
@@ -3004,4 +3102,5 @@ module.exports = {
   executeCommand,
   buildPineVersionHistoryStructuredSummary,
   buildPineEditorSafeAuthoringSummary,
+  buildPineEditorDiagnosticsStructuredSummary,
 };

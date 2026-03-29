@@ -411,3 +411,98 @@ test('session intent continuity recommends bounded new-script drafting for empty
 
   fs.rmSync(tempDir, { recursive: true, force: true });
 });
+
+test('session intent continuity surfaces Pine diagnostics state and recovery guidance', () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'liku-session-intent-'));
+  const stateFile = path.join(tempDir, 'session-intent-state.json');
+  const store = createSessionIntentStateStore({ stateFile });
+
+  const recorded = store.recordExecutedTurn({
+    userMessage: 'open pine editor in tradingview and check diagnostics',
+    executionIntent: 'Inspect visible Pine diagnostics.',
+    committedSubgoal: 'Inspect the visible Pine diagnostics state',
+    actionPlan: [
+      { type: 'focus_window', title: 'TradingView', processName: 'tradingview' },
+      { type: 'key', key: 'ctrl+e', verifyKind: 'panel-visible', verifyTarget: 'pine-editor' },
+      { type: 'get_text', text: 'Pine Editor' }
+    ],
+    results: [
+      { type: 'focus_window', success: true, message: 'focused' },
+      { type: 'key', success: true, message: 'editor opened' },
+      {
+        type: 'get_text',
+        success: true,
+        message: 'diagnostics inspected',
+        pineStructuredSummary: {
+          evidenceMode: 'diagnostics',
+          compileStatus: 'errors-visible',
+          errorCountEstimate: 1,
+          warningCountEstimate: 1,
+          lineBudgetSignal: 'unknown-line-budget',
+          statusSignals: ['compile-errors-visible', 'warnings-visible'],
+          topVisibleDiagnostics: ['Compiler error at line 42: mismatched input.', 'Warning: script has unused variable.'],
+          compactSummary: 'status=errors-visible | errors=1 | warnings=1'
+        }
+      }
+    ],
+    success: true,
+    verification: { status: 'verified' }
+  }, {
+    cwd: path.join(__dirname, '..')
+  });
+
+  assert(/fix the visible errors/i.test(recorded.chatContinuity.lastTurn.nextRecommendedStep));
+
+  const continuityContext = formatChatContinuityContext(recorded);
+  assert(continuityContext.includes('pineCompileStatus: errors-visible'));
+  assert(continuityContext.includes('pineErrorCountEstimate: 1'));
+  assert(continuityContext.includes('pineWarningCountEstimate: 1'));
+  assert(continuityContext.includes('pineTopVisibleDiagnostics: Compiler error at line 42: mismatched input. | Warning: script has unused variable.'));
+
+  fs.rmSync(tempDir, { recursive: true, force: true });
+});
+
+test('session intent continuity recommends targeted edits under Pine line-budget pressure', () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'liku-session-intent-'));
+  const stateFile = path.join(tempDir, 'session-intent-state.json');
+  const store = createSessionIntentStateStore({ stateFile });
+
+  const recorded = store.recordExecutedTurn({
+    userMessage: 'open pine editor in tradingview and check the line budget',
+    executionIntent: 'Inspect visible Pine line-budget hints.',
+    committedSubgoal: 'Inspect visible Pine line-budget hints',
+    actionPlan: [
+      { type: 'focus_window', title: 'TradingView', processName: 'tradingview' },
+      { type: 'key', key: 'ctrl+e', verifyKind: 'panel-visible', verifyTarget: 'pine-editor' },
+      { type: 'get_text', text: 'Pine Editor' }
+    ],
+    results: [
+      { type: 'focus_window', success: true, message: 'focused' },
+      { type: 'key', success: true, message: 'editor opened' },
+      {
+        type: 'get_text',
+        success: true,
+        message: 'line budget inspected',
+        pineStructuredSummary: {
+          evidenceMode: 'line-budget',
+          compileStatus: 'status-only',
+          errorCountEstimate: 0,
+          warningCountEstimate: 1,
+          visibleLineCountEstimate: 487,
+          lineBudgetSignal: 'near-limit-visible',
+          statusSignals: ['line-budget-hint-visible', 'near-limit-visible'],
+          topVisibleDiagnostics: ['Line count: 487 / 500 lines.', 'Warning: script is close to the Pine limit.'],
+          compactSummary: 'status=status-only | errors=0 | warnings=1 | lines=487 | budget=near-limit-visible'
+        }
+      }
+    ],
+    success: true,
+    verification: { status: 'verified' }
+  }, {
+    cwd: path.join(__dirname, '..')
+  });
+
+  assert(/targeted edits/i.test(recorded.chatContinuity.lastTurn.nextRecommendedStep));
+
+  fs.rmSync(tempDir, { recursive: true, force: true });
+});

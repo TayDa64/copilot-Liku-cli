@@ -204,3 +204,52 @@ test('continuity mapper preserves Pine safe-authoring structured summary facts',
     'script-body-visible'
   ]);
 });
+
+test('continuity mapper preserves Pine diagnostics structured summary facts', () => {
+  const turnRecord = buildChatContinuityTurnRecord({
+    actionData: {
+      thought: 'Inspect Pine diagnostics',
+      actions: [
+        { type: 'focus_window', title: 'TradingView', processName: 'tradingview' },
+        { type: 'key', key: 'ctrl+e', reason: 'Open Pine Editor', verify: { kind: 'panel-visible', target: 'pine-editor' } },
+        { type: 'get_text', text: 'Pine Editor', reason: 'Read visible diagnostics' }
+      ]
+    },
+    execResult: {
+      success: true,
+      results: [
+        { success: true, action: 'focus_window', message: 'focused' },
+        { success: true, action: 'key', message: 'editor opened' },
+        {
+          success: true,
+          action: 'get_text',
+          message: 'diagnostics inspected',
+          pineStructuredSummary: {
+            evidenceMode: 'diagnostics',
+            compileStatus: 'errors-visible',
+            errorCountEstimate: 1,
+            warningCountEstimate: 1,
+            lineBudgetSignal: 'unknown-line-budget',
+            statusSignals: ['compile-errors-visible', 'warnings-visible'],
+            topVisibleDiagnostics: ['Compiler error at line 42: mismatched input.', 'Warning: script has unused variable.'],
+            compactSummary: 'status=errors-visible | errors=1 | warnings=1'
+          }
+        }
+      ]
+    },
+    details: {
+      userMessage: 'open pine editor in tradingview and check diagnostics',
+      executionIntent: 'Inspect Pine diagnostics.',
+      nextRecommendedStep: 'Fix the visible compiler errors before continuing.'
+    }
+  });
+
+  assert.strictEqual(turnRecord.results[2].pineStructuredSummary.compileStatus, 'errors-visible');
+  assert.strictEqual(turnRecord.results[2].pineStructuredSummary.errorCountEstimate, 1);
+  assert.strictEqual(turnRecord.results[2].pineStructuredSummary.warningCountEstimate, 1);
+  assert.deepStrictEqual(turnRecord.results[2].pineStructuredSummary.statusSignals, ['compile-errors-visible', 'warnings-visible']);
+  assert.deepStrictEqual(turnRecord.results[2].pineStructuredSummary.topVisibleDiagnostics, [
+    'Compiler error at line 42: mismatched input.',
+    'Warning: script has unused variable.'
+  ]);
+});

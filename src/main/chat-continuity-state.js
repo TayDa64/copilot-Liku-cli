@@ -53,7 +53,13 @@ function normalizePineStructuredSummary(summary) {
     editorVisibleState: normalizeText(summary.editorVisibleState, 60),
     visibleScriptKind: normalizeText(summary.visibleScriptKind, 40),
     visibleLineCountEstimate: safeNumber(summary.visibleLineCountEstimate),
+    compileStatus: normalizeText(summary.compileStatus, 40),
+    errorCountEstimate: safeNumber(summary.errorCountEstimate),
+    warningCountEstimate: safeNumber(summary.warningCountEstimate),
+    lineBudgetSignal: normalizeText(summary.lineBudgetSignal, 60),
     visibleSignals: normalizeEvidenceList(summary.visibleSignals, 40),
+    statusSignals: normalizeEvidenceList(summary.statusSignals, 40),
+    topVisibleDiagnostics: normalizeEvidenceList(summary.topVisibleDiagnostics, 140),
     latestVisibleRevisionLabel: normalizeText(summary.latestVisibleRevisionLabel, 80),
     latestVisibleRevisionNumber: safeNumber(summary.latestVisibleRevisionNumber),
     latestVisibleRelativeTime: normalizeText(summary.latestVisibleRelativeTime, 80),
@@ -67,7 +73,13 @@ function normalizePineStructuredSummary(summary) {
     && !normalized.editorVisibleState
     && !normalized.visibleScriptKind
     && normalized.visibleLineCountEstimate === null
+    && !normalized.compileStatus
+    && normalized.errorCountEstimate === null
+    && normalized.warningCountEstimate === null
+    && !normalized.lineBudgetSignal
     && normalized.visibleSignals.length === 0
+    && normalized.statusSignals.length === 0
+    && normalized.topVisibleDiagnostics.length === 0
     && !normalized.latestVisibleRevisionLabel
     && normalized.latestVisibleRevisionNumber === null
     && !normalized.latestVisibleRelativeTime

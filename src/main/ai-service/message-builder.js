@@ -97,6 +97,11 @@ function buildPineEvidenceConstraint({ foreground, userMessage }) {
 
   if (requestKind === 'line-budget') {
     lines.push('- Rule: Pine scripts are capped at 500 lines in TradingView. Treat visible line-count hints as bounded editor evidence, and prefer targeted edits over full rewrites when the budget is tight.');
+    lines.push('- Rule: Summarize only the visible line-count or budget hints; do not infer hidden script size beyond what the editor text shows.');
+  }
+
+  if (requestKind === 'generic-status') {
+    lines.push('- Rule: Treat visible Pine Editor status/output text as bounded editor evidence only; do not turn generic status text into runtime, chart, or market claims.');
   }
 
   if (requestKind === 'provenance-summary') {
