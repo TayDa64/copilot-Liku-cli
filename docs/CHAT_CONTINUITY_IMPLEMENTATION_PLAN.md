@@ -1807,6 +1807,7 @@ node scripts/test-bug-fixes.js
 - drawing bindings are explicitly marked customizable / user-confirmed, and Trading Panel / DOM execution shortcuts remain context-dependent and paper-test only
 - Pine Editor no longer assumes `ctrl+e` as a stable native TradingView shortcut; Pine workflows now route Pine Editor opening through a verified TradingView quick-search / command-palette path instead of hardcoding an ungrounded opener
 - explicit legacy Pine Editor opener plans are now canonicalized into that TradingView quick-search route before execution and continuity persistence, so verified/explicit plans no longer preserve stale `ctrl+e` assumptions
+- Pine Editor quick-search selection now validates and clicks the visible `Open Pine Editor` result instead of assuming `Enter` alone will activate the correct TradingView function item
 - TradingView Pine workflows, prompt guidance, and shortcut regressions now consult and protect that app-specific shortcut profile
 
 **Why this track exists**

@@ -101,7 +101,8 @@ function createObservationCheckpointRuntime(deps = {}) {
   }
 
   function buildKeyObservationCheckpointFromVerifyMetadata(action, actionData, actionIndex, options = {}) {
-    if (!action || action.type !== 'key') return null;
+    const actionType = String(action?.type || '').trim().toLowerCase();
+    if (!['key', 'click_element', 'click', 'double_click', 'right_click'].includes(actionType)) return null;
 
     const verify = normalizeActionVerifyMetadata(action.verify);
     if (!verify) return null;
@@ -144,6 +145,7 @@ function createObservationCheckpointRuntime(deps = {}) {
     return {
       applicable: true,
       key: String(action.key || '').trim().toLowerCase(),
+      actionType,
       classification,
       appName,
       tradingModeHint: inferTradingViewTradingMode({

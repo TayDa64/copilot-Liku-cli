@@ -179,8 +179,8 @@ test('open pine editor and read visible status stays verification-first', () => 
   assert.strictEqual(rewritten[0].type, 'bring_window_to_front');
   assert.strictEqual(rewritten[2].type, 'key');
   assert.strictEqual(rewritten[2].key, 'ctrl+k');
-  assert.strictEqual(opener.type, 'key');
-  assert.strictEqual(opener.key, 'enter');
+  assert.strictEqual(opener.type, 'click_element');
+  assert.strictEqual(opener.text, 'Open Pine Editor');
   assert.strictEqual(opener.verify.target, 'pine-editor');
   assert(readback, 'pine editor status workflow should gather Pine Editor text');
   assert.strictEqual(readback.pineEvidenceMode, 'generic-status');
@@ -269,7 +269,8 @@ test('pine resume prerequisites re-establish editor activation before destructiv
   assert(Array.isArray(prerequisites), 'resume prerequisites should be returned as an action array');
   assert.strictEqual(prerequisites[0].type, 'bring_window_to_front');
   assert.strictEqual(prerequisites[2].key, 'ctrl+k');
-  assert.strictEqual(opener.key, 'enter');
+  assert.strictEqual(opener.type, 'click_element');
+  assert.strictEqual(opener.text, 'Open Pine Editor');
   assert.strictEqual(opener.verify.kind, 'editor-active');
   assert.strictEqual(prerequisites[8].key, 'ctrl+a');
 });

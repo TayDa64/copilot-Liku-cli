@@ -47,7 +47,6 @@ const {
 } = require('./ai-service/providers/registry');
 const { createProviderOrchestrator } = require('./ai-service/providers/orchestration');
 const {
-  checkActionPolicies,
   checkNegativePolicies,
   formatActionPolicyViolationSystemMessage,
   formatNegativePolicyViolationSystemMessage
@@ -4526,8 +4525,8 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
       }
     }
 
-    // Ensure keyboard input goes to the last known target window.
-    if ((action.type === 'key' || action.type === 'type') && lastTargetWindowHandle) {
+    // Ensure focus-sensitive input goes to the last known target window.
+    if ((action.type === 'key' || action.type === 'type' || action.type === 'click_element') && lastTargetWindowHandle) {
       console.log(`[AI-SERVICE] Re-focusing last target window ${lastTargetWindowHandle} before ${action.type}`);
       await systemAutomation.focusWindow(lastTargetWindowHandle);
       await new Promise(r => setTimeout(r, 125));
@@ -5040,7 +5039,7 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
       }
     }
 
-    if ((action.type === 'key' || action.type === 'type') && lastTargetWindowHandle) {
+    if ((action.type === 'key' || action.type === 'type' || action.type === 'click_element') && lastTargetWindowHandle) {
       console.log(`[AI-SERVICE] (resume) Re-focusing last target window ${lastTargetWindowHandle} before ${action.type}`);
       await systemAutomation.focusWindow(lastTargetWindowHandle);
       await new Promise(r => setTimeout(r, 125));

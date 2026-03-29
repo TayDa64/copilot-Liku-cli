@@ -427,7 +427,7 @@ test('session intent continuity surfaces Pine diagnostics state and recovery gui
       { type: 'focus_window', title: 'TradingView', processName: 'tradingview' },
       { type: 'key', key: 'ctrl+k' },
       { type: 'type', text: 'Pine Editor' },
-      { type: 'key', key: 'enter', verifyKind: 'panel-visible', verifyTarget: 'pine-editor' },
+      { type: 'click_element', text: 'Open Pine Editor', verifyKind: 'panel-visible', verifyTarget: 'pine-editor' },
       { type: 'get_text', text: 'Pine Editor' }
     ],
     results: [
@@ -481,7 +481,7 @@ test('session intent continuity recommends targeted edits under Pine line-budget
       { type: 'focus_window', title: 'TradingView', processName: 'tradingview' },
       { type: 'key', key: 'ctrl+k' },
       { type: 'type', text: 'Pine Editor' },
-      { type: 'key', key: 'enter', verifyKind: 'panel-visible', verifyTarget: 'pine-editor' },
+      { type: 'click_element', text: 'Open Pine Editor', verifyKind: 'panel-visible', verifyTarget: 'pine-editor' },
       { type: 'get_text', text: 'Pine Editor' }
     ],
     results: [

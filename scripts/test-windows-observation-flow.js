@@ -912,7 +912,7 @@ async function run() {
       });
 
       assert.strictEqual(execResult.success, true, 'Execution should proceed after Pine Editor is observed');
-      assert.deepStrictEqual(executed, ['bring_window_to_front', 'wait', 'key', 'wait', 'type', 'wait', 'key', 'wait', 'get_text'], 'Bounded Pine Editor diagnostics gathering should upgrade legacy opener plans into the TradingView quick-search route before reading text');
+      assert.deepStrictEqual(executed, ['bring_window_to_front', 'wait', 'key', 'wait', 'type', 'wait', 'click_element', 'wait', 'get_text'], 'Bounded Pine Editor diagnostics gathering should upgrade legacy opener plans into the TradingView quick-search route before reading text');
       assert.deepStrictEqual(evidenceModes, ['compile-result'], 'Pine Editor diagnostics gathering should preserve compile-result evidence mode');
       assert.strictEqual(execResult.observationCheckpoints.length, 1, 'A post-key observation checkpoint should be returned');
       assert.strictEqual(execResult.observationCheckpoints[0].verified, true, 'Pine Editor panel observation should pass');
@@ -967,7 +967,7 @@ async function run() {
       });
 
       assert.strictEqual(execResult.success, true, 'Execution should proceed after Pine Editor diagnostics surface is observed');
-      assert.deepStrictEqual(executed, ['bring_window_to_front', 'wait', 'key', 'wait', 'type', 'wait', 'key', 'wait', 'get_text'], 'Bounded Pine Editor diagnostics should upgrade legacy opener plans into the TradingView quick-search route before reading text');
+      assert.deepStrictEqual(executed, ['bring_window_to_front', 'wait', 'key', 'wait', 'type', 'wait', 'click_element', 'wait', 'get_text'], 'Bounded Pine Editor diagnostics should upgrade legacy opener plans into the TradingView quick-search route before reading text');
       assert.deepStrictEqual(evidenceModes, ['diagnostics'], 'Pine diagnostics gathering should preserve diagnostics evidence mode');
       assert.strictEqual(execResult.observationCheckpoints.length, 1, 'A post-key observation checkpoint should be returned');
       assert.strictEqual(execResult.observationCheckpoints[0].verified, true, 'Pine Editor panel observation should pass');
@@ -1519,7 +1519,7 @@ async function run() {
       assert.strictEqual(resumed.success, true, 'Pine resume should succeed after editor prerequisites are re-established');
       assert.deepStrictEqual(
         executed,
-        ['bring_window_to_front', 'wait', 'key:ctrl+k', 'wait', 'type', 'wait', 'key:enter', 'wait', 'key:ctrl+a', 'wait', 'key:backspace', 'type'],
+        ['bring_window_to_front', 'wait', 'key:ctrl+k', 'wait', 'type', 'wait', 'click_element', 'wait', 'key:ctrl+a', 'wait', 'key:backspace', 'type'],
         'Pine resume should re-open the editor through TradingView quick search and re-select contents before destructive overwrite continues'
       );
       assert.strictEqual(resumed.observationCheckpoints.length, 1, 'Resume should verify the Pine Editor activation checkpoint');
@@ -1869,7 +1869,7 @@ async function run() {
       });
 
       assert.strictEqual(execResult.success, true, 'Execution should proceed after the Pine Editor surface is observed');
-      assert.deepStrictEqual(executed, ['bring_window_to_front', 'wait', 'key', 'wait', 'type', 'wait', 'key', 'wait', 'type'], 'Typing should continue only after the legacy Pine opener is rewritten into the TradingView quick-search route and verified');
+      assert.deepStrictEqual(executed, ['bring_window_to_front', 'wait', 'key', 'wait', 'type', 'wait', 'click_element', 'wait', 'type'], 'Typing should continue only after the legacy Pine opener is rewritten into the TradingView quick-search route and verified');
       assert.strictEqual(execResult.observationCheckpoints.length, 1, 'A post-key observation checkpoint should be returned');
       assert.strictEqual(execResult.observationCheckpoints[0].verified, true, 'The Pine checkpoint should pass after panel observation');
       assert.strictEqual(execResult.observationCheckpoints[0].classification, 'editor-active', 'Pine Editor should verify as an editor-active checkpoint');
@@ -1921,7 +1921,7 @@ async function run() {
       });
 
       assert.strictEqual(execResult.success, false, 'Typing should not continue when Pine Editor activation is not observed');
-      assert.deepStrictEqual(executed, ['bring_window_to_front', 'wait', 'key', 'wait', 'type', 'wait', 'key'], 'Typing should stop after the rewritten Pine opener route fails its editor-active checkpoint');
+      assert.deepStrictEqual(executed, ['bring_window_to_front', 'wait', 'key', 'wait', 'type', 'wait', 'click_element'], 'Typing should stop after the rewritten Pine opener route fails its editor-active checkpoint');
       assert.strictEqual(execResult.observationCheckpoints.length, 1, 'An editor-active checkpoint should be recorded');
       assert.strictEqual(execResult.observationCheckpoints[0].classification, 'editor-active', 'Pine authoring should classify the checkpoint as editor-active');
       assert.strictEqual(execResult.observationCheckpoints[0].verified, false, 'Editor-active checkpoint should fail without a visible Pine Editor activation');

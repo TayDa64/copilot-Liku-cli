@@ -89,9 +89,10 @@ function isPineSelectionStep(action) {
 function actionLooksLikePineEditorOpenIntent(action) {
   if (!action || typeof action !== 'object') return false;
   if (matchesTradingViewShortcutAction(action, 'open-pine-editor')) return true;
+  if (String(action?.tradingViewShortcut?.id || '').trim().toLowerCase() === 'open-pine-editor') return true;
 
   const type = String(action.type || '').trim().toLowerCase();
-  if (!['key', 'type', 'click', 'double_click', 'right_click'].includes(type)) {
+  if (!['key', 'type', 'click', 'double_click', 'right_click', 'click_element', 'find_element'].includes(type)) {
     return false;
   }
 

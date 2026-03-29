@@ -312,6 +312,12 @@ function buildTradingViewShortcutRoute(id, overrides = {}) {
       route: 'quick-search'
     };
 
+    const selectionActionOverrides = overrides.selectionActionOverrides && typeof overrides.selectionActionOverrides === 'object'
+      ? overrides.selectionActionOverrides
+      : (overrides.enterActionOverrides && typeof overrides.enterActionOverrides === 'object'
+        ? overrides.enterActionOverrides
+        : {});
+
     return [
       quickSearchAction,
       { type: 'wait', ms: Number.isFinite(Number(overrides.searchWaitMs)) ? Number(overrides.searchWaitMs) : 220 },
@@ -323,13 +329,12 @@ function buildTradingViewShortcutRoute(id, overrides = {}) {
       },
       { type: 'wait', ms: Number.isFinite(Number(overrides.commitWaitMs)) ? Number(overrides.commitWaitMs) : 180 },
       {
-        type: 'key',
-        key: 'enter',
-        reason: overrides.enterReason || 'Open Pine Editor from TradingView quick search',
+        type: 'click_element',
+        text: overrides.selectionText || 'Open Pine Editor',
+        exact: overrides.selectionExact === undefined ? true : !!overrides.selectionExact,
+        reason: overrides.selectionReason || overrides.enterReason || 'Click the Open Pine Editor result in TradingView quick search',
         tradingViewShortcut: routeMetadata,
-        ...(overrides.enterActionOverrides && typeof overrides.enterActionOverrides === 'object'
-          ? overrides.enterActionOverrides
-          : {})
+        ...selectionActionOverrides
       }
     ];
   }
