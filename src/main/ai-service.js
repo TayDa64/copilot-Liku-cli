@@ -4813,13 +4813,11 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
         while (evaluation.shouldReflect && reflectionIteration < MAX_REFLECTION_ITERATIONS) {
           reflectionIteration++;
           console.log(`[AI-SERVICE] Reflection triggered (iteration ${reflectionIteration}/${MAX_REFLECTION_ITERATIONS}): ${evaluation.reason}`);
-          const reflectionPrompt = reflectionTrigger.buildReflectionPrompt(evaluation.failures);
+          const reflectionMessages = reflectionTrigger.buildReflectionMessages(evaluation.failures);
 
           try {
             const reflectionResult = await providerOrchestrator.requestWithFallback(
-              [
-                { role: 'system', content: reflectionPrompt }
-              ],
+              reflectionMessages,
               reflectionModelOverride, // N6: use reasoning model for reflection when configured
               { phase: 'reflection' }
             );

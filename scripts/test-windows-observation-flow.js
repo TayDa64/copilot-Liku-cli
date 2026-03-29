@@ -469,6 +469,18 @@ async function run() {
     assert.strictEqual(rewritten[4].pineEvidenceMode, 'compile-result');
   });
 
+  await testAsync('low-signal TradingView pine-script-editor alias request rewrites to panel verification plus get_text', async () => {
+    const rewritten = aiService.rewriteActionsForReliability([
+      { type: 'key', key: 'ctrl+e' }
+    ], {
+      userMessage: 'open pine script editor in tradingview and read the visible compiler status'
+    });
+
+    assert(Array.isArray(rewritten), 'pine editor alias rewrite should return an action array');
+    assert.strictEqual(rewritten[2].verify.target, 'pine-editor');
+    assert.strictEqual(rewritten[4].text, 'Pine Editor');
+  });
+
   await testAsync('low-signal TradingView Pine diagnostics request rewrites to panel verification plus diagnostics get_text', async () => {
     const rewritten = aiService.rewriteActionsForReliability([
       { type: 'key', key: 'ctrl+e' }
@@ -531,6 +543,18 @@ async function run() {
     assert.strictEqual(rewritten[4].text, 'Pine Profiler');
   });
 
+  await testAsync('low-signal TradingView performance-profiler alias request rewrites to panel verification plus get_text', async () => {
+    const rewritten = aiService.rewriteActionsForReliability([
+      { type: 'key', key: 'ctrl+shift+p' }
+    ], {
+      userMessage: 'open performance profiler in tradingview and summarize the visible metrics'
+    });
+
+    assert(Array.isArray(rewritten), 'pine profiler alias rewrite should return an action array');
+    assert.strictEqual(rewritten[2].verify.target, 'pine-profiler');
+    assert.strictEqual(rewritten[4].text, 'Pine Profiler');
+  });
+
   await testAsync('low-signal TradingView Pine Version History request rewrites to panel verification plus get_text', async () => {
     const rewritten = aiService.rewriteActionsForReliability([
       { type: 'key', key: 'alt+h' }
@@ -543,6 +567,18 @@ async function run() {
     assert.strictEqual(rewritten[2].type, 'key');
     assert.strictEqual(rewritten[2].verify.target, 'pine-version-history');
     assert.strictEqual(rewritten[4].type, 'get_text');
+    assert.strictEqual(rewritten[4].text, 'Pine Version History');
+  });
+
+  await testAsync('low-signal TradingView revision-history alias request rewrites to panel verification plus get_text', async () => {
+    const rewritten = aiService.rewriteActionsForReliability([
+      { type: 'key', key: 'alt+h' }
+    ], {
+      userMessage: 'open revision history in tradingview and summarize the latest visible revisions'
+    });
+
+    assert(Array.isArray(rewritten), 'revision-history alias rewrite should return an action array');
+    assert.strictEqual(rewritten[2].verify.target, 'pine-version-history');
     assert.strictEqual(rewritten[4].text, 'Pine Version History');
   });
 

@@ -626,7 +626,7 @@ function isBroadAdvisoryPivotInput(message) {
   if (!text) return false;
 
   const hasAdvisorySignal = /\b(what would help|what should i|how can i|confidence|invest|investing|visualizations|indicators|data|catalyst|fundamental|fundamentals|what matters|what should i watch|what should i use)\b/i.test(text);
-  const hasExplicitExecutionSignal = /\b(continue|apply|add|open|show|set|switch|change|draw|place|capture|screenshot|pine logs|pine editor|volume profile|rsi|macd|bollinger|alert|timeframe|watchlist)\b/i.test(text);
+  const hasExplicitExecutionSignal = /\b(continue|apply|add|open|show|set|switch|change|draw|place|capture|screenshot|pine logs|pine editor|pine script editor|pine profiler|performance profiler|pine version history|revision history|script history|volume profile|rsi|macd|bollinger|alert|timeframe|watchlist)\b/i.test(text);
   return hasAdvisorySignal && !hasExplicitExecutionSignal;
 }
 
@@ -710,6 +710,8 @@ function formatChatContinuityContext(state, options = {}) {
       lines.push(`- pineVisibleSignals: ${pineStructuredSummary.visibleSignals.join(' | ')}`);
     }
   }
+  if (pineStructuredSummary?.evidenceMode) lines.push(`- pineEvidenceMode: ${pineStructuredSummary.evidenceMode}`);
+  if (pineStructuredSummary?.compactSummary) lines.push(`- pineCompactSummary: ${pineStructuredSummary.compactSummary}`);
   if (pineStructuredSummary?.compileStatus) {
     lines.push(`- pineCompileStatus: ${pineStructuredSummary.compileStatus}`);
     if (pineStructuredSummary.errorCountEstimate !== null && pineStructuredSummary.errorCountEstimate !== undefined) {
@@ -725,6 +727,22 @@ function formatChatContinuityContext(state, options = {}) {
     if (Array.isArray(pineStructuredSummary.topVisibleDiagnostics) && pineStructuredSummary.topVisibleDiagnostics.length > 0) {
       lines.push(`- pineTopVisibleDiagnostics: ${pineStructuredSummary.topVisibleDiagnostics.join(' | ')}`);
     }
+  }
+  if (pineStructuredSummary?.latestVisibleRevisionLabel) lines.push(`- pineLatestVisibleRevisionLabel: ${pineStructuredSummary.latestVisibleRevisionLabel}`);
+  if (pineStructuredSummary?.latestVisibleRevisionNumber !== null && pineStructuredSummary?.latestVisibleRevisionNumber !== undefined) {
+    lines.push(`- pineLatestVisibleRevisionNumber: ${pineStructuredSummary.latestVisibleRevisionNumber}`);
+  }
+  if (pineStructuredSummary?.latestVisibleRelativeTime) lines.push(`- pineLatestVisibleRelativeTime: ${pineStructuredSummary.latestVisibleRelativeTime}`);
+  if (pineStructuredSummary?.visibleRevisionCount !== null && pineStructuredSummary?.visibleRevisionCount !== undefined) {
+    lines.push(`- pineVisibleRevisionCount: ${pineStructuredSummary.visibleRevisionCount}`);
+  }
+  if (pineStructuredSummary?.visibleRecencySignal) lines.push(`- pineVisibleRecencySignal: ${pineStructuredSummary.visibleRecencySignal}`);
+  if (Array.isArray(pineStructuredSummary?.topVisibleRevisions) && pineStructuredSummary.topVisibleRevisions.length > 0) {
+    const revisions = pineStructuredSummary.topVisibleRevisions
+      .map((entry) => [entry.label, entry.relativeTime, entry.revisionNumber !== null && entry.revisionNumber !== undefined ? `#${entry.revisionNumber}` : null].filter(Boolean).join(' '))
+      .filter(Boolean)
+      .join(' | ');
+    if (revisions) lines.push(`- pineTopVisibleRevisions: ${revisions}`);
   }
   if (lastTurn?.executionResult?.popupFollowUp?.attempted) {
     const popup = lastTurn.executionResult.popupFollowUp;

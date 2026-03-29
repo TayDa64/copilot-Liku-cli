@@ -3,10 +3,17 @@ const { extractTradingViewObservationKeywords } = require('./verification');
 const {
   buildTradingViewShortcutAction,
   getTradingViewShortcutKey,
+  getTradingViewShortcutMatchTerms,
+  messageMentionsTradingViewShortcut,
   matchesTradingViewShortcutAction
 } = require('./shortcut-profile');
 
 const PINE_EDITOR_SHORTCUT = getTradingViewShortcutKey('open-pine-editor') || 'ctrl+e';
+const PINE_SURFACE_ALIASES = Object.freeze({
+  'pine-logs': ['pine logs', 'compiler logs'],
+  'pine-profiler': ['pine profiler', 'performance profiler'],
+  'pine-version-history': ['pine version history', 'revision history', 'script history']
+});
 
 function normalizeTextForMatch(value) {
   return String(value || '')
@@ -20,6 +27,26 @@ function mergeUnique(values = []) {
     .flat()
     .map((value) => String(value || '').trim())
     .filter(Boolean)));
+}
+
+function getPineSurfaceMatchTerms(surfaceTarget) {
+  if (surfaceTarget === 'pine-editor') {
+    return mergeUnique(getTradingViewShortcutMatchTerms('open-pine-editor'));
+  }
+  return mergeUnique(PINE_SURFACE_ALIASES[surfaceTarget] || []);
+}
+
+function messageMentionsPineSurface(raw = '', surfaceTarget = '') {
+  if (surfaceTarget === 'pine-editor') {
+    return messageMentionsTradingViewShortcut(raw, 'open-pine-editor');
+  }
+
+  const normalized = normalizeTextForMatch(raw);
+  if (!normalized) return false;
+
+  return getPineSurfaceMatchTerms(surfaceTarget)
+    .map((term) => normalizeTextForMatch(term))
+    .some((term) => term && normalized.includes(term));
 }
 
 function getNextMeaningfulAction(actions = [], startIndex = 0) {
@@ -199,16 +226,16 @@ function inferPineSurfaceTarget(raw = '') {
   const normalized = normalizeTextForMatch(raw);
   if (!normalized) return null;
 
-  if (/\bpine logs\b/.test(normalized)) {
+  if (messageMentionsPineSurface(normalized, 'pine-logs')) {
     return { target: 'pine-logs', kind: 'panel-visible' };
   }
-  if (/\bprofiler\b/.test(normalized)) {
+  if (messageMentionsPineSurface(normalized, 'pine-profiler') || /\bprofiler\b/.test(normalized)) {
     return { target: 'pine-profiler', kind: 'panel-visible' };
   }
-  if (/\bversion history\b/.test(normalized)) {
+  if (messageMentionsPineSurface(normalized, 'pine-version-history') || /\bversion history\b/.test(normalized)) {
     return { target: 'pine-version-history', kind: 'panel-visible' };
   }
-  if (/\bpine editor\b|\bpine\b|\bscript\b|\bscripts\b/.test(normalized)) {
+  if (messageMentionsPineSurface(normalized, 'pine-editor') || /\bpine editor\b|\bpine\b|\bscript\b|\bscripts\b/.test(normalized)) {
     return { target: 'pine-editor', kind: 'panel-visible' };
   }
 
@@ -223,7 +250,11 @@ function inferTradingViewPineIntent(userMessage = '', actions = []) {
     || (Array.isArray(actions) && actions.some((action) => /tradingview/i.test(String(action?.title || '')) || /tradingview/i.test(String(action?.processName || ''))));
   if (!mentionsTradingView) return null;
 
-  const mentionsPineSurface = /\bpine editor\b|\bpine logs\b|\bprofiler\b|\bversion history\b|\bpine\s+script\b|\bpine\b/i.test(raw);
+  const mentionsPineSurface = messageMentionsPineSurface(raw, 'pine-editor')
+    || messageMentionsPineSurface(raw, 'pine-logs')
+    || messageMentionsPineSurface(raw, 'pine-profiler')
+    || messageMentionsPineSurface(raw, 'pine-version-history')
+    || /\bpine editor\b|\bpine logs\b|\bprofiler\b|\bversion history\b|\bpine\s+script\b|\bpine\b/i.test(raw);
   const mentionsSafeOpenIntent = /\b(open|show|focus|switch|activate|bring up|display|launch)\b/i.test(raw);
   const pineAuthoringMode = inferPineAuthoringMode(raw);
   const mentionsUnsafeAuthoringOnly = !!pineAuthoringMode && !mentionsSafeOpenIntent;
@@ -287,10 +318,12 @@ function buildTradingViewPineWorkflowActions(intent = {}, actions = []) {
 
   const opener = actions[intent.openerIndex];
   const verifyTarget = buildVerifyTargetHintFromAppName(intent.appName || 'TradingView');
+  const surfaceTerms = getPineSurfaceMatchTerms(intent.surfaceTarget);
   const expectedKeywords = mergeUnique([
     'pine',
     'pine editor',
     intent.surfaceTarget,
+    surfaceTerms,
     extractTradingViewObservationKeywords(`open ${intent.surfaceTarget} in tradingview`),
     verifyTarget.pineKeywords,
     verifyTarget.dialogKeywords,

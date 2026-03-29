@@ -96,7 +96,7 @@ function buildReflectionPrompt(failures) {
     return `Failure ${i + 1}:\n  task: ${f.task}\n  phase: ${f.phase}\n${actions}\n${verifier}${context}`;
   }).join('\n\n');
 
-  return `You are the Reflection Agent for Liku CLI. Analyze these recent failures and respond with ONLY a JSON object:
+  return `Analyze these recent failures and respond with ONLY a JSON object:
 
 ${failureSummary}
 
@@ -115,6 +115,19 @@ Respond with exactly this JSON structure:
     "keywords": ["optional", "keywords"]
   }
 }`;
+}
+
+function buildReflectionMessages(failures) {
+  return [
+    {
+      role: 'system',
+      content: 'You are the Reflection Agent for Liku CLI. Analyze recent failures and respond with ONLY a JSON object.'
+    },
+    {
+      role: 'user',
+      content: buildReflectionPrompt(failures)
+    }
+  ];
 }
 
 /**
@@ -222,6 +235,7 @@ function resetSession() {
 
 module.exports = {
   evaluateOutcome,
+  buildReflectionMessages,
   buildReflectionPrompt,
   applyReflectionResult,
   resetSession,

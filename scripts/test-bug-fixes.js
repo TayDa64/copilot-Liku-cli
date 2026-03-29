@@ -305,6 +305,27 @@ test('system prompt includes Pine diagnostics guidance', () => {
   assert(systemPromptContent.includes('TradingView shortcut profile rule'), 'System prompt should include TradingView shortcut-profile guidance');
 });
 
+test('reflection trigger builds provider-compatible chat messages', () => {
+  const reflectionTriggerPath = path.join(__dirname, '..', 'src', 'main', 'telemetry', 'reflection-trigger.js');
+  const reflectionTrigger = require(reflectionTriggerPath);
+
+  assert(typeof reflectionTrigger.buildReflectionMessages === 'function', 'Reflection trigger should expose chat-message builder');
+  const messages = reflectionTrigger.buildReflectionMessages([
+    {
+      task: 'Open TradingView alert dialog',
+      phase: 'execution',
+      actions: [{ type: 'key', key: 'alt+a' }],
+      verifier: { exitCode: 1, stderr: 'dialog not observed' },
+      context: { failedCount: 1 }
+    }
+  ]);
+
+  assert(Array.isArray(messages), 'Reflection trigger should return a message array');
+  assertEqual(messages[0].role, 'system', 'Reflection messages should begin with a system instruction');
+  assertEqual(messages[1].role, 'user', 'Reflection messages should include a user payload for providers that reject system-only chat requests');
+  assert(/Open TradingView alert dialog/i.test(messages[1].content), 'Reflection user payload should contain summarized failure context');
+});
+
 test('rewriteActionsForReliability does not reinterpret passive TradingView open-state prompts as app launches', () => {
   const aiServicePath = path.join(__dirname, '..', 'src', 'main', 'ai-service.js');
   const aiService = require(aiServicePath);
@@ -397,6 +418,8 @@ test('ai-service gates TradingView follow-up typing on post-key observation chec
   assert(systemPromptContent.includes('safe new-script / bounded-edit paths'), 'system prompt should guide Pine authoring toward safe new-script flows');
   assert(observationCheckpointContent.includes('active Pine Editor surface before continuing'), 'Observation checkpoint failures should explain missing active Pine Editor state');
   assert(tradingViewPineContent.includes('requiresEditorActivation'), 'TradingView Pine workflows should distinguish editor activation from generic panel visibility');
+  assert(tradingViewPineContent.includes("messageMentionsTradingViewShortcut(raw, 'open-pine-editor')"), 'TradingView Pine workflows should use shortcut-profile aliases for Pine Editor phrasing');
+  assert(tradingViewPineContent.includes('getPineSurfaceMatchTerms'), 'TradingView Pine workflows should expose alias-aware Pine surface match terms');
   assert(tradingViewVerificationContent.includes('pine editor'), 'TradingView checkpoints should ground Pine Editor workflows');
   assert(tradingViewVerificationContent.includes('depth of market'), 'TradingView checkpoints should ground DOM workflows');
   assert(tradingViewVerificationContent.includes('paper trading'), 'TradingView checkpoints should ground Paper Trading workflows');

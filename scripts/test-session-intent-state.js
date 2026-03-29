@@ -506,3 +506,58 @@ test('session intent continuity recommends targeted edits under Pine line-budget
 
   fs.rmSync(tempDir, { recursive: true, force: true });
 });
+
+test('session intent continuity surfaces Pine provenance summaries for continuation context', () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'liku-session-intent-'));
+  const stateFile = path.join(tempDir, 'session-intent-state.json');
+  const store = createSessionIntentStateStore({ stateFile });
+
+  const recorded = store.recordExecutedTurn({
+    userMessage: 'open pine version history in tradingview and summarize the top visible revision metadata',
+    executionIntent: 'Inspect visible Pine Version History provenance.',
+    committedSubgoal: 'Inspect top visible Pine Version History metadata',
+    actionPlan: [
+      { type: 'focus_window', title: 'TradingView', processName: 'tradingview' },
+      { type: 'key', key: 'alt+h', verifyKind: 'panel-visible', verifyTarget: 'pine-version-history' },
+      { type: 'get_text', text: 'Pine Version History' }
+    ],
+    results: [
+      { type: 'focus_window', success: true, message: 'focused' },
+      { type: 'key', success: true, message: 'version history opened' },
+      {
+        type: 'get_text',
+        success: true,
+        message: 'provenance inspected',
+        pineStructuredSummary: {
+          evidenceMode: 'provenance-summary',
+          compactSummary: 'latest=Revision 12 | revisions=3 | recency=recent-visible',
+          latestVisibleRevisionLabel: 'Revision 12',
+          latestVisibleRevisionNumber: 12,
+          latestVisibleRelativeTime: '5 minutes ago',
+          visibleRevisionCount: 3,
+          visibleRecencySignal: 'recent-visible',
+          topVisibleRevisions: [
+            { label: 'Revision 12', relativeTime: '5 minutes ago', revisionNumber: 12 },
+            { label: 'Revision 11', relativeTime: '1 hour ago', revisionNumber: 11 }
+          ]
+        }
+      }
+    ],
+    success: true,
+    verification: { status: 'verified' }
+  }, {
+    cwd: path.join(__dirname, '..')
+  });
+
+  const continuityContext = formatChatContinuityContext(recorded);
+  assert(continuityContext.includes('pineEvidenceMode: provenance-summary'));
+  assert(continuityContext.includes('pineCompactSummary: latest=Revision 12 | revisions=3 | recency=recent-visible'));
+  assert(continuityContext.includes('pineLatestVisibleRevisionLabel: Revision 12'));
+  assert(continuityContext.includes('pineLatestVisibleRevisionNumber: 12'));
+  assert(continuityContext.includes('pineLatestVisibleRelativeTime: 5 minutes ago'));
+  assert(continuityContext.includes('pineVisibleRevisionCount: 3'));
+  assert(continuityContext.includes('pineVisibleRecencySignal: recent-visible'));
+  assert(continuityContext.includes('pineTopVisibleRevisions: Revision 12 5 minutes ago #12 | Revision 11 1 hour ago #11'));
+
+  fs.rmSync(tempDir, { recursive: true, force: true });
+});

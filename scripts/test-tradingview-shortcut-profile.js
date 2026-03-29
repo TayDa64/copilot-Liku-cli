@@ -110,10 +110,13 @@ test('shortcut profile resolves aliases and documents official shortcut referenc
 test('shortcut profile exposes reusable phrase matching helpers for workflow inference', () => {
   const indicatorTerms = getTradingViewShortcutMatchTerms('indicator-search');
   const alertTerms = getTradingViewShortcutMatchTerms('create-alert');
+  const pineEditorTerms = getTradingViewShortcutMatchTerms('open-pine-editor');
 
   assert(indicatorTerms.includes('study search'));
   assert(indicatorTerms.includes('indicators menu'));
   assert(alertTerms.includes('new alert'));
+  assert(pineEditorTerms.includes('pine script editor'));
   assert(messageMentionsTradingViewShortcut('open the study search in tradingview', 'indicator-search'));
   assert(messageMentionsTradingViewShortcut('open a new alert in tradingview', 'create-alert'));
+  assert(messageMentionsTradingViewShortcut('open the pine script editor in tradingview', 'open-pine-editor'));
 });

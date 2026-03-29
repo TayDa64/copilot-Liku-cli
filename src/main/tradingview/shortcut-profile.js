@@ -83,7 +83,7 @@ const TRADINGVIEW_SHORTCUTS = Object.freeze({
     category: 'context-dependent',
     surface: 'pine-editor',
     safety: 'safe',
-    aliases: ['pine editor', 'open pine editor'],
+    aliases: ['pine editor', 'open pine editor', 'pine script editor'],
     notes: ['Requires verified TradingView focus and should not be treated as a universal desktop shortcut.'],
     sourceConfidence: 'internal-profile',
     sourceUrls: [TRADINGVIEW_SHORTCUTS_OFFICIAL_URL]

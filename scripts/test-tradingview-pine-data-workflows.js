@@ -42,6 +42,16 @@ test('pine workflow recognizes pine editor status-output requests', () => {
   assert.strictEqual(intent.wantsEvidenceReadback, true);
 });
 
+test('pine workflow recognizes pine-editor alias phrasing', () => {
+  const intent = inferTradingViewPineIntent('open pine script editor in tradingview and read the visible compiler status', [
+    { type: 'key', key: 'ctrl+e' }
+  ]);
+
+  assert(intent, 'intent should be inferred');
+  assert.strictEqual(intent.surfaceTarget, 'pine-editor');
+  assert.strictEqual(intent.wantsEvidenceReadback, true);
+});
+
 test('pine workflow recognizes compile-result requests', () => {
   const intent = inferTradingViewPineIntent('open pine editor in tradingview and summarize the compile result', [
     { type: 'key', key: 'ctrl+e' }
@@ -84,8 +94,28 @@ test('pine workflow recognizes pine profiler evidence-gathering requests', () =>
   assert.strictEqual(intent.wantsEvidenceReadback, true);
 });
 
+test('pine workflow recognizes pine profiler alias phrasing', () => {
+  const intent = inferTradingViewPineIntent('open performance profiler in tradingview and summarize the metrics', [
+    { type: 'key', key: 'ctrl+shift+p' }
+  ]);
+
+  assert(intent, 'intent should be inferred');
+  assert.strictEqual(intent.surfaceTarget, 'pine-profiler');
+  assert.strictEqual(intent.wantsEvidenceReadback, true);
+});
+
 test('pine workflow recognizes pine version history provenance requests', () => {
   const intent = inferTradingViewPineIntent('open pine version history in tradingview and read the latest visible revisions', [
+    { type: 'key', key: 'alt+h' }
+  ]);
+
+  assert(intent, 'intent should be inferred');
+  assert.strictEqual(intent.surfaceTarget, 'pine-version-history');
+  assert.strictEqual(intent.wantsEvidenceReadback, true);
+});
+
+test('pine workflow recognizes revision-history alias phrasing', () => {
+  const intent = inferTradingViewPineIntent('open revision history in tradingview and read the latest visible revisions', [
     { type: 'key', key: 'alt+h' }
   ]);
 
