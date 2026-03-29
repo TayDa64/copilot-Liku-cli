@@ -280,6 +280,11 @@ test('pine workflow encodes diagnostics and compile-result evidence modes', () =
   assert(shortcutProfileContent.includes("'create-alert'"), 'TradingView shortcut profile should define stable alert guidance');
   assert(shortcutProfileContent.includes("'drawing-tool-binding'"), 'TradingView shortcut profile should mark drawing bindings as customizable');
   assert(shortcutProfileContent.includes("'open-dom-panel'"), 'TradingView shortcut profile should classify DOM shortcuts explicitly');
+  assert(shortcutProfileContent.includes("'take-snapshot'"), 'TradingView shortcut profile should include grounded reference-only snapshot guidance');
+  assert(shortcutProfileContent.includes("'add-symbol-to-watchlist'"), 'TradingView shortcut profile should include grounded watchlist shortcut guidance');
+  assert(shortcutProfileContent.includes('TRADINGVIEW_SHORTCUTS_OFFICIAL_URL'), 'TradingView shortcut profile should record the official support reference');
+  assert(shortcutProfileContent.includes('TRADINGVIEW_SHORTCUTS_SECONDARY_URL'), 'TradingView shortcut profile should record the secondary Pineify reference');
+  assert(shortcutProfileContent.includes('resolveTradingViewShortcutId'), 'TradingView shortcut profile should support alias-to-shortcut resolution');
 });
 
 test('system prompt includes Pine diagnostics guidance', () => {
