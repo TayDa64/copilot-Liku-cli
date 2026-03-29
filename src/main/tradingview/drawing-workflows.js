@@ -25,6 +25,23 @@ const DRAWING_NAMES = [
   'fixed range volume profile'
 ];
 
+function inferTradingViewDrawingRequestKind(userMessage = '') {
+  const text = String(userMessage || '').trim().toLowerCase();
+  if (!text || !/tradingview/.test(text)) return null;
+  if (!/\bdraw|drawing|drawings|trend line|trendline|ray|pitchfork|fibonacci|fib|brush|rectangle|ellipse|path|polyline|object tree\b/.test(text)) {
+    return null;
+  }
+
+  const asksSurfaceAccess = /\b(open|show|focus|search|find|object tree|drawing tools|drawing toolbar|drawings toolbar)\b/.test(text);
+  const asksPrecisePlacement = /\b(draw|place|position|anchor|put)\b/.test(text)
+    && /\b(on|onto|between|from|to|at|through|exact|exactly|precise|precisely)\b/.test(text)
+    && !asksSurfaceAccess;
+
+  if (asksPrecisePlacement) return 'precise-placement';
+  if (asksSurfaceAccess) return 'surface-access';
+  return 'general-drawing';
+}
+
 function normalizeTextForMatch(value) {
   return String(value || '')
     .toLowerCase()
@@ -100,14 +117,12 @@ function inferTradingViewDrawingIntent(userMessage = '', actions = []) {
   if (!mentionsTradingView) return null;
 
   const drawingName = extractRequestedDrawingName(raw);
+  const requestKind = inferTradingViewDrawingRequestKind(raw);
   const mentionsObjectTree = /\bobject tree\b/i.test(raw) || messageMentionsTradingViewShortcut(raw, 'open-object-tree');
   const mentionsDrawingSurface = /\bdrawing|drawings|trend\s*line|ray|pitchfork|fibonacci|fib|brush|rectangle|ellipse|path|polyline|measure|anchored text|note\b/i.test(raw);
   const mentionsSafeOpenIntent = /\b(open|show|focus|switch|select|choose|pick|search|find|use|activate)\b/i.test(raw);
-  const mentionsUnsafePlacement = /\bdraw\b/i.test(raw) && !mentionsObjectTree && !mentionsSafeOpenIntent;
-
-  if (!mentionsObjectTree && (!mentionsDrawingSurface || mentionsUnsafePlacement)) {
-    return null;
-  }
+  const mentionsUnsafePlacement = requestKind === 'precise-placement'
+    || (/\bdraw\b/i.test(raw) && !mentionsObjectTree && !mentionsSafeOpenIntent);
 
   const openerTypes = new Set(['key', 'click', 'double_click', 'right_click']);
   const openerIndex = Array.isArray(actions)
@@ -115,25 +130,37 @@ function inferTradingViewDrawingIntent(userMessage = '', actions = []) {
     : -1;
   const openerAction = openerIndex >= 0 ? actions[openerIndex] || null : null;
   const nextAction = openerIndex >= 0 ? actions[openerIndex + 1] || null : null;
+
+  if (!mentionsObjectTree && (!mentionsDrawingSurface || (mentionsUnsafePlacement && !openerAction))) {
+    return null;
+  }
+
   const surface = resolveDrawingSurfaceTarget(raw, { action: openerAction, nextAction }, drawingName);
   if (!surface) return null;
 
   const existingWorkflowSignal = Array.isArray(actions) && actions.some((action) => /drawing|object-tree/.test(String(action?.verify?.target || '')));
+  const boundedSurfaceOnly = mentionsUnsafePlacement;
+
+  const baseReason = surface.target === 'object-tree'
+    ? 'Open TradingView Object Tree with verification'
+    : surface.target === 'object-tree-search'
+      ? 'Open TradingView Object Tree search with verification'
+      : surface.target === 'drawing-search'
+        ? `Open TradingView drawing search${drawingName ? ` for ${drawingName}` : ''} with verification`
+        : 'Open TradingView drawing tools with verification';
 
   return {
     appName: 'TradingView',
     drawingName,
+    requestKind,
+    boundedSurfaceOnly,
     surfaceTarget: surface.target,
     verifyKind: surface.kind,
     openerIndex,
     existingWorkflowSignal,
-    reason: surface.target === 'object-tree'
-      ? 'Open TradingView Object Tree with verification'
-      : surface.target === 'object-tree-search'
-        ? 'Open TradingView Object Tree search with verification'
-        : surface.target === 'drawing-search'
-          ? `Open TradingView drawing search${drawingName ? ` for ${drawingName}` : ''} with verification`
-          : 'Open TradingView drawing tools with verification'
+    reason: boundedSurfaceOnly
+      ? `${baseReason} (surface access only; exact drawing placement remains unverified)`
+      : baseReason
   };
 }
 
@@ -184,11 +211,15 @@ function buildTradingViewDrawingWorkflowActions(intent = {}, actions = []) {
   const trailing = actions.slice(intent.openerIndex + 1)
     .filter((action) => action && typeof action === 'object' && action.type !== 'screenshot');
 
-  if (trailing.length > 0 && trailing[0]?.type !== 'wait') {
+  const boundedTrailing = intent.boundedSurfaceOnly
+    ? trailing.filter((action) => action?.type === 'wait' || action?.type === 'type')
+    : trailing;
+
+  if (boundedTrailing.length > 0 && boundedTrailing[0]?.type !== 'wait') {
     rewritten.push({ type: 'wait', ms: 220 });
   }
 
-  return rewritten.concat(trailing);
+  return rewritten.concat(boundedTrailing);
 }
 
 function maybeRewriteTradingViewDrawingWorkflow(actions, context = {}) {
@@ -197,7 +228,7 @@ function maybeRewriteTradingViewDrawingWorkflow(actions, context = {}) {
   const intent = inferTradingViewDrawingIntent(context.userMessage || '', actions);
   if (!intent || intent.existingWorkflowSignal || intent.openerIndex < 0) return null;
 
-  const lowSignalTypes = new Set(['bring_window_to_front', 'focus_window', 'key', 'click', 'double_click', 'right_click', 'type', 'wait', 'screenshot']);
+  const lowSignalTypes = new Set(['bring_window_to_front', 'focus_window', 'key', 'click', 'double_click', 'right_click', 'drag', 'type', 'wait', 'screenshot']);
   const lowSignal = actions.every((action) => lowSignalTypes.has(action?.type));
   const tinyOrFragmented = actions.length <= 4;
   const screenshotFirst = actions[0]?.type === 'screenshot';
@@ -212,6 +243,7 @@ function maybeRewriteTradingViewDrawingWorkflow(actions, context = {}) {
 
 module.exports = {
   extractRequestedDrawingName,
+  inferTradingViewDrawingRequestKind,
   inferTradingViewDrawingIntent,
   buildTradingViewDrawingWorkflowActions,
   maybeRewriteTradingViewDrawingWorkflow

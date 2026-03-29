@@ -601,6 +601,24 @@ test('TradingView shortcut profile and drawing bounds are wired through promptin
   assert(systemPromptContent.includes('TradingView shortcut profile rule'), 'System prompt should include TradingView shortcut profile guidance');
 });
 
+test('TradingView drawing workflows and safety rails preserve bounded surface-only behavior', () => {
+  const drawingWorkflowPath = path.join(__dirname, '..', 'src', 'main', 'tradingview', 'drawing-workflows.js');
+  const verificationPath = path.join(__dirname, '..', 'src', 'main', 'tradingview', 'verification.js');
+  const aiServicePath = path.join(__dirname, '..', 'src', 'main', 'ai-service.js');
+  const fs = require('fs');
+
+  const drawingWorkflowContent = fs.readFileSync(drawingWorkflowPath, 'utf8');
+  const verificationContent = fs.readFileSync(verificationPath, 'utf8');
+  const aiServiceContent = fs.readFileSync(aiServicePath, 'utf8');
+
+  assert(drawingWorkflowContent.includes('inferTradingViewDrawingRequestKind'), 'Drawing workflows should classify TradingView drawing request kinds explicitly');
+  assert(drawingWorkflowContent.includes('surface access only; exact drawing placement remains unverified'), 'Drawing workflows should label bounded surface-only salvage for precise placement requests');
+  assert(drawingWorkflowContent.includes("action?.type === 'wait' || action?.type === 'type'"), 'Drawing workflows should drop placement actions while preserving bounded search entry');
+  assert(verificationContent.includes('TradingView drawing placement action detected'), 'TradingView verification should recognize precise drawing placement actions');
+  assert(verificationContent.includes('exact chart-object placement requires a deterministic verified placement workflow'), 'TradingView verification should explain why precise drawing placement is blocked');
+  assert(aiServiceContent.includes('targetInfo.userMessage ||'), 'ai-service safety analysis should include the user message for drawing placement context');
+});
+
 test('ai-service app launch detection treats TradingView shortcut surfaces as app surfaces, not app names', () => {
   const aiServicePath = path.join(__dirname, '..', 'src', 'main', 'ai-service.js');
   const fs = require('fs');

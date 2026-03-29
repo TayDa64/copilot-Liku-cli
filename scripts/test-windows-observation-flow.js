@@ -1320,6 +1320,29 @@ async function run() {
     assert(messageBuilderContent.includes('safe surface workflow or explicitly refuse precise-placement claims'), 'Drawing bounds should require safe workflow fallback or bounded refusal under degraded evidence');
   });
 
+  await testAsync('TradingView precise drawing placement actions are blocked before execution', async () => {
+    let executed = 0;
+    const execResult = await aiService.executeActions({
+      thought: 'Draw a trend line exactly on the TradingView chart',
+      verification: 'TradingView should place the trend line exactly where requested',
+      actions: [
+        { type: 'drag', x: 220, y: 180, toX: 540, toY: 320, reason: 'Place trend line exactly on the TradingView chart' }
+      ]
+    }, null, null, {
+      userMessage: 'draw a trend line exactly on tradingview',
+      actionExecutor: async (action) => {
+        executed += 1;
+        return { success: true, action: action.type, message: 'executed' };
+      }
+    });
+
+    assert.strictEqual(executed, 0, 'Exact TradingView drawing placement should be blocked before drag execution');
+    assert.strictEqual(execResult.success, false, 'Exact TradingView drawing placement should fail closed');
+    assert.strictEqual(execResult.results[0].blockedByPolicy, true, 'Blocked drawing placement should be marked as policy-blocked');
+    assert(/drawing placement action/i.test(execResult.results[0].error || ''), 'Blocked drawing placement should explain the drawing-placement safety rail');
+    assert(/drawing tools|object tree|drawing search/i.test(execResult.results[0].error || ''), 'Blocked drawing placement should point back to safe surface workflows');
+  });
+
   await testAsync('screenshot module reports fallback capture mode markers', async () => {
     const screenshotPath = path.join(__dirname, '..', 'src', 'main', 'ui-automation', 'screenshot.js');
     const screenshotContent = fs.readFileSync(screenshotPath, 'utf8');

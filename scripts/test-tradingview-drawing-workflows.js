@@ -6,6 +6,7 @@ const { getTradingViewShortcutKey } = require(path.join(__dirname, '..', 'src', 
 
 const {
   extractRequestedDrawingName,
+  inferTradingViewDrawingRequestKind,
   inferTradingViewDrawingIntent,
   buildTradingViewDrawingWorkflowActions,
   maybeRewriteTradingViewDrawingWorkflow
@@ -25,6 +26,11 @@ function test(name, fn) {
 test('extractRequestedDrawingName normalizes common TradingView drawing names', () => {
   assert.strictEqual(extractRequestedDrawingName('search for trend line in tradingview drawing tools'), 'trend line');
   assert.strictEqual(extractRequestedDrawingName('open the "fibonacci" drawing in tradingview'), 'fibonacci');
+});
+
+test('inferTradingViewDrawingRequestKind distinguishes surface access from precise placement', () => {
+  assert.strictEqual(inferTradingViewDrawingRequestKind('open drawing tools in tradingview'), 'surface-access');
+  assert.strictEqual(inferTradingViewDrawingRequestKind('draw a trend line exactly on tradingview'), 'precise-placement');
 });
 
 test('inferTradingViewDrawingIntent recognizes object tree requests', () => {
@@ -169,4 +175,23 @@ test('drawing workflow keeps refusing precise placement requests from screenshot
   });
 
   assert.strictEqual(rewritten, null);
+});
+
+test('drawing workflow rewrites precise placement requests into bounded surface-only search access', () => {
+  const rewritten = maybeRewriteTradingViewDrawingWorkflow([
+    { type: 'key', key: '/' },
+    { type: 'type', text: 'trend line' },
+    { type: 'key', key: 'enter', reason: 'Select Trend Line result' },
+    { type: 'drag', x: 300, y: 220, toX: 520, toY: 340, reason: 'Place trend line exactly on the chart' }
+  ], {
+    userMessage: 'draw a trend line exactly on tradingview'
+  });
+
+  assert(Array.isArray(rewritten), 'precise placement request should be salvaged into a bounded surface-access workflow');
+  assert.strictEqual(rewritten[2].verify.target, 'drawing-search');
+  assert.strictEqual(rewritten[2].reason.includes('surface access only'), true, 'rewritten workflow should state that exact placement remains unverified');
+  assert.strictEqual(rewritten.some((action) => action.type === 'drag'), false, 'bounded workflow should drop chart-placement drag actions');
+  assert.strictEqual(rewritten.some((action) => action.type === 'key' && action.key === 'enter'), false, 'bounded workflow should not select or arm exact placement from search results');
+  assert.strictEqual(rewritten[4].type, 'type', 'bounded workflow should preserve non-placement search text entry');
+  assert.strictEqual(rewritten[4].text, 'trend line');
 });

@@ -2051,6 +2051,7 @@ function analyzeActionSafety(action, targetInfo = {}) {
     targetInfo.buttonText || '',
     targetInfo.label || '',
     action.reason || '',
+    targetInfo.userMessage || '',
     ...(targetInfo.nearbyText || [])
   ].join(' ');
 
@@ -2059,7 +2060,9 @@ function analyzeActionSafety(action, targetInfo = {}) {
     && /\b(time\s*frame|timeframe|chart|symbol|watchlist|indicator|search|open|focus|switch|selector|tab|5m|1m|15m|30m|1h|4h|1d)\b/i.test(textToCheck)
     && !/\b(delete|remove|purchase|payment|transfer|permanent|irreversible|shutdown|restart|unsubscribe|close account)\b/i.test(textToCheck);
 
-  const tradingDomainRisk = detectTradingViewDomainActionRisk(textToCheck, ActionRiskLevel);
+  const tradingDomainRisk = detectTradingViewDomainActionRisk(textToCheck, ActionRiskLevel, {
+    actionType: action?.type
+  });
   if (tradingDomainRisk) {
     result.riskLevel = tradingDomainRisk.riskLevel;
     result.warnings.push(tradingDomainRisk.warning);
@@ -4382,10 +4385,14 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
 
     // ===== SAFETY CHECK =====
     // Get target info if available (from visual analysis)
-    const targetInfo = targetAnalysis[`${action.x},${action.y}`] || {
-      text: action.reason || '',
-      buttonText: action.targetText || '',
-      nearbyText: []
+    const targetInfo = {
+      ...(targetAnalysis[`${action.x},${action.y}`] || {}),
+      text: targetAnalysis[`${action.x},${action.y}`]?.text || action.reason || '',
+      buttonText: targetAnalysis[`${action.x},${action.y}`]?.buttonText || action.targetText || '',
+      nearbyText: Array.isArray(targetAnalysis[`${action.x},${action.y}`]?.nearbyText)
+        ? targetAnalysis[`${action.x},${action.y}`].nearbyText
+        : [],
+      userMessage: options.userMessage || actionData.userMessage || ''
     };
     
     // Analyze safety
@@ -4467,6 +4474,7 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
         completedResults: [...results],
         thought: actionData.thought,
         verification: actionData.verification,
+        userMessage: options.userMessage || actionData.userMessage || '',
         lastTargetWindowHandle,
         lastTargetWindowProfile,
         resumePrerequisites,
@@ -4991,7 +4999,8 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
     const resumeSafety = analyzeActionSafety(action, {
       text: action.reason || '',
       buttonText: action.targetText || '',
-      nearbyText: []
+      nearbyText: [],
+      userMessage: options.userMessage || pending?.userMessage || ''
     });
     if (resumeSafety.blockExecution) {
       const blockedResult = {

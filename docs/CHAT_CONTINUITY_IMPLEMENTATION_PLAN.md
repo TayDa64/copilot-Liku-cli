@@ -2118,6 +2118,17 @@ This is the next Pine-facing implementation slice after the current Logs / Profi
 
 ### Track E — Honest drawing capability framing
 
+**Status:** Completed and committed
+
+**Delivered so far**
+- strengthened `src/main/tradingview/drawing-workflows.js` so precise TradingView drawing-placement requests can be salvaged into bounded, verified surface-access workflows when a safe opener already exists
+- bounded drawing rewrites now preserve only non-placement surface steps (for example opening drawing search and typing the drawing name) while dropping result-selection and chart-placement actions that would overclaim exact placement
+- extended `src/main/tradingview/verification.js` and `src/main/ai-service.js` so residual precise TradingView drawing placement click/drag actions fail closed behind an advisory-only safety rail instead of executing as if exact chart-object placement were deterministic
+- added focused workflow, seam, and execution regressions in:
+  - `scripts/test-tradingview-drawing-workflows.js`
+  - `scripts/test-windows-observation-flow.js`
+  - `scripts/test-bug-fixes.js`
+
 **Why this track exists**
 - `src/main/tradingview/drawing-workflows.js` already refuses unsafe placement prompts such as `draw a trend line on tradingview`.
 - Runtime responses can still imply more precise drawing capability than the current workflow actually guarantees.

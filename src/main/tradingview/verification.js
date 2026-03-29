@@ -113,9 +113,29 @@ function extractTradingViewObservationKeywords(text = '') {
   return mergeUniqueKeywords(keywords);
 }
 
-function detectTradingViewDomainActionRisk(text = '', ActionRiskLevel) {
+function detectTradingViewDomainActionRisk(text = '', ActionRiskLevel, context = {}) {
   const normalized = normalizeTextForMatch(text);
   if (!normalized) return null;
+
+  const actionType = String(context?.actionType || '').trim().toLowerCase();
+  const drawingContext = /\b(tradingview|draw|drawing|drawings|trend line|trendline|ray|pitchfork|fibonacci|fib|brush|rectangle|ellipse|path|polyline|object tree)\b/i.test(normalized);
+  const drawingPlacementIntent = /\b(draw|place|position|anchor|put|drag)\b/i.test(normalized)
+    && /\b(trend line|trendline|ray|pitchfork|fibonacci|fib|brush|rectangle|ellipse|path|polyline|drawing|object)\b/i.test(normalized);
+  const drawingSurfaceIntent = /\b(open|show|focus|search|find|object tree|drawing tools|drawings toolbar|drawing toolbar)\b/i.test(normalized);
+  const placementLikeAction = actionType === 'drag'
+    || actionType === 'click'
+    || actionType === 'double_click'
+    || actionType === 'right_click';
+
+  if (drawingContext && drawingPlacementIntent && !drawingSurfaceIntent && placementLikeAction) {
+    return {
+      riskLevel: ActionRiskLevel?.HIGH || 'high',
+      warning: 'TradingView drawing placement action detected',
+      requiresConfirmation: true,
+      blockExecution: true,
+      blockReason: 'Advisory-only safety rail blocked a TradingView drawing placement action. Liku can help open Drawing Tools, drawing search, or Object Tree, but exact chart-object placement requires a deterministic verified placement workflow.'
+    };
+  }
 
   const tradingMode = inferTradingViewTradingMode(text);
 
