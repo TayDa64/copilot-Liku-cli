@@ -1724,7 +1724,7 @@ node scripts/test-bug-fixes.js
 
 #### Track H / Slice 3 — Safe Pine authoring defaults
 
-**Status:** First slice completed in working tree
+**Status:** Completed and committed
 
 **Delivered so far**
 - generic TradingView Pine creation requests now rewrite into inspect-first Pine Editor flows instead of defaulting to `ctrl+a` + `backspace` clear-first behavior
@@ -1768,6 +1768,13 @@ node scripts/test-bug-fixes.js
 
 #### Track H / Slice 4 — Resume-after-confirmation re-establishes prerequisites
 
+**Status:** Completed and committed
+
+**Delivered so far**
+- `resumeAfterConfirmation(...)` now re-establishes TradingView focus and Pine editor prerequisites before destructive edit continuation
+- Pine resume prerequisite shaping explicitly re-opens or re-activates Pine Editor before assuming `ctrl+a`, destructive edit keys, or typing are still safe
+- focused execution regressions now prove confirmation-resume flows do not assume ephemeral editor state or selection survived the pause
+
 **Goal**
 - after confirmation pauses, re-verify TradingView focus, Pine surface visibility, and editor-active state instead of assuming ephemeral selection/focus survived.
 
@@ -1792,7 +1799,14 @@ node scripts/test-bug-fixes.js
 
 ### Track I — TradingView shortcuts become app-specific tool knowledge
 
-**Status:** Planned
+**Status:** Core slice completed and committed
+
+**Delivered so far**
+- added a dedicated TradingView shortcut capability/profile helper in `src/main/tradingview/shortcut-profile.js`
+- stable defaults such as `/`, `Alt+A`, `Esc`, and `Ctrl+K` are now modeled as TradingView-specific capability knowledge instead of generic desktop shortcut doctrine
+- drawing bindings are explicitly marked customizable / user-confirmed, and Trading Panel / DOM execution shortcuts remain context-dependent and paper-test only
+- Pine Editor no longer assumes `ctrl+e` as a stable native TradingView shortcut; Pine workflows now route Pine Editor opening through a verified TradingView quick-search / command-palette path instead of hardcoding an ungrounded opener
+- TradingView Pine workflows, prompt guidance, and shortcut regressions now consult and protect that app-specific shortcut profile
 
 **Why this track exists**
 - Official TradingView shortcut documentation and third-party workflow guides show an important distinction:
@@ -1805,13 +1819,13 @@ node scripts/test-bug-fixes.js
 - represent TradingView shortcut knowledge as TradingView-specific capability/profile data, not as a generic keyboard rule set.
 
 **Primary files**
-- likely new: `src/main/tradingview/shortcut-profile.js`
+- `src/main/tradingview/shortcut-profile.js`
 - `src/main/tradingview/pine-workflows.js`
 - `src/main/tradingview/indicator-workflows.js`
 - `src/main/tradingview/alert-workflows.js`
 - `src/main/ai-service/system-prompt.js`
 - `scripts/test-bug-fixes.js`
-- likely new: `scripts/test-tradingview-shortcut-profile.js`
+- `scripts/test-tradingview-shortcut-profile.js`
 
 **Implementation checklist**
 - define TradingView shortcut categories in a dedicated app-specific helper:
@@ -1826,12 +1840,22 @@ node scripts/test-bug-fixes.js
   - Trading/DOM shortcuts remain advisory-safe and paper-test only
 
 **Regression additions**
-- likely new `scripts/test-tradingview-shortcut-profile.js`
+- `scripts/test-tradingview-shortcut-profile.js`
   - `stable default shortcuts are exposed as tradingview-specific helpers`
   - `drawing shortcuts are marked customizable rather than universal`
   - `trading panel shortcuts are marked context-dependent and unsafe-by-default`
+  - `pine editor opener is routed through TradingView quick search instead of a hardcoded native shortcut`
 - `scripts/test-bug-fixes.js`
   - seam assertions that system prompt and TradingView workflows use TradingView-specific shortcut guidance instead of generic assumptions
+
+**Acceptance proof**
+```powershell
+node scripts/test-tradingview-shortcut-profile.js
+node scripts/test-tradingview-pine-workflows.js
+node scripts/test-tradingview-pine-data-workflows.js
+node scripts/test-windows-observation-flow.js
+node scripts/test-bug-fixes.js
+```
 
 **Acceptance criteria**
 - TradingView keyboard shortcut guidance is app-specific, not global desktop doctrine
