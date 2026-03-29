@@ -490,7 +490,7 @@ node scripts/test-chat-actionability.js
 
 ### Phase 2 — Prefer state over phrasing
 
-**Status:** Completed in working tree
+**Status:** Completed and committed
 
 **Delivered**
 - state-first continuation routing in `src/cli/commands/chat.js`
@@ -526,7 +526,7 @@ node scripts/test-session-intent-state.js
 
 ### Phase 3 — Store richer execution facts
 
-**Status:** Completed in working tree
+**Status:** Completed and committed
 
 **Delivered**
 - dedicated continuity mapper in `src/main/chat-continuity-state.js`
@@ -566,7 +566,7 @@ node scripts/test-chat-actionability.js
 
 ### Phase 4 — Verification contracts for UI changes
 
-**Status:** Completed in working tree
+**Status:** Completed and committed
 
 **Delivered**
 - reusable `action.verify` checkpoint support in `src/main/ai-service.js`
@@ -610,7 +610,7 @@ node scripts/test-session-intent-state.js
 
 ### Phase 5 — Explicit screenshot trust and degraded continuity handling
 
-**Status:** Completed in working tree
+**Status:** Completed and committed
 
 **Delivered**
 - trusted vs degraded capture handling in `src/main/session-intent-state.js`
@@ -647,7 +647,7 @@ node scripts/test-chat-actionability.js
 
 ### Phase 6 — Multi-turn continuity coherence suite
 
-**Status:** Completed in working tree
+**Status:** Completed and committed
 
 **Delivered**
 - multi-turn prompting regressions in `scripts/test-chat-continuity-prompting.js`
@@ -1072,7 +1072,7 @@ node scripts/test-session-intent-state.js
 
 ### Milestone 4 — TradingView domain modules replace one-off workflow logic
 
-**Status:** Completed in working tree
+**Status:** Completed and committed
 
 **Delivered so far**
 - extracted TradingView app identity/profile normalization to `src/main/tradingview/app-profile.js`
@@ -1132,7 +1132,7 @@ node scripts/test-chat-actionability.js
 
 ### Milestone 5 — Multi-turn coherence suite proves safe continuation
 
-**Status:** Completed in working tree
+**Status:** Completed and committed
 
 **Delivered so far**
 - added reusable paper-aware TradingView continuity fixtures in `scripts/fixtures/tradingview/paper-aware-continuity.json`
@@ -1171,7 +1171,7 @@ node scripts/test-chat-inline-proof-evaluator.js
 
 ### Milestone 6 — Repo-grounded search actions improve implementation assistance
 
-**Status:** Completed in working tree
+**Status:** Completed and committed
 
 **Delivered so far**
 - added modular repo/process search execution in `src/main/repo-search-actions.js`
@@ -1229,7 +1229,7 @@ node scripts/test-ai-service-contract.js
 
 ### Milestone 7 — Non-disruptive vision for approval-time continuity
 
-**Status:** Completed in working tree
+**Status:** Completed and committed
 
 **Delivered so far**
 - added modular non-disruptive capture provider abstraction in `src/main/background-capture.js`
@@ -1339,7 +1339,7 @@ The findings below are grounded in current repo seams, especially:
 
 ### Track A — Intent-safe reliability rewrites
 
-**Status:** Second slice completed in working tree
+**Status:** Completed and committed
 
 **Delivered so far**
 - hardened `extractRequestedAppName(...)` in `src/main/ai-service.js` so passive open-state phrasing no longer gets treated as app-launch intent
@@ -1389,7 +1389,7 @@ The findings below are grounded in current repo seams, especially:
 
 ### Track B — Same-turn degraded visual evidence contract
 
-**Status:** First slice completed in working tree
+**Status:** Completed and committed
 
 **Delivered so far**
 - injected a `## Current Visual Evidence Bounds` system block in `src/main/ai-service/message-builder.js`
@@ -1440,7 +1440,7 @@ node scripts/test-message-builder-session-intent.js
 
 ### Track C — Forced-observation recovery becomes useful, not just safe
 
-**Status:** First slice completed in working tree
+**Status:** Completed and committed
 
 **Delivered so far**
 - replaced the screenshot-loop dead-end in `src/cli/commands/chat.js` with a deterministic bounded observation fallback
@@ -1493,7 +1493,7 @@ node scripts/test-windows-observation-flow.js
 
 ### Track E — Recommendation follow-through becomes executable
 
-**Status:** First slice completed in working tree
+**Status:** Completed and committed
 
 **Delivered so far**
 - added explicit affirmative-follow-through classification in `src/cli/commands/chat.js` so turns like `yes, lets apply the volume profile` preserve the current requested operation as execution intent instead of collapsing back to the prior advisory turn
@@ -1531,7 +1531,7 @@ node scripts/test-chat-actionability.js
 
 ### Track F — Continuity scoping respects advisory pivots
 
-**Status:** First slice completed in working tree
+**Status:** Completed and committed
 
 **Delivered so far**
 - scoped `formatChatContinuityContext(...)` in `src/main/session-intent-state.js` so broad advisory pivots receive a reduced continuity block instead of full stale chart-execution detail
@@ -1570,7 +1570,7 @@ node scripts/test-message-builder-session-intent.js
 
 ### Track G — Degraded recovery stays tied to the requested task
 
-**Status:** First slice completed in working tree
+**Status:** Completed and committed
 
 **Delivered so far**
 - added lightweight `pendingRequestedTask` persistence in `src/main/session-intent-state.js` so a concrete requested TradingView/Pine step can survive a withheld or blocked execution branch
@@ -1611,7 +1611,7 @@ node scripts/test-message-builder-session-intent.js
 
 ### Track H — TradingView UI grounding becomes truthful before Pine authoring
 
-**Status:** Planned
+**Status:** Completed and committed
 
 **Why this track exists**
 - Recent real TradingView/Pine testing showed Liku can generate plausible Pine authoring plans while still failing at the more basic UI truthfulness layers:
@@ -1639,7 +1639,7 @@ node scripts/test-message-builder-session-intent.js
 
 #### Track H / Slice 1 — Focus truthfulness and handle drift accounting
 
-**Status:** First slice completed in working tree
+**Status:** Completed and committed
 
 **Delivered so far**
 - added requested-vs-actual focus metadata to `focus_window` / `bring_window_to_front` results in `src/main/system-automation.js`
@@ -1681,7 +1681,7 @@ node scripts/test-bug-fixes.js
 
 #### Track H / Slice 2 — TradingView surface activation and editor-active verification
 
-**Status:** First slice completed in working tree
+**Status:** Completed and committed
 
 **Delivered so far**
 - Pine authoring workflows now request stronger `editor-active` verification when the next meaningful step needs real editor control
@@ -1806,6 +1806,7 @@ node scripts/test-bug-fixes.js
 - stable defaults such as `/`, `Alt+A`, `Esc`, and `Ctrl+K` are now modeled as TradingView-specific capability knowledge instead of generic desktop shortcut doctrine
 - drawing bindings are explicitly marked customizable / user-confirmed, and Trading Panel / DOM execution shortcuts remain context-dependent and paper-test only
 - Pine Editor no longer assumes `ctrl+e` as a stable native TradingView shortcut; Pine workflows now route Pine Editor opening through a verified TradingView quick-search / command-palette path instead of hardcoding an ungrounded opener
+- explicit legacy Pine Editor opener plans are now canonicalized into that TradingView quick-search route before execution and continuity persistence, so verified/explicit plans no longer preserve stale `ctrl+e` assumptions
 - TradingView Pine workflows, prompt guidance, and shortcut regressions now consult and protect that app-specific shortcut profile
 
 **Why this track exists**
@@ -1864,7 +1865,7 @@ node scripts/test-bug-fixes.js
 
 ### Track D — Pine-backed evidence gathering for concrete TradingView insight
 
-**Status:** In progress in working tree
+**Status:** Core evidence slices completed and committed
 
 **Delivered so far**
 - extended `src/main/tradingview/pine-workflows.js` so Pine Logs evidence-gathering requests can stay verification-first while preserving or auto-appending bounded `get_text` readback
@@ -1873,6 +1874,8 @@ node scripts/test-bug-fixes.js
 - extended `src/main/tradingview/pine-workflows.js` so Pine Editor visible status/output requests can stay verification-first while preserving or auto-appending bounded `get_text` readback
 - added Pine Editor line-budget awareness so `500-line limit` / line-count checks prefer verified Pine Editor readback and prompt guidance now explicitly treats Pine scripts as capped at 500 lines when reading/writing
 - refined Pine Editor readback into explicit `compile-result` and `diagnostics` evidence modes so visible compiler status, warnings, and errors can be summarized as bounded text evidence rather than generic status text
+- structured Pine Version History provenance summaries now extract compact visible revision metadata instead of only returning raw visible text
+- recent Pine continuation hardening keeps explicit Pine Editor opener plans aligned with the verified quick-search route instead of preserving stale hardcoded opener assumptions
 - added dedicated Pine data-workflow regressions in `scripts/test-tradingview-pine-data-workflows.js`
 - extended `scripts/test-windows-observation-flow.js` with verified Pine Logs, Pine Profiler, Pine Version History, and Pine Editor status/output readback coverage that gathers text without re-entering a screenshot loop
 - updated `src/main/ai-service/system-prompt.js` so TradingView Pine output/error/provenance requests prefer verified Pine surfaces plus `get_text`, including Pine Editor visible status/output, over screenshot-only inference
@@ -1944,21 +1947,23 @@ This is the next Pine-facing implementation slice after the current Logs / Profi
 
 **Grounded status of recent Pine follow-ups**
 - broader visible Pine status/output surfaces beyond Logs / Profiler / Version History are now implemented via verified `pine-editor` readback with bounded `get_text`
-- script-audit / provenance refinement is only partially complete:
+- script-audit / provenance refinement is now implemented:
   - verified Pine Version History opening plus raw visible text readback is implemented
-  - structural extraction of the top visible revision metadata (for example revision label, relative time, author/source hints when visible, and compact summary formatting) is not implemented yet
+  - structural extraction of the top visible revision metadata (for example revision label, relative time, author/source hints when visible, and compact summary formatting) is implemented
+- explicit Pine Editor opener canonicalization is now aligned with the verified TradingView quick-search route, including explicit legacy plans and continuity fixtures
 
-**Immediate next objective**
-- turn generic Pine Editor text readback into explicit visible diagnostics summaries
-- turn generic Pine Version History text readback into explicit visible revision/provenance summaries
+**Latest completed objectives**
+- turned generic Pine Editor text readback into explicit visible diagnostics summaries
+- turned generic Pine Version History text readback into explicit visible revision/provenance summaries
+- aligned explicit Pine opener plans with the verified TradingView quick-search route before execution and continuity storage
 
-**Priority order**
+**Completed priority order**
 1. **Slice D-next-1 — Pine Editor compile-result / diagnostics summaries**
 2. **Slice D-next-2 — Pine Version History top visible revision metadata summaries**
 
 #### Slice D-next-1 — Pine Editor compile-result / diagnostics summaries
 
-**Status:** First slice completed in working tree
+**Status:** Completed and committed
 
 **Delivered so far**
 - extended `src/main/tradingview/pine-workflows.js` so Pine Editor readback requests can classify bounded evidence modes:
@@ -2045,7 +2050,7 @@ This is the next Pine-facing implementation slice after the current Logs / Profi
 
 #### Slice D-next-2 — Pine Version History top visible revision metadata summaries
 
-**Status:** First slice completed in working tree
+**Status:** Completed and committed
 
 **Delivered so far**
 - extended `src/main/tradingview/pine-workflows.js` with a `provenance-summary` evidence mode for `pine-version-history`
