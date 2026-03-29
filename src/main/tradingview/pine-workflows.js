@@ -470,7 +470,18 @@ function maybeRewriteTradingViewPineWorkflow(actions, context = {}) {
   if (!Array.isArray(actions) || actions.length === 0) return null;
 
   const intent = inferTradingViewPineIntent(context.userMessage || '', actions);
-  if (!intent || intent.existingWorkflowSignal || intent.openerIndex < 0) return null;
+  if (!intent || intent.openerIndex < 0) return null;
+
+  const opener = actions[intent.openerIndex] || null;
+  const explicitLegacyPineEditorOpen = intent.surfaceTarget === 'pine-editor'
+    && intent.existingWorkflowSignal
+    && actionLooksLikePineEditorOpenIntent(opener);
+
+  if (explicitLegacyPineEditorOpen) {
+    return buildTradingViewPineWorkflowActions(intent, actions);
+  }
+
+  if (intent.existingWorkflowSignal) return null;
 
   const lowSignalTypes = new Set(['bring_window_to_front', 'focus_window', 'key', 'click', 'double_click', 'right_click', 'type', 'wait', 'screenshot', 'get_text', 'find_element']);
   const lowSignal = actions.every((action) => lowSignalTypes.has(action?.type));

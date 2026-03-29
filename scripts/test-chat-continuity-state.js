@@ -211,7 +211,9 @@ test('continuity mapper preserves Pine diagnostics structured summary facts', ()
       thought: 'Inspect Pine diagnostics',
       actions: [
         { type: 'focus_window', title: 'TradingView', processName: 'tradingview' },
-        { type: 'key', key: 'ctrl+e', reason: 'Open Pine Editor', verify: { kind: 'panel-visible', target: 'pine-editor' } },
+        { type: 'key', key: 'ctrl+k', reason: 'Open TradingView quick search' },
+        { type: 'type', text: 'Pine Editor', reason: 'Search for Pine Editor' },
+        { type: 'key', key: 'enter', reason: 'Open Pine Editor from quick search', verify: { kind: 'panel-visible', target: 'pine-editor' } },
         { type: 'get_text', text: 'Pine Editor', reason: 'Read visible diagnostics' }
       ]
     },

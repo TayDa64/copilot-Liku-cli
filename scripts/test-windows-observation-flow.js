@@ -912,11 +912,11 @@ async function run() {
       });
 
       assert.strictEqual(execResult.success, true, 'Execution should proceed after Pine Editor is observed');
-      assert.deepStrictEqual(executed, ['focus_window', 'key', 'get_text'], 'Bounded Pine Editor diagnostics gathering should continue to read text after panel verification');
+      assert.deepStrictEqual(executed, ['bring_window_to_front', 'wait', 'key', 'wait', 'type', 'wait', 'key', 'wait', 'get_text'], 'Bounded Pine Editor diagnostics gathering should upgrade legacy opener plans into the TradingView quick-search route before reading text');
       assert.deepStrictEqual(evidenceModes, ['compile-result'], 'Pine Editor diagnostics gathering should preserve compile-result evidence mode');
       assert.strictEqual(execResult.observationCheckpoints.length, 1, 'A post-key observation checkpoint should be returned');
       assert.strictEqual(execResult.observationCheckpoints[0].verified, true, 'Pine Editor panel observation should pass');
-      assert.strictEqual(execResult.results[2].text, 'Compiler: no errors. Status: strategy loaded.', 'Pine Editor status text should be preserved on the get_text result');
+      assert.strictEqual(execResult.results.find((result) => result.action === 'get_text')?.text, 'Compiler: no errors. Status: strategy loaded.', 'Pine Editor status text should be preserved on the get_text result');
       assert(!execResult.screenshotCaptured, 'Pine Editor diagnostics gathering should not require a screenshot loop');
     });
   });
@@ -967,11 +967,11 @@ async function run() {
       });
 
       assert.strictEqual(execResult.success, true, 'Execution should proceed after Pine Editor diagnostics surface is observed');
-      assert.deepStrictEqual(executed, ['focus_window', 'key', 'get_text'], 'Bounded Pine Editor diagnostics should continue to read text after panel verification');
+      assert.deepStrictEqual(executed, ['bring_window_to_front', 'wait', 'key', 'wait', 'type', 'wait', 'key', 'wait', 'get_text'], 'Bounded Pine Editor diagnostics should upgrade legacy opener plans into the TradingView quick-search route before reading text');
       assert.deepStrictEqual(evidenceModes, ['diagnostics'], 'Pine diagnostics gathering should preserve diagnostics evidence mode');
       assert.strictEqual(execResult.observationCheckpoints.length, 1, 'A post-key observation checkpoint should be returned');
       assert.strictEqual(execResult.observationCheckpoints[0].verified, true, 'Pine Editor panel observation should pass');
-      assert.strictEqual(execResult.results[2].text, 'Compiler error at line 42: mismatched input. Warning: script has unused variable.', 'Pine Editor diagnostics text should be preserved on the get_text result');
+      assert.strictEqual(execResult.results.find((result) => result.action === 'get_text')?.text, 'Compiler error at line 42: mismatched input. Warning: script has unused variable.', 'Pine Editor diagnostics text should be preserved on the get_text result');
       assert(!execResult.screenshotCaptured, 'Pine Editor diagnostics gathering should not require a screenshot loop');
     });
   });
@@ -1869,7 +1869,7 @@ async function run() {
       });
 
       assert.strictEqual(execResult.success, true, 'Execution should proceed after the Pine Editor surface is observed');
-      assert.deepStrictEqual(executed, ['focus_window', 'key', 'type'], 'Typing should continue only after the Pine panel transition is verified');
+      assert.deepStrictEqual(executed, ['bring_window_to_front', 'wait', 'key', 'wait', 'type', 'wait', 'key', 'wait', 'type'], 'Typing should continue only after the legacy Pine opener is rewritten into the TradingView quick-search route and verified');
       assert.strictEqual(execResult.observationCheckpoints.length, 1, 'A post-key observation checkpoint should be returned');
       assert.strictEqual(execResult.observationCheckpoints[0].verified, true, 'The Pine checkpoint should pass after panel observation');
       assert.strictEqual(execResult.observationCheckpoints[0].classification, 'editor-active', 'Pine Editor should verify as an editor-active checkpoint');
@@ -1921,7 +1921,7 @@ async function run() {
       });
 
       assert.strictEqual(execResult.success, false, 'Typing should not continue when Pine Editor activation is not observed');
-      assert.deepStrictEqual(executed, ['focus_window', 'key'], 'Typing should stop after an unverified editor-active checkpoint');
+      assert.deepStrictEqual(executed, ['bring_window_to_front', 'wait', 'key', 'wait', 'type', 'wait', 'key'], 'Typing should stop after the rewritten Pine opener route fails its editor-active checkpoint');
       assert.strictEqual(execResult.observationCheckpoints.length, 1, 'An editor-active checkpoint should be recorded');
       assert.strictEqual(execResult.observationCheckpoints[0].classification, 'editor-active', 'Pine authoring should classify the checkpoint as editor-active');
       assert.strictEqual(execResult.observationCheckpoints[0].verified, false, 'Editor-active checkpoint should fail without a visible Pine Editor activation');

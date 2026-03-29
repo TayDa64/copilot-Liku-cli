@@ -425,7 +425,9 @@ test('session intent continuity surfaces Pine diagnostics state and recovery gui
     committedSubgoal: 'Inspect the visible Pine diagnostics state',
     actionPlan: [
       { type: 'focus_window', title: 'TradingView', processName: 'tradingview' },
-      { type: 'key', key: 'ctrl+e', verifyKind: 'panel-visible', verifyTarget: 'pine-editor' },
+      { type: 'key', key: 'ctrl+k' },
+      { type: 'type', text: 'Pine Editor' },
+      { type: 'key', key: 'enter', verifyKind: 'panel-visible', verifyTarget: 'pine-editor' },
       { type: 'get_text', text: 'Pine Editor' }
     ],
     results: [
@@ -477,7 +479,9 @@ test('session intent continuity recommends targeted edits under Pine line-budget
     committedSubgoal: 'Inspect visible Pine line-budget hints',
     actionPlan: [
       { type: 'focus_window', title: 'TradingView', processName: 'tradingview' },
-      { type: 'key', key: 'ctrl+e', verifyKind: 'panel-visible', verifyTarget: 'pine-editor' },
+      { type: 'key', key: 'ctrl+k' },
+      { type: 'type', text: 'Pine Editor' },
+      { type: 'key', key: 'enter', verifyKind: 'panel-visible', verifyTarget: 'pine-editor' },
       { type: 'get_text', text: 'Pine Editor' }
     ],
     results: [
