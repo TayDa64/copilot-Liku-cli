@@ -48,7 +48,9 @@ const {
 const { createProviderOrchestrator } = require('./ai-service/providers/orchestration');
 const {
   checkNegativePolicies,
+  checkCapabilityPolicies,
   formatActionPolicyViolationSystemMessage,
+  formatCapabilityPolicyViolationSystemMessage,
   formatNegativePolicyViolationSystemMessage
 } = require('./ai-service/policy-enforcement');
 const { LIKU_TOOLS, toolCallsToActions, getToolDefinitions } = require('./ai-service/providers/copilot/tools');
@@ -132,6 +134,7 @@ const {
   createVisualContextStore
 } = require('./ai-service/visual-context');
 const { createMessageBuilder } = require('./ai-service/message-builder');
+const { buildCapabilityPolicySnapshot } = require('./capability-policy');
 const { SYSTEM_PROMPT } = require('./ai-service/system-prompt');
 const skillRouter = require('./memory/skill-router');
 const memoryStore = require('./memory/memory-store');
@@ -359,6 +362,7 @@ const messageBuilder = createMessageBuilder({
   },
   getInspectService,
   getLatestVisualContext: () => visualContextStore.getLatestVisualContext(),
+  getAppPolicy: (processName) => preferences.getAppPolicy(processName),
   getPreferencesSystemContext: () => preferences.getPreferencesSystemContext(),
   getPreferencesSystemContextForApp: (processName) => preferences.getPreferencesSystemContextForApp(processName),
   getRecentConversationHistory: (limit) => historyStore.getRecentConversationHistory(limit),
@@ -1443,8 +1447,20 @@ async function sendMessage(userMessage, options = {}) {
         const appPolicy = fgProcess ? preferences.getAppPolicy(fgProcess) : null;
         const negativePolicies = Array.isArray(appPolicy?.negativePolicies) ? appPolicy.negativePolicies : [];
         const actionPolicies = Array.isArray(appPolicy?.actionPolicies) ? appPolicy.actionPolicies : [];
+        const watcher = getUIWatcher();
+        const watcherSnapshot = watcher && typeof watcher.getCapabilitySnapshot === 'function'
+          ? watcher.getCapabilitySnapshot()
+          : null;
+        const capabilitySnapshot = buildCapabilityPolicySnapshot({
+          foreground: fg,
+          watcherSnapshot,
+          browserState: getBrowserSessionState(),
+          latestVisual: getLatestVisualContext(),
+          appPolicy,
+          userMessage: enhancedMessage
+        });
 
-        if (negativePolicies.length || actionPolicies.length) {
+        if (negativePolicies.length || actionPolicies.length || capabilitySnapshot) {
           const maxPolicyRetries = 2;
           let attempt = 0;
           let currentResponse = response;
@@ -1453,7 +1469,11 @@ async function sendMessage(userMessage, options = {}) {
           while (attempt <= maxPolicyRetries) {
             const negCheck = checkNegativePolicies(currentParsed, negativePolicies);
             const actCheck = checkActionPolicies(currentParsed, actionPolicies);
-            if (negCheck.ok && actCheck.ok) {
+            const capabilityCheck = checkCapabilityPolicies(currentParsed, capabilitySnapshot, {
+              userMessage: enhancedMessage,
+              processName: fgProcess
+            });
+            if (negCheck.ok && actCheck.ok && capabilityCheck.ok) {
               response = currentResponse;
               break;
             }
@@ -1474,6 +1494,7 @@ async function sendMessage(userMessage, options = {}) {
             const rejectionSystemParts = [];
             if (!negCheck.ok) rejectionSystemParts.push(formatNegativePolicyViolationSystemMessage(fgProcess, negCheck.violations));
             if (!actCheck.ok) rejectionSystemParts.push(formatActionPolicyViolationSystemMessage(fgProcess, actCheck.violations));
+            if (!capabilityCheck.ok) rejectionSystemParts.push(formatCapabilityPolicyViolationSystemMessage(capabilitySnapshot, capabilityCheck.violations));
             const rejectionSystem = rejectionSystemParts.join('\n\n');
 
             const regenMessages = await buildMessages(enhancedMessage, includeVisualContext, {

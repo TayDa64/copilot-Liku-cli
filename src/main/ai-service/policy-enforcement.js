@@ -192,10 +192,102 @@ function formatNegativePolicyViolationSystemMessage(processName, violations) {
   return lines.join('\n');
 }
 
+function hasSemanticAction(actions = []) {
+  return actions.some((action) => ['click_element', 'find_element', 'get_text', 'set_value', 'scroll_element', 'expand_element', 'collapse_element'].includes(normalizeActionType(action)));
+}
+
+function hasWindowKeyboardAction(actions = []) {
+  return actions.some((action) => ['key', 'type', 'focus_window', 'bring_window_to_front', 'restore_window', 'wait'].includes(normalizeActionType(action)));
+}
+
+function buildPlanHaystack(actionData, options = {}) {
+  const actions = Array.isArray(actionData?.actions) ? actionData.actions : [];
+  return [
+    options.userMessage,
+    actionData?.thought,
+    actionData?.verification,
+    ...actions.map((action) => [action.reason, action.text, action.targetLabel, action.targetText].filter(Boolean).join(' '))
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+}
+
+function checkCapabilityPolicies(actionData, capabilitySnapshot, options = {}) {
+  const actions = actionData?.actions;
+  if (!Array.isArray(actions) || actions.length === 0 || !capabilitySnapshot || typeof capabilitySnapshot !== 'object') {
+    return { ok: true, violations: [] };
+  }
+
+  const violations = [];
+  const surfaceClass = String(capabilitySnapshot.surfaceClass || capabilitySnapshot.surface?.mode || '').trim().toLowerCase();
+  const haystack = buildPlanHaystack(actionData, options);
+  const coordinateActions = actions
+    .map((action, actionIndex) => ({ action, actionIndex }))
+    .filter(({ action }) => isCoordinateInteractionAction(action));
+  const semanticActionPresent = hasSemanticAction(actions);
+  const windowKeyboardActionPresent = hasWindowKeyboardAction(actions);
+  const precisePlacementIntent = /draw|drawing|trend\s*line|trendline|place|position|anchor|fib|fibonacci|rectangle|ellipse|polyline|path|chart object/.test(haystack);
+  const semanticSupport = String(capabilitySnapshot.supports?.semanticControl || '').trim().toLowerCase();
+  const precisePlacementSupport = String(capabilitySnapshot.supports?.precisePlacement || '').trim().toLowerCase();
+
+  if (surfaceClass === 'visual-first-low-uia'
+    && (capabilitySnapshot.enforcement?.avoidPrecisePlacementClaims || precisePlacementSupport === 'unsupported')
+    && precisePlacementIntent) {
+    for (const { action, actionIndex } of coordinateActions) {
+      violations.push({
+        action,
+        actionIndex,
+        reason: 'Capability-policy matrix forbids precise placement claims on visual-first-low-uia surfaces unless a deterministic verified workflow proves the anchors.'
+      });
+    }
+  }
+
+  if ((surfaceClass === 'uia-rich' || surfaceClass === 'browser')
+    && (capabilitySnapshot.enforcement?.discourageCoordinateOnlyPlans || semanticSupport === 'supported')
+    && coordinateActions.length > 0
+    && !semanticActionPresent
+    && !windowKeyboardActionPresent) {
+    for (const { action, actionIndex } of coordinateActions) {
+      violations.push({
+        action,
+        actionIndex,
+        reason: surfaceClass === 'browser'
+          ? 'Capability-policy matrix prefers deterministic browser-native or semantic UI actions over coordinate-only plans on browser surfaces.'
+          : 'Capability-policy matrix prefers semantic UIA actions over coordinate-only plans on UIA-rich surfaces.'
+      });
+    }
+  }
+
+  return { ok: violations.length === 0, violations };
+}
+
+function formatCapabilityPolicyViolationSystemMessage(capabilitySnapshot, violations) {
+  const lines = [];
+  lines.push('POLICY ENFORCEMENT: The previous action plan is REJECTED by the capability-policy matrix.');
+  lines.push(`Surface class: ${capabilitySnapshot?.surfaceClass || capabilitySnapshot?.surface?.mode || 'unknown'}`);
+  lines.push(`App: ${capabilitySnapshot?.appId || capabilitySnapshot?.foreground?.processName || 'unknown-app'}`);
+  lines.push('Reason(s):');
+  for (const violation of violations.slice(0, 6)) {
+    const index = typeof violation.actionIndex === 'number' ? violation.actionIndex : -1;
+    const actionType = violation.action?.type ? String(violation.action.type) : 'unknown';
+    lines.push(`- Action[${index}] type=${actionType}: ${violation.reason}`);
+  }
+  lines.push('You MUST regenerate a compliant plan.');
+  lines.push('Hard requirements:');
+  lines.push('- Respect the active surface-class channel rules from the capability-policy matrix.');
+  lines.push('- Prefer semantic/browser-native actions where the surface supports them.');
+  lines.push('- Do not imply precise placement on low-UIA visual surfaces without deterministic verified evidence.');
+  lines.push('- Respond ONLY with a JSON code block (```json ... ```): { thought, actions, verification }.');
+  return lines.join('\n');
+}
+
 module.exports = {
+  checkCapabilityPolicies,
   checkActionPolicies,
   checkNegativePolicies,
   formatActionPolicyViolationSystemMessage,
+  formatCapabilityPolicyViolationSystemMessage,
   formatNegativePolicyViolationSystemMessage,
   isClickLikeActionType,
   isCoordinateInteractionAction

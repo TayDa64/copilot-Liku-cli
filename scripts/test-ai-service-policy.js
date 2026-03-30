@@ -66,3 +66,65 @@ test('policy rejection message stays structured', () => {
   assert.ok(message.includes('Active app: Code.exe'));
   assert.ok(message.includes('Respond ONLY with a JSON code block'));
 });
+
+test('capability policy rejects precise placement on visual-first-low-uia surfaces', () => {
+  const result = policy.checkCapabilityPolicies(
+    {
+      thought: 'Draw and place a trend line exactly on the TradingView chart.',
+      actions: [{ type: 'drag', fromX: 10, fromY: 10, toX: 100, toY: 100 }]
+    },
+    {
+      surfaceClass: 'visual-first-low-uia',
+      appId: 'tradingview',
+      enforcement: { avoidPrecisePlacementClaims: true }
+    },
+    {
+      userMessage: 'draw and place a trend line exactly on tradingview'
+    }
+  );
+
+  assert.strictEqual(result.ok, false);
+  assert.strictEqual(result.violations.length, 1);
+  assert.ok(result.violations[0].reason.includes('precise placement claims'));
+});
+
+test('capability policy rejects browser coordinate-only plans when deterministic routes exist', () => {
+  const result = policy.checkCapabilityPolicies(
+    {
+      actions: [{ type: 'click', x: 400, y: 200 }]
+    },
+    {
+      surfaceClass: 'browser',
+      appId: 'msedge',
+      enforcement: { discourageCoordinateOnlyPlans: true }
+    },
+    {
+      userMessage: 'click the browser button'
+    }
+  );
+
+  assert.strictEqual(result.ok, false);
+  assert.strictEqual(result.violations.length, 1);
+  assert.ok(result.violations[0].reason.includes('browser-native'));
+});
+
+test('capability policy message stays structured', () => {
+  const message = policy.formatCapabilityPolicyViolationSystemMessage(
+    {
+      surfaceClass: 'visual-first-low-uia',
+      appId: 'tradingview'
+    },
+    [
+      {
+        actionIndex: 0,
+        action: { type: 'drag' },
+        reason: 'Capability-policy matrix forbids precise placement claims on visual-first-low-uia surfaces unless a deterministic verified workflow proves the anchors.'
+      }
+    ]
+  );
+
+  assert.ok(message.includes('REJECTED by the capability-policy matrix'));
+  assert.ok(message.includes('Surface class: visual-first-low-uia'));
+  assert.ok(message.includes('App: tradingview'));
+  assert.ok(message.includes('Respond ONLY with a JSON code block'));
+});

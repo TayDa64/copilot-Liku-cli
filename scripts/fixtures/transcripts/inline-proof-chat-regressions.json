@@ -1,0 +1,91 @@
+{
+  "repo-boundary-clarification-runtime": {
+    "description": "Sanitized runtime transcript proving repo-boundary clarification remains explicit before MUSE work proceeds.",
+    "source": {
+      "capturedAt": "2026-03-30T00:00:00.000Z",
+      "origin": "transcript-grounded regression seed"
+    },
+    "transcriptLines": [
+      "Conversation, visual context, browser session state, session intent state, and chat continuity state cleared.",
+      "> MUSE is a different repo, this is copilot-liku-cli.",
+      "[copilot:stub]",
+      "Understood. MUSE is a different repo and this session is in copilot-liku-cli.",
+      "Current repo: copilot-liku-cli",
+      "Downstream repo intent: MUSE",
+      "> What is the safest next step if I want to work on MUSE without mixing repos or windows? Reply briefly.",
+      "[copilot:stub]",
+      "Safest next step: explicitly switch to the MUSE repo or window first, then continue there."
+    ],
+    "notes": [
+      "Derived from an existing inline-proof style runtime transcript.",
+      "Kept intentionally short so expectation review stays easy."
+    ],
+    "expectations": [
+      {
+        "name": "repo state remains explicit in transcript",
+        "scope": "transcript",
+        "include": [
+          { "regex": "Current repo:\\s+copilot-liku-cli", "flags": "i" },
+          { "regex": "Downstream repo intent:\\s+muse", "flags": "i" }
+        ]
+      },
+      {
+        "name": "first assistant turn acknowledges separate repo",
+        "turn": 1,
+        "include": [
+          { "regex": "different repo", "flags": "i" },
+          { "regex": "copilot-liku-cli", "flags": "i" }
+        ]
+      },
+      {
+        "name": "follow-up requires an explicit switch",
+        "turn": 2,
+        "include": [
+          { "regex": "switch", "flags": "i" },
+          { "regex": "(repo|window|workspace)", "flags": "i" },
+          { "regex": "muse", "flags": "i" }
+        ],
+        "exclude": [
+          { "regex": "(edit|patch|implement|change).{0,60}muse", "flags": "i" }
+        ]
+      }
+    ]
+  },
+  "forgone-feature-suppression-runtime": {
+    "description": "Sanitized runtime transcript proving forgone features stay out of scope until explicitly re-enabled.",
+    "source": {
+      "capturedAt": "2026-03-30T00:00:00.000Z",
+      "origin": "transcript-grounded regression seed"
+    },
+    "transcriptLines": [
+      "Conversation, visual context, browser session state, session intent state, and chat continuity state cleared.",
+      "> I have forgone the implementation of: terminal-liku ui.",
+      "[copilot:stub]",
+      "Understood.",
+      "Forgone features: terminal-liku ui",
+      "> Should terminal-liku ui be part of the plan right now? Reply briefly.",
+      "[copilot:stub]",
+      "No. It is a forgone feature and should stay out of scope until you explicitly re-enable it."
+    ],
+    "expectations": [
+      {
+        "name": "transcript preserves forgone feature state",
+        "scope": "transcript",
+        "include": [
+          { "regex": "Forgone features:\\s+terminal-liku ui", "flags": "i" }
+        ]
+      },
+      {
+        "name": "assistant keeps forgone feature out of scope",
+        "turn": 2,
+        "include": [
+          { "regex": "(forgone|re-enable)", "flags": "i" },
+          { "regex": "(out of scope|not right now|should stay out)", "flags": "i" }
+        ],
+        "exclude": [
+          { "regex": "(implement|build|revive|restore).{0,40}(terminal-liku ui|terminal ui)", "flags": "i" }
+        ]
+      }
+    ]
+  }
+}

@@ -16,6 +16,8 @@
     "test:skills:inline": "node scripts/test-skill-inline-smoothness.js",
     "proof:inline": "node scripts/run-chat-inline-proof.js",
     "proof:inline:summary": "node scripts/summarize-chat-inline-proof.js",
+    "regression:extract": "node scripts/extract-transcript-regression.js",
+    "regression:transcripts": "node scripts/run-transcript-regressions.js",
     "smoke:shortcuts": "node scripts/smoke-shortcuts.js",
     "smoke:chat-direct": "node scripts/smoke-chat-direct.js",
     "smoke": "node scripts/smoke-command-system.js",

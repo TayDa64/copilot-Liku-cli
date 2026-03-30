@@ -1,13 +1,13 @@
-const BROWSER_PROCESS_NAMES = new Set(['msedge', 'chrome', 'firefox', 'brave', 'opera', 'iexplore', 'safari']);
-const LOW_UIA_PROCESS_HINTS = new Set(['tradingview', 'electron', 'slack', 'discord', 'teams']);
 const { buildClaimBoundConstraint } = require('../claim-bounds');
+const {
+  buildCapabilityPolicySnapshot,
+  buildCapabilityPolicySystemMessage,
+  classifyActiveAppCapability: classifyActiveAppCapabilityFromPolicy,
+  isScreenLikeCaptureMode
+} = require('../capability-policy');
 
-function isScreenLikeCaptureMode(captureMode) {
-  const normalized = String(captureMode || '').trim().toLowerCase();
-  return normalized === 'screen'
-    || normalized === 'fullscreen-fallback'
-    || normalized.startsWith('screen-')
-    || normalized.includes('fullscreen');
+function classifyActiveAppCapability(options) {
+  return classifyActiveAppCapabilityFromPolicy(options);
 }
 
 function isLikelyLowUiaChartContext({ capability, foreground, userMessage }) {
@@ -191,14 +191,14 @@ function buildDrawingEvidenceConstraint({ foreground, latestVisual, userMessage 
   return lines.join('\n');
 }
 
-function buildCurrentTurnVisualEvidenceConstraint({ latestVisual, capability, foreground, userMessage }) {
+function buildCurrentTurnVisualEvidenceConstraint({ policySnapshot, latestVisual, foreground, userMessage }) {
   if (!latestVisual || typeof latestVisual !== 'object') return '';
 
-  const captureMode = String(latestVisual.captureMode || latestVisual.scope || '').trim() || 'unknown';
-  const captureTrusted = typeof latestVisual.captureTrusted === 'boolean'
-    ? latestVisual.captureTrusted
-    : !isScreenLikeCaptureMode(captureMode);
-  const lowUiaChartContext = isLikelyLowUiaChartContext({ capability, foreground, userMessage });
+  const captureMode = String(policySnapshot?.evidence?.captureMode || latestVisual.captureMode || latestVisual.scope || '').trim() || 'unknown';
+  const captureTrusted = typeof policySnapshot?.evidence?.captureTrusted === 'boolean'
+    ? policySnapshot.evidence.captureTrusted
+    : (typeof latestVisual.captureTrusted === 'boolean' ? latestVisual.captureTrusted : !isScreenLikeCaptureMode(captureMode));
+  const lowUiaChartContext = isLikelyLowUiaChartContext({ capability: policySnapshot?.surface, foreground, userMessage });
   const activeApp = String(foreground?.title || foreground?.processName || '').trim();
 
   const lines = [
@@ -230,103 +230,6 @@ function buildCurrentTurnVisualEvidenceConstraint({ latestVisual, capability, fo
   return lines.join('\n');
 }
 
-function classifyActiveAppCapability({ foreground, watcherSnapshot, browserState }) {
-  const processName = String(foreground?.processName || watcherSnapshot?.activeWindow?.processName || '').toLowerCase();
-  const title = String(foreground?.title || watcherSnapshot?.activeWindow?.title || '').toLowerCase();
-  const activeWindowElementCount = Number(watcherSnapshot?.activeWindowElementCount || 0);
-  const namedInteractiveElementCount = Number(watcherSnapshot?.namedInteractiveElementCount || 0);
-  const interactiveElementCount = Number(watcherSnapshot?.interactiveElementCount || 0);
-  const browserUrl = String(browserState?.url || '').trim();
-
-  if (BROWSER_PROCESS_NAMES.has(processName) || (!processName && browserUrl)) {
-    return {
-      mode: 'browser',
-      confidence: 'high',
-      rationale: 'Foreground app matches a browser process or active browser session state exists.',
-      inventory: {
-        activeWindowElementCount,
-        interactiveElementCount,
-        namedInteractiveElementCount
-      },
-      directives: [
-        'Treat this as a browser-capable surface.',
-        'Prefer browser-specific navigation and recovery rules over generic desktop-app assumptions.'
-      ],
-      responseShape: [
-        'If the user asks what controls are available, distinguish browser-native controls from generic desktop/window controls.',
-        'Do not describe desktop UIA coverage as if it were the same as webpage DOM coverage.'
-      ]
-    };
-  }
-
-  const lowUiSignal = activeWindowElementCount <= 8 && namedInteractiveElementCount <= 2;
-  const likelyLowUiaApp = LOW_UIA_PROCESS_HINTS.has(processName)
-    || /tradingview|chart|workspace|electron/i.test(title)
-    || (interactiveElementCount <= 3 && lowUiSignal);
-
-  if (likelyLowUiaApp) {
-    return {
-      mode: 'visual-first-low-uia',
-      confidence: (LOW_UIA_PROCESS_HINTS.has(processName) || /tradingview/i.test(title)) ? 'high' : 'medium',
-      rationale: 'Foreground app looks like a Chromium/Electron or otherwise low-UIA surface with sparse named controls.',
-      inventory: {
-        activeWindowElementCount,
-        interactiveElementCount,
-        namedInteractiveElementCount
-      },
-      directives: [
-        'Do not over-claim named controls from Live UI State when the active window exposes sparse UIA signal.',
-        'Prefer screenshot-grounded observation plus keyboard/window actions for this app.',
-        'If the user asks what controls are available, separate direct UIA controls from visually visible controls.'
-      ],
-      responseShape: [
-        'Answer with three buckets when relevant: direct UIA controls, reliable keyboard/window controls, and visible but screenshot-only controls.',
-        'If namedInteractiveElementCount is very low, explicitly say the visible app surface is only partially exposed to UIA.'
-      ]
-    };
-  }
-
-  if (namedInteractiveElementCount >= 5 || interactiveElementCount >= 8 || activeWindowElementCount >= 20) {
-    return {
-      mode: 'uia-rich',
-      confidence: 'medium',
-      rationale: 'Foreground app exposes a healthy amount of named or interactive UIA elements.',
-      inventory: {
-        activeWindowElementCount,
-        interactiveElementCount,
-        namedInteractiveElementCount
-      },
-      directives: [
-        'Prefer semantic UIA actions such as click_element, find_element, get_text, and set_value when applicable.',
-        'Use Live UI State as the primary control inventory before falling back to screenshot reasoning.'
-      ],
-      responseShape: [
-        'When the user asks about controls, mention the direct UIA controls first.',
-        'Prefer find_element or get_text before claiming no controls are available.'
-      ]
-    };
-  }
-
-  return {
-    mode: 'keyboard-window-first',
-    confidence: 'low',
-    rationale: 'Foreground app is not clearly browser or UIA-rich, and the current evidence is limited.',
-    inventory: {
-      activeWindowElementCount,
-      interactiveElementCount,
-      namedInteractiveElementCount
-    },
-    directives: [
-      'Prefer reliable window management and keyboard actions first.',
-      'Use screenshots for observation tasks when Live UI State is sparse or ambiguous.'
-    ],
-    responseShape: [
-      'Be explicit that direct element-level control is uncertain from current evidence.',
-      'Describe reliable keyboard/window controls separately from anything that is only visually observed.'
-    ]
-  };
-}
-
 function createMessageBuilder(dependencies) {
   const {
     getBrowserSessionState,
@@ -348,6 +251,7 @@ function createMessageBuilder(dependencies) {
     const { extraSystemMessages = [], skillsContext = '', memoryContext = '', sessionIntentContext = '', chatContinuityContext = '' } = options || {};
     let currentForeground = null;
     let activeAppCapability = null;
+    let capabilitySnapshot = null;
 
     try {
       let prefText = '';
@@ -431,19 +335,20 @@ function createMessageBuilder(dependencies) {
       const watcherSnapshot = watcher && typeof watcher.getCapabilitySnapshot === 'function'
         ? watcher.getCapabilitySnapshot()
         : null;
-      activeAppCapability = classifyActiveAppCapability({ foreground: currentForeground, watcherSnapshot, browserState });
-      if (activeAppCapability) {
-        const capabilityBlock = [
-          '## Active App Capability',
-          `- mode: ${activeAppCapability.mode}`,
-          `- confidence: ${activeAppCapability.confidence}`,
-          `- rationale: ${activeAppCapability.rationale}`,
-          `- activeWindowElementCount: ${Number(activeAppCapability.inventory?.activeWindowElementCount || 0)}`,
-          `- interactiveElementCount: ${Number(activeAppCapability.inventory?.interactiveElementCount || 0)}`,
-          `- namedInteractiveElementCount: ${Number(activeAppCapability.inventory?.namedInteractiveElementCount || 0)}`,
-          ...(Array.isArray(activeAppCapability.directives) ? activeAppCapability.directives.map((line) => `- directive: ${line}`) : [])
-          ,...(Array.isArray(activeAppCapability.responseShape) ? activeAppCapability.responseShape.map((line) => `- answer-shape: ${line}`) : [])
-        ].join('\n');
+      const appPolicy = typeof dependencies?.getAppPolicy === 'function' && currentForeground?.processName
+        ? dependencies.getAppPolicy(currentForeground.processName)
+        : null;
+      capabilitySnapshot = buildCapabilityPolicySnapshot({
+        foreground: currentForeground,
+        watcherSnapshot,
+        browserState,
+        latestVisual: includeVisual ? getLatestVisualContext() : null,
+        appPolicy,
+        userMessage
+      });
+      activeAppCapability = capabilitySnapshot?.surface || classifyActiveAppCapability({ foreground: currentForeground, watcherSnapshot, browserState });
+      const capabilityBlock = buildCapabilityPolicySystemMessage(capabilitySnapshot);
+      if (capabilityBlock) {
         messages.push({ role: 'system', content: capabilityBlock });
       }
     } catch {}
@@ -456,8 +361,8 @@ function createMessageBuilder(dependencies) {
 
     try {
       const visualEvidenceConstraint = buildCurrentTurnVisualEvidenceConstraint({
+        policySnapshot: capabilitySnapshot,
         latestVisual,
-        capability: activeAppCapability,
         foreground: currentForeground,
         userMessage
       });

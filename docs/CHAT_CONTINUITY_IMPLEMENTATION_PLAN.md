@@ -2327,6 +2327,38 @@ The most credible next roadmap is:
 
 ### Roadmap N4 — Capability-policy matrix by app and surface class
 
+**Status (2026-03-30)**
+- first runtime matrix slice implemented
+- landed via:
+  - `src/main/capability-policy.js`
+  - `src/main/ai-service/message-builder.js`
+  - `src/main/ai-service/policy-enforcement.js`
+  - `src/main/ai-service.js`
+  - `scripts/test-capability-policy.js`
+  - `scripts/test-ai-service-policy.js`
+- current scope:
+  - added a built-in runtime capability-policy matrix for the canonical surface classes:
+    - `browser`
+    - `uia-rich`
+    - `visual-first-low-uia`
+    - `keyboard-window-first`
+  - the runtime policy snapshot now exposes normalized support dimensions for each surface/app combination:
+    - semantic control
+    - keyboard control
+    - trustworthy background capture
+    - precise placement
+    - bounded text extraction
+    - approval-time recovery
+  - prompt assembly now emits capability-policy snapshot context instead of relying only on inline surface heuristics
+  - action-plan enforcement now applies narrow built-in matrix checks in addition to existing per-app `actionPolicies` / `negativePolicies`
+  - TradingView now rides the generic `visual-first-low-uia` matrix as a first overlay for chart-evidence honesty and precise-placement bounds
+  - TradingView overlay metadata now pulls from existing verification/shortcut helpers so the runtime policy snapshot can surface:
+    - trading mode hints (`paper` / `live` / `unknown`)
+    - stable default shortcuts
+    - customizable shortcuts
+    - paper-test-only shortcut groups
+  - existing visual trust and background-capture signals are reused as policy inputs rather than duplicated into a second evidence model
+
 **Why this should be next**
 - Several current safety and honesty wins are still encoded as targeted TradingView or low-UIA heuristics.
 - The next architectural step is to formalize those rules into a reusable capability-policy layer.
@@ -2358,6 +2390,22 @@ The most credible next roadmap is:
 - app onboarding gets easier because trust behavior is declared, not rediscovered ad hoc
 
 ### Roadmap N5 — Runtime transcript to regression pipeline
+
+**Status (2026-03-30)**
+- first transcript-ingestion slice implemented
+- landed via:
+  - `scripts/transcript-regression-fixtures.js`
+  - `scripts/extract-transcript-regression.js`
+  - `scripts/run-transcript-regressions.js`
+  - `scripts/test-transcript-regression-pipeline.js`
+  - `scripts/fixtures/transcripts/inline-proof-chat-regressions.json`
+  - `docs/RUNTIME_REGRESSION_WORKFLOW.md`
+- current scope:
+  - added a checked-in transcript fixture format for sanitized `liku chat` regressions
+  - added an extraction helper that turns a runtime transcript or inline-proof log into a fixture skeleton
+  - added a fixture-driven runner that reuses the existing inline-proof transcript evaluator instead of introducing a second regression engine
+  - seeded the pipeline with checked-in transcript fixtures for repo-boundary and forgone-feature regressions
+  - documented the `runtime finding -> fixture -> focused rerun -> commit` workflow in repo docs and testing commands
 
 **Why this should be next**
 - The strongest recent improvements all came from real runtime transcripts, then hand-converted into tests.

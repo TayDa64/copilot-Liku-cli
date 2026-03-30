@@ -227,6 +227,42 @@ What this covers:
 - cohort filtering to separate pre-fix history from post-fix Phase 3 runs
 - evaluator characterization for transcript expectations without needing a live model run
 
+### Runtime Transcript Regression Pipeline
+
+Use the transcript regression pipeline when you already have a sanitized `liku chat` transcript or an inline-proof `.log` artifact and want to promote it into a checked-in regression fixture quickly:
+
+```bash
+# List checked-in transcript fixtures
+npm run regression:transcripts -- --list
+
+# Run all checked-in transcript fixtures
+npm run regression:transcripts
+
+# Run one fixture only
+npm run regression:transcripts -- --fixture repo-boundary-clarification-runtime
+
+# Generate a fixture skeleton from an existing transcript log
+npm run regression:extract -- --transcript-file C:\path\to\runtime.log --fixture-name repo-boundary-clarification
+
+# Or print a fixture skeleton without writing a file
+npm run regression:extract -- --transcript-file C:\path\to\runtime.log --stdout-only
+```
+
+What this covers:
+
+- checked-in sanitized transcript fixtures under `scripts/fixtures/transcripts/`
+- deterministic evaluation of transcript expectations without a live model call
+- rapid conversion of a real runtime failure into a reusable fixture skeleton
+- reuse of the same transcript parsing/evaluation semantics already used by the inline-proof harness
+
+Recommended workflow:
+
+1. capture or identify the runtime transcript/log you want to preserve
+2. sanitize it down to the smallest transcript snippet that still proves the failure or behavior
+3. run `regression:extract` to generate a fixture skeleton
+4. tighten the generated expectations manually so they assert the real invariant, not incidental phrasing
+5. run `regression:transcripts` and the nearest behavior test before committing
+
 ### Manual Checks for Model Selection
 
 When changing model-selection UX or Copilot routing, add these checks:
