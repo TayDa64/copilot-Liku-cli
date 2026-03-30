@@ -2,6 +2,7 @@
 
 const assert = require('assert');
 const path = require('path');
+const aiService = require(path.join(__dirname, '..', 'src', 'main', 'ai-service.js'));
 
 const {
   buildTradingViewPineResumePrerequisites,
@@ -179,8 +180,8 @@ test('open pine editor and read visible status stays verification-first', () => 
   assert.strictEqual(rewritten[0].type, 'bring_window_to_front');
   assert.strictEqual(rewritten[2].type, 'key');
   assert.strictEqual(rewritten[2].key, 'ctrl+k');
-  assert.strictEqual(opener.type, 'click_element');
-  assert.strictEqual(opener.text, 'Open Pine Editor');
+  assert.strictEqual(opener.type, 'key');
+  assert.strictEqual(opener.key, 'enter');
   assert.strictEqual(opener.verify.target, 'pine-editor');
   assert(readback, 'pine editor status workflow should gather Pine Editor text');
   assert.strictEqual(readback.pineEvidenceMode, 'generic-status');
@@ -232,6 +233,100 @@ test('generic pine script creation prefers safe new-script workflow', () => {
   assert(!rewritten.some((action) => String(action?.key || '').toLowerCase() === 'backspace'), 'safe authoring should avoid destructive clear-first behavior');
 });
 
+test('clipboard-only pine authoring plan rewrites into guarded continuation after safe inspection', () => {
+  const rewritten = maybeRewriteTradingViewPineWorkflow([
+    {
+      type: 'run_command',
+      shell: 'powershell',
+      command: "Set-Clipboard -Value @'\n//@version=6\nindicator(\"Momentum Confidence\", overlay=false)\nplot(close)\n'@",
+      reason: 'Copy the prepared Pine script to the clipboard'
+    }
+  ], {
+    userMessage: 'in tradingview, create a pine script that builds confidence and insight from movement and momentum'
+  });
+
+  const opener = rewritten.find((action) => action?.verify?.target === 'pine-editor');
+  const inspectStep = rewritten.find((action) => action?.type === 'get_text' && action?.pineEvidenceMode === 'safe-authoring-inspect');
+
+  assert(Array.isArray(rewritten), 'workflow should rewrite');
+  assert.strictEqual(rewritten[0].type, 'bring_window_to_front');
+  assert.strictEqual(rewritten[2].key, 'ctrl+k');
+  assert.strictEqual(opener.verify.kind, 'editor-active');
+  assert(inspectStep, 'safe authoring should inspect Pine Editor state first');
+  assert.strictEqual(inspectStep.continueOnPineEditorState, 'empty-or-starter');
+  assert(Array.isArray(inspectStep.continueActions) && inspectStep.continueActions.length > 0, 'safe authoring inspect step should carry continuation actions');
+  assert(inspectStep.continueActions.some((action) => action?.type === 'run_command' && /set-clipboard/i.test(String(action?.command || ''))), 'continuation should preserve clipboard preparation');
+  assert(inspectStep.continueActions.some((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'ctrl+v'), 'continuation should paste the prepared script');
+  assert(inspectStep.continueActions.some((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'ctrl+enter'), 'continuation should add the script to the chart');
+  assert(inspectStep.continueActions.some((action) => action?.type === 'get_text' && action?.pineEvidenceMode === 'compile-result'), 'continuation should gather compile-result feedback after add-to-chart');
+});
+
+test('full ai-service rewrite handles the transcript Pine prompt without browser or timeframe derailment', () => {
+  const rewritten = aiService.rewriteActionsForReliability([
+    { type: 'focus_window', windowHandle: 459522 }
+  ], {
+    userMessage: 'tradingview application is in the background, create a pine script that shows confidence in volume and momentum. then use key ctrl + enter to apply to the LUNR chart.'
+  });
+
+  assert(Array.isArray(rewritten), 'full rewrite should return an action list');
+  assert.strictEqual(rewritten[0].type, 'bring_window_to_front', 'rewrite should focus TradingView rather than keep a raw opaque focus action');
+  assert(rewritten.some((action) => action?.verify?.target === 'pine-editor'), 'rewrite should continue into a TradingView Pine workflow');
+  assert(!rewritten.some((action) => /google\.com\/search\?q=/i.test(String(action?.text || ''))), 'rewrite should not derail into browser discovery search');
+});
+
+test('bare focus-only TradingView Pine authoring plans are flagged as incomplete for retry', () => {
+  const incomplete = aiService.isIncompleteTradingViewPineAuthoringPlan({
+    actions: [
+      { type: 'focus_window', windowHandle: 459522 }
+    ]
+  }, 'tradingview application is in the background, create a pine script that shows confidence in volume and momentum. then use key ctrl + enter to apply to the LUNR chart.');
+
+  const complete = aiService.isIncompleteTradingViewPineAuthoringPlan({
+    actions: [
+      { type: 'focus_window', windowHandle: 459522 },
+      { type: 'run_command', shell: 'powershell', command: "Set-Clipboard -Value 'indicator(\"Confidence\")'" },
+      { type: 'key', key: 'ctrl+v' },
+      { type: 'key', key: 'ctrl+enter' }
+    ]
+  }, 'tradingview application is in the background, create a pine script that shows confidence in volume and momentum. then use key ctrl + enter to apply to the LUNR chart.');
+
+  assert.strictEqual(incomplete, true, 'focus-only Pine authoring plans should be considered incomplete');
+  assert.strictEqual(complete, false, 'plans with substantive Pine authoring payload should not be considered incomplete');
+});
+
+test('focus-only TradingView Pine authoring plan remains blocked when no script payload was produced', () => {
+  const recovered = aiService.maybeBuildRecoveredTradingViewPineActionResponse({
+    thought: 'Executing requested actions',
+    actions: [
+      { type: 'focus_window', windowHandle: 459522 }
+    ],
+    verification: 'Verify the actions completed successfully'
+  }, 'tradingview application is in the background, create a pine script that shows confidence in volume and momentum. then use key ctrl + enter to apply to the LUNR chart.');
+
+  assert.strictEqual(recovered, null, 'focus-only Pine authoring plans should stay blocked when no actual script payload was produced');
+});
+
+test('overwrite-style TradingView Pine prompts with focus-only plans remain incomplete instead of degrading into status-only playback', () => {
+  const incomplete = aiService.isIncompleteTradingViewPineAuthoringPlan({
+    actions: [
+      { type: 'focus_window', windowHandle: 459522 },
+      { type: 'focus_window', windowHandle: 459522 }
+    ]
+  }, 'TradingView is open in the background. Open Pine Editor for the LUNR chart, replace the current script with a new Pine script that shows confidence in volume and momentum, then press Ctrl+Enter to apply it and read the visible compile/apply result.');
+
+  const recovered = aiService.maybeBuildRecoveredTradingViewPineActionResponse({
+    thought: 'Executing requested actions',
+    actions: [
+      { type: 'focus_window', windowHandle: 459522 },
+      { type: 'focus_window', windowHandle: 459522 }
+    ],
+    verification: 'Verify the actions completed successfully'
+  }, 'TradingView is open in the background. Open Pine Editor for the LUNR chart, replace the current script with a new Pine script that shows confidence in volume and momentum, then press Ctrl+Enter to apply it and read the visible compile/apply result.');
+
+  assert.strictEqual(incomplete, true, 'overwrite-style Pine authoring prompts should still be considered incomplete when the model only produced focus actions');
+  assert.strictEqual(recovered, null, 'focus-only overwrite-style Pine plans should not be rewritten into misleading status-only workflows');
+});
+
 test('destructive clear remains reserved for explicit overwrite intent', () => {
   const rewritten = maybeRewriteTradingViewPineWorkflow([
     { type: 'key', key: 'ctrl+e', reason: 'Open Pine Editor' },
@@ -269,10 +364,10 @@ test('pine resume prerequisites re-establish editor activation before destructiv
   assert(Array.isArray(prerequisites), 'resume prerequisites should be returned as an action array');
   assert.strictEqual(prerequisites[0].type, 'bring_window_to_front');
   assert.strictEqual(prerequisites[2].key, 'ctrl+k');
-  assert.strictEqual(opener.type, 'click_element');
-  assert.strictEqual(opener.text, 'Open Pine Editor');
+  assert.strictEqual(opener.type, 'key');
+  assert.strictEqual(opener.key, 'enter');
   assert.strictEqual(opener.verify.kind, 'editor-active');
-  assert.strictEqual(prerequisites[8].key, 'ctrl+a');
+  assert(prerequisites.some((action) => String(action?.key || '').toLowerCase() === 'ctrl+a'), 'resume prerequisites should re-select Pine Editor contents before destructive overwrite resumes');
 });
 
 test('open pine editor and summarize compile result stays verification-first', () => {

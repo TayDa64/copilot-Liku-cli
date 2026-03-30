@@ -47,6 +47,7 @@ const {
 } = require('./ai-service/providers/registry');
 const { createProviderOrchestrator } = require('./ai-service/providers/orchestration');
 const {
+  checkActionPolicies,
   checkNegativePolicies,
   checkCapabilityPolicies,
   formatActionPolicyViolationSystemMessage,
@@ -1231,6 +1232,115 @@ function looksLikeAutomationRequest(text) {
   return false;
 }
 
+function isIncompleteTradingViewPineAuthoringPlan(actionBlock, userMessage = '') {
+  const normalizedMessage = String(userMessage || '').toLowerCase();
+  if (!/\btradingview\b/.test(normalizedMessage)) return false;
+  if (!/\bpine\b/.test(normalizedMessage) && !/\bscript\b/.test(normalizedMessage)) return false;
+  if (!/\b(create|build|generate|write|draft|make|replace|overwrite|rewrite)\b/.test(normalizedMessage)) return false;
+
+  const actions = Array.isArray(actionBlock?.actions) ? actionBlock.actions.filter(Boolean) : [];
+  if (actions.length === 0) return false;
+
+  const hasScriptPayload = actions.some((action) => {
+    const type = String(action?.type || '').trim().toLowerCase();
+    if (type === 'type') {
+      const text = String(action?.text || '').trim();
+      return /\/\/\s*@version\s*=\s*\d+|\b(?:indicator|strategy|library)\s*\(|\bplot(?:shape|char)?\s*\(|\binput(?:\.[a-z]+)?\s*\(|\balertcondition\s*\(/i.test(text);
+    }
+    if (type === 'run_command' && String(action?.command || '').trim().length > 0) return true;
+    if (type === 'key') {
+      const key = String(action?.key || '').trim().toLowerCase();
+      return key === 'ctrl+v' || key === 'ctrl+enter';
+    }
+    return false;
+  });
+
+  return !hasScriptPayload;
+}
+
+function buildIncompleteTradingViewPinePlanBlockMessage() {
+  return [
+    'Verified result: only a partial TradingView window-activation plan was produced.',
+    'Bounded inference: no Pine script insertion payload or `Ctrl+Enter` add-to-chart step was generated, so Liku did not execute Pine edits or apply a script to the chart.',
+    'Unverified next step: retry with a full TradingView Pine authoring plan that opens the Pine Editor, inserts the script, and verifies the compile/apply result.'
+  ].join('\n');
+}
+
+function extractTradingViewPineTargetSymbol(text = '') {
+  const raw = String(text || '');
+  const chartMatch = raw.match(/\b(?:to|for|on)\s+the\s+([A-Z][A-Z0-9._-]{0,9})\s+chart\b/);
+  if (chartMatch?.[1]) return chartMatch[1].toUpperCase();
+
+  const symbolMatch = raw.match(/\b([A-Z][A-Z0-9._-]{1,9})\b(?=\s+chart\b)/);
+  if (symbolMatch?.[1]) return symbolMatch[1].toUpperCase();
+
+  return null;
+}
+
+function buildIncompleteTradingViewPineRecoveryPrompt(userMessage = '') {
+  const raw = String(userMessage || '').trim();
+  if (!raw) return '';
+
+  const targetSymbol = extractTradingViewPineTargetSymbol(raw);
+  const normalized = raw.toLowerCase();
+  const requestedAddToChart = /\bctrl\s*\+\s*enter\b/.test(normalized)
+    || /\b(add|apply|load|put)\b.{0,20}\bchart\b/.test(normalized);
+
+  return [
+    'Retry the blocked TradingView Pine authoring task.',
+    `Original request: ${raw}`,
+    'You must respond ONLY with a JSON code block (```json ... ```).',
+    'Return an object with keys: thought, actions, verification.',
+    'Requirements:',
+    '- Produce a complete executable TradingView Pine workflow, not just window activation.',
+    '- Open TradingView Pine Editor through a verified TradingView route.',
+    '- Inspect the visible Pine Editor state before editing.',
+    '- Do not overwrite an existing visible script implicitly; prefer a safe new-script or bounded starter-script path unless the user explicitly asked to replace the current script.',
+    '- Insert the Pine script content using substantive authoring actions such as Set-Clipboard plus Ctrl+V or direct Pine code typing.',
+    requestedAddToChart
+      ? '- Use Ctrl+Enter only after the script is inserted, then read visible compile/apply result text.'
+      : '- After insertion, verify visible Pine compile/apply result text before claiming success.',
+    targetSymbol
+      ? `- Keep the requested chart target in mind: ${targetSymbol}.`
+      : '- Keep the requested TradingView chart target unchanged unless the user explicitly asked to switch symbols.'
+  ].join('\n');
+}
+
+function formatAutomationActionBlockMessage(actionBlock = {}) {
+  return '```json\n' + JSON.stringify({
+    thought: actionBlock.thought || 'Executing requested actions',
+    actions: Array.isArray(actionBlock.actions) ? actionBlock.actions : [],
+    verification: actionBlock.verification || 'Verify the actions completed successfully'
+  }, null, 2) + '\n```';
+}
+
+function maybeBuildRecoveredTradingViewPineActionResponse(actionBlock, userMessage = '') {
+  if (!isIncompleteTradingViewPineAuthoringPlan(actionBlock, userMessage)) {
+    return null;
+  }
+
+  const originalActions = Array.isArray(actionBlock?.actions) ? actionBlock.actions.filter(Boolean) : [];
+  const salvageSeedActions = originalActions.length > 0
+    ? originalActions
+    : [{ type: 'focus_window', title: 'TradingView', processName: 'tradingview' }];
+  const rewrittenActions = rewriteActionsForReliability(salvageSeedActions, { userMessage });
+
+  const recovered = {
+    thought: actionBlock?.thought || 'Create and apply the requested TradingView Pine script',
+    actions: Array.isArray(rewrittenActions) ? rewrittenActions : [],
+    verification: actionBlock?.verification || 'TradingView should show the Pine Editor workflow, bounded script insertion path, and visible compile/apply result.'
+  };
+
+  if (isIncompleteTradingViewPineAuthoringPlan(recovered, userMessage)) {
+    return null;
+  }
+
+  return {
+    actionBlock: recovered,
+    message: formatAutomationActionBlockMessage(recovered)
+  };
+}
+
 /**
  * Send a message and get AI response with auto-continuation
  */
@@ -1346,6 +1456,33 @@ async function sendMessage(userMessage, options = {}) {
     console.warn('[AI] Session intent state error (non-fatal):', err.message);
   }
 
+  const satisfiedBrowserResponse = maybeBuildSatisfiedBrowserNoOpResponse(enhancedMessage, {
+    browserState: getBrowserSessionState(),
+    processName: currentProcessName,
+    windowTitle: currentWindowTitle,
+    recentHistory: historyStore.getRecentConversationHistory(6)
+  });
+  if (satisfiedBrowserResponse) {
+    historyStore.pushConversationEntry({ role: 'user', content: enhancedMessage });
+    historyStore.pushConversationEntry({ role: 'assistant', content: satisfiedBrowserResponse });
+    historyStore.trimConversationHistory();
+    historyStore.saveConversationHistory();
+
+    const effectiveModel = resolveCopilotModelKey(model) || getCurrentCopilotModel();
+    return {
+      success: true,
+      message: satisfiedBrowserResponse,
+      provider: getCurrentProvider(),
+      model: effectiveModel,
+      requestedModel: effectiveModel,
+      modelVersion: modelRegistry()[effectiveModel]?.id || null,
+      endpointHost: null,
+      routingNote: 'browser-goal-satisfied-short-circuit',
+      routing: { mode: 'browser-goal-satisfied-short-circuit' },
+      hasVisualContext: false
+    };
+  }
+
   // Build messages with explicit skills/memory context params
   const messages = await buildMessages(enhancedMessage, includeVisualContext, {
     extraSystemMessages: baseExtraSystemMessages,
@@ -1369,6 +1506,8 @@ async function sendMessage(userMessage, options = {}) {
     const requestedModel = providerResult.requestedModel || providerResult.effectiveModel;
     const providerMetadata = providerResult.providerMetadata || null;
     let usedProvider = providerResult.usedProvider;
+    let routingNoteOverride = null;
+    let routingOverride = null;
 
     // Auto-continuation for truncated responses
     let fullResponse = response;
@@ -1400,19 +1539,31 @@ async function sendMessage(userMessage, options = {}) {
     
     response = fullResponse;
 
+    const parsedAutomationResponse = parseActions(response);
+    const incompleteTradingViewPinePlan =
+      effectiveEnforceActions
+      && usedProvider === 'copilot'
+      && isIncompleteTradingViewPineAuthoringPlan(parsedAutomationResponse, enhancedMessage);
+
     // If the user likely wanted automation, but the model returned only intent text,
+    // or returned an obviously incomplete TradingView Pine authoring plan,
     // re-prompt once to emit a JSON action block.
     if (
       effectiveEnforceActions &&
       usedProvider === 'copilot' &&
       looksLikeAutomationRequest(enhancedMessage) &&
-      !hasActions(response)
+      (!hasActions(response) || incompleteTradingViewPinePlan)
     ) {
-      chatDebugLog('[AI] No actions detected for an automation-like request; retrying once with stricter formatting...');
+      chatDebugLog(incompleteTradingViewPinePlan
+        ? '[AI] Incomplete TradingView Pine action plan detected; retrying once with stricter formatting...'
+        : '[AI] No actions detected for an automation-like request; retrying once with stricter formatting...');
       const enforcementPrompt =
         'You must respond ONLY with a JSON code block (```json ... ```).\n' +
         'Return an object with keys: thought, actions, verification.\n' +
-        'If you truly cannot take actions, return {"thought":"...","actions":[],"verification":"..."}.\n\n' +
+        'If you truly cannot take actions, return {"thought":"...","actions":[],"verification":"..."}.\n' +
+        (incompleteTradingViewPinePlan
+          ? 'Your previous plan was incomplete for a TradingView Pine authoring request. Include the substantive authoring steps, not just focus/window activation.\n\n'
+          : '\n') +
         `User request:\n${enhancedMessage}`;
       try {
         const forcedMessages = await buildMessages(enforcementPrompt, includeVisualContext, {
@@ -1421,11 +1572,54 @@ async function sendMessage(userMessage, options = {}) {
         const forcedRaw = await providerOrchestrator.callProvider('copilot', forcedMessages, effectiveModel);
         const forced = (forcedRaw && typeof forcedRaw === 'object' && typeof forcedRaw.content === 'string')
           ? forcedRaw.content : forcedRaw;
-        if (forced && hasActions(forced)) {
+        const parsedForced = forced ? parseActions(forced) : null;
+        if (forced && hasActions(forced) && !isIncompleteTradingViewPineAuthoringPlan(parsedForced, enhancedMessage)) {
           response = forced;
         }
       } catch (e) {
         console.warn('[AI] Action enforcement retry failed:', e.message);
+      }
+    }
+
+    if (
+      effectiveEnforceActions
+      && usedProvider === 'copilot'
+      && isIncompleteTradingViewPineAuthoringPlan(parseActions(response), enhancedMessage)
+    ) {
+      let recoveredPinePlan = maybeBuildRecoveredTradingViewPineActionResponse(parseActions(response), enhancedMessage);
+      if (!recoveredPinePlan?.message) {
+        const pineRecoveryPrompt = buildIncompleteTradingViewPineRecoveryPrompt(enhancedMessage);
+        if (pineRecoveryPrompt) {
+          try {
+            const recoveryMessages = await buildMessages(pineRecoveryPrompt, includeVisualContext, {
+              extraSystemMessages: baseExtraSystemMessages
+            });
+            const recoveryRaw = await providerOrchestrator.callProvider('copilot', recoveryMessages, effectiveModel);
+            const recoveryResponse = (recoveryRaw && typeof recoveryRaw === 'object' && typeof recoveryRaw.content === 'string')
+              ? recoveryRaw.content
+              : recoveryRaw;
+            const parsedRecovery = recoveryResponse ? parseActions(recoveryResponse) : null;
+            if (recoveryResponse && hasActions(recoveryResponse) && !isIncompleteTradingViewPineAuthoringPlan(parsedRecovery, enhancedMessage)) {
+              response = recoveryResponse;
+              routingNoteOverride = 'recovered TradingView Pine authoring plan after incomplete first draft';
+              routingOverride = { mode: 'recovered-incomplete-tradingview-pine-plan' };
+            }
+          } catch (e) {
+            console.warn('[AI] TradingView Pine recovery retry failed:', e.message);
+          }
+        }
+      }
+
+      if (!routingOverride && recoveredPinePlan?.message) {
+        response = recoveredPinePlan.message;
+        routingNoteOverride = 'locally synthesized TradingView Pine workflow from incomplete plan';
+        routingOverride = { mode: 'recovered-incomplete-tradingview-pine-plan' };
+      }
+
+      if (!routingOverride) {
+        response = buildIncompleteTradingViewPinePlanBlockMessage();
+        routingNoteOverride = 'blocked incomplete TradingView Pine authoring plan';
+        routingOverride = { mode: 'blocked-incomplete-tradingview-pine-plan' };
       }
     }
 
@@ -1536,8 +1730,8 @@ async function sendMessage(userMessage, options = {}) {
       requestedModel,
       modelVersion: modelRegistry()[effectiveModel]?.id || null,
       endpointHost: providerMetadata?.endpointHost || null,
-      routingNote: providerMetadata?.routing?.message || null,
-      routing: providerMetadata?.routing || null,
+      routingNote: routingNoteOverride || providerMetadata?.routing?.message || null,
+      routing: routingOverride || providerMetadata?.routing || null,
       hasVisualContext: includeVisualContext && visualContextStore.getVisualContextCount() > 0
     };
 
@@ -1946,6 +2140,10 @@ let pendingAction = null;
  * @returns {Object} Safety analysis result
  */
 function analyzeActionSafety(action, targetInfo = {}) {
+  const benignPineStarterResetIntent = action?.type === 'key'
+    && (String(action?.key || '').toLowerCase().includes('delete') || String(action?.key || '').toLowerCase().includes('backspace'))
+    && action?.safePineStarterReset === true;
+
   const result = {
     actionId: `action-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`,
     action: action,
@@ -2008,8 +2206,13 @@ function analyzeActionSafety(action, targetInfo = {}) {
       }
 
       if (key.includes('delete') || key.includes('backspace')) {
-        result.riskLevel = ActionRiskLevel.HIGH;
-        result.warnings.push('Delete/Backspace key may remove content');
+        if (benignPineStarterResetIntent) {
+          result.riskLevel = ActionRiskLevel.MEDIUM;
+          result.warnings.push('Bounded Pine starter reset after safe editor inspection');
+        } else {
+          result.riskLevel = ActionRiskLevel.HIGH;
+          result.warnings.push('Delete/Backspace key may remove content');
+        }
       } else if (key.includes('enter') || key.includes('return')) {
         result.riskLevel = ActionRiskLevel.MEDIUM;
         result.warnings.push('Enter key may submit form or confirm action');
@@ -2098,6 +2301,9 @@ function analyzeActionSafety(action, targetInfo = {}) {
   // Check for danger patterns
   for (const pattern of DANGER_PATTERNS) {
     if (pattern.test(textToCheck)) {
+      if (benignPineStarterResetIntent && /\b(delete|remove|erase|destroy|clear|reset|format)\b/i.test(String(textToCheck.match(pattern)?.[0] || ''))) {
+        continue;
+      }
       if (benignEnterIntent && /confirm/i.test(String(textToCheck.match(pattern)?.[0] || ''))) {
         continue;
       }
@@ -2403,6 +2609,166 @@ function getBrowserRecoverySnapshot(userMessage = '') {
   };
 }
 
+function titleCaseWords(value) {
+  return String(value || '')
+    .split(/[^a-z0-9]+/i)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
+    .join(' ')
+    .trim();
+}
+
+function inferBrowserDisplayName(userMessage, processName, windowTitle) {
+  const explicitTarget = extractExplicitBrowserTarget(userMessage);
+  const explicitBrowser = String(explicitTarget?.browser || '').trim().toLowerCase();
+  if (explicitBrowser === 'edge') return 'Edge';
+  if (explicitBrowser === 'chrome') return 'Chrome';
+  if (explicitBrowser === 'firefox') return 'Firefox';
+
+  const normalizedProcess = String(processName || '').trim().toLowerCase();
+  if (normalizedProcess === 'msedge') return 'Edge';
+  if (normalizedProcess === 'chrome') return 'Chrome';
+  if (normalizedProcess === 'firefox') return 'Firefox';
+
+  const normalizedTitle = String(windowTitle || '').trim().toLowerCase();
+  if (/microsoft edge/.test(normalizedTitle)) return 'Edge';
+  if (/google chrome/.test(normalizedTitle)) return 'Chrome';
+  if (/firefox/.test(normalizedTitle)) return 'Firefox';
+
+  return 'the browser';
+}
+
+function inferBrowserTargetLabels(urlLike) {
+  const fallback = {
+    pageLabel: 'The requested page',
+    websiteLabel: 'The requested website'
+  };
+
+  if (!urlLike) return fallback;
+
+  try {
+    const parsed = new URL(String(urlLike || '').trim());
+    const hostname = String(parsed.hostname || '').replace(/^www\./i, '').trim();
+    const rootToken = hostname.split('.')[0] || '';
+    const displayName = titleCaseWords(rootToken);
+    if (!displayName) return fallback;
+    return {
+      pageLabel: `${displayName} page`,
+      websiteLabel: `${displayName} website`
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+function isAcknowledgementOnlyBrowserMessage(text) {
+  return /^(thanks|thank you|awesome|great|nice|perfect|cool|ok|okay|got it|sounds good|that works)(?:[!.,\s].*)?$/i.test(String(text || '').trim());
+}
+
+function isBrowserNoOpConfirmationRequest(text) {
+  const normalized = String(text || '').trim();
+  if (!normalized) return false;
+  return /(confirm|already\s+open|already\s+be\s+open|do\s+not\s+propose\s+any\s+new\s+actions|don't\s+propose\s+any\s+new\s+actions|no\s+further\s+actions|reply\s+briefly)/i.test(normalized);
+}
+
+function getRecentBrowserGoalEvidence(recentHistory = []) {
+  const entries = Array.isArray(recentHistory) ? recentHistory.filter(Boolean) : [];
+  const recentUserMessage = [...entries]
+    .reverse()
+    .find((entry) => entry?.role === 'user' && typeof entry?.content === 'string')?.content || '';
+  const recentAssistantMessage = [...entries]
+    .reverse()
+    .find((entry) => entry?.role === 'assistant' && typeof entry?.content === 'string')?.content || '';
+  const historyText = entries
+    .map((entry) => String(entry?.content || '').trim())
+    .filter(Boolean)
+    .join('\n');
+
+  const candidateUrl = extractFirstUrlFromText(recentUserMessage)
+    || extractFirstUrlFromText(recentAssistantMessage)
+    || extractFirstUrlFromText(historyText);
+  const browserMentioned = /\b(edge|chrome|firefox|browser|tab|page|website|address\s+bar)\b/i.test(historyText)
+    || !!candidateUrl;
+  const directPlanEvidence = browserMentioned && /("actions"\s*:|bring_window_to_front|focus_window|ctrl\+l|address bar|navigate\s+directly|navigate to url|should now load)/i.test(recentAssistantMessage);
+  const noOpEvidence = /(no further actions needed|no further actions taken|no actions proposed|confirmed\.)/i.test(recentAssistantMessage);
+
+  return {
+    recentUserMessage,
+    recentAssistantMessage,
+    candidateUrl,
+    directPlanEvidence,
+    noOpEvidence
+  };
+}
+
+function looksLikeBrowserGoalMessage(text) {
+  const normalized = String(text || '').trim();
+  if (!normalized) return false;
+
+  const hasExplicitUrl = !!extractFirstUrlFromText(normalized);
+  const explicitBrowserTarget = extractExplicitBrowserTarget(normalized);
+  const integratedBrowserRequest = isVsCodeIntegratedBrowserRequest(normalized);
+  const strongBrowserSignals = hasExplicitUrl
+    || !!explicitBrowserTarget
+    || integratedBrowserRequest
+    || /\b(browser|tab|url|address\s+bar|microsoft\s+edge|edge|google\s+chrome|chrome|firefox|website|web\s*site|simple\s+browser|integrated\s+browser|browser\s+preview|live\s+preview)\b/i.test(normalized);
+  const weakBrowserSignals = /\b(page|site|link|links)\b/i.test(normalized);
+  const appSurfaceSignals = /\b(tradingview|pine\s+editor|pine\s+logs|pine\s+profiler|pine\s+version\s+history|version\s+history|watchlist|timeframe|time\s+frame|indicator|chart|object(?:\s+|-)tree|paper\s+trading|depth\s+of\s+market|dom|drawing\s+tools?|trading\s+panel)\b/i.test(normalized)
+    || /\b(app|application|program|software)\b/i.test(normalized)
+    || !!extractRequestedAppName(normalized);
+
+  if (appSurfaceSignals && !strongBrowserSignals) {
+    return false;
+  }
+
+  return strongBrowserSignals || weakBrowserSignals;
+}
+
+function maybeBuildSatisfiedBrowserNoOpResponse(userMessage, options = {}) {
+  const browserState = options.browserState && typeof options.browserState === 'object'
+    ? options.browserState
+    : getBrowserSessionState();
+  const recentEvidence = getRecentBrowserGoalEvidence(options.recentHistory);
+  const browserGoalEvident = String(browserState.goalStatus || '').trim().toLowerCase() === 'achieved'
+    || recentEvidence.directPlanEvidence
+    || recentEvidence.noOpEvidence;
+  if (!browserGoalEvident) return null;
+
+  const normalizedMessage = String(userMessage || '').trim();
+  if (!normalizedMessage) return null;
+  if (!looksLikeBrowserGoalMessage(normalizedMessage)) return null;
+
+  const normalizedIntent = normalizeIntentForRecovery(normalizedMessage);
+  const previousIntent = normalizeIntentForRecovery(browserState.lastUserIntent || recentEvidence.recentUserMessage || '');
+  const sameIntent = !!(normalizedIntent && previousIntent && normalizedIntent === previousIntent);
+  const acknowledgementOnly = isAcknowledgementOnlyBrowserMessage(normalizedMessage);
+  const explicitNoOpConfirmation = isBrowserNoOpConfirmationRequest(normalizedMessage);
+  if (!sameIntent && !acknowledgementOnly && !explicitNoOpConfirmation) {
+    return null;
+  }
+
+  const targetUrl = extractFirstUrlFromText(normalizedMessage)
+    || normalizeUrlCandidate(browserState.url)
+    || normalizeUrlCandidate(browserState.lastAttemptedUrl)
+    || recentEvidence.candidateUrl;
+  const labels = inferBrowserTargetLabels(targetUrl);
+  const browserName = inferBrowserDisplayName(
+    normalizedMessage,
+    options.processName || browserState.processName,
+    browserState.title || options.windowTitle
+  );
+
+  if (acknowledgementOnly) {
+    return `You're welcome — ${labels.pageLabel} is already open in ${browserName}. No further actions needed.`;
+  }
+
+  if (explicitNoOpConfirmation) {
+    return `Confirmed. ${labels.pageLabel} is already open in ${browserName}. No further actions needed.`;
+  }
+
+  return `${labels.websiteLabel} should now be open in ${browserName}. No further actions needed.`;
+}
+
 function buildBrowserSearchActions(target, query) {
   const normalizedQuery = String(query || '').trim();
   const searchUrl = buildGoogleSearchUrl(normalizedQuery);
@@ -2516,7 +2882,7 @@ function extractExplicitBrowserTarget(text) {
   // Prefer explicit "open/use ... in <browser>" style instructions, taking the LAST match.
   const matches = Array.from(
     t.matchAll(
-      /\b(open|launch|use)\b[^.!?\n]{0,120}\b(in|with|using)\b[^.!?\n]{0,60}\b(microsoft\s+edge\s+beta|microsoft\s+edge\s+dev|microsoft\s+edge\s+canary|microsoft\s+edge|edge\s+beta|edge\s+dev|edge\s+canary|edge|google\s+chrome\s+canary|google\s+chrome\s+beta|google\s+chrome\s+dev|google\s+chrome|chrome\s+canary|chrome\s+beta|chrome\s+dev|chrome|firefox)\b/gi
+      /\b(open|launch|use)\b[^\n]{0,180}\b(in|with|using)\b[^\n]{0,80}\b(microsoft\s+edge\s+beta|microsoft\s+edge\s+dev|microsoft\s+edge\s+canary|microsoft\s+edge|edge\s+beta|edge\s+dev|edge\s+canary|edge|google\s+chrome\s+canary|google\s+chrome\s+beta|google\s+chrome\s+dev|google\s+chrome|chrome\s+canary|chrome\s+beta|chrome\s+dev|chrome|firefox)\b/gi
     )
   );
   const last = matches.length ? matches[matches.length - 1] : null;
@@ -2839,6 +3205,7 @@ async function trySmartBrowserClick(action, actionData, windowHandle, actionExec
     } catch (e) {
       console.log(`[AI-SERVICE] UIA lookup failed: ${e.message}`);
     }
+
   }
 
   // ---------- Strategy 3: Ctrl+F find on page, then coordinate click ----------
@@ -3408,8 +3775,8 @@ function rewriteActionsForReliability(actions, context = {}) {
 /**
  * Detect and eliminate redundant Google search steps when the same plan
  * also contains a direct URL navigation. Example anti-pattern:
- *   type "https://www.google.com/search?q=apple.com" → enter → wait →
- *   ctrl+l → type "https://www.apple.com" → enter
+ *   type "https://www.google.com/search?q=example.com" → enter → wait →
+ *   ctrl+l → type "https://example.com" → enter
  * The search adds ~6 unnecessary steps. Strip them, keep the direct navigation.
  */
 function eliminateRedundantSearch(actions) {
@@ -3966,6 +4333,163 @@ function classifyActionFocusTargetResult(action = {}, result = {}) {
   };
 }
 
+const PINE_EDITOR_RESULT_CLICK_CANDIDATES = Object.freeze([
+  { text: 'Open Pine Editor', exact: true },
+  { text: 'Pine Editor', exact: false }
+]);
+
+const PINE_EDITOR_SURFACE_PROBE_CANDIDATES = Object.freeze([
+  { text: 'Add to chart', exact: true },
+  { text: 'Publish script', exact: false },
+  { text: 'Pine Logs', exact: false },
+  { text: 'Strategy Tester', exact: false }
+]);
+
+async function findForegroundElementByText(searchText, exact = false) {
+  if (typeof systemAutomation.findElementByText !== 'function') {
+    return null;
+  }
+
+  const foreground = await systemAutomation.getForegroundWindowInfo();
+  const foregroundHwnd = Number(foreground?.hwnd || 0) || 0;
+
+  try {
+    const found = await systemAutomation.findElementByText(searchText, {
+      exact,
+      controlType: ''
+    });
+    const element = found?.element || null;
+    if (!element) return null;
+
+    const elementHwnd = Number(element?.WindowHandle || 0) || 0;
+    if (foregroundHwnd && elementHwnd && foregroundHwnd !== elementHwnd) {
+      return null;
+    }
+
+    return {
+      foreground,
+      element,
+      text: searchText,
+      exact
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function probeTradingViewPineEditorSurface() {
+  for (const candidate of PINE_EDITOR_SURFACE_PROBE_CANDIDATES) {
+    const matched = await findForegroundElementByText(candidate.text, candidate.exact);
+    if (matched) {
+      return {
+        matched: true,
+        text: candidate.text,
+        exact: candidate.exact,
+        element: matched.element,
+        foreground: matched.foreground
+      };
+    }
+  }
+
+  return null;
+}
+
+async function maybeRecoverTradingViewPineEditorOpen(action, checkpointSpec, checkpointBeforeForeground, observationCheckpoint, options = {}) {
+  const routeId = String(action?.searchSurfaceContract?.id || '').trim().toLowerCase();
+  const verifyTarget = String(action?.verify?.target || '').trim().toLowerCase();
+  const key = String(action?.key || '').trim().toLowerCase();
+  if (routeId !== 'open-pine-editor' || verifyTarget !== 'pine-editor' || key !== 'enter') {
+    return null;
+  }
+
+  const probeMatchedBeforeClick = await probeTradingViewPineEditorSurface();
+  if (probeMatchedBeforeClick) {
+    const foreground = await systemAutomation.getForegroundWindowInfo();
+    return {
+      recovered: true,
+      checkpoint: {
+        ...observationCheckpoint,
+        verified: true,
+        error: null,
+        editorActiveMatched: true,
+        foreground,
+        matchReason: 'pine-editor-surface-probe',
+        recoveredBy: 'surface-probe',
+        pineEditorSurfaceProbe: probeMatchedBeforeClick
+      }
+    };
+  }
+
+  if (typeof systemAutomation.click !== 'function') {
+    return null;
+  }
+
+  for (const candidate of PINE_EDITOR_RESULT_CLICK_CANDIDATES) {
+    const matchedResult = await findForegroundElementByText(candidate.text, candidate.exact);
+    if (!matchedResult?.element?.Bounds) {
+      continue;
+    }
+
+    const clickResult = {
+      success: true,
+      coordinates: {
+        x: matchedResult.element.Bounds.CenterX,
+        y: matchedResult.element.Bounds.CenterY
+      }
+    };
+
+    try {
+      await systemAutomation.click(
+        matchedResult.element.Bounds.CenterX,
+        matchedResult.element.Bounds.CenterY,
+        'left'
+      );
+    } catch (error) {
+      clickResult.success = false;
+      clickResult.error = error?.message || String(error || 'click failed');
+    }
+
+    if (!clickResult.success) continue;
+
+    await sleepMs(240);
+
+    const relaxedCheckpoint = await verifyKeyObservationCheckpoint({
+      ...checkpointSpec,
+      requiresObservedChange: false
+    }, checkpointBeforeForeground, {
+      expectedWindowHandle: options.expectedWindowHandle
+    });
+
+    const probeMatchedAfterClick = await probeTradingViewPineEditorSurface();
+    if (relaxedCheckpoint?.verified || probeMatchedAfterClick) {
+      const foreground = relaxedCheckpoint?.foreground?.success
+        ? relaxedCheckpoint.foreground
+        : await systemAutomation.getForegroundWindowInfo();
+      return {
+        recovered: true,
+        clickResult,
+        checkpoint: {
+          ...observationCheckpoint,
+          ...(relaxedCheckpoint || {}),
+          verified: true,
+          error: null,
+          editorActiveMatched: true,
+          foreground,
+          matchReason: relaxedCheckpoint?.matchReason || 'pine-editor-semantic-click-recovery',
+          recoveredBy: 'semantic-click',
+          pineEditorResultClick: {
+            text: candidate.text,
+            exact: candidate.exact
+          },
+          pineEditorSurfaceProbe: probeMatchedAfterClick || null
+        }
+      };
+    }
+  }
+
+  return null;
+}
+
 function buildWindowProfileFromForeground(foreground, fallbackProfile = null) {
   if (!foreground || !foreground.success) return fallbackProfile;
   return {
@@ -3974,6 +4498,46 @@ function buildWindowProfileFromForeground(foreground, fallbackProfile = null) {
     windowKind: foreground.windowKind || fallbackProfile?.windowKind || undefined,
     title: foreground.title || fallbackProfile?.title || undefined
   };
+}
+
+function scopeActionToTargetWindow(action, lastTargetWindowHandle, lastTargetWindowProfile = null) {
+  if (!action || typeof action !== 'object') return action;
+
+  const type = String(action.type || '').trim().toLowerCase();
+  const targetWindowHandle = Number(lastTargetWindowHandle || 0) || 0;
+  const targetWindowTitle = String(lastTargetWindowProfile?.title || '').trim();
+
+  if (type === 'click_element' || type === 'find_element') {
+    if (!targetWindowHandle || Number(action.windowHandle || 0) === targetWindowHandle) {
+      return action;
+    }
+    return {
+      ...action,
+      windowHandle: targetWindowHandle
+    };
+  }
+
+  if (type === 'get_text') {
+    if (!targetWindowTitle) return action;
+    const existingCriteria = action.criteria && typeof action.criteria === 'object'
+      ? action.criteria
+      : null;
+    if (String(existingCriteria?.windowTitle || '').trim()) {
+      return action;
+    }
+    return {
+      ...action,
+      criteria: {
+        text: action.text,
+        automationId: action.automationId,
+        controlType: action.controlType,
+        ...(existingCriteria || {}),
+        windowTitle: targetWindowTitle
+      }
+    };
+  }
+
+  return action;
 }
 
 function buildPopupFollowUpRecipe(target) {
@@ -4579,7 +5143,9 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
       }
     }
 
-    const checkpointSpec = inferKeyObservationCheckpoint(action, actionData, i, {
+    const effectiveAction = scopeActionToTargetWindow(action, lastTargetWindowHandle, lastTargetWindowProfile);
+
+    const checkpointSpec = inferKeyObservationCheckpoint(effectiveAction, actionData, i, {
       userMessage,
       focusRecoveryTarget
     });
@@ -4587,7 +5153,7 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
       ? await systemAutomation.getForegroundWindowInfo()
       : null;
 
-    const result = await (actionExecutor ? actionExecutor(action) : systemAutomation.executeAction(action));
+    const result = await (actionExecutor ? actionExecutor(effectiveAction) : systemAutomation.executeAction(effectiveAction));
     result.reason = action.reason || '';
     result.safety = safety;
 
@@ -4616,9 +5182,22 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
     results.push(result);
 
     if (result.success && checkpointSpec?.applicable) {
-      const observationCheckpoint = await verifyKeyObservationCheckpoint(checkpointSpec, checkpointBeforeForeground, {
+      let observationCheckpoint = await verifyKeyObservationCheckpoint(checkpointSpec, checkpointBeforeForeground, {
         expectedWindowHandle: lastTargetWindowHandle
       });
+      const pineEditorRecovery = !observationCheckpoint.verified
+        ? await maybeRecoverTradingViewPineEditorOpen(effectiveAction, checkpointSpec, checkpointBeforeForeground, observationCheckpoint, {
+          expectedWindowHandle: lastTargetWindowHandle
+        })
+        : null;
+      if (pineEditorRecovery?.checkpoint) {
+        observationCheckpoint = pineEditorRecovery.checkpoint;
+        result.pineEditorRecovery = {
+          recoveredBy: observationCheckpoint.recoveredBy || 'semantic-click',
+          pineEditorResultClick: observationCheckpoint.pineEditorResultClick || null,
+          pineEditorSurfaceProbe: observationCheckpoint.pineEditorSurfaceProbe || null
+        };
+      }
       result.observationCheckpoint = observationCheckpoint;
       observationCheckpoints.push({
         ...observationCheckpoint,
@@ -4646,6 +5225,41 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
       if (!observationCheckpoint.verified) {
         result.success = false;
         result.error = observationCheckpoint.error;
+      }
+    }
+
+    if (
+      result.success
+      && effectiveAction.type === 'get_text'
+      && Array.isArray(action.continueActions)
+      && action.continueActions.length > 0
+    ) {
+      const observedPineState = String(result?.pineStructuredSummary?.editorVisibleState || '').trim().toLowerCase();
+      const expectedPineState = String(action?.continueOnPineEditorState || '').trim().toLowerCase();
+
+      if (observedPineState && expectedPineState && observedPineState === expectedPineState) {
+        const continuationActions = action.continueActions.map((step) => {
+          try {
+            return JSON.parse(JSON.stringify(step));
+          } catch {
+            return { ...step };
+          }
+        });
+
+        if (continuationActions.length > 0) {
+          actionData.actions.splice(i + 1, 0, ...continuationActions);
+          result.pineContinuationInjected = true;
+          result.pineContinuationState = observedPineState;
+          result.pineContinuationCount = continuationActions.length;
+        }
+      } else if (action.haltOnPineEditorStateMismatch) {
+        const mismatchReasons = action?.pineStateMismatchReasons && typeof action.pineStateMismatchReasons === 'object'
+          ? action.pineStateMismatchReasons
+          : {};
+        const fallbackReason = action?.haltReason || 'The visible Pine Editor state does not safely allow automatic authoring continuation.';
+
+        result.success = false;
+        result.error = mismatchReasons[observedPineState] || fallbackReason;
       }
     }
 
@@ -5096,7 +5710,9 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
       verification: pending.verification,
       actions: actionsToResume
     };
-    const checkpointSpec = inferKeyObservationCheckpoint(action, resumeActionData, i, {
+    const effectiveAction = scopeActionToTargetWindow(action, lastTargetWindowHandle, lastTargetWindowProfile);
+
+    const checkpointSpec = inferKeyObservationCheckpoint(effectiveAction, resumeActionData, i, {
       userMessage,
       focusRecoveryTarget
     });
@@ -5104,7 +5720,7 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
       ? await systemAutomation.getForegroundWindowInfo()
       : null;
 
-    const result = await (actionExecutor ? actionExecutor(action) : systemAutomation.executeAction(action));
+    const result = await (actionExecutor ? actionExecutor(effectiveAction) : systemAutomation.executeAction(effectiveAction));
     result.reason = action.reason || '';
     result.userConfirmed = resumePrerequisites.length === 0 && i === 0;
 
@@ -5133,9 +5749,22 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
     results.push(result);
 
     if (result.success && checkpointSpec?.applicable) {
-      const observationCheckpoint = await verifyKeyObservationCheckpoint(checkpointSpec, checkpointBeforeForeground, {
+      let observationCheckpoint = await verifyKeyObservationCheckpoint(checkpointSpec, checkpointBeforeForeground, {
         expectedWindowHandle: lastTargetWindowHandle
       });
+      const pineEditorRecovery = !observationCheckpoint.verified
+        ? await maybeRecoverTradingViewPineEditorOpen(effectiveAction, checkpointSpec, checkpointBeforeForeground, observationCheckpoint, {
+          expectedWindowHandle: lastTargetWindowHandle
+        })
+        : null;
+      if (pineEditorRecovery?.checkpoint) {
+        observationCheckpoint = pineEditorRecovery.checkpoint;
+        result.pineEditorRecovery = {
+          recoveredBy: observationCheckpoint.recoveredBy || 'semantic-click',
+          pineEditorResultClick: observationCheckpoint.pineEditorResultClick || null,
+          pineEditorSurfaceProbe: observationCheckpoint.pineEditorSurfaceProbe || null
+        };
+      }
       result.observationCheckpoint = observationCheckpoint;
       observationCheckpoints.push({
         ...observationCheckpoint,
@@ -5336,6 +5965,9 @@ module.exports = {
   preflightActions,
   rewriteActionsForReliability,
   getBrowserRecoverySnapshot,
+  maybeBuildSatisfiedBrowserNoOpResponse,
+  isIncompleteTradingViewPineAuthoringPlan,
+  maybeBuildRecoveredTradingViewPineActionResponse,
   // Teach UX
   parsePreferenceCorrection,
   executeActions,

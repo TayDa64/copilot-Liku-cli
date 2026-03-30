@@ -155,6 +155,42 @@ test('session intent store persists and clears pending requested task state', ()
   fs.rmSync(tempDir, { recursive: true, force: true });
 });
 
+test('session intent store persists resumable blocked Pine pending task metadata', () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'liku-session-intent-'));
+  const stateFile = path.join(tempDir, 'session-intent-state.json');
+  const store = createSessionIntentStateStore({ stateFile });
+
+  const recorded = store.setPendingRequestedTask({
+    userMessage: 'continue',
+    executionIntent: 'Retry the blocked TradingView Pine authoring task.',
+    taskSummary: 'Retry blocked TradingView Pine authoring task for LUNR chart',
+    targetApp: 'tradingview',
+    targetSurface: 'pine-editor',
+    targetSymbol: 'LUNR',
+    taskKind: 'tradingview-pine-authoring',
+    requestedAddToChart: true,
+    requestedVerification: 'visible-compile-or-apply-result',
+    resumeDisposition: 'bounded-retry',
+    blockedReason: 'incomplete-tradingview-pine-plan',
+    continuationIntent: 'Retry the blocked TradingView Pine authoring task.\nOriginal request: create a pine script for LUNR.',
+    recoveryNote: 'Retrying the blocked TradingView Pine authoring task from saved intent.'
+  }, {
+    cwd: path.join(__dirname, '..')
+  });
+
+  assert.strictEqual(recorded.pendingRequestedTask.taskKind, 'tradingview-pine-authoring');
+  assert.strictEqual(recorded.pendingRequestedTask.targetSurface, 'pine-editor');
+  assert.strictEqual(recorded.pendingRequestedTask.targetSymbol, 'LUNR');
+  assert.strictEqual(recorded.pendingRequestedTask.requestedAddToChart, true);
+  assert.strictEqual(recorded.pendingRequestedTask.resumeDisposition, 'bounded-retry');
+
+  const reloaded = createSessionIntentStateStore({ stateFile }).getPendingRequestedTask({ cwd: path.join(__dirname, '..') });
+  assert.strictEqual(reloaded.blockedReason, 'incomplete-tradingview-pine-plan');
+  assert(/Retry the blocked TradingView Pine authoring task/i.test(reloaded.continuationIntent));
+
+  fs.rmSync(tempDir, { recursive: true, force: true });
+});
+
 test('screen-like fallback evidence degrades continuity readiness', () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'liku-session-intent-'));
   const stateFile = path.join(tempDir, 'session-intent-state.json');

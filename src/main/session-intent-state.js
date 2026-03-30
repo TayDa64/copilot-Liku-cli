@@ -991,7 +991,16 @@ function normalizePendingRequestedTask(task = {}) {
     executionIntent: normalizeText(task.executionIntent, 280),
     taskSummary,
     targetApp: normalizeText(task.targetApp, 80),
-    targetWindowTitle: normalizeText(task.targetWindowTitle, 160)
+    targetWindowTitle: normalizeText(task.targetWindowTitle, 160),
+    taskKind: normalizeText(task.taskKind, 80),
+    targetSurface: normalizeText(task.targetSurface, 80),
+    targetSymbol: normalizeText(task.targetSymbol, 32),
+    requestedVerification: normalizeText(task.requestedVerification, 120),
+    resumeDisposition: normalizeText(task.resumeDisposition, 80),
+    blockedReason: normalizeText(task.blockedReason, 120),
+    continuationIntent: normalizeText(task.continuationIntent, 1200),
+    recoveryNote: normalizeText(task.recoveryNote, 240),
+    requestedAddToChart: typeof task.requestedAddToChart === 'boolean' ? task.requestedAddToChart : null
   };
 }
 

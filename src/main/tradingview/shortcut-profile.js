@@ -1,6 +1,6 @@
 const TRADINGVIEW_SHORTCUTS_OFFICIAL_URL = 'https://www.tradingview.com/support/shortcuts/';
 const TRADINGVIEW_SHORTCUTS_SECONDARY_URL = 'https://pineify.app/resources/blog/tradingview-hotkeys-the-complete-2025-guide-to-faster-charting-and-execution';
-const { buildSearchSurfaceSelectionContract } = require('../search-surface-contracts');
+const { mergeAction } = require('../search-surface-contracts');
 
 function cloneShortcut(shortcut) {
   if (!shortcut || typeof shortcut !== 'object') return null;
@@ -318,25 +318,40 @@ function buildTradingViewShortcutRoute(id, overrides = {}) {
       : (overrides.enterActionOverrides && typeof overrides.enterActionOverrides === 'object'
         ? overrides.enterActionOverrides
         : {});
+    const queryActionOverrides = overrides.queryActionOverrides && typeof overrides.queryActionOverrides === 'object'
+      ? overrides.queryActionOverrides
+      : (overrides.typeActionOverrides && typeof overrides.typeActionOverrides === 'object'
+        ? overrides.typeActionOverrides
+        : {});
 
-    return buildSearchSurfaceSelectionContract({
-      openerAction: quickSearchAction,
-      openerWaitMs: Number.isFinite(Number(overrides.searchWaitMs)) ? Number(overrides.searchWaitMs) : 220,
-      query: overrides.searchText || 'Pine Editor',
-      queryReason: overrides.typeReason || 'Search for Pine Editor in TradingView quick search',
-      queryActionOverrides: {
+    return [
+      mergeAction(quickSearchAction, { searchSurfaceContract: routeMetadata }),
+      { type: 'wait', ms: Number.isFinite(Number(overrides.searchWaitMs)) ? Number(overrides.searchWaitMs) : 220 },
+      mergeAction({
+        type: 'type',
+        text: overrides.searchText || 'Pine Editor',
+        reason: overrides.typeReason || 'Search for Pine Editor in TradingView quick search',
+        searchSurfaceContract: routeMetadata,
         tradingViewShortcut: routeMetadata
-      },
-      queryWaitMs: Number.isFinite(Number(overrides.commitWaitMs)) ? Number(overrides.commitWaitMs) : 180,
-      selectionText: overrides.selectionText || 'Open Pine Editor',
-      selectionExact: overrides.selectionExact === undefined ? true : !!overrides.selectionExact,
-      selectionReason: overrides.selectionReason || overrides.enterReason || 'Click the Open Pine Editor result in TradingView quick search',
-      selectionActionOverrides: {
-        tradingViewShortcut: routeMetadata,
-        ...selectionActionOverrides
-      },
-      metadata: routeMetadata
-    });
+      }, queryActionOverrides),
+      { type: 'wait', ms: Number.isFinite(Number(overrides.commitWaitMs)) ? Number(overrides.commitWaitMs) : 260 },
+      mergeAction({
+        type: 'key',
+        key: 'enter',
+        reason: overrides.selectionReason || overrides.enterReason || 'Select the highlighted Pine Editor result in TradingView quick search',
+        verify: selectionActionOverrides.verify || {
+          kind: 'editor-active',
+          appName: 'TradingView',
+          target: 'pine-editor',
+          keywords: ['pine', 'pine editor', 'script'],
+          requiresObservedChange: true
+        },
+        verifyTarget: selectionActionOverrides.verifyTarget,
+        searchSurfaceContract: routeMetadata,
+        tradingViewShortcut: routeMetadata
+      }, selectionActionOverrides),
+      { type: 'wait', ms: Number.isFinite(Number(overrides.selectionWaitMs)) ? Number(overrides.selectionWaitMs) : 220 }
+    ];
   }
 
   const singleAction = buildTradingViewShortcutAction(id, overrides);

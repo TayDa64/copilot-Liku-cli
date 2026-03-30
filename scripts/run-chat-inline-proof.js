@@ -38,9 +38,9 @@ const SUITES = {
     executeMode: 'false',
     prompts: [
       '/status',
-      'Open https://www.apple.com in Edge without using search or intermediate pages. Use the most direct grounded method.',
-      'Open https://www.apple.com in Edge without using search or intermediate pages. Use the most direct grounded method.',
-      'The Apple page should already be open. Confirm briefly and do not propose any new actions.',
+      'Open https://example.com in Edge without using search or intermediate pages. Use the most direct grounded method.',
+      'Open https://example.com in Edge without using search or intermediate pages. Use the most direct grounded method.',
+      'The Example Domain page should already be open. Confirm briefly and do not propose any new actions.',
       'exit'
     ],
     expectations: [
@@ -51,20 +51,20 @@ const SUITES = {
       },
       {
         name: 'assistant uses direct URL plan',
-        turn: 2,
-        include: [/https:\/\/www\.apple\.com/i, /(bring_window_to_front|focus_window)/i],
+        turn: 1,
+        include: [/https:\/\/example\.com/i, /(bring_window_to_front|focus_window)/i],
         exclude: [/google\.com/i, /bing\.com/i, /search the web/i]
       },
       {
         name: 'repeated request stays direct',
         turn: 2,
-        include: [/(navigate( directly)? to ((https?:\/\/)?(www\.)?apple\.com|the apple website)|apple website should now be open)/i],
+        include: [/(navigate( directly)? to ((https?:\/\/)?example\.com|the example domain website)|example( domain)? website should now be open)/i],
         exclude: [/search engine/i, /intermediate page/i]
       },
       {
         name: 'final turn confirms no further actions',
         turn: 3,
-        include: [/(Confirmed|Apple page is not currently open|Apple page is already open)/i, /(No further actions (needed|taken|are proposed)|No actions proposed)/i],
+        include: [/(Confirmed|Example( Domain)? page is not currently open|Example( Domain)? page is already open)/i, /(No further actions (needed|taken|are proposed)|No actions proposed)/i],
         exclude: [/"actions"\s*:/i]
       }
     ]
@@ -74,8 +74,8 @@ const SUITES = {
     executeMode: 'false',
     prompts: [
       '/status',
-      'Open https://www.apple.com in Edge without using search or intermediate pages. Use the most direct grounded method.',
-      'The Apple page should already be open. Confirm briefly and do not propose any new actions.',
+      'Open https://example.com in Edge without using search or intermediate pages. Use the most direct grounded method.',
+      'The Example Domain page should already be open. Confirm briefly and do not propose any new actions.',
       'exit'
     ],
     expectations: [
@@ -87,13 +87,13 @@ const SUITES = {
       {
         name: 'first automation turn stays direct',
         turn: 1,
-        include: [/(apple\.com|Apple\.com is already open|https:\/\/www\.apple\.com)/i, /(bring_window_to_front|ctrl\+l|alt\+d)/i],
+        include: [/(example\.com|Example Domain is already open|https:\/\/example\.com)/i, /(bring_window_to_front|ctrl\+l|alt\+d)/i],
         exclude: [/google\.com/i, /bing\.com/i]
       },
       {
-        name: 'no-action retry path is exercised',
+        name: 'final no-op path uses retry or deterministic short-circuit',
         scope: 'transcript',
-        include: [/No actions detected for an automation-like request; retrying once with stricter formatting/i]
+        include: [/(No actions detected for an automation-like request; retrying once with stricter formatting|browser-goal-satisfied-short-circuit)/i]
       },
       {
         name: 'final turn confirms without new actions',
@@ -143,8 +143,8 @@ const SUITES = {
     executeMode: 'false',
     prompts: [
       '/status',
-      'Open https://www.apple.com in Edge without using search or intermediate pages. Use the most direct grounded method.',
-      'The Apple page should already be open. Confirm briefly and do not propose any new actions.',
+      'Open https://example.com in Edge without using search or intermediate pages. Use the most direct grounded method.',
+      'The Example Domain page should already be open. Confirm briefly and do not propose any new actions.',
       'exit'
     ],
     expectations: [
@@ -172,8 +172,8 @@ const SUITES = {
     executeMode: 'false',
     prompts: [
       '/status',
-      'Open https://www.apple.com in Edge without using search or intermediate pages. Use the most direct grounded method.',
-      'The Apple page should already be open. Confirm briefly and do not propose any new actions.',
+      'Open https://example.com in Edge without using search or intermediate pages. Use the most direct grounded method.',
+      'The Example Domain page should already be open. Confirm briefly and do not propose any new actions.',
       'Thanks, that is perfect.',
       'exit'
     ],
@@ -186,7 +186,7 @@ const SUITES = {
       {
         name: 'pre-ack turn is action-free confirmation',
         turn: 2,
-        include: [/(Confirmed|Apple page is not currently open|Apple page is already open)/i],
+        include: [/(Confirmed|Example( Domain)? page is not currently open|Example( Domain)? page is already open)/i],
         exclude: [/"actions"\s*:/i, /```json/i]
       },
       {

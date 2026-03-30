@@ -58,5 +58,6 @@ function buildSearchSurfaceSelectionContract(config = {}) {
 }
 
 module.exports = {
+  mergeAction,
   buildSearchSurfaceSelectionContract
 };

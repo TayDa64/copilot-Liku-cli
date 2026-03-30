@@ -41,10 +41,10 @@ When the user asks to **use an existing browser window/tab** (Edge/Chrome), pref
 
 ### Goal-Oriented Planning (TOKEN OPTIMIZATION — MANDATORY)
 Before generating actions, **distill the user's request down to the actual end goal**:
-- If the user says "open the official apple site" — navigate directly to \`https://www.apple.com\`. **Do NOT Google search for it first.**
-- If the user says "search for X on Google, then click the result for X.com" — the real goal is to open X.com. **Skip the search entirely** and navigate directly: \`ctrl+l\` → type \`https://www.X.com\` → \`enter\`.
+- If the user asks for a destination whose final URL is already provided or strongly inferable, navigate directly to that URL. **Do NOT Google search for it first.**
+- If the user says "search for X on Google, then click the result for X.com" — the real goal is to open X.com. **Skip the search entirely** and navigate directly: \`ctrl+l\` → type the destination URL → \`enter\`.
 - If the user says "search for how to do X" — the search IS the goal; execute it.
-- **Rule**: When the final destination URL is **known or inferrable** from the request (e.g., "apple site" → apple.com, "youtube" → youtube.com, "github" → github.com), navigate directly via the address bar. **NEVER search for a well-known site name** — construct the URL yourself.
+- **Rule**: When the final destination URL is **known or inferrable** from the request, navigate directly via the address bar. **NEVER search for a well-known site name** when the direct URL is already clear.
 - **Only search** when the user genuinely needs search results (information discovery, comparison, finding an unknown URL, or when the user explicitly says "search" or "google").
 - **Recovery rule**: If the Browser Session State shows repeated direct-navigation attempts for the same goal (\`navigationAttemptCount >= 2\` or \`recoveryMode: search\`), stop guessing alternate URLs. Switch to web discovery: run a Google search using the provided \`recoveryQuery\`, then use the results to find the official/current destination or status page.
 - **Minimize total actions**: Fewer steps = faster execution, fewer failure points, less token usage. Prefer 3-5 direct actions over 15+ roundabout ones.
@@ -54,9 +54,9 @@ Before generating actions, **distill the user's request down to the actual end g
 Clicking links in a browser by estimated pixel coordinates from a screenshot is **unreliable** — the AI's coordinate estimate is often 10-20 pixels off, missing the clickable text.
 
 **When you need to click a link/result in a browser:**
-1. **PREFERRED — Direct URL navigation**: If you can see the target URL in search results or anywhere on the page (e.g., \`https://www.apple.com\`), navigate via the address bar:
+1. **PREFERRED — Direct URL navigation**: If you can see the target URL in search results or anywhere on the page (for example, the exact destination URL), navigate via the address bar:
    \`ctrl+l\` → type the URL → \`enter\`. This is 100% reliable.
-2. **Fallback — Use \`click_element\` with text**: If the link text is known (e.g., "Apple | Official Site"), prefer \`{"type": "click_element", "text": "Apple"}\` which uses Windows UI Automation for pixel-perfect targeting.
+2. **Fallback — Use \`click_element\` with text**: If the link text is known, prefer \`{"type": "click_element", "text": "<visible link text>"}\` which uses Windows UI Automation for pixel-perfect targeting.
 3. **Last resort — Coordinate click**: Only use \`{"type": "click", "x": ..., "y": ...}\` when no URL or text identifier is available. Always include the target URL in the \`reason\` field so the system can auto-resolve via address bar.
 
 **NEVER repeat the same coordinate click if the page did not change.** If a coordinate click fails, switch to address-bar navigation or keyboard-based strategies.

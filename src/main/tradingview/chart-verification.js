@@ -43,6 +43,18 @@ function normalizeTextForMatch(value) {
     .trim();
 }
 
+const SYMBOL_STOPWORDS = new Set([
+  'A',
+  'AN',
+  'THE',
+  'CHART',
+  'TRADINGVIEW',
+  'PINE',
+  'EDITOR',
+  'SCRIPT',
+  'SCRIPTS'
+]);
+
 function mergeUnique(values = []) {
   return Array.from(new Set((Array.isArray(values) ? values : [values])
     .flat()
@@ -54,6 +66,7 @@ function normalizeSymbolToken(value = '') {
   const compact = String(value || '').trim().toUpperCase().replace(/[^A-Z0-9._-]+/g, '');
   if (!compact) return null;
   if (compact.length < 1 || compact.length > 15) return null;
+  if (SYMBOL_STOPWORDS.has(compact)) return null;
   return compact;
 }
 
@@ -78,10 +91,16 @@ function normalizeTimeframeToken(value = '') {
   return null;
 }
 
+function collectMatches(text = '', pattern) {
+  if (!(pattern instanceof RegExp)) return [];
+  const flags = pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`;
+  return Array.from(String(text || '').matchAll(new RegExp(pattern.source, flags)));
+}
+
 function extractRequestedTimeframe(userMessage = '') {
   const text = String(userMessage || '');
 
-  const explicitTo = Array.from(text.matchAll(/\bto\s+([1-9][0-9]{0,2}\s*(?:s|sec|secs|second|seconds|m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days|w|wk|wks|week|weeks|mo|mos|month|months))\b/gi));
+  const explicitTo = collectMatches(text, /\bto\s+([1-9][0-9]{0,2}\s*(?:s|sec|secs|second|seconds|m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days|w|wk|wks|week|weeks|mo|mos|month|months))\b/gi);
   if (explicitTo.length) {
     const normalized = normalizeTimeframeToken(explicitTo[explicitTo.length - 1]?.[1] || '');
     if (normalized) return normalized;
@@ -94,7 +113,7 @@ function extractRequestedTimeframe(userMessage = '') {
   ];
 
   for (const pattern of directPatterns) {
-    const matches = Array.from(text.matchAll(pattern));
+    const matches = collectMatches(text, pattern);
     for (let index = matches.length - 1; index >= 0; index--) {
       const normalized = normalizeTimeframeToken(matches[index]?.[1] || '');
       if (normalized) return normalized;
@@ -110,7 +129,7 @@ function extractRequestedSymbol(userMessage = '') {
     /\b(?:change|switch|set)\s+(?:the\s+)?(?:symbol|ticker)\s+(?:to\s+)?\$?([A-Za-z][A-Za-z0-9._-]{0,14})\b/i,
     /\b(?:open|search\s+for|find)\s+(?:the\s+)?(?:symbol|ticker)\s+\$?([A-Za-z][A-Za-z0-9._-]{0,14})\b/i,
     /\b(?:symbol|ticker)\s+(?:search\s+for\s+)?\$?([A-Za-z][A-Za-z0-9._-]{0,14})\b/i,
-    /\b(?:to|for)\s+\$?([A-Za-z][A-Za-z0-9._-]{0,14})\b(?=[^\n]{0,40}\b(?:in\s+tradingview|on\s+tradingview|chart|ticker|symbol))?/i
+    /\b(?:to|for)\s+(?:the\s+)?\$?([A-Za-z][A-Za-z0-9._-]{0,14})\b(?=[^\n]{0,40}\b(?:in\s+tradingview|on\s+tradingview|chart|ticker|symbol))?/i
   ];
 
   for (const pattern of patterns) {
@@ -176,6 +195,8 @@ function inferTradingViewSymbolIntent(userMessage = '', actions = []) {
   const mentionsTradingView = /\btradingview|trading view\b/i.test(raw)
     || (Array.isArray(actions) && actions.some((action) => /tradingview/i.test(String(action?.title || '')) || /tradingview/i.test(String(action?.processName || ''))));
   const mentionsQuickSearchSurface = messageMentionsTradingViewShortcut(raw, 'symbol-search');
+  const mentionsPineWorkflow = /\bpine\b|\bpine editor\b|\bpine script\b|\bscript\b|\bctrl\s*\+\s*enter\b|\badd to chart\b|\bapply to (?:the\s+)?[a-z0-9._-]+\s+chart\b/i.test(raw);
+  if (mentionsPineWorkflow) return null;
   const mentionsSymbolFlow = (/\b(symbol|ticker)\b/i.test(raw) && /\b(change|switch|set|open|search|find)\b/i.test(raw))
     || (mentionsQuickSearchSurface && /\b(change|switch|set|open|search|find|use|focus)\b/i.test(raw));
   if (!mentionsTradingView || !mentionsSymbolFlow) return null;

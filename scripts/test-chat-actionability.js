@@ -24,6 +24,8 @@ let visualContexts = [];
 let latestVisualContext = null;
 let lastRecordedTurn = null;
 let preflightUserMessages = [];
+const failFirstPineExecution = process.env.__FAIL_FIRST_PINE_EXECUTION__ === '1';
+let failedFirstPineExecution = false;
 
 function isScreenLikeCaptureMode(captureMode) {
   const normalized = String(captureMode || '').trim().toLowerCase();
@@ -84,63 +86,149 @@ function deriveContinuityState(turnRecord) {
 function buildActionResponse(line) {
   const lower = String(line || '').toLowerCase();
 
+  if (/retry the blocked tradingview pine authoring task/.test(lower)) {
+    return {
+      success: true,
+      provider: 'stub',
+      model: 'stub-model',
+      requestedModel: 'stub-model',
+      message: JSON.stringify({
+        thought: 'Create and apply the requested TradingView Pine script',
+        actions: [
+          { type: 'focus_window', windowHandle: 458868 },
+          { type: 'run_command', shell: 'powershell', command: "Set-Clipboard -Value @'\\n//@version=6\\nindicator(\\\"Volume Momentum Confidence\\\", overlay=false)\\nplot(close)\\n'@" },
+          { type: 'key', key: 'ctrl+v', reason: 'Paste the Pine script' },
+          { type: 'key', key: 'ctrl+enter', reason: 'Apply the Pine script to the chart' }
+        ],
+        verification: 'TradingView should show the Pine script applied and visible compile/apply status.'
+      }, null, 2)
+    };
+  }
+
+  if (/retry the failed tradingview pine authoring workflow/.test(lower)) {
+    return {
+      success: true,
+      provider: 'stub',
+      model: 'stub-model',
+      requestedModel: 'stub-model',
+      message: JSON.stringify({
+        thought: 'Retry the TradingView Pine workflow from the start',
+        actions: [
+          { type: 'focus_window', windowHandle: 458868 },
+          { type: 'run_command', shell: 'powershell', command: "Set-Clipboard -Value @'\\n//@version=6\\nindicator(\\\"Volume Momentum Confidence\\\", overlay=false)\\nplot(close)\\n'@" },
+          { type: 'key', key: 'ctrl+v', reason: 'Paste the Pine script' },
+          { type: 'key', key: 'ctrl+enter', reason: 'Apply the Pine script to the chart' }
+        ],
+        verification: 'TradingView should show the Pine script applied and visible compile/apply status.'
+      }, null, 2)
+    };
+  }
+
+  if (/tradingview application is in the background, create a pine script that shows confidence in volume and momentum/.test(lower)) {
+    return {
+      success: true,
+      provider: 'stub',
+      model: 'stub-model',
+      requestedModel: 'stub-model',
+      routing: { mode: 'blocked-incomplete-tradingview-pine-plan' },
+      routingNote: 'blocked incomplete TradingView Pine authoring plan',
+      message: [
+        'Verified result: only a partial TradingView window-activation plan was produced.',
+        'Bounded inference: no Pine script insertion payload or Ctrl+Enter add-to-chart step was generated, so Liku did not execute Pine edits or apply a script to the chart.',
+        'Unverified next step: retry with a full TradingView Pine authoring plan that opens the Pine Editor, inserts the script, and verifies the compile/apply result.'
+      ].join('\\n')
+    };
+  }
+
   if (/confidence about investing|what would help me have confidence/.test(lower)) {
-    return 'To build confidence in LUNR, combine chart structure, indicators, and catalyst data.';
+    return {
+      success: true,
+      provider: 'stub',
+      model: 'stub-model',
+      requestedModel: 'stub-model',
+      message: 'To build confidence in LUNR, combine chart structure, indicators, and catalyst data.'
+    };
   }
 
   if (/volume profile|vpvr/.test(lower)) {
-    return JSON.stringify({
-      thought: 'Apply Volume Profile in TradingView',
-      actions: [
-        { type: 'focus_window', windowHandle: 458868 },
-        { type: 'key', key: '/', reason: 'Open Indicators search in TradingView' },
-        { type: 'type', text: 'Volume Profile Visible Range' },
-        { type: 'key', key: 'enter', reason: 'Add Volume Profile Visible Range' }
-      ],
-      verification: 'TradingView should show Volume Profile Visible Range on the chart.'
-    }, null, 2);
+    return {
+      success: true,
+      provider: 'stub',
+      model: 'stub-model',
+      requestedModel: 'stub-model',
+      message: JSON.stringify({
+        thought: 'Apply Volume Profile in TradingView',
+        actions: [
+          { type: 'focus_window', windowHandle: 458868 },
+          { type: 'key', key: '/', reason: 'Open Indicators search in TradingView' },
+          { type: 'type', text: 'Volume Profile Visible Range' },
+          { type: 'key', key: 'enter', reason: 'Add Volume Profile Visible Range' }
+        ],
+        verification: 'TradingView should show Volume Profile Visible Range on the chart.'
+      }, null, 2)
+    };
   }
 
   if (/add rsi/.test(lower)) {
-    return JSON.stringify({
-      thought: 'Add RSI in TradingView',
-      actions: [
-        { type: 'focus_window', windowHandle: 458868 },
-        { type: 'key', key: '/', reason: 'Open Indicators search in TradingView' },
-        { type: 'type', text: 'RSI' },
-        { type: 'key', key: 'enter', reason: 'Add RSI indicator' }
-      ],
-      verification: 'TradingView should show RSI on the chart.'
-    }, null, 2);
+    return {
+      success: true,
+      provider: 'stub',
+      model: 'stub-model',
+      requestedModel: 'stub-model',
+      message: JSON.stringify({
+        thought: 'Add RSI in TradingView',
+        actions: [
+          { type: 'focus_window', windowHandle: 458868 },
+          { type: 'key', key: '/', reason: 'Open Indicators search in TradingView' },
+          { type: 'type', text: 'RSI' },
+          { type: 'key', key: 'enter', reason: 'Add RSI indicator' }
+        ],
+        verification: 'TradingView should show RSI on the chart.'
+      }, null, 2)
+    };
   }
 
   if (/pine logs/.test(lower)) {
-    return JSON.stringify({
-      thought: 'Open Pine Logs in TradingView',
-      actions: [
-        { type: 'focus_window', windowHandle: 458868 },
-        { type: 'key', key: 'alt+l', reason: 'Open Pine Logs' }
-      ],
-      verification: 'TradingView should show the Pine Logs panel.'
-    }, null, 2);
+    return {
+      success: true,
+      provider: 'stub',
+      model: 'stub-model',
+      requestedModel: 'stub-model',
+      message: JSON.stringify({
+        thought: 'Open Pine Logs in TradingView',
+        actions: [
+          { type: 'focus_window', windowHandle: 458868 },
+          { type: 'key', key: 'alt+l', reason: 'Open Pine Logs' }
+        ],
+        verification: 'TradingView should show the Pine Logs panel.'
+      }, null, 2)
+    };
   }
 
-  return JSON.stringify({
-    thought: 'Set alert in TradingView',
-    actions: [
-      { type: 'focus_window', windowHandle: 458868 },
-      { type: 'key', key: 'alt+a', reason: 'Open the Create Alert dialog' },
-      { type: 'type', text: '20.02' },
-      { type: 'key', key: 'enter', reason: 'Save the alert' }
-    ],
-    verification: 'TradingView should show the alert configured at 20.02'
-  }, null, 2);
+  return {
+    success: true,
+    provider: 'stub',
+    model: 'stub-model',
+    requestedModel: 'stub-model',
+    message: JSON.stringify({
+      thought: 'Set alert in TradingView',
+      actions: [
+        { type: 'focus_window', windowHandle: 458868 },
+        { type: 'key', key: 'alt+a', reason: 'Open the Create Alert dialog' },
+        { type: 'type', text: '20.02' },
+        { type: 'key', key: 'enter', reason: 'Save the alert' }
+      ],
+      verification: 'TradingView should show the alert configured at 20.02'
+    }, null, 2)
+  };
 }
 
 const aiStub = {
   sendMessage: async (line) => {
     seenMessages.push(line);
-    return { success: true, provider: 'stub', model: 'stub-model', message: line ? buildActionResponse(line) : 'stub response', requestedModel: 'stub-model' };
+    return line
+      ? buildActionResponse(line)
+      : { success: true, provider: 'stub', model: 'stub-model', message: 'stub response', requestedModel: 'stub-model' };
   },
   handleCommand: async () => ({ type: 'info', message: 'stub command' }),
   parseActions: (message) => {
@@ -158,8 +246,27 @@ const aiStub = {
     return value;
   },
   analyzeActionSafety: () => ({ requiresConfirmation: false }),
-  executeActions: async () => {
+  executeActions: async (actionData) => {
     executeCount++;
+    const actions = Array.isArray(actionData?.actions) ? actionData.actions : [];
+    const isTradingViewPineWorkflow = actions.some((action) =>
+      String(action?.verify?.target || '').toLowerCase() === 'pine-editor'
+      || String(action?.tradingViewShortcut?.id || '').toLowerCase() === 'open-pine-editor'
+      || String(action?.searchSurfaceContract?.id || '').toLowerCase() === 'open-pine-editor'
+      || String(action?.key || '').toLowerCase() === 'ctrl+enter'
+    );
+    if (failFirstPineExecution && !failedFirstPineExecution && isTradingViewPineWorkflow) {
+      failedFirstPineExecution = true;
+      return {
+        success: false,
+        error: 'Element not found',
+        results: [
+          { index: 6, action: 'key', success: false, error: 'Element not found' }
+        ],
+        screenshotCaptured: false,
+        postVerification: { verified: false }
+      };
+    }
     return { success: true, results: [], screenshotCaptured: false, postVerification: { verified: true } };
   },
   getLatestVisualContext: () => {
@@ -285,7 +392,8 @@ async function runScenarioWithContinuity(inputs, continuityState, latestVisualSe
       __CHAT_CONTINUITY__: continuityState ? JSON.stringify(continuityState) : '',
       __PENDING_REQUESTED_TASK__: pendingTask ? JSON.stringify(pendingTask) : '',
       __LATEST_VISUAL_SEQUENCE__: latestVisualSequence ? JSON.stringify(latestVisualSequence) : '',
-      __ALLOW_CAPTURE_RECOVERY__: options.allowRecoveryCapture ? '1' : ''
+      __ALLOW_CAPTURE_RECOVERY__: options.allowRecoveryCapture ? '1' : '',
+      __FAIL_FIRST_PINE_EXECUTION__: options.failFirstPineExecution ? '1' : ''
     }
   });
 
@@ -708,6 +816,84 @@ async function main() {
   assert.strictEqual(pendingTaskWithoutContinuity.exitCode, 0, 'pending-task-only continuation scenario should exit successfully');
   assert(pendingTaskWithoutContinuity.output.includes('EXECUTE_COUNT:0'), 'pending-task-only continuation should not execute emitted actions');
   assert(/The last requested task was: Open Pine Logs in TradingView/i.test(pendingTaskWithoutContinuity.output), 'pending-task-only continuation should still guide recovery toward the pending task');
+
+  const blockedPineTaskPersists = await runScenario([
+    'tradingview application is in the background, create a pine script that shows confidence in volume and momentum. then use key ctrl + enter to apply to the LUNR chart.'
+  ]);
+  assert.strictEqual(blockedPineTaskPersists.exitCode, 0, 'blocked Pine authoring scenario should exit successfully');
+  assert(blockedPineTaskPersists.output.includes('EXECUTE_COUNT:0'), 'blocked Pine authoring scenario should not execute actions');
+  assert(/Stored blocked TradingView Pine authoring task for bounded retry/i.test(blockedPineTaskPersists.output), 'blocked Pine authoring scenario should persist a bounded retry task');
+  assert(/PENDING_REQUESTED_TASK:.*"taskKind":"tradingview-pine-authoring"/i.test(blockedPineTaskPersists.output), 'blocked Pine authoring scenario should persist the Pine task kind');
+  assert(/PENDING_REQUESTED_TASK:.*"targetSymbol":"LUNR"/i.test(blockedPineTaskPersists.output), 'blocked Pine authoring scenario should persist the target symbol');
+
+  const blockedPineContinuation = await runScenario([
+    'tradingview application is in the background, create a pine script that shows confidence in volume and momentum. then use key ctrl + enter to apply to the LUNR chart.',
+    'continue'
+  ]);
+  assert.strictEqual(blockedPineContinuation.exitCode, 0, 'blocked Pine continuation scenario should exit successfully');
+  assert(blockedPineContinuation.output.includes('EXECUTE_COUNT:1'), 'blocked Pine continuation should execute after replaying the saved retry intent');
+  assert(
+    blockedPineContinuation.output.includes('PREFLIGHT_USER_MESSAGES:["Retry the blocked TradingView Pine authoring task.'),
+    'blocked Pine continuation should route through the saved bounded retry intent instead of raw continue text'
+  );
+  assert(
+    blockedPineContinuation.output.includes('PENDING_REQUESTED_TASK:null'),
+    'blocked Pine continuation should clear the saved pending task once actionable steps are emitted'
+  );
+
+  const blockedPineContinuationBeatsExpiredContinuity = await runScenarioWithContinuity([
+    'tradingview application is in the background, create a pine script that shows confidence in volume and momentum. then use key ctrl + enter to apply to the LUNR chart.',
+    'continue'
+  ], {
+    activeGoal: 'Inspect the active TradingView chart',
+    currentSubgoal: 'Continue from prior TradingView chart state',
+    continuationReady: false,
+    degradedReason: 'Stored continuity is expired (45m) and must be rebuilt from fresh evidence before continuing.',
+    freshnessState: 'expired',
+    freshnessAgeMs: 2700000,
+    freshnessBudgetMs: 90000,
+    freshnessRecoverableBudgetMs: 900000,
+    freshnessReason: 'Stored continuity is expired (45m) and must be rebuilt from fresh evidence before continuing.',
+    requiresReobserve: true,
+    lastTurn: {
+      recordedAt: new Date(Date.now() - (45 * 60 * 1000)).toISOString(),
+      verificationStatus: 'verified',
+      executionStatus: 'succeeded',
+      captureMode: 'window-copyfromscreen',
+      captureTrusted: true,
+      targetWindowHandle: 458868,
+      nextRecommendedStep: 'Continue from the latest chart evidence.'
+    }
+  });
+  assert.strictEqual(blockedPineContinuationBeatsExpiredContinuity.exitCode, 0, 'blocked Pine continuation with expired continuity should exit successfully');
+  assert(blockedPineContinuationBeatsExpiredContinuity.output.includes('EXECUTE_COUNT:1'), 'blocked Pine continuation should recover through the saved Pine task even when older continuity is expired');
+  assert(
+    !/Stored continuity is expired \(45m\) and must be rebuilt from fresh evidence before continuing/i.test(blockedPineContinuationBeatsExpiredContinuity.output),
+    'blocked Pine continuation should not be re-blocked by unrelated expired continuity once a fresh bounded retry task is saved'
+  );
+
+  const failedPineContinuationRetry = await runScenarioWithContinuity([
+    'tradingview application is in the background, create a pine script that shows confidence in volume and momentum. then use key ctrl + enter to apply to the LUNR chart.',
+    'continue',
+    'continue'
+  ], null, null, null, {
+    failFirstPineExecution: true
+  });
+  assert.strictEqual(failedPineContinuationRetry.exitCode, 0, 'failed Pine retry continuation scenario should exit successfully');
+  assert(failedPineContinuationRetry.output.includes('EXECUTE_COUNT:2'), 'failed Pine retry scenario should attempt the recovered Pine workflow again after the first execution failure');
+  assert(/Stored failed TradingView Pine workflow for bounded retry/i.test(failedPineContinuationRetry.output), 'failed Pine execution should persist a bounded retry task instead of dead-ending continuity');
+  assert(
+    failedPineContinuationRetry.output.includes('PREFLIGHT_USER_MESSAGES:["Retry the blocked TradingView Pine authoring task.'),
+    'failed Pine retry scenario should first execute the saved blocked-task intent'
+  );
+  assert(
+    !/There is not enough verified continuity state to continue safely/i.test(failedPineContinuationRetry.output),
+    'failed Pine retry scenario should not fall back to the continuity dead-end after the first Pine execution fails'
+  );
+  assert(
+    failedPineContinuationRetry.output.includes('PENDING_REQUESTED_TASK:null'),
+    'failed Pine retry scenario should clear the retry task once the follow-up execution succeeds'
+  );
 
   console.log('PASS chat actionability');
 }

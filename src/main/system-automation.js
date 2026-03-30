@@ -1859,10 +1859,17 @@ function executePowerShellScript(scriptContent, timeoutMs = 10000) {
  * @param {Object} options - Search options
  * @param {string} options.controlType - Filter by control type (Button, Text, ComboBox, etc.)
  * @param {boolean} options.exact - Require exact text match (default: false)
+ * @param {number} options.windowHandle - Limit search to a specific top-level window handle
+ * @param {boolean} options.foregroundOnly - Limit search to the active foreground window
  * @returns {Object} Element info with bounds, or error
  */
 async function findElementByText(searchText, options = {}) {
-  const { controlType = '', exact = false } = options;
+  const {
+    controlType = '',
+    exact = false,
+    windowHandle = 0,
+    foregroundOnly = false
+  } = options;
   
   const psScript = `
 $ErrorActionPreference = 'Stop'
@@ -1961,6 +1968,27 @@ try {
     $searchText = "${searchText.replace(/"/g, '`"')}"
     $controlType = "${controlType}"
     $exact = $${exact}
+    $windowHandle = [int64]${Number(windowHandle) || 0}
+    $foregroundOnly = $${foregroundOnly}
+
+    if ($windowHandle -ne 0) {
+        try {
+            $targetWindow = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]::new($windowHandle))
+            if ($targetWindow) {
+                $found = Find-InElement -Root $targetWindow -Text $searchText -IsExact $exact -CtrlType $controlType
+                if ($found) {
+                    $data = Get-ElementData -el $found
+                    if ($data) {
+                        $data | ConvertTo-Json -Compress
+                        exit 0
+                    }
+                }
+            }
+        } catch {}
+
+        Write-Output '{"error": "Element not found"}'
+        exit 0
+    }
     
     # 1. Search Active Window (Fast Path)
     # Using System.Windows.Forms to get active window handle is unreliable in pure scripts sometimes
@@ -1988,6 +2016,11 @@ try {
             }
        }
     } catch {}
+
+    if ($foregroundOnly) {
+        Write-Output '{"error": "Element not found"}'
+        exit 0
+    }
 
     # 2. Iterate Top Level Windows (Robust Path)
     $root = [System.Windows.Automation.AutomationElement]::RootElement

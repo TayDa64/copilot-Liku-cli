@@ -391,6 +391,150 @@ function buildPendingRequestedTaskRecord({ userMessage, executionIntent, actionD
   };
 }
 
+function normalizePendingTaskText(value, maxLength = 280) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!text) return null;
+  return text.slice(0, maxLength);
+}
+
+function extractTradingViewTargetSymbol(text = '') {
+  const raw = String(text || '');
+  const chartMatch = raw.match(/\b(?:to|for|on)\s+the\s+([A-Z][A-Z0-9._-]{0,9})\s+chart\b/);
+  if (chartMatch?.[1]) return chartMatch[1].toUpperCase();
+
+  const symbolMatch = raw.match(/\b([A-Z][A-Z0-9._-]{1,9})\b(?=\s+chart\b)/);
+  if (symbolMatch?.[1]) return symbolMatch[1].toUpperCase();
+
+  return null;
+}
+
+function buildBlockedTradingViewPineResumeContract(userMessage = '', response = null) {
+  if (String(response?.routing?.mode || '').trim() !== 'blocked-incomplete-tradingview-pine-plan') {
+    return null;
+  }
+
+  const raw = String(userMessage || '').trim();
+  const normalized = raw.toLowerCase();
+  if (!/\btradingview\b/.test(normalized)) return null;
+  if (!/\bpine\b/.test(normalized) && !/\bscript\b/.test(normalized)) return null;
+  if (!/\b(create|build|generate|write|draft|make)\b/.test(normalized)) return null;
+
+  const targetSymbol = extractTradingViewTargetSymbol(raw);
+  const requestedAddToChart = /\bctrl\s*\+\s*enter\b/.test(normalized)
+    || /\b(add|apply|load|put)\b.{0,20}\bchart\b/.test(normalized);
+  const taskSummary = targetSymbol
+    ? `Retry blocked TradingView Pine authoring task for ${targetSymbol} chart`
+    : 'Retry blocked TradingView Pine authoring task';
+
+  const continuationIntent = [
+    'Retry the blocked TradingView Pine authoring task.',
+    `Original request: ${raw}`,
+    'Requirements:',
+    '- Produce a complete executable TradingView Pine workflow, not just window activation.',
+    '- Open TradingView Pine Editor through a verified TradingView route.',
+    '- Inspect the visible Pine Editor state before editing.',
+    '- Do not overwrite an existing visible script implicitly; prefer a safe new-script or bounded starter-script path unless the user explicitly asked to replace the current script.',
+    '- Insert the Pine script content.',
+    requestedAddToChart
+      ? '- Use Ctrl+Enter only after the script is inserted, then read visible compile/apply result text.'
+      : '- After insertion, verify visible Pine compile/apply result text before claiming success.'
+  ].join('\n');
+
+  return {
+    taskSummary,
+    taskKind: 'tradingview-pine-authoring',
+    targetApp: 'tradingview',
+    targetSurface: 'pine-editor',
+    targetSymbol,
+    requestedAddToChart,
+    requestedVerification: 'visible-compile-or-apply-result',
+    resumeDisposition: 'bounded-retry',
+    blockedReason: 'incomplete-tradingview-pine-plan',
+    continuationIntent,
+    recoveryNote: 'Retrying the blocked TradingView Pine authoring task from saved intent.'
+  };
+}
+
+function buildFailedTradingViewPineRetryContract({ userMessage = '', executionIntent = '', actionData = null, execResult = null, targetProcessName = null, targetWindowTitle = null } = {}) {
+  const raw = String(executionIntent || userMessage || '').trim();
+  const normalized = raw.toLowerCase();
+  if (!/\btradingview\b/.test(normalized)) return null;
+  if (!/\bpine\b/.test(normalized) && !/\bscript\b/.test(normalized)) return null;
+  if (!/\b(create|build|generate|write|draft|make|retry|continue)\b/.test(normalized)) return null;
+
+  const actionPlan = Array.isArray(actionData?.actions) ? actionData.actions : [];
+  const lastFailedResult = Array.isArray(execResult?.results)
+    ? [...execResult.results].reverse().find((result) => result && result.success === false)
+    : null;
+  const failedAction = actionPlan[Math.max(0, Number(lastFailedResult?.index || 0))] || null;
+  const targetSymbol = extractTradingViewTargetSymbol(raw);
+  const requestedAddToChart = /\bctrl\s*\+\s*enter\b/.test(normalized)
+    || /\b(add|apply|load|put)\b.{0,20}\bchart\b/.test(normalized);
+  const failureLabel = String(lastFailedResult?.action || failedAction?.type || 'step').trim();
+  const failureReason = String(lastFailedResult?.error || execResult?.error || '').trim();
+  const taskSummary = targetSymbol
+    ? `Retry failed TradingView Pine authoring workflow for ${targetSymbol} chart`
+    : 'Retry failed TradingView Pine authoring workflow';
+  const continuationLines = [
+    'Retry the failed TradingView Pine authoring workflow from the start.',
+    `Original request: ${raw}`,
+    failureReason
+      ? `Previous failure: ${failureLabel} failed with "${failureReason}".`
+      : `Previous failure: ${failureLabel} did not complete successfully.`,
+    'Requirements:',
+    '- Re-focus TradingView and reopen Pine Editor through the TradingView quick-search route.',
+    '- Prefer keyboard result selection for Pine Editor instead of relying on an exact UI element label.',
+    '- Verify that Pine Editor actually became active before continuing.',
+    '- Inspect the visible Pine Editor state before editing.',
+    '- Do not overwrite an existing visible script implicitly; prefer a safe new-script or bounded starter-script path unless the user explicitly asked to replace the current script.',
+    '- Insert the Pine script content.'
+  ];
+
+  if (requestedAddToChart) {
+    continuationLines.push('- Use Ctrl+Enter only after the script is inserted, then read visible compile/apply result text.');
+  } else {
+    continuationLines.push('- Read visible compile/apply result text before claiming success.');
+  }
+
+  return {
+    taskSummary,
+    taskKind: 'tradingview-pine-authoring',
+    targetApp: targetProcessName || 'tradingview',
+    targetWindowTitle: targetWindowTitle || 'TradingView',
+    targetSurface: 'pine-editor',
+    targetSymbol,
+    requestedAddToChart,
+    requestedVerification: 'visible-compile-or-apply-result',
+    resumeDisposition: 'bounded-retry',
+    blockedReason: 'failed-execution',
+    continuationIntent: continuationLines.join('\n'),
+    recoveryNote: 'Retrying the failed TradingView Pine authoring workflow from saved intent.'
+  };
+}
+
+function hasResumablePendingTask(task = null) {
+  return !!(
+    task
+    && task.resumeDisposition === 'bounded-retry'
+    && typeof task.continuationIntent === 'string'
+    && task.continuationIntent.trim()
+  );
+}
+
+function buildPendingTaskContinuationIntent(task = null, fallbackText = '') {
+  if (hasResumablePendingTask(task)) {
+    return String(task.continuationIntent || '').trim();
+  }
+
+  return String(
+    task?.executionIntent
+    || task?.userMessage
+    || task?.taskSummary
+    || fallbackText
+    || ''
+  ).trim();
+}
+
 function buildContinuityRecoveryMessage(continuity, pendingRequestedTask = null) {
   const pendingTaskSummary = String(
     pendingRequestedTask?.taskSummary
@@ -448,6 +592,17 @@ function getContinuationDecision(userInput, continuity, pendingRequestedTask = n
   const freshnessState = String(continuity?.freshnessState || '').trim().toLowerCase();
   const recoverWithReobserve = freshnessState === 'stale-recoverable';
   const hardBlocked = hasHardContinuationBlock(continuity);
+  const resumablePendingTask = hasResumablePendingTask(pendingRequestedTask);
+
+  if (resumablePendingTask && (!hasUsableChatContinuity(continuity) || hardBlocked || freshnessState === 'expired' || (!continuity?.continuationReady && !recoverWithReobserve) || (continuity?.degradedReason && !recoverWithReobserve))) {
+    return {
+      block: false,
+      useContinuityState: false,
+      usePendingRequestedTask: true,
+      effectiveIntent: buildPendingTaskContinuationIntent(pendingRequestedTask, userInput),
+      reason: pendingRequestedTask?.recoveryNote || null
+    };
+  }
 
   if (pendingRequestedTask && (!hasUsableChatContinuity(continuity) || hardBlocked || freshnessState === 'expired' || (!continuity.continuationReady && !recoverWithReobserve) || (continuity.degradedReason && !recoverWithReobserve))) {
     return {
@@ -1143,6 +1298,10 @@ async function runChatLoop(ai, options) {
       continue;
     }
 
+    if (['exit', 'quit', 'q'].includes(line.toLowerCase())) {
+      break;
+    }
+
     if (!line.startsWith('/') && !isContinueLike) {
       lastNonTrivialUserMessage = line;
       clearPendingRequestedTask({ cwd: process.cwd() });
@@ -1150,11 +1309,9 @@ async function runChatLoop(ai, options) {
 
     const executionIntent = continuationDecision.useContinuityState
       ? continuationDecision.effectiveIntent
+      : continuationDecision.usePendingRequestedTask
+        ? continuationDecision.effectiveIntent
       : (isContinueLike && !isAffirmativeExplicitOperation ? (lastNonTrivialUserMessage || line) : line);
-
-    if (['exit', 'quit', 'q'].includes(line.toLowerCase())) {
-      break;
-    }
 
     // Slash commands are handled by ai-service
     if (line.startsWith('/')) {
@@ -1311,8 +1468,18 @@ async function runChatLoop(ai, options) {
       );
     }
 
+    if (continuationDecision.usePendingRequestedTask && continuationDecision.effectiveIntent) {
+      extraSystemMessages.push(
+        `PENDING TASK RECOVERY: The user issued a minimal continuation turn. Do not answer the literal word "continue" in isolation. Resume the saved bounded retry intent instead: ${continuationDecision.effectiveIntent}`
+      );
+    }
+
+    const modelInput = continuationDecision.usePendingRequestedTask
+      ? executionIntent
+      : line;
+
     // Send message
-    let resp = await ai.sendMessage(line, {
+    let resp = await ai.sendMessage(modelInput, {
       includeVisualContext: includeVisualUsed,
       model,
       extraSystemMessages
@@ -1335,7 +1502,28 @@ async function runChatLoop(ai, options) {
     let actionData = ai.parseActions(resp.message);
     let hasActions = !!(actionData && Array.isArray(actionData.actions) && actionData.actions.length > 0);
 
-    if (!hasActions) continue;
+    if (!hasActions) {
+      const blockedPendingTask = buildBlockedTradingViewPineResumeContract(executionIntent || line, resp);
+      if (blockedPendingTask) {
+        setPendingRequestedTask({
+          ...buildPendingRequestedTaskRecord({
+            userMessage: line,
+            executionIntent,
+            actionData,
+            targetProcessName: blockedPendingTask.targetApp,
+            targetWindowTitle: 'TradingView'
+          }),
+          ...blockedPendingTask,
+          userMessage: normalizePendingTaskText(line, 280),
+          executionIntent: normalizePendingTaskText(executionIntent, 600),
+          continuationIntent: normalizePendingTaskText(blockedPendingTask.continuationIntent, 1200),
+          recoveryNote: normalizePendingTaskText(blockedPendingTask.recoveryNote, 240),
+          blockedReason: normalizePendingTaskText(blockedPendingTask.blockedReason, 120)
+        }, { cwd: process.cwd() });
+        info('Stored blocked TradingView Pine authoring task for bounded retry.');
+      }
+      continue;
+    }
 
     if (!shouldExecuteDetectedActions(line, executionIntent, actionData)) {
       setPendingRequestedTask(buildPendingRequestedTaskRecord({
@@ -1580,6 +1768,32 @@ async function runChatLoop(ai, options) {
 
     if (!execResult?.success) {
       error(execResult.error || 'One or more actions failed');
+      const failedPineRetryTask = buildFailedTradingViewPineRetryContract({
+        userMessage: line,
+        executionIntent: effectiveUserMessage,
+        actionData,
+        execResult,
+        targetProcessName,
+        targetWindowTitle: 'TradingView'
+      });
+      if (failedPineRetryTask) {
+        setPendingRequestedTask({
+          ...buildPendingRequestedTaskRecord({
+            userMessage: line,
+            executionIntent: effectiveUserMessage,
+            actionData,
+            targetProcessName: failedPineRetryTask.targetApp,
+            targetWindowTitle: failedPineRetryTask.targetWindowTitle
+          }),
+          ...failedPineRetryTask,
+          userMessage: normalizePendingTaskText(line, 280),
+          executionIntent: normalizePendingTaskText(effectiveUserMessage, 800),
+          continuationIntent: normalizePendingTaskText(failedPineRetryTask.continuationIntent, 1400),
+          recoveryNote: normalizePendingTaskText(failedPineRetryTask.recoveryNote, 240),
+          blockedReason: normalizePendingTaskText(failedPineRetryTask.blockedReason, 120)
+        }, { cwd: process.cwd() });
+        info('Stored failed TradingView Pine workflow for bounded retry.');
+      }
     }
 
     if (execResult?.success && shouldAutoCaptureObservationAfterActions(effectiveUserMessage, actionData?.actions, execResult)) {
@@ -1618,7 +1832,7 @@ async function runChatLoop(ai, options) {
         // coordinate estimate is likely wrong. Guide it toward keyboard strategies.
         let staleClickHint = '';
         if (lastClickCoords && visionContinuations > 1) {
-          staleClickHint = `\n\nIMPORTANT: Your previous click at (${lastClickCoords.x}, ${lastClickCoords.y}) did not navigate the page. The coordinate click likely missed the target. DO NOT click the same coordinates again. Instead, use one of these strategies:\n1. If you can see the target URL (e.g., https://www.apple.com), navigate via the address bar: Ctrl+L → type the URL → Enter\n2. Use Ctrl+F to find the link text on the page, then close find bar and try clicking\n3. Try different coordinates (offset by 10-20 pixels from your previous attempt)`;
+          staleClickHint = `\n\nIMPORTANT: Your previous click at (${lastClickCoords.x}, ${lastClickCoords.y}) did not navigate the page. The coordinate click likely missed the target. DO NOT click the same coordinates again. Instead, use one of these strategies:\n1. If you can see the target URL, navigate via the address bar: Ctrl+L → type the URL → Enter\n2. Use Ctrl+F to find the link text on the page, then close find bar and try clicking\n3. Try different coordinates (offset by 10-20 pixels from your previous attempt)`;
         }
 
         const continuationPrompt = visionContinuations === 1

@@ -135,7 +135,6 @@ test('pine editor opener is routed through TradingView quick search instead of a
   assert.strictEqual(routeActions[0].key, 'ctrl+k');
   assert.strictEqual(routeActions[2].type, 'type');
   assert.strictEqual(routeActions[2].text, 'Pine Editor');
-  assert.strictEqual(routeActions[4].type, 'click_element');
-  assert.strictEqual(routeActions[4].text, 'Open Pine Editor');
-  assert.strictEqual(routeActions[4].exact, true);
+  assert.strictEqual(routeActions[4].type, 'key');
+  assert.strictEqual(routeActions[4].key, 'enter');
 });

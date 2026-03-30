@@ -27,6 +27,7 @@ const INDEX_FILE = path.join(MEMORY_DIR, 'index.json');
 const MEMORY_TOKEN_BUDGET = 2000;
 const DEFAULT_NOTE_LIMIT = 5;
 const MAX_NOTES = 500;
+const MEMORY_VERBOSE = /^(1|true|yes)$/i.test(String(process.env.LIKU_MEMORY_VERBOSE || '').trim());
 
 // ─── ULID-lite (monotonic, no dependency) ──────────────────
 
@@ -122,7 +123,9 @@ function pruneOldNotes() {
   }
 
   saveIndex(index);
-  console.log(`[Memory] Pruned ${toRemove.length} old notes (limit: ${MAX_NOTES})`);
+  if (MEMORY_VERBOSE) {
+    console.log(`[Memory] Pruned ${toRemove.length} old notes (limit: ${MAX_NOTES})`);
+  }
   return toRemove.length;
 }
 

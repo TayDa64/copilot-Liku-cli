@@ -36,6 +36,13 @@ test('extractRequestedTimeframe normalizes common TradingView timeframe phrases'
   assert.strictEqual(extractRequestedTimeframe('set the chart interval to 4 hours'), '4h');
 });
 
+test('extractRequestedTimeframe does not throw on Pine authoring prompts with no timeframe intent', () => {
+  assert.doesNotThrow(() => {
+    const timeframe = extractRequestedTimeframe('tradingview application is in the background, create a pine script that shows confidence in volume and momentum. then use key ctrl + enter to apply to the LUNR chart.');
+    assert.strictEqual(timeframe, null);
+  });
+});
+
 test('inferTradingViewTimeframeIntent recognizes selector-style timeframe workflows', () => {
   const intent = inferTradingViewTimeframeIntent('change the timeframe selector from 1m to 5m in tradingview');
   assert(intent, 'intent should be inferred');
@@ -48,6 +55,7 @@ test('extractRequestedSymbol normalizes common TradingView symbol phrases', () =
   assert.strictEqual(extractRequestedSymbol('change the symbol to NVDA in tradingview'), 'NVDA');
   assert.strictEqual(extractRequestedSymbol('search for ticker msft in tradingview'), 'MSFT');
   assert.strictEqual(extractRequestedSymbol('set the ticker to spy on tradingview'), 'SPY');
+  assert.strictEqual(extractRequestedSymbol('open Pine Editor for the LUNR chart in tradingview'), 'LUNR');
 });
 
 test('inferTradingViewSymbolIntent recognizes symbol-change workflows', () => {
@@ -186,6 +194,16 @@ test('symbol workflow does not hijack passive TradingView analysis prompts', () 
     { type: 'wait', ms: 250 }
   ], {
     userMessage: 'help me make a confident synthesis of ticker LUNR in tradingview'
+  });
+
+  assert.strictEqual(rewritten, null);
+});
+
+test('symbol workflow does not hijack TradingView Pine authoring prompts that mention a chart symbol', () => {
+  const rewritten = maybeRewriteTradingViewSymbolWorkflow([
+    { type: 'focus_window', windowHandle: 459522 }
+  ], {
+    userMessage: 'tradingview application is in the background, create a pine script that shows confidence in volume and momentum. then use key ctrl + enter to apply to the LUNR chart.'
   });
 
   assert.strictEqual(rewritten, null);
