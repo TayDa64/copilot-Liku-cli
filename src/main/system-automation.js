@@ -449,6 +449,9 @@ function buildPineEditorSafeAuthoringSummary(text) {
   if (/\b(start writing|write your script|new script|empty editor|untitled script)\b/i.test(compactText)) {
     addSignal(visibleSignals, 'editor-empty-hint');
   }
+  const targetCorruptionVisible = /\bscript could not be translated from\b/i.test(compactText)
+    || (/\|[a-z]\|/i.test(rawText) && /\bpine editor\b/i.test(compactText));
+  if (targetCorruptionVisible) addSignal(visibleSignals, 'editor-target-corrupt');
 
   const starterLike = (
     visibleScriptKind !== 'unknown'
@@ -464,7 +467,9 @@ function buildPineEditorSafeAuthoringSummary(text) {
   );
 
   let editorVisibleState = 'unknown-visible-state';
-  if (visibleSignals.includes('editor-empty-hint') || starterLike) {
+  if (targetCorruptionVisible) {
+    editorVisibleState = 'unknown-visible-state';
+  } else if (visibleSignals.includes('editor-empty-hint') || starterLike) {
     editorVisibleState = 'empty-or-starter';
   } else if (
     visibleScriptKind !== 'unknown'
@@ -483,6 +488,11 @@ function buildPineEditorSafeAuthoringSummary(text) {
     visibleScriptKind !== 'unknown' ? `kind=${visibleScriptKind}` : null,
     Number.isFinite(visibleLineCountEstimate) ? `lines=${visibleLineCountEstimate}` : null
   ].filter(Boolean).join(' | ');
+  const lifecycleState = targetCorruptionVisible
+    ? 'editor-target-corrupt'
+    : editorVisibleState === 'empty-or-starter'
+      ? 'new-script-required'
+      : null;
 
   return {
     evidenceMode: 'safe-authoring-inspect',
@@ -490,6 +500,7 @@ function buildPineEditorSafeAuthoringSummary(text) {
     visibleScriptKind,
     visibleLineCountEstimate,
     visibleSignals: visibleSignals.slice(0, 6),
+    lifecycleState,
     compactSummary: compactSummary || null
   };
 }
@@ -522,6 +533,11 @@ function buildPineEditorDiagnosticsStructuredSummary(text, evidenceMode = 'gener
   const warningSegments = visibleSegments.filter((segment) => /\bwarning\b/i.test(segment));
   const statusSegments = visibleSegments.filter((segment) => /\b(status|compiler|compiled|strategy loaded|indicator loaded|loaded)\b/i.test(segment));
   const lineBudgetContextVisible = /\b(500\s*lines?|line count|line budget|script length|lines used|line limit|maximum lines|max lines|capped)\b/i.test(compactText);
+  const targetCorruptionVisible = /\bscript could not be translated from\b/i.test(compactText)
+    || (/\|[a-z]\|/i.test(rawText) && /\bpine editor\b/i.test(compactText));
+  const saveConfirmedVisible = /\b(saved(?: successfully)?|script saved|all changes saved|saved version|save complete)\b/i.test(compactText);
+  const saveRequiredVisible = /\b(save script|save your script|name your script|script name|save as|rename script)\b/i.test(compactText)
+    || /\bunsaved\b/i.test(compactText);
 
   let visibleLineCountEstimate = null;
   const lineCountMatch = rawText.match(/(?:line count|script length|lines used|used)\s*[:=]?\s*(\d{1,4})(?:\s*\/\s*500|\s+of\s+500)?\s*lines?/i)
@@ -535,7 +551,11 @@ function buildPineEditorDiagnosticsStructuredSummary(text, evidenceMode = 'gener
   const errorCountEstimate = errorSegments.length;
   const warningCountEstimate = warningSegments.length;
   let compileStatus = 'unknown';
-  if (errorCountEstimate > 0) {
+  if (targetCorruptionVisible) {
+    compileStatus = 'errors-visible';
+    addSignal(statusSignals, 'compile-errors-visible');
+    addSignal(statusSignals, 'editor-target-corrupt');
+  } else if (errorCountEstimate > 0) {
     compileStatus = 'errors-visible';
     addSignal(statusSignals, 'compile-errors-visible');
   } else if (noErrorsVisible) {
@@ -550,9 +570,12 @@ function buildPineEditorDiagnosticsStructuredSummary(text, evidenceMode = 'gener
   if (lineBudgetContextVisible || Number.isFinite(visibleLineCountEstimate)) {
     addSignal(statusSignals, 'line-budget-hint-visible');
   }
+  if (saveConfirmedVisible) addSignal(statusSignals, 'save-confirmed-visible');
+  if (saveRequiredVisible) addSignal(statusSignals, 'save-required-visible');
   if (evidenceMode === 'diagnostics') addSignal(statusSignals, 'diagnostics-request');
   if (evidenceMode === 'compile-result') addSignal(statusSignals, 'compile-result-request');
   if (evidenceMode === 'line-budget') addSignal(statusSignals, 'line-budget-request');
+  if (evidenceMode === 'save-status') addSignal(statusSignals, 'save-status-request');
   if (evidenceMode === 'generic-status') addSignal(statusSignals, 'generic-status-request');
 
   const lineBudgetSignal = Number.isFinite(visibleLineCountEstimate)
@@ -571,6 +594,15 @@ function buildPineEditorDiagnosticsStructuredSummary(text, evidenceMode = 'gener
     Number.isFinite(visibleLineCountEstimate) ? `lines=${visibleLineCountEstimate}` : null,
     lineBudgetSignal !== 'unknown-line-budget' ? `budget=${lineBudgetSignal}` : null
   ].filter(Boolean).join(' | ');
+  const lifecycleState = targetCorruptionVisible
+    ? 'editor-target-corrupt'
+    : evidenceMode === 'save-status'
+      ? (saveConfirmedVisible
+        ? 'saved-state-verified'
+        : (saveRequiredVisible ? 'save-required-before-apply' : 'unknown-save-state'))
+      : (compileStatus === 'success' || compileStatus === 'errors-visible' || compileStatus === 'status-only'
+        ? 'apply-result-verified'
+        : null);
 
   return {
     evidenceMode,
@@ -581,6 +613,7 @@ function buildPineEditorDiagnosticsStructuredSummary(text, evidenceMode = 'gener
     lineBudgetSignal,
     statusSignals: statusSignals.slice(0, 8),
     topVisibleDiagnostics,
+    lifecycleState,
     compactSummary: compactSummary || null
   };
 }
@@ -2678,21 +2711,64 @@ async function executeAction(action) {
         break;
       
       // Semantic element-based actions (MORE RELIABLE than coordinates)
-      case ACTION_TYPES.CLICK_ELEMENT:
-        const clickResult = await clickElementByText(action.text, {
-          controlType: action.controlType || '',
-          exact: action.exact || false
-        });
-        result = { ...result, ...clickResult };
+      case ACTION_TYPES.CLICK_ELEMENT: {
+        const criteria = action.criteria && typeof action.criteria === 'object'
+          ? action.criteria
+          : null;
+        if (criteria && String(criteria.windowTitle || '').trim()) {
+          const ui = require('./ui-automation');
+          const clickResult = await ui.click(criteria, {
+            focusWindow: true
+          });
+          result = {
+            ...result,
+            ...clickResult,
+            method: clickResult?.success ? 'uia-click' : (clickResult?.method || 'uia-click')
+          };
+          result.message = clickResult.success
+            ? `Clicked "${clickResult?.element?.name || criteria.text || action.text || 'element'}" via window-scoped UI Automation`
+            : `Click element failed: ${clickResult.error || 'Element not found'}`;
+        } else {
+          const clickResult = await clickElementByText(action.text, {
+            controlType: action.controlType || '',
+            exact: action.exact || false,
+            windowHandle: action.windowHandle || action.hwnd || 0,
+            foregroundOnly: !!action.foregroundOnly
+          });
+          result = { ...result, ...clickResult };
+        }
         break;
-        
-      case ACTION_TYPES.FIND_ELEMENT:
-        const findResult = await findElementByText(action.text, {
-          controlType: action.controlType || '',
-          exact: action.exact || false
-        });
-        result = { ...result, ...findResult };
+      }
+
+      case ACTION_TYPES.FIND_ELEMENT: {
+        const criteria = action.criteria && typeof action.criteria === 'object'
+          ? action.criteria
+          : null;
+        if (criteria && String(criteria.windowTitle || '').trim()) {
+          const ui = require('./ui-automation');
+          const findResult = await ui.findElement(criteria);
+          result = {
+            ...result,
+            success: !!findResult?.success,
+            element: findResult?.element || null,
+            elements: findResult?.element ? [findResult.element] : [],
+            count: findResult?.element ? 1 : 0,
+            error: findResult?.error
+          };
+          result.message = findResult?.success
+            ? `Found "${findResult?.element?.name || criteria.text || action.text || 'element'}" via window-scoped UI Automation`
+            : `Find element failed: ${findResult?.error || 'Element not found'}`;
+        } else {
+          const findResult = await findElementByText(action.text, {
+            controlType: action.controlType || '',
+            exact: action.exact || false,
+            windowHandle: action.windowHandle || action.hwnd || 0,
+            foregroundOnly: !!action.foregroundOnly
+          });
+          result = { ...result, ...findResult };
+        }
         break;
+      }
       
       case ACTION_TYPES.RUN_COMMAND:
         const cmdResult = await executeCommand(action.command, {
@@ -2868,6 +2944,7 @@ async function executeAction(action) {
             action?.pineEvidenceMode === 'compile-result'
             || action?.pineEvidenceMode === 'diagnostics'
             || action?.pineEvidenceMode === 'line-budget'
+            || action?.pineEvidenceMode === 'save-status'
             || action?.pineEvidenceMode === 'generic-status'
           ) {
             result.pineStructuredSummary = buildPineEditorDiagnosticsStructuredSummary(gtResult.text, action.pineEvidenceMode);

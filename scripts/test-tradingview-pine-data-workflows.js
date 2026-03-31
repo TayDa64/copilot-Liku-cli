@@ -255,10 +255,16 @@ test('clipboard-only pine authoring plan rewrites into guarded continuation afte
   assert(inspectStep, 'safe authoring should inspect Pine Editor state first');
   assert.strictEqual(inspectStep.continueOnPineEditorState, 'empty-or-starter');
   assert(Array.isArray(inspectStep.continueActions) && inspectStep.continueActions.length > 0, 'safe authoring inspect step should carry continuation actions');
-  assert(inspectStep.continueActions.some((action) => action?.type === 'run_command' && /set-clipboard/i.test(String(action?.command || ''))), 'continuation should preserve clipboard preparation');
-  assert(inspectStep.continueActions.some((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'ctrl+v'), 'continuation should paste the prepared script');
-  assert(inspectStep.continueActions.some((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'ctrl+enter'), 'continuation should add the script to the chart');
-  assert(inspectStep.continueActions.some((action) => action?.type === 'get_text' && action?.pineEvidenceMode === 'compile-result'), 'continuation should gather compile-result feedback after add-to-chart');
+  assert(inspectStep.continueActions.some((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'ctrl+i'), 'continuation should create a fresh Pine indicator through the official shortcut chord');
+  const freshInspect = inspectStep.continueActions.find((action) => action?.type === 'get_text' && action?.pineEvidenceMode === 'safe-authoring-inspect' && Array.isArray(action?.continueActions));
+  assert(freshInspect, 'continuation should verify a fresh Pine script surface after creating a new indicator');
+  assert(freshInspect.continueActions.some((action) => action?.type === 'run_command' && /set-clipboard/i.test(String(action?.command || ''))), 'fresh-script continuation should preserve clipboard preparation');
+  assert(freshInspect.continueActions.some((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'ctrl+v'), 'fresh-script continuation should paste the prepared script');
+  const saveInspect = freshInspect.continueActions.find((action) => action?.type === 'get_text' && action?.pineEvidenceMode === 'save-status');
+  assert(saveInspect, 'fresh-script continuation should verify visible save status before applying');
+  assert.strictEqual(saveInspect.continueOnPineLifecycleState, 'saved-state-verified');
+  assert(saveInspect.continueActions.some((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'ctrl+enter'), 'save-verified continuation should add the script to the chart');
+  assert(saveInspect.continueActions.some((action) => action?.type === 'get_text' && action?.pineEvidenceMode === 'compile-result'), 'save-verified continuation should gather compile-result feedback after add-to-chart');
 });
 
 test('full ai-service rewrite handles the transcript Pine prompt without browser or timeframe derailment', () => {

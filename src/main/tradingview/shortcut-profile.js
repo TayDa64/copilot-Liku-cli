@@ -2,92 +2,357 @@ const TRADINGVIEW_SHORTCUTS_OFFICIAL_URL = 'https://www.tradingview.com/support/
 const TRADINGVIEW_SHORTCUTS_SECONDARY_URL = 'https://pineify.app/resources/blog/tradingview-hotkeys-the-complete-2025-guide-to-faster-charting-and-execution';
 const { mergeAction } = require('../search-surface-contracts');
 
+function cloneValue(value) {
+  if (Array.isArray(value)) return value.map((entry) => cloneValue(entry));
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, cloneValue(entry)]));
+  }
+  return value;
+}
+
 function cloneShortcut(shortcut) {
   if (!shortcut || typeof shortcut !== 'object') return null;
-  return {
-    ...shortcut,
-    aliases: Array.isArray(shortcut.aliases) ? [...shortcut.aliases] : [],
-    notes: Array.isArray(shortcut.notes) ? [...shortcut.notes] : [],
-    platforms: Array.isArray(shortcut.platforms) ? [...shortcut.platforms] : [],
-    sourceUrls: Array.isArray(shortcut.sourceUrls) ? [...shortcut.sourceUrls] : []
-  };
+  return cloneValue(shortcut);
 }
 
 function createShortcut(definition) {
+  const keySequence = Array.isArray(definition.keySequence)
+    ? definition.keySequence.map((value) => String(value || '').trim()).filter(Boolean)
+    : (definition.key ? [String(definition.key).trim()] : []);
+  const key = definition.key !== undefined
+    ? definition.key
+    : (keySequence.length === 1 ? keySequence[0] : null);
   return Object.freeze({
     ...definition,
+    key,
+    keySequence: Object.freeze(keySequence),
     aliases: Object.freeze(Array.isArray(definition.aliases) ? definition.aliases : []),
     notes: Object.freeze(Array.isArray(definition.notes) ? definition.notes : []),
     platforms: Object.freeze(Array.isArray(definition.platforms) ? definition.platforms : ['windows', 'linux', 'mac']),
     sourceUrls: Object.freeze(Array.isArray(definition.sourceUrls) ? definition.sourceUrls : []),
-    sourceConfidence: definition.sourceConfidence || 'internal-profile'
+    verificationContract: definition.verificationContract && typeof definition.verificationContract === 'object'
+      ? Object.freeze(cloneValue(definition.verificationContract))
+      : null,
+    sourceConfidence: definition.sourceConfidence || 'internal-profile',
+    requiresChartFocus: definition.requiresChartFocus !== false,
+    fallbackPolicy: definition.fallbackPolicy || 'none',
+    automationRoutable: definition.automationRoutable === true
   });
 }
+
+const OFFICIAL_PDF_SOURCES = Object.freeze([
+  TRADINGVIEW_SHORTCUTS_OFFICIAL_URL
+]);
 
 const OFFICIAL_AND_SECONDARY_SOURCES = Object.freeze([
   TRADINGVIEW_SHORTCUTS_OFFICIAL_URL,
   TRADINGVIEW_SHORTCUTS_SECONDARY_URL
 ]);
 
-const SECONDARY_REFERENCE_ONLY_SOURCES = Object.freeze([
-  TRADINGVIEW_SHORTCUTS_SECONDARY_URL
-]);
+function createOfficialShortcut(definition) {
+  return createShortcut({
+    sourceConfidence: 'official-pdf',
+    sourceUrls: OFFICIAL_PDF_SOURCES,
+    ...definition
+  });
+}
 
 const TRADINGVIEW_SHORTCUTS = Object.freeze({
-  'indicator-search': createShortcut({
+  'indicator-search': createOfficialShortcut({
     id: 'indicator-search',
     key: '/',
     category: 'stable-default',
     surface: 'indicator-search',
     safety: 'safe',
+    automationRoutable: true,
     aliases: ['indicator search', 'study search', 'indicators menu', 'open indicators'],
-    notes: ['Stable default TradingView search opener for indicators and studies when the chart surface is verified.'],
-    sourceConfidence: 'official-and-secondary',
-    sourceUrls: OFFICIAL_AND_SECONDARY_SOURCES
+    notes: ['Stable default TradingView shortcut for opening indicator search from the chart surface.'],
+    verificationContract: {
+      kind: 'dialog-visible',
+      appName: 'TradingView',
+      target: 'indicator-search',
+      keywords: ['indicator', 'indicators', 'study', 'studies']
+    },
+    fallbackPolicy: 'verified-search-selection'
   }),
-  'create-alert': createShortcut({
+  'create-alert': createOfficialShortcut({
     id: 'create-alert',
     key: 'alt+a',
     category: 'stable-default',
     surface: 'create-alert',
     safety: 'safe',
-    aliases: ['alert dialog', 'create alert', 'new alert'],
+    automationRoutable: true,
+    aliases: ['alert dialog', 'create alert', 'new alert', 'add alert'],
     notes: ['Stable default TradingView shortcut for opening the Create Alert dialog.'],
-    sourceConfidence: 'official-and-secondary',
-    sourceUrls: OFFICIAL_AND_SECONDARY_SOURCES
+    verificationContract: {
+      kind: 'dialog-visible',
+      appName: 'TradingView',
+      target: 'create-alert',
+      keywords: ['alert', 'create alert']
+    },
+    fallbackPolicy: 'none'
   }),
-  'symbol-search': createShortcut({
+  'symbol-search': createOfficialShortcut({
     id: 'symbol-search',
     key: 'ctrl+k',
     category: 'stable-default',
     surface: 'quick-search',
     safety: 'safe',
+    automationRoutable: true,
     aliases: ['symbol search', 'quick search', 'command palette', 'search symbols'],
-    notes: ['Treat as TradingView-specific tool knowledge rather than a generic desktop shortcut.'],
-    sourceConfidence: 'secondary-reference',
-    sourceUrls: SECONDARY_REFERENCE_ONLY_SOURCES
+    notes: ['TradingView quick search opener.'],
+    verificationContract: {
+      kind: 'dialog-visible',
+      appName: 'TradingView',
+      target: 'quick-search',
+      keywords: ['quick search', 'symbol search', 'search']
+    },
+    fallbackPolicy: 'none'
   }),
-  'dismiss-surface': createShortcut({
+  'open-data-window': createOfficialShortcut({
+    id: 'open-data-window',
+    key: 'alt+d',
+    category: 'stable-default',
+    surface: 'data-window',
+    safety: 'safe',
+    aliases: ['data window', 'open data window'],
+    notes: ['Official chart data window shortcut.']
+  }),
+  'load-layout': createOfficialShortcut({
+    id: 'load-layout',
+    key: '.',
+    category: 'reference-only',
+    surface: 'layout',
+    safety: 'safe',
+    aliases: ['load layout', 'open saved layout', 'saved layout', 'load chart layout'],
+    notes: ['Official layout loading shortcut.']
+  }),
+  'save-layout': createOfficialShortcut({
+    id: 'save-layout',
+    key: 'ctrl+s',
+    category: 'reference-only',
+    surface: 'layout',
+    safety: 'safe',
+    aliases: ['save your layout', 'save layout', 'save chart layout'],
+    notes: ['Official layout save shortcut; do not confuse with Pine script save inside the editor.']
+  }),
+  'dismiss-surface': createOfficialShortcut({
     id: 'dismiss-surface',
     key: 'esc',
     category: 'stable-default',
     surface: 'dismiss-surface',
     safety: 'safe',
+    automationRoutable: true,
     aliases: ['dismiss', 'close popup', 'close dialog'],
-    notes: ['Useful for dismissing dialogs or search surfaces when TradingView focus is verified.'],
-    sourceConfidence: 'official-page-family',
-    sourceUrls: [TRADINGVIEW_SHORTCUTS_OFFICIAL_URL]
+    notes: ['Useful for dismissing dialogs or transient surfaces when TradingView focus is verified.']
   }),
-  'open-pine-editor': createShortcut({
+  'toggle-maximize-chart': createOfficialShortcut({
+    id: 'toggle-maximize-chart',
+    key: 'alt+enter',
+    category: 'reference-only',
+    surface: 'chart-view',
+    safety: 'safe',
+    aliases: ['toggle maximize chart', 'maximize chart'],
+    notes: ['Official chart maximize shortcut.']
+  }),
+  'go-to-date': createOfficialShortcut({
+    id: 'go-to-date',
+    key: 'alt+g',
+    category: 'reference-only',
+    surface: 'chart-view',
+    safety: 'safe',
+    aliases: ['go to date'],
+    notes: ['Official go-to-date shortcut.']
+  }),
+  'add-text-note': createOfficialShortcut({
+    id: 'add-text-note',
+    key: 'alt+n',
+    category: 'reference-only',
+    surface: 'chart-annotation',
+    safety: 'safe',
+    aliases: ['add text note', 'text note'],
+    notes: ['Official chart text note shortcut; not a Pine workflow shortcut.']
+  }),
+  'take-snapshot': createOfficialShortcut({
+    id: 'take-snapshot',
+    key: 'alt+s',
+    category: 'reference-only',
+    surface: 'chart-capture',
+    safety: 'safe',
+    aliases: ['snapshot', 'take snapshot', 'chart snapshot', 'copy link to the chart image'],
+    notes: ['Official chart snapshot link shortcut.']
+  }),
+  'save-chart-image': createOfficialShortcut({
+    id: 'save-chart-image',
+    key: 'alt+ctrl+s',
+    category: 'reference-only',
+    surface: 'chart-capture',
+    safety: 'safe',
+    aliases: ['save chart image'],
+    notes: ['Official chart image save shortcut.']
+  }),
+  'copy-chart-image': createOfficialShortcut({
+    id: 'copy-chart-image',
+    key: 'shift+ctrl+s',
+    category: 'reference-only',
+    surface: 'chart-capture',
+    safety: 'safe',
+    aliases: ['copy chart image'],
+    notes: ['Official chart image copy shortcut.']
+  }),
+  'reset-chart-zoom': createOfficialShortcut({
+    id: 'reset-chart-zoom',
+    key: 'alt+r',
+    category: 'reference-only',
+    surface: 'chart-view',
+    safety: 'safe',
+    aliases: ['reset chart zoom', 'reset zoom', 'reset chart view'],
+    notes: ['Official chart view reset shortcut.']
+  }),
+  'invert-chart': createOfficialShortcut({
+    id: 'invert-chart',
+    key: 'alt+i',
+    category: 'reference-only',
+    surface: 'chart-view',
+    safety: 'safe',
+    aliases: ['invert chart', 'invert series scale'],
+    notes: ['Official invert-series shortcut.']
+  }),
+  'enter-full-screen': createOfficialShortcut({
+    id: 'enter-full-screen',
+    key: 'shift+f',
+    category: 'reference-only',
+    surface: 'chart-view',
+    safety: 'safe',
+    aliases: ['full screen', 'fullscreen', 'fullscreen mode'],
+    notes: ['Official fullscreen shortcut.']
+  }),
+  'add-symbol-to-watchlist': createOfficialShortcut({
+    id: 'add-symbol-to-watchlist',
+    key: 'alt+w',
+    category: 'reference-only',
+    surface: 'watchlist',
+    safety: 'safe',
+    aliases: ['add to watchlist', 'watchlist shortcut', 'watchlist'],
+    notes: ['Official add-to-watchlist shortcut.']
+  }),
+  'open-pine-editor': createOfficialShortcut({
     id: 'open-pine-editor',
     key: null,
+    keySequence: [],
     category: 'context-dependent',
     surface: 'pine-editor',
     safety: 'safe',
+    automationRoutable: true,
     aliases: ['pine editor', 'open pine editor', 'pine script editor'],
-    notes: ['No stable native default should be assumed for opening Pine Editor; prefer TradingView quick search / command palette or a user-confirmed custom binding after TradingView focus is verified.'],
-    sourceConfidence: 'official-page-family',
-    sourceUrls: [TRADINGVIEW_SHORTCUTS_OFFICIAL_URL]
+    notes: ['No dedicated official Pine Editor opener is exposed in the PDF; route through official TradingView quick search and verify the editor before typing.'],
+    verificationContract: {
+      kind: 'editor-active',
+      appName: 'TradingView',
+      target: 'pine-editor',
+      keywords: ['pine', 'pine editor', 'script'],
+      requiresObservedChange: true
+    },
+    fallbackPolicy: 'bounded-search-selection'
+  }),
+  'new-pine-indicator': createOfficialShortcut({
+    id: 'new-pine-indicator',
+    key: null,
+    keySequence: ['ctrl+k', 'ctrl+i'],
+    category: 'context-dependent',
+    surface: 'pine-editor',
+    safety: 'safe',
+    automationRoutable: true,
+    aliases: ['new indicator', 'new pine indicator', 'create fresh indicator'],
+    notes: ['Official Pine editor command for creating a fresh indicator.'],
+    verificationContract: {
+      kind: 'editor-active',
+      appName: 'TradingView',
+      target: 'pine-editor',
+      keywords: ['pine', 'pine editor', 'script'],
+      requiresObservedChange: true
+    },
+    fallbackPolicy: 'none'
+  }),
+  'new-pine-strategy': createOfficialShortcut({
+    id: 'new-pine-strategy',
+    key: null,
+    keySequence: ['ctrl+k', 'ctrl+s'],
+    category: 'context-dependent',
+    surface: 'pine-editor',
+    safety: 'safe',
+    aliases: ['new strategy', 'new pine strategy'],
+    notes: ['Official Pine editor command for creating a fresh strategy script.']
+  }),
+  'open-pine-script': createOfficialShortcut({
+    id: 'open-pine-script',
+    key: 'ctrl+o',
+    category: 'context-dependent',
+    surface: 'pine-editor',
+    safety: 'safe',
+    aliases: ['open script', 'open pine script'],
+    notes: ['Official Pine editor open-script shortcut.']
+  }),
+  'save-pine-script': createOfficialShortcut({
+    id: 'save-pine-script',
+    key: 'ctrl+s',
+    category: 'context-dependent',
+    surface: 'pine-editor',
+    safety: 'safe',
+    automationRoutable: true,
+    aliases: ['save script', 'save pine script'],
+    notes: ['Official Pine editor save shortcut.'],
+    verificationContract: {
+      kind: 'status-visible',
+      appName: 'TradingView',
+      target: 'pine-editor',
+      keywords: ['pine', 'save', 'script']
+    },
+    fallbackPolicy: 'none'
+  }),
+  'add-pine-to-chart': createOfficialShortcut({
+    id: 'add-pine-to-chart',
+    key: 'ctrl+enter',
+    category: 'context-dependent',
+    surface: 'pine-editor',
+    safety: 'safe',
+    automationRoutable: true,
+    aliases: ['add to chart', 'update on chart', 'apply pine to chart', 'apply script'],
+    notes: ['Official Pine editor add/update-on-chart shortcut.'],
+    verificationContract: {
+      kind: 'editor-active',
+      appName: 'TradingView',
+      target: 'pine-editor',
+      keywords: ['pine', 'add to chart', 'publish script', 'strategy tester']
+    },
+    fallbackPolicy: 'none'
+  }),
+  'show-command-palette': createOfficialShortcut({
+    id: 'show-command-palette',
+    key: 'f1',
+    category: 'context-dependent',
+    surface: 'command-palette',
+    safety: 'safe',
+    aliases: ['show command palette', 'command palette'],
+    notes: ['Official Pine/code editor command palette shortcut.']
+  }),
+  'show-command-palette-alias': createOfficialShortcut({
+    id: 'show-command-palette-alias',
+    key: 'ctrl+shift+p',
+    category: 'context-dependent',
+    surface: 'command-palette',
+    safety: 'safe',
+    aliases: ['command palette alias'],
+    notes: ['Official Pine/code editor command palette alias shortcut.']
+  }),
+  'toggle-console': createOfficialShortcut({
+    id: 'toggle-console',
+    key: 'ctrl+`',
+    category: 'reference-only',
+    surface: 'pine-editor',
+    safety: 'safe',
+    aliases: ['toggle console'],
+    notes: ['Official Pine/code editor console toggle shortcut.']
   }),
   'open-object-tree': createShortcut({
     id: 'open-object-tree',
@@ -98,7 +363,7 @@ const TRADINGVIEW_SHORTCUTS = Object.freeze({
     aliases: ['object tree'],
     notes: ['Treat as TradingView-specific and verify the resulting surface before typing.'],
     sourceConfidence: 'internal-profile',
-    sourceUrls: [TRADINGVIEW_SHORTCUTS_OFFICIAL_URL]
+    sourceUrls: OFFICIAL_AND_SECONDARY_SOURCES
   }),
   'drawing-tool-binding': createShortcut({
     id: 'drawing-tool-binding',
@@ -132,83 +397,6 @@ const TRADINGVIEW_SHORTCUTS = Object.freeze({
     notes: ['Paper Trading shortcuts should remain bounded to verified paper-assist flows.'],
     sourceConfidence: 'internal-profile',
     sourceUrls: [TRADINGVIEW_SHORTCUTS_OFFICIAL_URL]
-  }),
-  'save-layout': createShortcut({
-    id: 'save-layout',
-    key: 'ctrl+s',
-    category: 'reference-only',
-    surface: 'layout',
-    safety: 'safe',
-    aliases: ['save your layout', 'save layout'],
-    notes: ['Useful reference shortcut for layout management, but not currently routed into automated workflows.'],
-    sourceConfidence: 'secondary-reference',
-    sourceUrls: SECONDARY_REFERENCE_ONLY_SOURCES
-  }),
-  'load-layout': createShortcut({
-    id: 'load-layout',
-    key: '.',
-    category: 'reference-only',
-    surface: 'layout',
-    safety: 'safe',
-    aliases: ['load layout', 'open saved layout', 'saved layout'],
-    notes: ['Reference-only layout shortcut from secondary guidance; keep automation usage explicit and verified.'],
-    sourceConfidence: 'secondary-reference',
-    sourceUrls: SECONDARY_REFERENCE_ONLY_SOURCES
-  }),
-  'take-snapshot': createShortcut({
-    id: 'take-snapshot',
-    key: 'alt+s',
-    category: 'reference-only',
-    surface: 'chart-capture',
-    safety: 'safe',
-    aliases: ['snapshot', 'take snapshot', 'chart snapshot'],
-    notes: ['Reference-only chart capture shortcut; prefer existing bounded screenshot flows for automation.'],
-    sourceConfidence: 'secondary-reference',
-    sourceUrls: SECONDARY_REFERENCE_ONLY_SOURCES
-  }),
-  'reset-chart-zoom': createShortcut({
-    id: 'reset-chart-zoom',
-    key: 'alt+r',
-    category: 'reference-only',
-    surface: 'chart-view',
-    safety: 'safe',
-    aliases: ['reset chart zoom', 'reset zoom'],
-    notes: ['Reference-only chart view shortcut from secondary guidance.'],
-    sourceConfidence: 'secondary-reference',
-    sourceUrls: SECONDARY_REFERENCE_ONLY_SOURCES
-  }),
-  'add-symbol-to-watchlist': createShortcut({
-    id: 'add-symbol-to-watchlist',
-    key: 'alt+w',
-    category: 'reference-only',
-    surface: 'watchlist',
-    safety: 'safe',
-    aliases: ['add to watchlist', 'watchlist shortcut', 'watchlist'],
-    notes: ['Reference-only watchlist shortcut from secondary guidance; explicit verification should precede any automated follow-up typing.'],
-    sourceConfidence: 'secondary-reference',
-    sourceUrls: SECONDARY_REFERENCE_ONLY_SOURCES
-  }),
-  'invert-chart': createShortcut({
-    id: 'invert-chart',
-    key: 'alt+i',
-    category: 'reference-only',
-    surface: 'chart-view',
-    safety: 'safe',
-    aliases: ['invert chart'],
-    notes: ['Reference-only chart view shortcut from secondary guidance.'],
-    sourceConfidence: 'secondary-reference',
-    sourceUrls: SECONDARY_REFERENCE_ONLY_SOURCES
-  }),
-  'enter-full-screen': createShortcut({
-    id: 'enter-full-screen',
-    key: 'f11',
-    category: 'reference-only',
-    surface: 'chart-view',
-    safety: 'safe',
-    aliases: ['full screen', 'fullscreen'],
-    notes: ['Reference-only view shortcut; use only when fullscreen transitions are explicitly requested and safe.'],
-    sourceConfidence: 'secondary-reference',
-    sourceUrls: SECONDARY_REFERENCE_ONLY_SOURCES
   })
 });
 
@@ -269,29 +457,92 @@ function getTradingViewShortcutKey(id) {
   return getTradingViewShortcut(id)?.key || null;
 }
 
+function buildTradingViewShortcutMetadata(shortcut) {
+  if (!shortcut) return null;
+  return {
+    id: shortcut.id,
+    category: shortcut.category,
+    surface: shortcut.surface,
+    safety: shortcut.safety,
+    sourceConfidence: shortcut.sourceConfidence,
+    keySequence: Array.isArray(shortcut.keySequence) ? [...shortcut.keySequence] : [],
+    automationRoutable: !!shortcut.automationRoutable,
+    fallbackPolicy: shortcut.fallbackPolicy || 'none',
+    requiresChartFocus: shortcut.requiresChartFocus !== false,
+    verificationContract: shortcut.verificationContract ? cloneValue(shortcut.verificationContract) : null
+  };
+}
+
 function matchesTradingViewShortcutAction(action, id) {
   if (!action || typeof action !== 'object') return false;
+  const resolvedId = resolveTradingViewShortcutId(id);
+  if (!resolvedId) return false;
+  if (String(action?.tradingViewShortcut?.id || '').trim().toLowerCase() === resolvedId) return true;
   if (String(action.type || '').trim().toLowerCase() !== 'key') return false;
-  const key = getTradingViewShortcutKey(id);
+  const key = getTradingViewShortcutKey(resolvedId);
   if (!key) return false;
   return normalizeKey(action.key) === normalizeKey(key);
 }
 
 function buildTradingViewShortcutAction(id, overrides = {}) {
   const shortcut = getTradingViewShortcut(id);
-  if (!shortcut || !shortcut.key) return null;
+  if (!shortcut || !shortcut.key || (Array.isArray(shortcut.keySequence) && shortcut.keySequence.length > 1)) return null;
   return {
     type: 'key',
     key: shortcut.key,
-    tradingViewShortcut: {
-      id: shortcut.id,
-      category: shortcut.category,
-      surface: shortcut.surface,
-      safety: shortcut.safety,
-      sourceConfidence: shortcut.sourceConfidence
-    },
+    tradingViewShortcut: buildTradingViewShortcutMetadata(shortcut),
     ...overrides
   };
+}
+
+function buildTradingViewShortcutSequenceRoute(shortcut, overrides = {}) {
+  const keySequence = Array.isArray(shortcut?.keySequence)
+    ? shortcut.keySequence.map((value) => String(value || '').trim()).filter(Boolean)
+    : [];
+  if (keySequence.length === 0) return null;
+
+  const routeMetadata = buildTradingViewShortcutMetadata(shortcut);
+  const actions = [];
+  const finalActionOverrides = overrides.finalActionOverrides && typeof overrides.finalActionOverrides === 'object'
+    ? overrides.finalActionOverrides
+    : {};
+  const perStepOverrides = Array.isArray(overrides.stepActionOverrides) ? overrides.stepActionOverrides : [];
+  const stepReasons = Array.isArray(overrides.stepReasons) ? overrides.stepReasons : [];
+  const interStepWaitMs = Number.isFinite(Number(overrides.interStepWaitMs)) ? Number(overrides.interStepWaitMs) : 140;
+
+  keySequence.forEach((key, index) => {
+    const isLast = index === keySequence.length - 1;
+    const baseAction = {
+      type: 'key',
+      key,
+      reason: stepReasons[index]
+        || (isLast
+          ? overrides.reason || `Execute TradingView shortcut ${shortcut.id}`
+          : `Execute TradingView shortcut step ${index + 1} for ${shortcut.surface}`),
+      tradingViewShortcut: routeMetadata
+    };
+    if (isLast) {
+      if (overrides.verify || shortcut.verificationContract) {
+        baseAction.verify = cloneValue(overrides.verify || shortcut.verificationContract);
+      }
+      if (overrides.verifyTarget) {
+        baseAction.verifyTarget = cloneValue(overrides.verifyTarget);
+      }
+    }
+
+    const actionOverrides = isLast ? finalActionOverrides : (perStepOverrides[index] || null);
+    actions.push(mergeAction(baseAction, actionOverrides));
+
+    if (!isLast) {
+      actions.push({ type: 'wait', ms: interStepWaitMs });
+    }
+  });
+
+  const finalWaitMs = Number.isFinite(Number(overrides.finalWaitMs)) ? Number(overrides.finalWaitMs) : 220;
+  if (finalWaitMs > 0) {
+    actions.push({ type: 'wait', ms: finalWaitMs });
+  }
+  return actions;
 }
 
 function buildTradingViewShortcutRoute(id, overrides = {}) {
@@ -305,11 +556,7 @@ function buildTradingViewShortcutRoute(id, overrides = {}) {
     if (!quickSearchAction) return null;
 
     const routeMetadata = {
-      id: shortcut.id,
-      category: shortcut.category,
-      surface: shortcut.surface,
-      safety: shortcut.safety,
-      sourceConfidence: shortcut.sourceConfidence,
+      ...buildTradingViewShortcutMetadata(shortcut),
       route: 'quick-search'
     };
 
@@ -339,7 +586,7 @@ function buildTradingViewShortcutRoute(id, overrides = {}) {
         type: 'key',
         key: 'enter',
         reason: overrides.selectionReason || overrides.enterReason || 'Select the highlighted Pine Editor result in TradingView quick search',
-        verify: selectionActionOverrides.verify || {
+        verify: selectionActionOverrides.verify || cloneValue(shortcut.verificationContract) || {
           kind: 'editor-active',
           appName: 'TradingView',
           target: 'pine-editor',
@@ -354,14 +601,14 @@ function buildTradingViewShortcutRoute(id, overrides = {}) {
     ];
   }
 
-  const singleAction = buildTradingViewShortcutAction(id, overrides);
-  return singleAction ? [singleAction] : null;
+  return buildTradingViewShortcutSequenceRoute(shortcut, overrides);
 }
 
 module.exports = {
   TRADINGVIEW_SHORTCUTS_OFFICIAL_URL,
   TRADINGVIEW_SHORTCUTS_SECONDARY_URL,
   buildTradingViewShortcutAction,
+  buildTradingViewShortcutMetadata,
   buildTradingViewShortcutRoute,
   getTradingViewShortcut,
   getTradingViewShortcutKey,

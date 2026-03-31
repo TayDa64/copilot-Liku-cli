@@ -4508,12 +4508,23 @@ function scopeActionToTargetWindow(action, lastTargetWindowHandle, lastTargetWin
   const targetWindowTitle = String(lastTargetWindowProfile?.title || '').trim();
 
   if (type === 'click_element' || type === 'find_element') {
-    if (!targetWindowHandle || Number(action.windowHandle || 0) === targetWindowHandle) {
-      return action;
-    }
+    const existingCriteria = action.criteria && typeof action.criteria === 'object'
+      ? action.criteria
+      : null;
     return {
       ...action,
-      windowHandle: targetWindowHandle
+      ...(targetWindowHandle && Number(action.windowHandle || 0) !== targetWindowHandle
+        ? { windowHandle: targetWindowHandle }
+        : {}),
+      criteria: {
+        text: action.text,
+        automationId: action.automationId,
+        controlType: action.controlType,
+        ...(existingCriteria || {}),
+        ...(targetWindowTitle && !String(existingCriteria?.windowTitle || '').trim()
+          ? { windowTitle: targetWindowTitle }
+          : {})
+      }
     };
   }
 
@@ -5260,6 +5271,46 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
 
         result.success = false;
         result.error = mismatchReasons[observedPineState] || fallbackReason;
+      }
+
+      const observedPineLifecycleState = String(result?.pineStructuredSummary?.lifecycleState || '').trim().toLowerCase();
+      const expectedPineLifecycleState = String(action?.continueOnPineLifecycleState || '').trim().toLowerCase();
+
+      if (result.success && observedPineLifecycleState && expectedPineLifecycleState && observedPineLifecycleState === expectedPineLifecycleState) {
+        const continuationActions = action.continueActions.map((step) => {
+          try {
+            return JSON.parse(JSON.stringify(step));
+          } catch {
+            return { ...step };
+          }
+        });
+
+        if (continuationActions.length > 0) {
+          actionData.actions.splice(i + 1, 0, ...continuationActions);
+          result.pineContinuationInjected = true;
+          result.pineContinuationLifecycleState = observedPineLifecycleState;
+          result.pineContinuationCount = continuationActions.length;
+        }
+      } else if (result.success && action.haltOnPineLifecycleStateMismatch) {
+        const mismatchReasons = action?.pineLifecycleMismatchReasons && typeof action.pineLifecycleMismatchReasons === 'object'
+          ? action.pineLifecycleMismatchReasons
+          : {};
+        const fallbackReason = action?.haltReason || 'The visible Pine lifecycle state does not safely allow automatic continuation.';
+
+        result.success = false;
+        result.error = mismatchReasons[observedPineLifecycleState] || fallbackReason;
+      }
+    }
+
+    if (result.success && Array.isArray(action.failOnPineLifecycleStates) && action.failOnPineLifecycleStates.length > 0) {
+      const observedPineLifecycleState = String(result?.pineStructuredSummary?.lifecycleState || '').trim().toLowerCase();
+      const normalizedBlockedStates = action.failOnPineLifecycleStates
+        .map((value) => String(value || '').trim().toLowerCase())
+        .filter(Boolean);
+      if (observedPineLifecycleState && normalizedBlockedStates.includes(observedPineLifecycleState)) {
+        result.success = false;
+        result.error = action?.pineLifecycleFailureReason
+          || `Pine lifecycle state ${observedPineLifecycleState} blocks safe continuation.`;
       }
     }
 

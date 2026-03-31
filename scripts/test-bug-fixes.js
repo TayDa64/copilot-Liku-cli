@@ -202,16 +202,18 @@ test('ui-watcher exposes active window capability snapshot', () => {
 
 test('message-builder injects active app capability context', () => {
   const messageBuilderPath = path.join(__dirname, '..', 'src', 'main', 'ai-service', 'message-builder.js');
+  const capabilityPolicyPath = path.join(__dirname, '..', 'src', 'main', 'capability-policy.js');
   const fs = require('fs');
 
   const messageBuilderContent = fs.readFileSync(messageBuilderPath, 'utf8');
+  const capabilityPolicyContent = fs.readFileSync(capabilityPolicyPath, 'utf8');
 
   assert(messageBuilderContent.includes('classifyActiveAppCapability'), 'Message builder should classify active app capability');
-  assert(messageBuilderContent.includes('## Active App Capability'), 'Message builder should inject active app capability context');
+  assert(messageBuilderContent.includes('buildCapabilityPolicySystemMessage'), 'Message builder should inject active app capability context');
   assert(messageBuilderContent.includes('visual-first-low-uia'), 'Capability context should recognize low-UIA visual-first apps');
-  assert(messageBuilderContent.includes('uia-rich'), 'Capability context should recognize UIA-rich apps');
-  assert(messageBuilderContent.includes('namedInteractiveElementCount'), 'Capability context should include UIA inventory counts');
-  assert(messageBuilderContent.includes('answer-shape:'), 'Capability context should shape control-surface answers');
+  assert(capabilityPolicyContent.includes('uia-rich'), 'Capability context should recognize UIA-rich apps');
+  assert(messageBuilderContent.includes('watcherSnapshot'), 'Capability context should include watcher/UIA inventory input');
+  assert(capabilityPolicyContent.includes('answer-shape:'), 'Capability context should shape control-surface answers');
   assert(messageBuilderContent.includes('## Pine Evidence Bounds'), 'Message builder should inject a bounded Pine diagnostics evidence block when relevant');
   assert(messageBuilderContent.includes('inferPineEvidenceRequestKind'), 'Message builder should classify Pine evidence request kinds');
   assert(messageBuilderContent.includes('runtime correctness, strategy validity, profitability, or market insight'), 'Pine evidence bounds should prevent compile success from being overclaimed');
@@ -280,7 +282,7 @@ test('pine workflow encodes diagnostics and compile-result evidence modes', () =
   assert(shortcutProfileContent.includes("'create-alert'"), 'TradingView shortcut profile should define stable alert guidance');
   assert(shortcutProfileContent.includes("'drawing-tool-binding'"), 'TradingView shortcut profile should mark drawing bindings as customizable');
   assert(shortcutProfileContent.includes("'open-dom-panel'"), 'TradingView shortcut profile should classify DOM shortcuts explicitly');
-  assert(shortcutProfileContent.includes('No stable native default should be assumed for opening Pine Editor'), 'TradingView shortcut profile should stop treating Pine Editor as a stable native shortcut');
+  assert(shortcutProfileContent.includes('No dedicated official Pine Editor opener is exposed in the PDF'), 'TradingView shortcut profile should stop treating Pine Editor as a stable native shortcut');
   assert(shortcutProfileContent.includes('buildTradingViewShortcutRoute'), 'TradingView shortcut profile should expose TradingView-specific route helpers for non-native shortcuts');
   assert(shortcutProfileContent.includes("'take-snapshot'"), 'TradingView shortcut profile should include grounded reference-only snapshot guidance');
   assert(shortcutProfileContent.includes("'add-symbol-to-watchlist'"), 'TradingView shortcut profile should include grounded watchlist shortcut guidance');
@@ -600,7 +602,7 @@ test('TradingView shortcut profile and drawing bounds are wired through promptin
   assert(alertWorkflowContent.includes("require('./shortcut-profile')"), 'Alert workflow should consume TradingView shortcut profile');
   assert(pineWorkflowContent.includes("require('./shortcut-profile')"), 'Pine workflow should consume TradingView shortcut profile');
   assert(indicatorWorkflowContent.includes("buildSearchSurfaceSelectionContract"), 'Indicator workflow should consume the shared search-surface selection contract');
-  assert(shortcutProfileContent.includes("buildSearchSurfaceSelectionContract"), 'Shortcut profile should reuse the shared search-surface selection contract for Pine quick-search routes');
+  assert(shortcutProfileContent.includes("buildTradingViewShortcutSequenceRoute"), 'Shortcut profile should expose reusable shortcut sequencing for official TradingView routes');
   assert(searchSurfaceContractsContent.includes("type: 'click_element'"), 'Shared search-surface contracts should perform semantic result selection');
   assert(claimBoundsContent.includes('buildProofCarryingAnswerPrompt'), 'Claim-bounds helper should build proof-carrying answer prompts');
   assert(messageBuilderContent.includes('buildClaimBoundConstraint'), 'Message builder should inject the answer claim contract on degraded or low-trust paths');

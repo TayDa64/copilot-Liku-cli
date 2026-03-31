@@ -68,6 +68,7 @@ function isPineAuthoringStep(action) {
     || key === 'backspace'
     || key === 'delete'
     || key === 'ctrl+v'
+    || key === 'ctrl+s'
     || key === 'ctrl+enter'
     || key === 'enter';
 }
@@ -142,6 +143,18 @@ function isPineAddToChartStep(action) {
     || /\b(add|apply|run|load|put)\b.{0,20}\bchart\b/i.test(combined);
 }
 
+function isPineSaveStep(action) {
+  if (!action || typeof action !== 'object') return false;
+  const type = getNormalizedActionType(action);
+  const key = String(action?.key || '').trim().toLowerCase();
+  const combined = [action.reason, action.text]
+    .map((value) => String(value || '').trim())
+    .filter(Boolean)
+    .join(' ');
+  return (type === 'key' && key === 'ctrl+s')
+    || /\bsave\b.{0,20}\bscript\b/i.test(combined);
+}
+
 function shouldAutoAddPineScriptToChart(raw = '', actions = []) {
   if (Array.isArray(actions) && actions.some((action) => isPineAddToChartStep(action))) {
     return true;
@@ -168,6 +181,7 @@ function buildSafePineAuthoringContinuationSteps(actions = [], intent = {}, raw 
   const clipboardPrepSteps = filtered.filter((action) => isPineClipboardPreparationAction(action)).map(cloneAction);
   const typingSteps = filtered.filter((action) => isPineScriptTypeAction(action)).map(cloneAction);
   const pasteSteps = filtered.filter((action) => isPinePasteStep(action)).map(cloneAction);
+  const saveSteps = filtered.filter((action) => isPineSaveStep(action)).map(cloneAction);
   const addToChartSteps = filtered.filter((action) => isPineAddToChartStep(action)).map(cloneAction);
 
   const payloadSteps = [];
@@ -192,51 +206,87 @@ function buildSafePineAuthoringContinuationSteps(actions = [], intent = {}, raw 
     return [];
   }
 
-  const followUp = [
-    { type: 'wait', ms: 180 },
-    {
-      type: 'key',
-      key: 'ctrl+a',
-      reason: 'Select the visible starter Pine script before inserting the prepared script',
-      safePineStarterReset: true
-    },
-    { type: 'wait', ms: 120 },
-    {
-      type: 'key',
-      key: 'backspace',
-      reason: 'Clear the visible starter Pine script before inserting the prepared script',
-      safePineStarterReset: true
-    },
-    { type: 'wait', ms: 120 },
-    ...payloadSteps
-  ];
-
+  const applyContinuationSteps = [];
   if (addToChartSteps.length > 0) {
-    followUp.push(...addToChartSteps);
+    applyContinuationSteps.push(...addToChartSteps);
   } else if (shouldAutoAddPineScriptToChart(raw, filtered)) {
-    followUp.push(
-      { type: 'wait', ms: 220 },
+    applyContinuationSteps.push(...(buildTradingViewShortcutRoute('add-pine-to-chart', {
+      reason: 'Add the saved Pine script to the chart'
+    }) || [
       {
         type: 'key',
         key: 'ctrl+enter',
-        reason: 'Add the prepared Pine script to the chart'
-      }
-    );
+        reason: 'Add the saved Pine script to the chart'
+      },
+      { type: 'wait', ms: 220 }
+    ]));
   }
 
-  if (followUp.some((action) => isPineAddToChartStep(action))) {
-    followUp.push(
+  if (applyContinuationSteps.some((action) => isPineAddToChartStep(action))) {
+    applyContinuationSteps.push(
       { type: 'wait', ms: 300 },
       {
         type: 'get_text',
         text: 'Pine Editor',
-        reason: 'Read visible Pine Editor compile-result text after adding the script to the chart',
-        pineEvidenceMode: 'compile-result'
+        reason: 'Read visible Pine Editor compile/apply result text after adding the script to the chart',
+        pineEvidenceMode: 'compile-result',
+        failOnPineLifecycleStates: ['editor-target-corrupt']
       }
     );
   }
 
-  return followUp;
+  const saveFollowUpActions = [
+    ...payloadSteps,
+    { type: 'wait', ms: 220 },
+    ...(saveSteps.length > 0
+      ? saveSteps
+      : ((buildTradingViewShortcutRoute('save-pine-script', {
+        reason: 'Save the freshly created Pine script before adding it to the chart',
+        finalWaitMs: 0
+      })) || [
+        {
+          type: 'key',
+          key: 'ctrl+s',
+          reason: 'Save the freshly created Pine script before adding it to the chart'
+        }
+      ])),
+    { type: 'wait', ms: 280 },
+    {
+      type: 'get_text',
+      text: 'Pine Editor',
+      reason: 'Verify visible Pine save-state evidence before adding the script to the chart',
+      pineEvidenceMode: 'save-status',
+      continueOnPineLifecycleState: 'saved-state-verified',
+      continueActions: applyContinuationSteps,
+      haltOnPineLifecycleStateMismatch: true,
+      pineLifecycleMismatchReasons: {
+        'save-required-before-apply': 'Visible save confirmation was not observed after saving the Pine script; do not add it to the chart yet.',
+        'editor-target-corrupt': 'Visible Pine output suggests editor-target corruption; stop before applying the script.',
+        '': 'The Pine save state could not be verified; do not add the script to the chart yet.'
+      }
+    }
+  ];
+
+  return [
+    ...(buildTradingViewShortcutRoute('new-pine-indicator', {
+      reason: 'Create a fresh Pine indicator before inserting the prepared script'
+    }) || []),
+    { type: 'wait', ms: 220 },
+    {
+      type: 'get_text',
+      text: 'Pine Editor',
+      reason: 'Verify that a fresh Pine script surface is active before inserting the prepared script',
+      pineEvidenceMode: 'safe-authoring-inspect',
+      continueOnPineEditorState: 'empty-or-starter',
+      continueActions: saveFollowUpActions,
+      haltOnPineEditorStateMismatch: true,
+      pineStateMismatchReasons: {
+        'existing-script-visible': 'Creating a fresh Pine indicator did not yield a clean starter script; stop rather than overwrite visible script content.',
+        'unknown-visible-state': 'The fresh Pine indicator state is ambiguous; inspect further before inserting the script.',
+        '': 'The fresh Pine indicator state is ambiguous; inspect further before inserting the script.'
+      }
+    }
+  ];
 }
 
 function actionLooksLikePineEditorOpenIntent(action) {
@@ -347,6 +397,8 @@ function buildPineReadbackStep(surfaceTarget, evidenceMode = null) {
     const mode = evidenceMode || 'generic-status';
     const reason = mode === 'compile-result'
       ? 'Read visible Pine Editor compile-result text for a bounded diagnostics summary'
+      : mode === 'save-status'
+        ? 'Read visible Pine Editor save-state text for bounded save verification'
       : mode === 'diagnostics'
         ? 'Read visible Pine Editor diagnostics and warnings text for bounded evidence gathering'
         : mode === 'line-budget'

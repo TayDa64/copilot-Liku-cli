@@ -32,10 +32,13 @@ test('stable default TradingView shortcuts are exposed through the profile helpe
   const indicatorSearch = getTradingViewShortcut('indicator-search');
   const createAlert = getTradingViewShortcut('create-alert');
   const quickSearch = getTradingViewShortcut('command palette');
+  const dataWindow = getTradingViewShortcut('open-data-window');
 
   assert(indicatorSearch, 'indicator-search shortcut should exist');
   assert.strictEqual(indicatorSearch.key, '/');
   assert.strictEqual(indicatorSearch.category, 'stable-default');
+  assert.deepStrictEqual(indicatorSearch.keySequence, ['/']);
+  assert.strictEqual(indicatorSearch.automationRoutable, true);
   assert(createAlert, 'create-alert shortcut should exist');
   assert.strictEqual(createAlert.key, 'alt+a');
   assert.strictEqual(createAlert.category, 'stable-default');
@@ -43,6 +46,8 @@ test('stable default TradingView shortcuts are exposed through the profile helpe
   assert(quickSearch, 'symbol-search alias should resolve through the profile helper');
   assert.strictEqual(quickSearch.id, 'symbol-search');
   assert.strictEqual(quickSearch.surface, 'quick-search');
+  assert(dataWindow, 'data window shortcut should exist');
+  assert.strictEqual(dataWindow.key, 'alt+d');
 });
 
 test('drawing shortcuts are marked customizable rather than universal', () => {
@@ -81,18 +86,18 @@ test('buildTradingViewShortcutAction preserves shortcut metadata for workflow ac
 test('listTradingViewShortcuts returns the categorized TradingView profile inventory', () => {
   const shortcuts = listTradingViewShortcuts();
   assert(Array.isArray(shortcuts), 'shortcut inventory should be an array');
-  assert(shortcuts.length >= 12, 'shortcut inventory should include the grounded TradingView shortcut inventory');
+  assert(shortcuts.length >= 20, 'shortcut inventory should include the expanded TradingView shortcut inventory');
 });
 
-test('shortcut profile exposes reference-only chart shortcuts with source provenance', () => {
+test('shortcut profile exposes official chart shortcuts with source provenance', () => {
   const snapshot = getTradingViewShortcut('take snapshot');
   const watchlist = getTradingViewShortcut('add-symbol-to-watchlist');
 
   assert(snapshot, 'snapshot shortcut should resolve by alias');
   assert.strictEqual(snapshot.key, 'alt+s');
   assert.strictEqual(snapshot.category, 'reference-only');
-  assert.strictEqual(snapshot.sourceConfidence, 'secondary-reference');
-  assert(snapshot.sourceUrls.includes(TRADINGVIEW_SHORTCUTS_SECONDARY_URL));
+  assert.strictEqual(snapshot.sourceConfidence, 'official-pdf');
+  assert(snapshot.sourceUrls.includes(TRADINGVIEW_SHORTCUTS_OFFICIAL_URL));
   assert(watchlist, 'watchlist shortcut should exist');
   assert.strictEqual(watchlist.key, 'alt+w');
   assert.strictEqual(watchlist.surface, 'watchlist');
@@ -105,7 +110,7 @@ test('shortcut profile resolves aliases and documents official shortcut referenc
 
   const indicatorSearch = getTradingViewShortcut('indicator-search');
   assert(indicatorSearch.sourceUrls.includes(TRADINGVIEW_SHORTCUTS_OFFICIAL_URL));
-  assert(indicatorSearch.sourceUrls.includes(TRADINGVIEW_SHORTCUTS_SECONDARY_URL));
+  assert.strictEqual(indicatorSearch.sourceConfidence, 'official-pdf');
 });
 
 test('shortcut profile exposes reusable phrase matching helpers for workflow inference', () => {
@@ -137,4 +142,30 @@ test('pine editor opener is routed through TradingView quick search instead of a
   assert.strictEqual(routeActions[2].text, 'Pine Editor');
   assert.strictEqual(routeActions[4].type, 'key');
   assert.strictEqual(routeActions[4].key, 'enter');
+});
+
+test('pine authoring shortcuts expose normalized capability metadata and chorded sequences', () => {
+  const newIndicator = getTradingViewShortcut('new-pine-indicator');
+  const saveScript = getTradingViewShortcut('save-pine-script');
+  const addToChart = getTradingViewShortcut('add-pine-to-chart');
+
+  assert(newIndicator, 'new pine indicator shortcut should exist');
+  assert.deepStrictEqual(newIndicator.keySequence, ['ctrl+k', 'ctrl+i']);
+  assert.strictEqual(newIndicator.key, null);
+  assert.strictEqual(newIndicator.automationRoutable, true);
+  assert.strictEqual(newIndicator.fallbackPolicy, 'none');
+  assert.strictEqual(saveScript.key, 'ctrl+s');
+  assert.strictEqual(saveScript.verificationContract.kind, 'status-visible');
+  assert.strictEqual(addToChart.key, 'ctrl+enter');
+  assert.strictEqual(addToChart.automationRoutable, true);
+});
+
+test('generic shortcut route builder emits a chord sequence with final verification metadata', () => {
+  const routeActions = buildTradingViewShortcutRoute('new-pine-indicator');
+  const keyActions = routeActions.filter((action) => action?.type === 'key');
+
+  assert(Array.isArray(routeActions) && routeActions.length >= 4, 'new indicator route should emit multiple steps');
+  assert.deepStrictEqual(keyActions.map((action) => action.key), ['ctrl+k', 'ctrl+i']);
+  assert.strictEqual(keyActions[1].verify.kind, 'editor-active');
+  assert.strictEqual(keyActions[1].tradingViewShortcut.id, 'new-pine-indicator');
 });
