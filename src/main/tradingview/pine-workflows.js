@@ -1,5 +1,6 @@
 const { buildVerifyTargetHintFromAppName } = require('./app-profile');
 const { extractTradingViewObservationKeywords } = require('./verification');
+const { buildPineClipboardPreparationCommandFromCanonicalState } = require('./pine-script-state');
 const {
   buildTradingViewShortcutAction,
   buildTradingViewShortcutRoute,
@@ -115,15 +116,55 @@ function getNormalizedActionType(action) {
   return String(action?.type || '').trim().toLowerCase();
 }
 
+function sanitizePineScriptText(value = '') {
+  let raw = String(value || '');
+  if (!raw) return raw;
+
+  raw = raw.replace(/^\uFEFF/, '');
+  raw = raw.replace(/(^|[\r\n])\s*(?:pine\s*editor|ine\s*editor)\s*(?=\/\/\s*@version\b)/ig, '$1');
+
+  const versionMatch = raw.match(/\/\/\s*@version\s*=\s*\d+\b/i);
+  if (versionMatch && versionMatch.index > 0) {
+    const prefix = raw.slice(0, versionMatch.index);
+    if (/\b(?:pine\s*editor|ine\s*editor)\b/i.test(prefix)) {
+      raw = raw.slice(versionMatch.index);
+    }
+  }
+
+  return raw;
+}
+
+function containsPineScriptPayloadText(value = '') {
+  const text = sanitizePineScriptText(value);
+  return /\/\/\s*@version\s*=\s*\d+|\b(?:indicator|strategy|library)\s*\(|\bplot(?:shape|char)?\s*\(|\binput(?:\.[a-z]+)?\s*\(|\balertcondition\s*\(/i.test(text);
+}
+
+function sanitizePineAuthoringAction(action) {
+  if (!action || typeof action !== 'object') return action;
+
+  const cloned = cloneAction(action);
+  const type = getNormalizedActionType(cloned);
+
+  if (type === 'type' && typeof cloned.text === 'string') {
+    cloned.text = sanitizePineScriptText(cloned.text);
+  }
+
+  if (type === 'run_command' && typeof cloned.command === 'string' && /\bset-clipboard\b/i.test(cloned.command)) {
+    cloned.command = sanitizePineScriptText(cloned.command);
+  }
+
+  return cloned;
+}
+
 function isPineClipboardPreparationAction(action) {
   return getNormalizedActionType(action) === 'run_command'
-    && /\bset-clipboard\b/i.test(String(action?.command || ''));
+    && /\bset-clipboard\b/i.test(String(action?.command || ''))
+    && containsPineScriptPayloadText(String(action?.command || ''));
 }
 
 function isPineScriptTypeAction(action) {
   if (getNormalizedActionType(action) !== 'type') return false;
-  const text = String(action?.text || '');
-  return /\/\/\s*@version\s*=\s*\d+|\b(?:indicator|strategy|library)\s*\(|\bplot\s*\(|\bplotshape\s*\(|\bplotchar\s*\(|\binput(?:\.[a-z]+)?\s*\(|\balertcondition\s*\(/i.test(text);
+  return containsPineScriptPayloadText(String(action?.text || ''));
 }
 
 function isPinePasteStep(action) {
@@ -171,13 +212,15 @@ function sanitizePineScriptName(value = '') {
 function inferSafePineScriptName(actions = [], raw = '') {
   const source = Array.isArray(actions) ? actions : [];
   for (const action of source) {
+    const canonicalTitle = sanitizePineScriptName(action?.pineCanonicalState?.scriptTitle || '');
+    if (canonicalTitle) return canonicalTitle;
     const type = getNormalizedActionType(action);
     if (type === 'type') {
-      const title = sanitizePineScriptName(extractPineDeclarationTitle(action.text));
+      const title = sanitizePineScriptName(extractPineDeclarationTitle(sanitizePineScriptText(action.text)));
       if (title) return title;
     }
     if (type === 'run_command') {
-      const title = sanitizePineScriptName(extractPineDeclarationTitle(action.command));
+      const title = sanitizePineScriptName(extractPineDeclarationTitle(sanitizePineScriptText(action.command)));
       if (title) return title;
     }
   }
@@ -186,6 +229,72 @@ function inferSafePineScriptName(actions = [], raw = '') {
   if (messageTitle) return messageTitle;
 
   return 'Liku Pine Script';
+}
+
+function extractPineCanonicalState(actions = []) {
+  for (const action of Array.isArray(actions) ? actions : []) {
+    const canonicalState = action?.pineCanonicalState;
+    if (canonicalState && typeof canonicalState === 'object') {
+      return {
+        ...canonicalState,
+        scriptTitle: sanitizePineScriptName(canonicalState.scriptTitle || '')
+      };
+    }
+  }
+  return null;
+}
+
+function hasValidatedCanonicalPineState(actions = []) {
+  const canonicalState = extractPineCanonicalState(actions);
+  return !!(
+    canonicalState
+    && String(canonicalState.sourcePath || '').trim()
+    && canonicalState?.validation?.valid === true
+  );
+}
+
+function buildCanonicalPineReplacementPayloadSteps(actions = []) {
+  const canonicalState = extractPineCanonicalState(actions);
+  if (!canonicalState?.sourcePath || canonicalState?.validation?.valid === false) return null;
+
+  const clipboardCommand = buildPineClipboardPreparationCommandFromCanonicalState(canonicalState);
+  if (!clipboardCommand) return null;
+  const canonicalLabel = [canonicalState.id, canonicalState.sourceHash ? canonicalState.sourceHash.slice(0, 12) : '']
+    .filter(Boolean)
+    .join(' / ');
+
+  return [
+    {
+      type: 'key',
+      key: 'ctrl+a',
+      reason: 'Select the fresh Pine starter script before replacing it with the canonical local Pine artifact'
+    },
+    { type: 'wait', ms: 120 },
+    {
+      type: 'key',
+      key: 'backspace',
+      reason: 'Clear the fresh Pine starter script before pasting the canonical local Pine artifact'
+    },
+    { type: 'wait', ms: 120 },
+    {
+      type: 'run_command',
+      shell: 'powershell',
+      command: clipboardCommand,
+      reason: canonicalLabel
+        ? `Load the validated canonical Pine script (${canonicalLabel}) from the persisted local state file into the clipboard`
+        : 'Load the validated canonical Pine script from the persisted local state file into the clipboard',
+      pineCanonicalState: canonicalState
+    },
+    { type: 'wait', ms: 120 },
+    {
+      type: 'key',
+      key: 'ctrl+v',
+      reason: canonicalLabel
+        ? `Paste the validated canonical Pine script (${canonicalLabel}) from the persisted local state file into the Pine Editor`
+        : 'Paste the validated canonical Pine script from the persisted local state file into the Pine Editor',
+      pineCanonicalState: canonicalState
+    }
+  ];
 }
 
 function shouldAutoAddPineScriptToChart(raw = '', actions = []) {
@@ -211,28 +320,31 @@ function buildSafePineAuthoringContinuationSteps(actions = [], intent = {}, raw 
     return action && typeof action === 'object' && type && type !== 'wait' && type !== 'screenshot';
   });
 
-  const clipboardPrepSteps = filtered.filter((action) => isPineClipboardPreparationAction(action)).map(cloneAction);
-  const typingSteps = filtered.filter((action) => isPineScriptTypeAction(action)).map(cloneAction);
+  const clipboardPrepSteps = filtered.filter((action) => isPineClipboardPreparationAction(action)).map(sanitizePineAuthoringAction);
+  const typingSteps = filtered.filter((action) => isPineScriptTypeAction(action)).map(sanitizePineAuthoringAction);
   const pasteSteps = filtered.filter((action) => isPinePasteStep(action)).map(cloneAction);
   const saveSteps = filtered.filter((action) => isPineSaveStep(action)).map(cloneAction);
   const addToChartSteps = filtered.filter((action) => isPineAddToChartStep(action)).map(cloneAction);
 
-  const payloadSteps = [];
-  if (clipboardPrepSteps.length > 0) {
-    payloadSteps.push(...clipboardPrepSteps);
-    if (pasteSteps.length > 0) {
+  const canonicalReplacementPayloadSteps = buildCanonicalPineReplacementPayloadSteps(filtered);
+  const payloadSteps = canonicalReplacementPayloadSteps ? canonicalReplacementPayloadSteps.slice() : [];
+  if (!canonicalReplacementPayloadSteps) {
+    if (clipboardPrepSteps.length > 0) {
+      payloadSteps.push(...clipboardPrepSteps);
+      if (pasteSteps.length > 0) {
+        payloadSteps.push(...pasteSteps);
+      } else {
+        payloadSteps.push({
+          type: 'key',
+          key: 'ctrl+v',
+          reason: 'Paste the prepared Pine script into the Pine Editor'
+        });
+      }
+    } else if (typingSteps.length > 0) {
+      payloadSteps.push(...typingSteps);
+    } else if (pasteSteps.length > 0) {
       payloadSteps.push(...pasteSteps);
-    } else {
-      payloadSteps.push({
-        type: 'key',
-        key: 'ctrl+v',
-        reason: 'Paste the prepared Pine script into the Pine Editor'
-      });
     }
-  } else if (typingSteps.length > 0) {
-    payloadSteps.push(...typingSteps);
-  } else if (pasteSteps.length > 0) {
-    payloadSteps.push(...pasteSteps);
   }
 
   if (payloadSteps.length === 0) {
@@ -425,6 +537,17 @@ function inferPineAuthoringMode(raw = '') {
   if (!mentionsAuthoringIntent && !explicitOverwriteIntent) return null;
 
   return explicitOverwriteIntent ? 'explicit-overwrite' : 'safe-new-script';
+}
+
+function requestRequiresFreshPineIndicator(raw = '') {
+  const normalized = normalizeTextForMatch(raw);
+  if (!normalized) return false;
+
+  return /\bnew\s+(?:interactive\s+)?(?:chart\s+)?indicator\b/.test(normalized)
+    || /\binteractive\s+chart\s+indicator\b/.test(normalized)
+    || /\bnew\s+indicator\s+flow\b/.test(normalized)
+    || /\bdoes\s+not\s+reuse\s+the\s+current\s+script\b/.test(normalized)
+    || /\bnew\s+pine\s+(?:indicator|script)\b/.test(normalized);
 }
 
 const PINE_VERSION_HISTORY_SUMMARY_FIELDS = Object.freeze([
@@ -630,6 +753,8 @@ function inferTradingViewPineIntent(userMessage = '', actions = []) {
     : null;
   const safeAuthoringDefault = surface.target === 'pine-editor' && pineAuthoringMode === 'safe-new-script';
   const explicitOverwriteAuthoring = surface.target === 'pine-editor' && pineAuthoringMode === 'explicit-overwrite';
+  const requiresFreshIndicator = surface.target === 'pine-editor'
+    && (requestRequiresFreshPineIndicator(raw) || hasValidatedCanonicalPineState(actions));
   const safeAuthoringContinuationSteps = safeAuthoringDefault
     ? buildSafePineAuthoringContinuationSteps(actions, { openerIndex, syntheticOpener }, raw)
     : [];
@@ -650,6 +775,7 @@ function inferTradingViewPineIntent(userMessage = '', actions = []) {
     pineEvidenceMode,
     syntheticOpener,
     safeAuthoringDefault,
+    requiresFreshIndicator,
     safeAuthoringContinuationSteps,
     explicitOverwriteAuthoring,
     reason: surface.target === 'pine-logs'
@@ -671,16 +797,29 @@ function buildTradingViewPineWorkflowActions(intent = {}, actions = []) {
   const opener = intent.syntheticOpener ? null : actions[intent.openerIndex];
   const verifyTarget = buildVerifyTargetHintFromAppName(intent.appName || 'TradingView');
   const surfaceTerms = getPineSurfaceMatchTerms(intent.surfaceTarget);
-  const expectedKeywords = mergeUnique([
-    'pine',
-    'pine editor',
-    intent.surfaceTarget,
-    surfaceTerms,
-    extractTradingViewObservationKeywords(`open ${intent.surfaceTarget} in tradingview`),
-    verifyTarget.pineKeywords,
-    verifyTarget.dialogKeywords,
-    verifyTarget.titleHints
-  ]);
+  const expectedKeywords = intent.surfaceTarget === 'pine-editor'
+    ? mergeUnique([
+      'pine',
+      'pine editor',
+      'script',
+      'add to chart',
+      'publish script',
+      'pine logs',
+      'profiler',
+      'version history',
+      'strategy tester',
+      intent.surfaceTarget,
+      surfaceTerms,
+      extractTradingViewObservationKeywords(`open ${intent.surfaceTarget} in tradingview`),
+      verifyTarget.pineKeywords
+    ])
+    : mergeUnique([
+      intent.surfaceTarget,
+      surfaceTerms,
+      extractTradingViewObservationKeywords(`open ${intent.surfaceTarget} in tradingview`),
+      verifyTarget.dialogKeywords,
+      verifyTarget.titleHints
+    ]);
 
   const rewritten = [
     {
@@ -745,6 +884,13 @@ function buildTradingViewPineWorkflowActions(intent = {}, actions = []) {
   }
 
   if (intent.safeAuthoringDefault) {
+    if (intent.requiresFreshIndicator && Array.isArray(intent.safeAuthoringContinuationSteps) && intent.safeAuthoringContinuationSteps.length > 0) {
+      if (rewritten.length > 0 && rewritten[rewritten.length - 1]?.type !== 'wait') {
+        rewritten.push({ type: 'wait', ms: 220 });
+      }
+      return rewritten.concat(intent.safeAuthoringContinuationSteps.map(cloneAction));
+    }
+
     const inspectStep = {
       type: 'get_text',
       text: 'Pine Editor',
@@ -929,5 +1075,7 @@ module.exports = {
   inferTradingViewPineIntent,
   buildTradingViewPineWorkflowActions,
   maybeRewriteTradingViewPineWorkflow,
-  inferPineVersionHistoryEvidenceMode
+  inferPineVersionHistoryEvidenceMode,
+  containsPineScriptPayloadText,
+  sanitizePineScriptText
 };

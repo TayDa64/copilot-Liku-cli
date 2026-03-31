@@ -618,6 +618,217 @@ function buildPineEditorDiagnosticsStructuredSummary(text, evidenceMode = 'gener
   };
 }
 
+function buildPineEditorFallbackCandidates(evidenceMode = 'generic-status') {
+  const normalizedMode = String(evidenceMode || 'generic-status').trim().toLowerCase();
+  const baseCandidates = [
+    { text: 'Pine Editor', synthetic: false, category: 'probe' }
+  ];
+
+  const safeAuthoringCandidates = [
+    { text: 'Untitled script', synthetic: true, category: 'starter' },
+    { text: 'My Script', synthetic: true, category: 'starter' },
+    { text: 'My Strategy', synthetic: true, category: 'starter' },
+    { text: 'My Library', synthetic: true, category: 'starter' },
+    { text: 'Publish script', synthetic: true, category: 'surface' },
+    { text: 'Add to chart', synthetic: true, category: 'surface' },
+    { text: 'Update on chart', synthetic: true, category: 'surface' },
+    { text: 'Strategy Tester', synthetic: true, category: 'surface' },
+    { text: 'Pine Logs', synthetic: true, category: 'surface' }
+  ];
+
+  const saveStatusCandidates = [
+    { text: 'Save script', synthetic: true, category: 'save-required' },
+    { text: 'Script name', synthetic: true, category: 'save-required' },
+    { text: 'Save as', synthetic: true, category: 'save-required' },
+    { text: 'Rename script', synthetic: true, category: 'save-required' },
+    { text: 'Unsaved', synthetic: true, category: 'save-required' },
+    { text: 'All changes saved', synthetic: true, category: 'save-confirmed' },
+    { text: 'Saved successfully', synthetic: true, category: 'save-confirmed' },
+    { text: 'Save complete', synthetic: true, category: 'save-confirmed' }
+  ];
+
+  if (normalizedMode === 'safe-authoring-inspect') {
+    return [...baseCandidates, ...safeAuthoringCandidates, ...saveStatusCandidates];
+  }
+
+  if (normalizedMode === 'save-status') {
+    return [...baseCandidates, ...saveStatusCandidates, ...safeAuthoringCandidates];
+  }
+
+  return baseCandidates;
+}
+
+async function getPineEditorTextFallback(action = {}) {
+  const targetText = String(action?.text || action?.criteria?.text || '').trim();
+  if (!/pine editor/i.test(targetText)) return null;
+
+  const ui = require('./ui-automation');
+  const host = ui.getSharedUIAHost();
+  const baseCriteria = action.criteria && typeof action.criteria === 'object'
+    ? { ...action.criteria }
+    : {};
+  const evidenceMode = String(action?.pineEvidenceMode || 'generic-status').trim().toLowerCase();
+  const fallbackCandidates = buildPineEditorFallbackCandidates(evidenceMode);
+  const syntheticAnchors = [];
+  const seenSyntheticAnchors = new Set();
+
+  for (const candidate of fallbackCandidates) {
+    const text = String(candidate?.text || '').trim();
+    if (!text) continue;
+    const findResult = await ui.findElement({
+      ...baseCriteria,
+      text,
+      exactText: '',
+      automationId: baseCriteria.automationId || '',
+      controlType: baseCriteria.controlType || ''
+    });
+    const element = findResult?.element || null;
+    const bounds = element?.bounds || element?.Bounds || null;
+    if (!findResult?.success) continue;
+
+    const syntheticAnchorText = normalizeCompactText(element?.name || text, 120);
+    if (candidate?.synthetic && syntheticAnchorText && !seenSyntheticAnchors.has(syntheticAnchorText)) {
+      seenSyntheticAnchors.add(syntheticAnchorText);
+      syntheticAnchors.push(syntheticAnchorText);
+    }
+
+    if (!bounds) continue;
+
+    const centerX = Number(bounds.centerX ?? bounds.CenterX ?? (bounds.x ?? bounds.X ?? 0) + ((bounds.width ?? bounds.Width ?? 0) / 2));
+    const centerY = Number(bounds.centerY ?? bounds.CenterY ?? (bounds.y ?? bounds.Y ?? 0) + ((bounds.height ?? bounds.Height ?? 0) / 2));
+    if (!Number.isFinite(centerX) || !Number.isFinite(centerY)) continue;
+
+    try {
+      const resp = await host.getText(centerX, centerY);
+      const fallbackText = normalizeCompactText(resp?.text, 2400);
+      if (fallbackText) {
+        return {
+          success: true,
+          text: resp.text,
+          method: `${resp.method || 'TextPattern'} (pine-editor-fallback:${text})`,
+          element: resp.element || element
+        };
+      }
+    } catch {}
+  }
+
+  if (syntheticAnchors.length > 0 && (evidenceMode === 'safe-authoring-inspect' || evidenceMode === 'save-status')) {
+    return {
+      success: true,
+      text: syntheticAnchors.join('\n'),
+      method: 'ElementAnchor (pine-editor-fallback)',
+      element: {
+        name: syntheticAnchors[0]
+      }
+    };
+  }
+
+  return null;
+}
+
+function getPineEditorWatcherFallback(action = {}) {
+  const targetText = String(action?.text || action?.criteria?.text || '').trim();
+  if (!/pine editor/i.test(targetText)) return null;
+
+  let getUIWatcher = null;
+  try {
+    ({ getUIWatcher } = require('./ai-service/ui-context'));
+  } catch {
+    return null;
+  }
+
+  const watcher = typeof getUIWatcher === 'function' ? getUIWatcher() : null;
+  if (!watcher?.cache || !Array.isArray(watcher.cache.elements) || watcher.cache.elements.length === 0) {
+    return null;
+  }
+
+  const activeHwnd = Number(watcher.cache.activeWindow?.hwnd || 0) || 0;
+  const scopedElements = activeHwnd > 0
+    ? watcher.cache.elements.filter((element) => Number(element?.windowHandle || 0) === activeHwnd)
+    : watcher.cache.elements.slice();
+  if (!scopedElements.length) return null;
+
+  const prioritizedTerms = [
+    'untitled script',
+    'add to chart',
+    'publish script',
+    'update on chart',
+    'strategy tester',
+    'pine logs',
+    'save script',
+    'script name',
+    'save as',
+    'rename script'
+  ];
+
+  const starterTerms = [
+    'untitled script',
+    'my script',
+    'my strategy',
+    'my library'
+  ];
+
+  const strongAnchorTerms = prioritizedTerms.filter((term) => !starterTerms.includes(term));
+
+  const normalizeForSearch = (value) => String(value || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  const isLikelyChartChromeNoise = (value = '') => {
+    const compact = normalizeCompactText(value, 160);
+    if (!compact) return true;
+    return /^[A-Z0-9.\-]{1,16}\s*[▲▼]/.test(compact)
+      || /\b[+-]?\d+(?:\.\d+)?%\b/.test(compact)
+      || /\b(?:open|high|low|close|vol)\b/i.test(compact)
+      || /\/\s*unnamed\b/i.test(compact)
+      || /\bunnamed\b/i.test(compact);
+  };
+
+  const collected = [];
+  const seen = new Set();
+  let strongAnchorCount = 0;
+  let starterSignalCount = 0;
+
+  for (const term of prioritizedTerms) {
+    const normalizedTerm = normalizeForSearch(term);
+    for (const element of scopedElements) {
+      const displayText = normalizeCompactText(element?.name || element?.automationId || element?.className || '', 160);
+      const matchText = normalizeCompactText([
+        element?.name,
+        element?.automationId,
+        element?.className,
+        element?.type
+      ].filter(Boolean).join(' '), 240);
+      const normalizedCandidate = normalizeForSearch(matchText);
+      if (!displayText || !normalizedCandidate.includes(normalizedTerm) || seen.has(displayText)) {
+        continue;
+      }
+      if (isLikelyChartChromeNoise(displayText)) {
+        continue;
+      }
+      seen.add(displayText);
+      collected.push(displayText);
+      if (strongAnchorTerms.includes(term)) {
+        strongAnchorCount += 1;
+      }
+      if (starterTerms.includes(term)) {
+        starterSignalCount += 1;
+      }
+    }
+  }
+
+  const hasSufficientPineEvidence = strongAnchorCount > 0 || starterSignalCount > 0;
+  if (collected.length === 0 || !hasSufficientPineEvidence) {
+    return null;
+  }
+
+  return {
+    success: true,
+    text: collected.join('\n'),
+    method: 'WatcherCache (pine-editor-fallback)',
+    element: {
+      name: collected[0]
+    }
+  };
+}
+
 function buildPineLogsStructuredSummary(text) {
   const rawText = String(text || '').replace(/\r/g, '');
   const compactText = normalizeCompactText(rawText, 2400);
@@ -2924,9 +3135,20 @@ async function executeAction(action) {
 
       case ACTION_TYPES.GET_TEXT: {
         const uia = require('./ui-automation');
-        const gtResult = await uia.getElementText(
+        let gtResult = await uia.getElementText(
           action.criteria || { text: action.text, automationId: action.automationId, controlType: action.controlType }
         );
+        if (!gtResult?.success) {
+          const pineFallbackResult = await getPineEditorTextFallback(action);
+          if (pineFallbackResult?.success) {
+            gtResult = pineFallbackResult;
+          } else {
+            const pineWatcherFallbackResult = getPineEditorWatcherFallback(action);
+            if (pineWatcherFallbackResult?.success) {
+              gtResult = pineWatcherFallbackResult;
+            }
+          }
+        }
         result = { ...result, ...gtResult };
         const pineTargetText = String(action?.text || action?.criteria?.text || '');
         if (gtResult.success

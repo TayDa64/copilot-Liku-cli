@@ -22,6 +22,16 @@ function chatDebugLog(...args) {
   }
 }
 
+function isPineRecoveryDebugEnabled() {
+  return process.env.LIKU_DEBUG_PINE_RECOVERY === '1';
+}
+
+function pineRecoveryDebugLog(...args) {
+  if (isPineRecoveryDebugEnabled()) {
+    console.log(...args);
+  }
+}
+
 // `ai-service` is used by the Electron app *and* by the CLI.
 // When running in CLI-only mode, Electron may not be available.
 let shell;
@@ -113,8 +123,14 @@ const {
 } = require('./tradingview/drawing-workflows');
 const {
   buildTradingViewPineResumePrerequisites,
-  maybeRewriteTradingViewPineWorkflow
+  maybeRewriteTradingViewPineWorkflow,
+  containsPineScriptPayloadText,
+  sanitizePineScriptText
 } = require('./tradingview/pine-workflows');
+const {
+  buildPineScriptState,
+  persistPineScriptState
+} = require('./tradingview/pine-script-state');
 const {
   maybeRewriteTradingViewPaperWorkflow
 } = require('./tradingview/paper-workflows');
@@ -1238,24 +1254,218 @@ function isIncompleteTradingViewPineAuthoringPlan(actionBlock, userMessage = '')
   if (!/\bpine\b/.test(normalizedMessage) && !/\bscript\b/.test(normalizedMessage)) return false;
   if (!/\b(create|build|generate|write|draft|make|replace|overwrite|rewrite)\b/.test(normalizedMessage)) return false;
 
-  const actions = Array.isArray(actionBlock?.actions) ? actionBlock.actions.filter(Boolean) : [];
+  const collectNestedActions = (items = [], seen = new Set()) => {
+    const collected = [];
+    for (const action of Array.isArray(items) ? items : []) {
+      if (!action || typeof action !== 'object' || seen.has(action)) continue;
+      seen.add(action);
+      collected.push(action);
+      if (Array.isArray(action.continueActions)) {
+        collected.push(...collectNestedActions(action.continueActions, seen));
+      }
+      const lifecycleBranches = action.continueActionsByPineLifecycleState;
+      if (lifecycleBranches && typeof lifecycleBranches === 'object') {
+        for (const branchActions of Object.values(lifecycleBranches)) {
+          if (Array.isArray(branchActions)) {
+            collected.push(...collectNestedActions(branchActions, seen));
+          }
+        }
+      }
+    }
+    return collected;
+  };
+
+  const actions = collectNestedActions(Array.isArray(actionBlock?.actions) ? actionBlock.actions.filter(Boolean) : []);
   if (actions.length === 0) return false;
+
+  const requestedAddToChart = /\bctrl\s*\+\s*enter\b/.test(normalizedMessage)
+    || /\b(add|apply|load|put)\b.{0,20}\bchart\b/.test(normalizedMessage);
+  const requestedVisibleResult = /\b(report|read|summari[sz]e|tell me|show me|capture)\b.{0,40}\b(?:compile|apply|result|status|error|warning)\b/.test(normalizedMessage)
+    || /\bvisible\s+(?:compile|apply|compiler|result|status|error|warning)\b/.test(normalizedMessage);
 
   const hasScriptPayload = actions.some((action) => {
     const type = String(action?.type || '').trim().toLowerCase();
     if (type === 'type') {
       const text = String(action?.text || '').trim();
-      return /\/\/\s*@version\s*=\s*\d+|\b(?:indicator|strategy|library)\s*\(|\bplot(?:shape|char)?\s*\(|\binput(?:\.[a-z]+)?\s*\(|\balertcondition\s*\(/i.test(text);
+      return containsPineScriptPayloadText(text);
     }
-    if (type === 'run_command' && String(action?.command || '').trim().length > 0) return true;
-    if (type === 'key') {
-      const key = String(action?.key || '').trim().toLowerCase();
-      return key === 'ctrl+v' || key === 'ctrl+enter';
+    if (type === 'run_command') {
+      if (
+        String(action?.pineCanonicalState?.sourcePath || '').trim()
+        && action?.pineCanonicalState?.validation?.valid !== false
+      ) {
+        return true;
+      }
+      return /\bset-clipboard\b/i.test(String(action?.command || ''))
+        && containsPineScriptPayloadText(String(action?.command || ''));
     }
     return false;
   });
 
-  return !hasScriptPayload;
+  const hasInsertionStep = actions.some((action) => {
+    const type = String(action?.type || '').trim().toLowerCase();
+    if (type === 'type') {
+      return containsPineScriptPayloadText(String(action?.text || ''));
+    }
+    if (type === 'key') {
+      return String(action?.key || '').trim().toLowerCase() === 'ctrl+v';
+    }
+    return false;
+  });
+
+  const hasApplyStep = actions.some((action) => {
+    const type = String(action?.type || '').trim().toLowerCase();
+    const key = String(action?.key || '').trim().toLowerCase();
+    const combined = [action?.reason, action?.text]
+      .map((value) => String(value || '').trim())
+      .filter(Boolean)
+      .join(' ');
+    return (type === 'key' && key === 'ctrl+enter')
+      || /\b(add|apply|load|put)\b.{0,20}\bchart\b/i.test(combined);
+  });
+
+  const hasVisibleResultReadback = actions.some((action) => {
+    if (String(action?.type || '').trim().toLowerCase() !== 'get_text') return false;
+    const text = String(action?.text || '').trim();
+    const reason = String(action?.reason || '').trim();
+    const evidenceMode = String(action?.pineEvidenceMode || '').trim().toLowerCase();
+    return evidenceMode === 'compile-result'
+      || /\b(?:added|error|warning|pine editor|compile|compiler|result|status)\b/i.test(`${text} ${reason}`);
+  });
+
+  if (!hasScriptPayload || !hasInsertionStep) {
+    return true;
+  }
+  if (requestedAddToChart && !hasApplyStep) {
+    return true;
+  }
+  if (requestedVisibleResult && !hasVisibleResultReadback) {
+    return true;
+  }
+
+  return false;
+}
+
+function isTradingViewPineAuthoringRequest(userMessage = '') {
+  const normalizedMessage = String(userMessage || '').toLowerCase();
+  return /\btradingview\b/.test(normalizedMessage)
+    && (/\bpine\b/.test(normalizedMessage) || /\bscript\b/.test(normalizedMessage))
+    && /\b(create|build|generate|write|draft|make|replace|overwrite|rewrite)\b/.test(normalizedMessage);
+}
+
+function requestRequiresFreshTradingViewPineIndicator(userMessage = '') {
+  const normalizedMessage = String(userMessage || '').toLowerCase();
+  return /\bnew\s+(?:interactive\s+)?(?:chart\s+)?indicator\b/.test(normalizedMessage)
+    || /\binteractive\s+chart\s+indicator\b/.test(normalizedMessage)
+    || /\bnew\s+indicator\s+flow\b/.test(normalizedMessage)
+    || /\bdoes\s+not\s+reuse\s+the\s+current\s+script\b/.test(normalizedMessage)
+    || /\bnew\s+pine\s+(?:indicator|script)\b/.test(normalizedMessage);
+}
+
+function buildTradingViewPineAuthoringSystemContract(userMessage = '') {
+  if (!isTradingViewPineAuthoringRequest(userMessage)) return '';
+
+  const normalized = String(userMessage || '').toLowerCase();
+  const requestedAddToChart = /\bctrl\s*\+\s*enter\b/.test(normalized)
+    || /\b(add|apply|load|put)\b.{0,20}\bchart\b/.test(normalized);
+  const requestedVisibleResult = /\b(report|read|summari[sz]e|tell me|show me|capture)\b.{0,40}\b(?:compile|apply|result|status|error|warning)\b/.test(normalized)
+    || /\bvisible\s+(?:compile|apply|compiler|result|status|error|warning)\b/.test(normalized);
+  const requiresFreshIndicator = requestRequiresFreshTradingViewPineIndicator(userMessage);
+
+  const lines = [
+    'TRADINGVIEW PINE AUTHORING CONTRACT:',
+    '- Return a complete executable TradingView Pine workflow, not just window activation.',
+    '- Open Pine Editor through the verified TradingView quick-search route.',
+    '- Inspect visible Pine Editor state before editing.',
+    requiresFreshIndicator
+      ? '- This request requires a fresh TradingView indicator script. Use the new-indicator flow and do not reuse or inspect-copy the existing script buffer as the authoring payload.'
+      : '- Do not overwrite an existing visible script implicitly; prefer a safe new-script or bounded starter-script path unless the user explicitly asked to replace the current script.',
+    '- Insert the actual Pine code with Set-Clipboard plus Ctrl+V or with direct multiline typing.',
+    '- If you use Set-Clipboard, the clipboard payload must contain the Pine code itself.',
+    '- The first Pine header line must be exactly `//@version=...` with no leading UI text such as `Pine editor`.',
+    '- Do not use clipboard-inspection-only commands, websearch placeholders, or focus-only plans as substitutes for authoring.'
+  ];
+
+  if (requestedAddToChart) {
+    lines.push('- Use Ctrl+Enter only after the script has been inserted and saved.');
+  }
+  if (requestedVisibleResult || requestedAddToChart) {
+    lines.push('- Read visible compile/apply result text before claiming success.');
+  }
+
+  return lines.join('\n');
+}
+
+function extractPineScriptFromModelResponse(response = '') {
+  const raw = String(response || '').trim();
+  if (!raw) return '';
+
+  const fencedMatch = raw.match(/```(?:pine|pinescript)?\s*([\s\S]*?)```/i);
+  const candidate = fencedMatch?.[1] || raw;
+  return sanitizePineScriptText(String(candidate || '').trim());
+}
+
+function normalizeGeneratedPineScript(pineScript = '') {
+  let normalized = sanitizePineScriptText(String(pineScript || '').trim());
+  if (!normalized) return '';
+
+  if (/\/\/\s*@version\s*=\s*\d+\b/i.test(normalized)) {
+    normalized = normalized.replace(/\/\/\s*@version\s*=\s*\d+\b/i, '//@version=6');
+  } else if (containsPineScriptPayloadText(normalized)) {
+    normalized = `//@version=6\n${normalized}`;
+  }
+
+  return normalized.trim();
+}
+
+function buildPineClipboardPreparationCommand(pineScript = '') {
+  const normalized = normalizeGeneratedPineScript(pineScript);
+  if (!normalized) return '';
+  return `Set-Clipboard -Value @'\n${normalized}\n'@`;
+}
+
+function buildTradingViewPineCodeGenerationPrompt(userMessage = '') {
+  if (!isTradingViewPineAuthoringRequest(userMessage)) return '';
+
+  const requiresFreshIndicator = requestRequiresFreshTradingViewPineIndicator(userMessage);
+  return [
+    'Return only Pine Script source code for this TradingView request.',
+    'No markdown. No prose. No JSON. No tool calls.',
+    'The first line must be exactly `//@version=6`.',
+    requiresFreshIndicator
+      ? 'Generate a fresh indicator script for a new interactive chart indicator.'
+      : 'Generate an indicator unless the user explicitly requested a strategy.',
+    'Do not prepend UI text such as `Pine editor` before the version header.',
+    `Request: ${String(userMessage || '').trim()}`
+  ].join('\n');
+}
+
+function buildTradingViewPineCodeGenerationRetryPrompt(userMessage = '') {
+  if (!isTradingViewPineAuthoringRequest(userMessage)) return '';
+
+  return `Return only Pine Script code. First line exactly //@version=6. No markdown, no prose, no JSON, no tool calls. Fresh indicator script. Request: ${String(userMessage || '').trim()}`;
+}
+
+function buildTradingViewPineCodeValidationRetryPrompt(userMessage = '', validation = null) {
+  if (!isTradingViewPineAuthoringRequest(userMessage)) return '';
+
+  const issueLines = Array.isArray(validation?.issues)
+    ? validation.issues
+      .map((issue) => String(issue?.message || '').trim())
+      .filter(Boolean)
+      .slice(0, 5)
+    : [];
+
+  return [
+    'Return only Pine Script code.',
+    'First line exactly //@version=6.',
+    'No markdown, no prose, no JSON, no tool calls.',
+    'The previous Pine draft failed local validation and must be regenerated cleanly.',
+    '- Do not include Pine Editor UI text anywhere inside the code body.',
+    '- Do not emit corrupted identifiers or partial editor labels inside conditions or expressions.',
+    ...(issueLines.length > 0 ? issueLines.map((line) => `- Fix this issue: ${line}`) : []),
+    `Request: ${String(userMessage || '').trim()}`
+  ].join('\n');
 }
 
 function buildIncompleteTradingViewPinePlanBlockMessage() {
@@ -1297,6 +1507,8 @@ function buildIncompleteTradingViewPineRecoveryPrompt(userMessage = '') {
     '- Inspect the visible Pine Editor state before editing.',
     '- Do not overwrite an existing visible script implicitly; prefer a safe new-script or bounded starter-script path unless the user explicitly asked to replace the current script.',
     '- Insert the Pine script content using substantive authoring actions such as Set-Clipboard plus Ctrl+V or direct Pine code typing.',
+    '- If you use Set-Clipboard, the clipboard payload must contain the actual Pine code, and the first Pine header line must be exactly `//@version=...` with no `Pine editor` or other leading contamination.',
+    '- Do not treat clipboard inspection, websearch placeholders, or focus-only steps as completion of the authoring task.',
     requestedAddToChart
       ? '- Use Ctrl+Enter only after the script is inserted, then read visible compile/apply result text.'
       : '- After insertion, verify visible Pine compile/apply result text before claiming success.',
@@ -1386,6 +1598,10 @@ async function sendMessage(userMessage, options = {}) {
     ...(Array.isArray(extraSystemMessages) ? extraSystemMessages : []),
     ...parsedTags.extraSystemMessages
   ];
+  const tradingViewPineContract = buildTradingViewPineAuthoringSystemContract(enhancedMessage);
+  if (tradingViewPineContract) {
+    baseExtraSystemMessages.push(tradingViewPineContract);
+  }
 
   // Fetch relevant skills (Phase 4 — Semantic Skill Router)
   let skillsContextText = '';
@@ -1564,6 +1780,7 @@ async function sendMessage(userMessage, options = {}) {
         (incompleteTradingViewPinePlan
           ? 'Your previous plan was incomplete for a TradingView Pine authoring request. Include the substantive authoring steps, not just focus/window activation.\n\n'
           : '\n') +
+        (tradingViewPineContract ? `${tradingViewPineContract}\n\n` : '') +
         `User request:\n${enhancedMessage}`;
       try {
         const forcedMessages = await buildMessages(enforcementPrompt, includeVisualContext, {
@@ -1587,6 +1804,120 @@ async function sendMessage(userMessage, options = {}) {
       && isIncompleteTradingViewPineAuthoringPlan(parseActions(response), enhancedMessage)
     ) {
       let recoveredPinePlan = maybeBuildRecoveredTradingViewPineActionResponse(parseActions(response), enhancedMessage);
+      if (!recoveredPinePlan?.message && isTradingViewPineAuthoringRequest(enhancedMessage)) {
+        const pineCodePrompt = buildTradingViewPineCodeGenerationPrompt(enhancedMessage);
+        if (pineCodePrompt) {
+          try {
+            pineRecoveryDebugLog('[AI][PINE-RECOVERY] Starting code-only recovery for TradingView Pine request');
+            pineRecoveryDebugLog('[AI][PINE-RECOVERY] Code prompt:', pineCodePrompt);
+            const requestPineCode = async (promptText) => {
+              if (!promptText) return '';
+              pineRecoveryDebugLog('[AI][PINE-RECOVERY] Requesting Pine code with prompt:', promptText);
+              const codeRaw = await providerOrchestrator.callProvider('copilot', [
+                {
+                  role: 'system',
+                  content: 'TRADINGVIEW PINE CODE-ONLY MODE: Return only Pine Script source text. Do not emit tool calls, JSON, or prose.'
+                },
+                {
+                  role: 'user',
+                  content: promptText
+                }
+              ], effectiveModel);
+              const codeContent = (codeRaw && typeof codeRaw === 'object' && typeof codeRaw.content === 'string')
+                ? codeRaw.content
+                : codeRaw;
+              pineRecoveryDebugLog('[AI][PINE-RECOVERY] Raw Pine code response:', String(codeContent || ''));
+              const extracted = extractPineScriptFromModelResponse(codeContent);
+              const normalized = normalizeGeneratedPineScript(extracted);
+              pineRecoveryDebugLog('[AI][PINE-RECOVERY] Extracted Pine snippet:', extracted);
+              pineRecoveryDebugLog('[AI][PINE-RECOVERY] Normalized Pine snippet:', normalized);
+              pineRecoveryDebugLog('[AI][PINE-RECOVERY] Contains Pine payload:', containsPineScriptPayloadText(normalized));
+              return normalized;
+            };
+
+            let pineScript = '';
+            let pineState = null;
+
+            const recoveryPrompts = [
+              pineCodePrompt,
+              buildTradingViewPineCodeGenerationRetryPrompt(enhancedMessage)
+            ].filter(Boolean);
+
+            for (let attempt = 0; attempt < 3; attempt++) {
+              const promptText = recoveryPrompts[attempt]
+                || buildTradingViewPineCodeValidationRetryPrompt(enhancedMessage, pineState?.validation);
+              if (!promptText) break;
+
+              pineScript = await requestPineCode(promptText);
+              pineState = buildPineScriptState({
+                source: pineScript,
+                intent: enhancedMessage,
+                origin: 'generated-recovery',
+                targetApp: 'tradingview'
+              });
+
+              pineRecoveryDebugLog('[AI][PINE-RECOVERY] Local Pine validation:', JSON.stringify(pineState.validation || null));
+
+              if (!containsPineScriptPayloadText(pineScript)) {
+                pineRecoveryDebugLog('[AI][PINE-RECOVERY] Generated draft did not contain substantive Pine payload.');
+                continue;
+              }
+
+              if (pineState?.validation?.valid) {
+                break;
+              }
+
+              pineRecoveryDebugLog('[AI][PINE-RECOVERY] Generated Pine failed local validation. Retrying with validation-aware prompt.');
+            }
+
+            const persistedPineState = pineState?.validation?.valid
+              ? persistPineScriptState(pineState, { cwd: process.cwd() })
+              : null;
+            const clipboardCommand = pineState?.validation?.valid
+              ? buildPineClipboardPreparationCommand(pineState.normalizedSource)
+              : '';
+            pineRecoveryDebugLog('[AI][PINE-RECOVERY] Clipboard command synthesized:', clipboardCommand);
+            if (clipboardCommand && containsPineScriptPayloadText(pineScript) && pineState?.validation?.valid) {
+              recoveredPinePlan = maybeBuildRecoveredTradingViewPineActionResponse({
+                thought: 'Create and apply the requested TradingView Pine script',
+                actions: [
+                  {
+                    type: 'run_command',
+                    shell: 'powershell',
+                    command: clipboardCommand,
+                    reason: 'Copy the prepared Pine script to the clipboard',
+                    pineCanonicalState: {
+                      id: pineState.id,
+                      scriptTitle: pineState.scriptTitle,
+                      sourceHash: pineState.sourceHash,
+                      origin: pineState.origin,
+                      validation: pineState.validation,
+                      sourcePath: persistedPineState?.sourcePath || null,
+                      metadataPath: persistedPineState?.metadataPath || null
+                    }
+                  }
+                ],
+                verification: 'TradingView should show the Pine Editor workflow, fresh indicator path, and visible compile/apply result.'
+              }, enhancedMessage);
+              pineRecoveryDebugLog('[AI][PINE-RECOVERY] Local Pine workflow recovery status:', !!recoveredPinePlan?.message);
+              if (recoveredPinePlan?.message) {
+                routingNoteOverride = 'locally synthesized TradingView Pine workflow from generated Pine code';
+                routingOverride = { mode: 'recovered-tradingview-pine-plan' };
+              }
+            } else {
+              const validationSummary = pineState?.validation?.valid === false
+                ? ` Validation issues: ${(pineState.validation.issues || []).map((issue) => issue.message).filter(Boolean).join(' | ')}`
+                : '';
+              pineRecoveryDebugLog('[AI][PINE-RECOVERY] Pine recovery could not synthesize a clipboard workflow from generated code.');
+              if (validationSummary) {
+                pineRecoveryDebugLog(`[AI][PINE-RECOVERY]${validationSummary}`);
+              }
+            }
+          } catch (e) {
+            console.warn('[AI] Pine code generation recovery failed:', e.message);
+          }
+        }
+      }
       if (!recoveredPinePlan?.message) {
         const pineRecoveryPrompt = buildIncompleteTradingViewPineRecoveryPrompt(enhancedMessage);
         if (pineRecoveryPrompt) {
@@ -4563,7 +4894,7 @@ function scopeActionToTargetWindow(action, lastTargetWindowHandle, lastTargetWin
   }
 
   if (type === 'get_text') {
-    if (!targetWindowTitle) return action;
+    if (!targetWindowTitle || omitDynamicTradingViewTitle) return action;
     const existingCriteria = action.criteria && typeof action.criteria === 'object'
       ? action.criteria
       : null;
@@ -6073,6 +6404,9 @@ module.exports = {
   getBrowserRecoverySnapshot,
   maybeBuildSatisfiedBrowserNoOpResponse,
   isIncompleteTradingViewPineAuthoringPlan,
+  buildTradingViewPineAuthoringSystemContract,
+  buildTradingViewPineCodeGenerationPrompt,
+  normalizeGeneratedPineScript,
   maybeBuildRecoveredTradingViewPineActionResponse,
   // Teach UX
   parsePreferenceCorrection,

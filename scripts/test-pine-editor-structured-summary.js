@@ -16,15 +16,36 @@ function test(name, fn) {
   }
 }
 
+let asyncTestChain = Promise.resolve();
+let asyncDrainScheduled = false;
+
+function scheduleAsyncDrain() {
+  if (asyncDrainScheduled) return;
+  asyncDrainScheduled = true;
+  setImmediate(async () => {
+    try {
+      await asyncTestChain;
+    } catch {
+      // Individual tests already record failures via process.exitCode.
+    }
+    if (process.exitCode) {
+      process.exit(process.exitCode);
+    }
+  });
+}
+
 async function testAsync(name, fn) {
-  try {
-    await fn();
-    console.log(`PASS ${name}`);
-  } catch (error) {
-    console.error(`FAIL ${name}`);
-    console.error(error.stack || error.message);
-    process.exitCode = 1;
-  }
+  asyncTestChain = asyncTestChain.then(async () => {
+    try {
+      await fn();
+      console.log(`PASS ${name}`);
+    } catch (error) {
+      console.error(`FAIL ${name}`);
+      console.error(error.stack || error.message);
+      process.exitCode = 1;
+    }
+  });
+  scheduleAsyncDrain();
 }
 
 test('Pine compile-result summary stays bounded to visible compiler status', () => {
@@ -129,6 +150,290 @@ testAsync('GET_TEXT attaches Pine structured summary for compile-result mode', a
     assert(result.message.includes('status=success'));
   } finally {
     uiAutomation.getElementText = originalGetElementText;
+  }
+});
+
+testAsync('GET_TEXT falls back to Pine editor anchors when exact Pine Editor element is not discoverable', async () => {
+  const uiAutomation = require(path.join(__dirname, '..', 'src', 'main', 'ui-automation'));
+  const uiContext = require(path.join(__dirname, '..', 'src', 'main', 'ai-service', 'ui-context.js'));
+  const originalGetElementText = uiAutomation.getElementText;
+  const originalFindElement = uiAutomation.findElement;
+  const host = uiAutomation.getSharedUIAHost();
+  const originalHostGetText = host.getText.bind(host);
+  const previousWatcher = uiContext.getUIWatcher();
+
+  uiAutomation.getElementText = async () => ({
+    success: false,
+    error: 'Element not found'
+  });
+  uiAutomation.findElement = async (criteria) => {
+    if (/publish script/i.test(String(criteria?.text || ''))) {
+      return {
+        success: true,
+        element: {
+          name: 'Publish script',
+          bounds: { x: 100, y: 100, width: 120, height: 24, centerX: 160, centerY: 112 }
+        }
+      };
+    }
+    return { success: false, error: 'Element not found' };
+  };
+  host.getText = async () => ({
+    text: 'Untitled script\nplot(close)\nPublish script',
+    method: 'TextPattern',
+    element: { name: 'Publish script' }
+  });
+  uiContext.setUIWatcher(null);
+
+  try {
+    const result = await systemAutomation.executeAction({
+      type: 'get_text',
+      text: 'Pine Editor',
+      pineEvidenceMode: 'safe-authoring-inspect',
+      criteria: { text: 'Pine Editor', windowTitle: 'TradingView' }
+    });
+
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.pineStructuredSummary.evidenceMode, 'safe-authoring-inspect');
+    assert.strictEqual(result.pineStructuredSummary.editorVisibleState, 'empty-or-starter');
+    assert(
+      /pine-editor-fallback:Publish script|WatcherCache \(pine-editor-fallback\)/i.test(String(result.method || '')),
+      'fallback method should record either the Pine anchor or the watcher-backed Pine fallback'
+    );
+  } finally {
+    uiAutomation.getElementText = originalGetElementText;
+    uiAutomation.findElement = originalFindElement;
+    host.getText = originalHostGetText;
+    uiContext.setUIWatcher(previousWatcher);
+  }
+});
+
+testAsync('GET_TEXT degrades to bounded Pine element anchors when UIA text extraction still fails on a fresh script surface', async () => {
+  const uiAutomation = require(path.join(__dirname, '..', 'src', 'main', 'ui-automation'));
+  const uiContext = require(path.join(__dirname, '..', 'src', 'main', 'ai-service', 'ui-context.js'));
+  const originalGetElementText = uiAutomation.getElementText;
+  const originalFindElement = uiAutomation.findElement;
+  const host = uiAutomation.getSharedUIAHost();
+  const originalHostGetText = host.getText.bind(host);
+  const previousWatcher = uiContext.getUIWatcher();
+
+  uiAutomation.getElementText = async () => ({
+    success: false,
+    error: 'Element not found'
+  });
+  uiAutomation.findElement = async (criteria) => {
+    if (/untitled script/i.test(String(criteria?.text || ''))) {
+      return {
+        success: true,
+        element: {
+          name: 'Untitled script',
+          bounds: { x: 100, y: 100, width: 120, height: 24, centerX: 160, centerY: 112 }
+        }
+      };
+    }
+    if (/publish script/i.test(String(criteria?.text || ''))) {
+      return {
+        success: true,
+        element: {
+          name: 'Publish script',
+          bounds: { x: 100, y: 140, width: 120, height: 24, centerX: 160, centerY: 152 }
+        }
+      };
+    }
+    return { success: false, error: 'Element not found' };
+  };
+  host.getText = async () => {
+    throw new Error('TextPattern failed');
+  };
+  uiContext.setUIWatcher(null);
+
+  try {
+    const result = await systemAutomation.executeAction({
+      type: 'get_text',
+      text: 'Pine Editor',
+      pineEvidenceMode: 'safe-authoring-inspect',
+      criteria: { text: 'Pine Editor', windowTitle: 'TradingView' }
+    });
+
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.pineStructuredSummary.evidenceMode, 'safe-authoring-inspect');
+    assert.strictEqual(result.pineStructuredSummary.editorVisibleState, 'empty-or-starter');
+    assert(/ElementAnchor \(pine-editor-fallback\)/i.test(String(result.method || '')), 'bounded Pine anchor fallback should record its degraded evidence method');
+    assert(/Untitled script/i.test(String(result.text || '')), 'bounded Pine anchor fallback should preserve the starter-surface anchor text');
+  } finally {
+    uiAutomation.getElementText = originalGetElementText;
+    uiAutomation.findElement = originalFindElement;
+    host.getText = originalHostGetText;
+    uiContext.setUIWatcher(previousWatcher);
+  }
+});
+
+testAsync('GET_TEXT degrades to bounded save-state anchors when TradingView first-save text extraction fails', async () => {
+  const uiAutomation = require(path.join(__dirname, '..', 'src', 'main', 'ui-automation'));
+  const uiContext = require(path.join(__dirname, '..', 'src', 'main', 'ai-service', 'ui-context.js'));
+  const originalGetElementText = uiAutomation.getElementText;
+  const originalFindElement = uiAutomation.findElement;
+  const host = uiAutomation.getSharedUIAHost();
+  const originalHostGetText = host.getText.bind(host);
+  const previousWatcher = uiContext.getUIWatcher();
+
+  uiAutomation.getElementText = async () => ({
+    success: false,
+    error: 'Element not found'
+  });
+  uiAutomation.findElement = async (criteria) => {
+    if (/save script/i.test(String(criteria?.text || ''))) {
+      return {
+        success: true,
+        element: {
+          name: 'Save script',
+          bounds: { x: 100, y: 100, width: 120, height: 24, centerX: 160, centerY: 112 }
+        }
+      };
+    }
+    if (/script name/i.test(String(criteria?.text || ''))) {
+      return {
+        success: true,
+        element: {
+          name: 'Script name',
+          bounds: { x: 100, y: 140, width: 120, height: 24, centerX: 160, centerY: 152 }
+        }
+      };
+    }
+    return { success: false, error: 'Element not found' };
+  };
+  host.getText = async () => {
+    throw new Error('TextPattern failed');
+  };
+  uiContext.setUIWatcher(null);
+
+  try {
+    const result = await systemAutomation.executeAction({
+      type: 'get_text',
+      text: 'Pine Editor',
+      pineEvidenceMode: 'save-status',
+      criteria: { text: 'Pine Editor', windowTitle: 'TradingView' }
+    });
+
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.pineStructuredSummary.evidenceMode, 'save-status');
+    assert.strictEqual(result.pineStructuredSummary.lifecycleState, 'save-required-before-apply');
+    assert(/ElementAnchor \(pine-editor-fallback\)/i.test(String(result.method || '')), 'bounded save-state anchor fallback should record its degraded evidence method');
+    assert(/Save script/i.test(String(result.text || '')), 'bounded save-state anchor fallback should preserve visible save prompts');
+  } finally {
+    uiAutomation.getElementText = originalGetElementText;
+    uiAutomation.findElement = originalFindElement;
+    host.getText = originalHostGetText;
+    uiContext.setUIWatcher(previousWatcher);
+  }
+});
+
+testAsync('GET_TEXT falls back to watcher-backed Pine surface text when UIA text extraction still fails', async () => {
+  const uiAutomation = require(path.join(__dirname, '..', 'src', 'main', 'ui-automation'));
+  const originalGetElementText = uiAutomation.getElementText;
+  const originalFindElement = uiAutomation.findElement;
+  const host = uiAutomation.getSharedUIAHost();
+  const originalHostGetText = host.getText.bind(host);
+  const previousWatcher = require(path.join(__dirname, '..', 'src', 'main', 'ai-service', 'ui-context.js')).getUIWatcher();
+  const uiContext = require(path.join(__dirname, '..', 'src', 'main', 'ai-service', 'ui-context.js'));
+
+  uiAutomation.getElementText = async () => ({
+    success: false,
+    error: 'Element not found'
+  });
+  uiAutomation.findElement = async () => ({
+    success: false,
+    error: 'Element not found'
+  });
+  host.getText = async () => {
+    throw new Error('TextPattern failed');
+  };
+  uiContext.setUIWatcher({
+    cache: {
+      activeWindow: {
+        hwnd: 777,
+        title: 'TradingView',
+        processName: 'tradingview',
+        windowKind: 'main'
+      },
+      elements: [
+        { name: 'Untitled script', windowHandle: 777, automationId: '', className: 'Tab' },
+        { name: 'Publish script', windowHandle: 777, automationId: '', className: 'Button' },
+        { name: 'Add to chart', windowHandle: 777, automationId: '', className: 'Button' }
+      ]
+    }
+  });
+
+  try {
+    const result = await systemAutomation.executeAction({
+      type: 'get_text',
+      text: 'Pine Editor',
+      pineEvidenceMode: 'safe-authoring-inspect',
+      criteria: { text: 'Pine Editor', windowTitle: 'TradingView' }
+    });
+
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.pineStructuredSummary.evidenceMode, 'safe-authoring-inspect');
+    assert.strictEqual(result.pineStructuredSummary.editorVisibleState, 'empty-or-starter');
+    assert(/WatcherCache \(pine-editor-fallback\)/i.test(String(result.method || '')), 'watcher fallback should record its method');
+    assert(/Untitled script/i.test(String(result.text || '')), 'watcher fallback should preserve bounded Pine surface text');
+  } finally {
+    uiAutomation.getElementText = originalGetElementText;
+    uiAutomation.findElement = originalFindElement;
+    host.getText = originalHostGetText;
+    uiContext.setUIWatcher(previousWatcher);
+  }
+});
+
+testAsync('GET_TEXT rejects watcher chart-title noise as Pine editor evidence when no Pine anchors are visible', async () => {
+  const uiAutomation = require(path.join(__dirname, '..', 'src', 'main', 'ui-automation'));
+  const originalGetElementText = uiAutomation.getElementText;
+  const originalFindElement = uiAutomation.findElement;
+  const host = uiAutomation.getSharedUIAHost();
+  const originalHostGetText = host.getText.bind(host);
+  const uiContext = require(path.join(__dirname, '..', 'src', 'main', 'ai-service', 'ui-context.js'));
+  const previousWatcher = uiContext.getUIWatcher();
+
+  uiAutomation.getElementText = async () => ({
+    success: false,
+    error: 'Element not found'
+  });
+  uiAutomation.findElement = async () => ({
+    success: false,
+    error: 'Element not found'
+  });
+  host.getText = async () => {
+    throw new Error('TextPattern failed');
+  };
+  uiContext.setUIWatcher({
+    cache: {
+      activeWindow: {
+        hwnd: 777,
+        title: 'TradingView',
+        processName: 'tradingview',
+        windowKind: 'main'
+      },
+      elements: [
+        { name: 'LUNR ▲ 18.56 +13.52% / Unnamed', windowHandle: 777, automationId: '', className: 'Text' }
+      ]
+    }
+  });
+
+  try {
+    const result = await systemAutomation.executeAction({
+      type: 'get_text',
+      text: 'Pine Editor',
+      pineEvidenceMode: 'safe-authoring-inspect',
+      criteria: { text: 'Pine Editor', windowTitle: 'TradingView' }
+    });
+
+    assert.strictEqual(result.success, false);
+    assert(/element not found/i.test(String(result.error || '')), 'chart-title noise should not be accepted as Pine editor evidence');
+  } finally {
+    uiAutomation.getElementText = originalGetElementText;
+    uiAutomation.findElement = originalFindElement;
+    host.getText = originalHostGetText;
+    uiContext.setUIWatcher(previousWatcher);
   }
 });
 

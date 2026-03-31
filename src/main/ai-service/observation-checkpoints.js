@@ -29,6 +29,13 @@ function createObservationCheckpointRuntime(deps = {}) {
       .filter(Boolean)));
   }
 
+  const PINE_EDITOR_WATCHER_SURFACE_ANCHORS = Object.freeze([
+    'add to chart',
+    'publish script',
+    'update on chart',
+    'script saved'
+  ]);
+
   function summarizeForegroundSignature(foreground) {
     if (!foreground || !foreground.success) return null;
     return {
@@ -242,6 +249,53 @@ function createObservationCheckpointRuntime(deps = {}) {
     };
   }
 
+  function getWatcherTextEvidenceMatch(watcher, spec, foreground) {
+    if (!watcher || !watcher.cache || !Array.isArray(watcher.cache.elements)) {
+      return { matched: false, anchor: null, element: null };
+    }
+
+    const expectedKeywords = Array.isArray(spec?.expectedKeywords)
+      ? spec.expectedKeywords.map((value) => normalizeTextForMatch(value)).filter(Boolean)
+      : [];
+    const pineEditorLike = spec?.classification === 'editor-active'
+      && expectedKeywords.some((value) => value.includes('pine'));
+
+    const anchors = pineEditorLike
+      ? PINE_EDITOR_WATCHER_SURFACE_ANCHORS
+      : [];
+    if (!anchors.length) {
+      return { matched: false, anchor: null, element: null };
+    }
+
+    const activeHwnd = Number(foreground?.hwnd || watcher.cache.activeWindow?.hwnd || 0) || 0;
+    const scopedElements = activeHwnd > 0
+      ? watcher.cache.elements.filter((element) => Number(element?.windowHandle || 0) === activeHwnd)
+      : watcher.cache.elements.slice();
+
+    for (const element of scopedElements) {
+      const haystack = normalizeTextForMatch([
+        element?.name,
+        element?.automationId,
+        element?.className,
+        element?.type
+      ].filter(Boolean).join(' '));
+      if (!haystack) continue;
+
+      for (const anchor of anchors) {
+        const normalizedAnchor = normalizeTextForMatch(anchor);
+        if (normalizedAnchor && haystack.includes(normalizedAnchor)) {
+          return {
+            matched: true,
+            anchor,
+            element
+          };
+        }
+      }
+    }
+
+    return { matched: false, anchor: null, element: null };
+  }
+
   async function verifyKeyObservationCheckpoint(spec, beforeForeground, options = {}) {
     if (!spec?.applicable) {
       return { applicable: false, verified: true, classification: null };
@@ -257,6 +311,9 @@ function createObservationCheckpointRuntime(deps = {}) {
     let keywordMatched = false;
     let windowKindMatched = false;
     let titleHintMatched = false;
+    let watcherSurfaceMatched = false;
+    let watcherSurfaceAnchor = null;
+    let watcherSurfaceElement = null;
     let tradingMode = spec.tradingModeHint || { mode: 'unknown', confidence: 'low', evidence: [] };
 
     for (let attempt = 1; attempt <= keyCheckpointMaxPolls; attempt++) {
@@ -286,6 +343,10 @@ function createObservationCheckpointRuntime(deps = {}) {
         const norm = normalizeTextForMatch(hint);
         return norm && titleNorm.includes(norm);
       });
+      const watcherEvidence = getWatcherTextEvidenceMatch(watcher, spec, foreground);
+      watcherSurfaceMatched = !!watcherEvidence.matched;
+      watcherSurfaceAnchor = watcherEvidence.anchor || null;
+      watcherSurfaceElement = watcherEvidence.element || null;
       tradingMode = inferTradingViewTradingMode({
         title: foreground?.title,
         textSignals: [
@@ -301,9 +362,14 @@ function createObservationCheckpointRuntime(deps = {}) {
       });
 
       const freshObservation = !!watcherFreshness?.fresh;
-      const surfaceChangeObserved = observedChange || keywordMatched || titleHintMatched;
+      const surfaceChangeObserved = observedChange || keywordMatched || titleHintMatched || watcherSurfaceMatched;
       const editorActiveMatched = spec.classification === 'editor-active'
-        ? !!(foreground?.success && evalResult.matched && windowKindMatched && surfaceChangeObserved && (keywordMatched || titleHintMatched || freshObservation))
+        ? !!(
+          foreground?.success
+          && evalResult.matched
+          && windowKindMatched
+          && (watcherSurfaceMatched || (surfaceChangeObserved && (keywordMatched || titleHintMatched || freshObservation)))
+        )
         : false;
       const verified = spec.requiresObservedChange
         ? (spec.classification === 'editor-active'
@@ -323,6 +389,9 @@ function createObservationCheckpointRuntime(deps = {}) {
           titleHintMatched,
           windowKindMatched,
           editorActiveMatched,
+          watcherSurfaceMatched,
+          watcherSurfaceAnchor,
+          watcherSurfaceElement,
           tradingMode,
           beforeForeground: beforeForeground || null,
           foreground,
@@ -346,6 +415,9 @@ function createObservationCheckpointRuntime(deps = {}) {
       titleHintMatched,
       windowKindMatched,
       editorActiveMatched: false,
+      watcherSurfaceMatched,
+      watcherSurfaceAnchor,
+      watcherSurfaceElement,
       tradingMode,
       beforeForeground: beforeForeground || null,
       foreground,
