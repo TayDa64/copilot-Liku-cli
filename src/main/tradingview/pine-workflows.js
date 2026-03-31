@@ -155,6 +155,39 @@ function isPineSaveStep(action) {
     || /\bsave\b.{0,20}\bscript\b/i.test(combined);
 }
 
+function extractPineDeclarationTitle(text = '') {
+  const match = String(text || '').match(/\b(?:indicator|strategy|library)\s*\(\s*["'`](.*?)["'`]/i);
+  return String(match?.[1] || '').trim();
+}
+
+function sanitizePineScriptName(value = '') {
+  return String(value || '')
+    .replace(/\s+/g, ' ')
+    .replace(/[<>:"/\\|?*\u0000-\u001f]+/g, ' ')
+    .trim()
+    .slice(0, 120);
+}
+
+function inferSafePineScriptName(actions = [], raw = '') {
+  const source = Array.isArray(actions) ? actions : [];
+  for (const action of source) {
+    const type = getNormalizedActionType(action);
+    if (type === 'type') {
+      const title = sanitizePineScriptName(extractPineDeclarationTitle(action.text));
+      if (title) return title;
+    }
+    if (type === 'run_command') {
+      const title = sanitizePineScriptName(extractPineDeclarationTitle(action.command));
+      if (title) return title;
+    }
+  }
+
+  const messageTitle = sanitizePineScriptName(String(raw || '').match(/\b(?:called|named)\s+["'`](.*?)["'`]/i)?.[1] || '');
+  if (messageTitle) return messageTitle;
+
+  return 'Liku Pine Script';
+}
+
 function shouldAutoAddPineScriptToChart(raw = '', actions = []) {
   if (Array.isArray(actions) && actions.some((action) => isPineAddToChartStep(action))) {
     return true;
@@ -205,6 +238,8 @@ function buildSafePineAuthoringContinuationSteps(actions = [], intent = {}, raw 
   if (payloadSteps.length === 0) {
     return [];
   }
+
+  const derivedScriptName = inferSafePineScriptName(payloadSteps, raw);
 
   const applyContinuationSteps = [];
   if (addToChartSteps.length > 0) {
@@ -258,6 +293,37 @@ function buildSafePineAuthoringContinuationSteps(actions = [], intent = {}, raw 
       pineEvidenceMode: 'save-status',
       continueOnPineLifecycleState: 'saved-state-verified',
       continueActions: applyContinuationSteps,
+      continueActionsByPineLifecycleState: {
+        'save-required-before-apply': [
+          { type: 'wait', ms: 180 },
+          {
+            type: 'type',
+            text: derivedScriptName,
+            reason: `Provide a Pine script name in the TradingView first-save flow: ${derivedScriptName}`
+          },
+          { type: 'wait', ms: 120 },
+          {
+            type: 'key',
+            key: 'enter',
+            reason: 'Confirm the TradingView Pine first-save flow after entering the script name'
+          },
+          { type: 'wait', ms: 450 },
+          {
+            type: 'get_text',
+            text: 'Pine Editor',
+            reason: 'Re-verify visible Pine save-state evidence after naming the script',
+            pineEvidenceMode: 'save-status',
+            continueOnPineLifecycleState: 'saved-state-verified',
+            continueActions: applyContinuationSteps,
+            haltOnPineLifecycleStateMismatch: true,
+            pineLifecycleMismatchReasons: {
+              'save-required-before-apply': 'TradingView still shows save-required state after naming the script; stop before applying it to the chart.',
+              'editor-target-corrupt': 'Visible Pine output suggests editor-target corruption during save; stop before applying the script.',
+              '': 'The Pine save state could not be verified after naming the script; do not add it to the chart yet.'
+            }
+          }
+        ]
+      },
       haltOnPineLifecycleStateMismatch: true,
       pineLifecycleMismatchReasons: {
         'save-required-before-apply': 'Visible save confirmation was not observed after saving the Pine script; do not add it to the chart yet.',

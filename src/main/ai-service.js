@@ -5242,8 +5242,10 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
     if (
       result.success
       && effectiveAction.type === 'get_text'
-      && Array.isArray(action.continueActions)
-      && action.continueActions.length > 0
+      && (
+        (Array.isArray(action.continueActions) && action.continueActions.length > 0)
+        || (action.continueActionsByPineLifecycleState && typeof action.continueActionsByPineLifecycleState === 'object')
+      )
     ) {
       const observedPineState = String(result?.pineStructuredSummary?.editorVisibleState || '').trim().toLowerCase();
       const expectedPineState = String(action?.continueOnPineEditorState || '').trim().toLowerCase();
@@ -5275,6 +5277,12 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
 
       const observedPineLifecycleState = String(result?.pineStructuredSummary?.lifecycleState || '').trim().toLowerCase();
       const expectedPineLifecycleState = String(action?.continueOnPineLifecycleState || '').trim().toLowerCase();
+      const lifecycleStateContinuations = action?.continueActionsByPineLifecycleState && typeof action.continueActionsByPineLifecycleState === 'object'
+        ? action.continueActionsByPineLifecycleState
+        : null;
+      const matchedLifecycleContinuation = lifecycleStateContinuations
+        ? lifecycleStateContinuations[observedPineLifecycleState] || lifecycleStateContinuations['*'] || null
+        : null;
 
       if (result.success && observedPineLifecycleState && expectedPineLifecycleState && observedPineLifecycleState === expectedPineLifecycleState) {
         const continuationActions = action.continueActions.map((step) => {
@@ -5291,6 +5299,19 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
           result.pineContinuationLifecycleState = observedPineLifecycleState;
           result.pineContinuationCount = continuationActions.length;
         }
+      } else if (result.success && observedPineLifecycleState && Array.isArray(matchedLifecycleContinuation) && matchedLifecycleContinuation.length > 0) {
+        const continuationActions = matchedLifecycleContinuation.map((step) => {
+          try {
+            return JSON.parse(JSON.stringify(step));
+          } catch {
+            return { ...step };
+          }
+        });
+
+        actionData.actions.splice(i + 1, 0, ...continuationActions);
+        result.pineContinuationInjected = true;
+        result.pineContinuationLifecycleState = observedPineLifecycleState;
+        result.pineContinuationCount = continuationActions.length;
       } else if (result.success && action.haltOnPineLifecycleStateMismatch) {
         const mismatchReasons = action?.pineLifecycleMismatchReasons && typeof action.pineLifecycleMismatchReasons === 'object'
           ? action.pineLifecycleMismatchReasons

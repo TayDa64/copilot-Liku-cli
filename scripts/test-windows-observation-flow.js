@@ -1350,8 +1350,9 @@ async function run() {
     assert(execResult.results.some((result) => result?.pineContinuationInjected), 'inspect step should inject continuation actions');
   });
 
-  await testAsync('safe pine authoring blocks add-to-chart when save evidence is missing', async () => {
+  await testAsync('safe pine authoring recovers through first-save naming before add-to-chart', async () => {
     const executed = [];
+    let saveStatusReads = 0;
 
     const foregroundSequence = [
       { success: true, hwnd: 777, title: 'TradingView', processName: 'tradingview', windowKind: 'main' },
@@ -1392,13 +1393,25 @@ async function run() {
           };
         }
         if (action?.type === 'get_text' && action?.pineEvidenceMode === 'save-status') {
+          saveStatusReads += 1;
           return {
             success: true,
             action: 'get_text',
-            message: 'save still required',
+            message: saveStatusReads === 1 ? 'save still required' : 'save verified',
             pineStructuredSummary: {
               evidenceMode: 'save-status',
-              lifecycleState: 'save-required-before-apply'
+              lifecycleState: saveStatusReads === 1 ? 'save-required-before-apply' : 'saved-state-verified'
+            }
+          };
+        }
+        if (action?.type === 'get_text' && action?.pineEvidenceMode === 'compile-result') {
+          return {
+            success: true,
+            action: 'get_text',
+            message: 'compiled successfully',
+            pineStructuredSummary: {
+              evidenceMode: 'compile-result',
+              lifecycleState: 'apply-result-verified'
             }
           };
         }
@@ -1406,10 +1419,12 @@ async function run() {
       }
     }));
 
-    assert.strictEqual(execResult.success, false, 'Execution should stop when save evidence is missing');
+    assert.strictEqual(execResult.success, true, 'Execution should recover after the first-save naming flow');
     assert(executed.includes('key:ctrl+s'), 'Save should still be attempted');
-    assert(!executed.includes('key:ctrl+enter'), 'Add-to-chart should be blocked without visible save evidence');
-    assert(execResult.results.some((result) => /do not add it to the chart yet/i.test(String(result?.error || ''))), 'Failure should explain that save verification blocked add-to-chart');
+    assert(executed.includes('type'), 'First-save recovery should type the derived script name');
+    assert(executed.includes('key:enter'), 'First-save recovery should confirm the save dialog');
+    assert(executed.includes('key:ctrl+enter'), 'Add-to-chart should resume only after save evidence is re-verified');
+    assert.strictEqual(saveStatusReads, 2, 'Save status should be checked before and after the first-save recovery');
   });
 
   await testAsync('compile-result corruption signal stops pine workflow with grounded editor-target failure', async () => {

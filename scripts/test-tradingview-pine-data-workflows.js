@@ -263,6 +263,8 @@ test('clipboard-only pine authoring plan rewrites into guarded continuation afte
   const saveInspect = freshInspect.continueActions.find((action) => action?.type === 'get_text' && action?.pineEvidenceMode === 'save-status');
   assert(saveInspect, 'fresh-script continuation should verify visible save status before applying');
   assert.strictEqual(saveInspect.continueOnPineLifecycleState, 'saved-state-verified');
+  assert(Array.isArray(saveInspect?.continueActionsByPineLifecycleState?.['save-required-before-apply']), 'save verification should branch into a first-save recovery path when TradingView requires a script name');
+  assert(saveInspect.continueActionsByPineLifecycleState['save-required-before-apply'].some((action) => action?.type === 'type' && /Momentum Confidence/.test(String(action?.text || ''))), 'first-save recovery should derive a script name from the Pine payload');
   assert(saveInspect.continueActions.some((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'ctrl+enter'), 'save-verified continuation should add the script to the chart');
   assert(saveInspect.continueActions.some((action) => action?.type === 'get_text' && action?.pineEvidenceMode === 'compile-result'), 'save-verified continuation should gather compile-result feedback after add-to-chart');
 });
