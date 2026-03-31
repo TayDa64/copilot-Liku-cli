@@ -306,7 +306,10 @@ const TRADINGVIEW_SHORTCUTS = Object.freeze({
       kind: 'status-visible',
       appName: 'TradingView',
       target: 'pine-editor',
-      keywords: ['pine', 'save', 'script']
+      keywords: ['pine', 'save', 'save script', 'script', 'script name', 'save as', 'rename script'],
+      titleHints: ['Save', 'Save script', 'Script name', 'Save As', 'Rename script'],
+      windowKinds: ['owned', 'palette', 'main'],
+      requiresObservedChange: false
     },
     fallbackPolicy: 'none'
   }),

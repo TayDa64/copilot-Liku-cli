@@ -5,6 +5,7 @@ const path = require('path');
 const fs = require('fs');
 
 const aiService = require(path.join(__dirname, '..', 'src', 'main', 'ai-service.js'));
+const { buildTradingViewShortcutRoute } = require(path.join(__dirname, '..', 'src', 'main', 'tradingview', 'shortcut-profile.js'));
 const { UIWatcher } = require(path.join(__dirname, '..', 'src', 'main', 'ui-watcher.js'));
 
 const results = {
@@ -1425,6 +1426,53 @@ async function run() {
     assert(executed.includes('key:enter'), 'First-save recovery should confirm the save dialog');
     assert(executed.includes('key:ctrl+enter'), 'Add-to-chart should resume only after save evidence is re-verified');
     assert.strictEqual(saveStatusReads, 2, 'Save status should be checked before and after the first-save recovery');
+  });
+
+  await testAsync('TradingView save shortcut verification retargets the first-save dialog before typing', async () => {
+    const focusCalls = [];
+    const executed = [];
+    const foregroundSequence = [
+      { success: true, hwnd: 777, title: 'Pine Editor - TradingView', processName: 'tradingview', windowKind: 'main' },
+      { success: true, hwnd: 889, title: 'Save Script - TradingView', processName: 'tradingview', windowKind: 'owned' },
+      { success: true, hwnd: 889, title: 'Save Script - TradingView', processName: 'tradingview', windowKind: 'owned' }
+    ];
+
+    await withPatchedSystemAutomation({
+      resolveWindowHandle: async (action) => action?.processName === 'tradingview' ? 777 : 0,
+      getForegroundWindowHandle: async () => 889,
+      getForegroundWindowInfo: async () => foregroundSequence.shift() || { success: true, hwnd: 889, title: 'Save Script - TradingView', processName: 'tradingview', windowKind: 'owned' },
+      focusWindow: async (hwnd) => {
+        focusCalls.push(hwnd);
+        return { success: true };
+      },
+      getRunningProcessesByNames: async () => ([{ pid: 4242, processName: 'tradingview', mainWindowTitle: 'TradingView', startTime: '2026-03-23T00:00:00Z' }])
+    }, async () => {
+      const execResult = await aiService.executeActions({
+        thought: 'Save the current Pine script, then type the first-save name',
+        verification: 'TradingView should show the save naming surface before text is entered',
+        actions: [
+          { type: 'focus_window', title: 'TradingView', processName: 'tradingview' },
+          ...(buildTradingViewShortcutRoute('save-pine-script', {
+            reason: 'Save the current Pine script'
+          }) || []),
+          { type: 'type', text: 'Momentum Confidence', reason: 'Type the Pine script name into the first-save dialog' }
+        ]
+      }, null, null, {
+        userMessage: 'in tradingview save the pine script and enter the name Momentum Confidence',
+        actionExecutor: async (action) => {
+          executed.push(action.type === 'key' ? `key:${action.key}` : action.type);
+          return { success: true, action: action.type, message: 'ok' };
+        }
+      });
+
+      assert.strictEqual(execResult.success, true, 'Save shortcut flow should succeed when the first-save dialog becomes visible');
+      assert(executed.includes('key:ctrl+s'), 'The official save shortcut should still be used');
+      assert.strictEqual(execResult.observationCheckpoints.length, 1, 'The save shortcut should emit a bounded observation checkpoint');
+      assert.strictEqual(execResult.observationCheckpoints[0].classification, 'input-surface-open', 'Status-visible save verification should classify as an input surface when naming is required');
+      assert.strictEqual(execResult.observationCheckpoints[0].foreground?.hwnd, 889, 'Checkpoint should adopt the first-save dialog as the active TradingView surface');
+      assert.strictEqual(execResult.observationCheckpoints[0].waitTargetHwnd, 0, 'Save-surface verification should allow the active TradingView handle to change');
+      assert.strictEqual(focusCalls[focusCalls.length - 1], 889, 'Typing should be re-focused to the observed first-save dialog handle');
+    });
   });
 
   await testAsync('compile-result corruption signal stops pine workflow with grounded editor-target failure', async () => {

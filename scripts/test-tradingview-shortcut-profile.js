@@ -156,6 +156,8 @@ test('pine authoring shortcuts expose normalized capability metadata and chorded
   assert.strictEqual(newIndicator.fallbackPolicy, 'none');
   assert.strictEqual(saveScript.key, 'ctrl+s');
   assert.strictEqual(saveScript.verificationContract.kind, 'status-visible');
+  assert.strictEqual(saveScript.verificationContract.requiresObservedChange, false);
+  assert(saveScript.verificationContract.titleHints.includes('Script name'));
   assert.strictEqual(addToChart.key, 'ctrl+enter');
   assert.strictEqual(addToChart.automationRoutable, true);
 });

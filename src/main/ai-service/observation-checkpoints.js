@@ -86,9 +86,17 @@ function createObservationCheckpointRuntime(deps = {}) {
   function classifyVerificationSurface(verify, nextAction) {
     const kind = String(verify?.kind || '').trim().toLowerCase();
     const target = String(verify?.target || '').trim().toLowerCase();
+    const keywordText = Array.isArray(verify?.keywords)
+      ? verify.keywords.map((value) => String(value || '').trim().toLowerCase()).join(' ')
+      : '';
 
     if (kind === 'panel-visible' || kind === 'panel-open') return 'panel-open';
     if (kind === 'editor-active' || kind === 'editor-ready') return 'editor-active';
+    if (kind === 'status-visible' || kind === 'status-ready') {
+      return /save|rename|name|input|picker|search|dialog/.test(`${target} ${keywordText}`.trim())
+        ? 'input-surface-open'
+        : 'panel-open';
+    }
     if (kind === 'input-surface-open' || kind === 'menu-open' || kind === 'text-visible') return 'input-surface-open';
     if (kind === 'dialog-visible') {
       return /indicator|search|input|picker/.test(target) ? 'input-surface-open' : 'dialog-open';
