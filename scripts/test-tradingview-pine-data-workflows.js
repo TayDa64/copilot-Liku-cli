@@ -269,6 +269,48 @@ test('clipboard-only pine authoring plan rewrites into guarded continuation afte
   assert(saveInspect.continueActions.some((action) => action?.type === 'get_text' && action?.pineEvidenceMode === 'compile-result'), 'save-verified continuation should gather compile-result feedback after add-to-chart');
 });
 
+test('transcript-style Pine clipboard/edit/apply plans are normalized back onto the safe authoring contract', () => {
+  const rewritten = maybeRewriteTradingViewPineWorkflow([
+    { type: 'focus_window', windowHandle: 42404660 },
+    { type: 'wait', ms: 700 },
+    { type: 'key', key: 'ctrl+k', reason: 'Open TradingView quick search' },
+    { type: 'wait', ms: 250 },
+    { type: 'type', text: 'pine editor' },
+    { type: 'wait', ms: 350 },
+    { type: 'click_element', text: 'Pine Editor', reason: 'Open Pine Editor by clicking the result' },
+    { type: 'wait', ms: 900 },
+    { type: 'get_text', text: 'Pine Editor', reason: 'Verify Pine Editor surface is visible' },
+    { type: 'wait', ms: 250 },
+    { type: 'key', key: 'ctrl+a', reason: 'Select all currently visible editor text for inspection' },
+    { type: 'wait', ms: 120 },
+    { type: 'key', key: 'ctrl+c', reason: 'Copy current script content for inspection' },
+    { type: 'wait', ms: 200 },
+    { type: 'run_command', shell: 'powershell', command: "powershell -NoProfile -Command \"$t=Get-Clipboard -Raw\"" },
+    { type: 'wait', ms: 250 },
+    { type: 'key', key: 'ctrl+a', reason: 'Prepare editor buffer for paste' },
+    { type: 'wait', ms: 120 },
+    {
+      type: 'run_command',
+      shell: 'powershell',
+      command: "powershell -NoProfile -Command \"$code=@'\n//@version=5\nindicator(\\\"Volume + Momentum Confidence (LUNR) [Liku]\\\", overlay=false)\nplot(close)\n'@; Set-Clipboard -Value $code\""
+    },
+    { type: 'wait', ms: 120 },
+    { type: 'key', key: 'ctrl+v', reason: 'Paste Pine code' },
+    { type: 'wait', ms: 250 },
+    { type: 'key', key: 'ctrl+enter', reason: 'Compile/apply the script to the chart' }
+  ], {
+    userMessage: 'TradingView is already open on the LUNR chart. Open Pine Editor, create a new Pine script that shows confidence in volume and momentum, apply it with Ctrl+Enter, and report the visible compile/apply result'
+  });
+
+  const inspectStep = rewritten.find((action) => action?.type === 'get_text' && action?.pineEvidenceMode === 'safe-authoring-inspect');
+  assert(Array.isArray(rewritten), 'workflow should rewrite the transcript-style Pine plan');
+  assert.strictEqual(rewritten[0].type, 'bring_window_to_front');
+  assert.strictEqual(rewritten[2].key, 'ctrl+k', 'rewrite should route Pine Editor opening through the verified TradingView quick-search path');
+  assert(inspectStep, 'rewrite should restore the safe Pine inspection contract before any authoring edit resumes');
+  assert(inspectStep.continueActions.some((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'ctrl+i'), 'rewrite should force fresh-indicator creation instead of preserving raw clipboard overwrite steps');
+  assert(!rewritten.some((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'ctrl+c'), 'rewrite should not preserve raw clipboard inspection keystrokes outside the guarded continuation');
+});
+
 test('full ai-service rewrite handles the transcript Pine prompt without browser or timeframe derailment', () => {
   const rewritten = aiService.rewriteActionsForReliability([
     { type: 'focus_window', windowHandle: 459522 }

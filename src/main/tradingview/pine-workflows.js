@@ -377,6 +377,41 @@ function actionLooksLikePineEditorOpenIntent(action) {
   return /pine editor|pine script editor|open pine editor/i.test(combined);
 }
 
+function actionLooksLikeUnverifiedPineAuthoringEdit(action) {
+  if (!action || typeof action !== 'object') return false;
+
+  const type = String(action.type || '').trim().toLowerCase();
+  const key = String(action.key || '').trim().toLowerCase();
+  const command = String(action.command || '').trim();
+  const combined = [
+    action.reason,
+    action.text,
+    action.title,
+    command
+  ]
+    .map((value) => String(value || '').trim())
+    .filter(Boolean)
+    .join(' ');
+
+  if (type === 'run_command' && /\bset-clipboard\b/i.test(command) && /\b(?:indicator|strategy|library)\s*\(/i.test(command)) {
+    return true;
+  }
+  if (type === 'run_command' && /\bget-clipboard\b/i.test(command)) {
+    return true;
+  }
+  if (type === 'click_element' && /pine editor/i.test(combined)) {
+    return true;
+  }
+  if (type === 'key' && ['ctrl+a', 'ctrl+c', 'ctrl+v', 'ctrl+enter'].includes(key)) {
+    return true;
+  }
+  if (type === 'type' && /\b(?:indicator|strategy|library)\s*\(/i.test(String(action.text || ''))) {
+    return true;
+  }
+
+  return false;
+}
+
 function inferPineAuthoringMode(raw = '') {
   const normalized = normalizeTextForMatch(raw);
   if (!normalized) return null;
@@ -791,6 +826,13 @@ function maybeRewriteTradingViewPineWorkflow(actions, context = {}) {
     && actionLooksLikePineEditorOpenIntent(opener);
 
   if (explicitLegacyPineEditorOpen) {
+    return buildTradingViewPineWorkflowActions(intent, actions);
+  }
+
+  const unsafeUnverifiedAuthoringPlan = intent.safeAuthoringDefault
+    && !intent.existingWorkflowSignal
+    && actions.some((action) => actionLooksLikeUnverifiedPineAuthoringEdit(action));
+  if (unsafeUnverifiedAuthoringPlan) {
     return buildTradingViewPineWorkflowActions(intent, actions);
   }
 

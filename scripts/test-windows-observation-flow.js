@@ -2448,6 +2448,81 @@ async function run() {
     });
   });
 
+  await testAsync('TradingView click_element actions omit brittle dynamic chart titles while keeping window-handle scoping', async () => {
+    await withPatchedSystemAutomation({
+      resolveWindowHandle: async (action) => Number(action?.windowHandle || 0) || (action?.processName === 'tradingview' ? 777 : 0),
+      focusWindow: async (hwnd) => ({
+        success: true,
+        exactMatch: true,
+        actualForegroundHandle: Number(hwnd || 0) || 777,
+        actualForeground: {
+          success: true,
+          hwnd: Number(hwnd || 0) || 777,
+          title: 'LUNR ▲ 18.43 +12.72% / Unnamed',
+          processName: 'tradingview',
+          windowKind: 'main'
+        }
+      }),
+      getForegroundWindowInfo: async () => ({ success: true, hwnd: 777, title: 'LUNR ▲ 18.43 +12.72% / Unnamed', processName: 'tradingview', windowKind: 'main' })
+    }, async () => {
+      const execResult = await aiService.executeActions({
+        thought: 'Focus TradingView and click the Pine Editor quick-search result',
+        verification: 'TradingView should receive the semantic click',
+        actions: [
+          { type: 'focus_window', windowHandle: 777 },
+          { type: 'click_element', text: 'Pine Editor', reason: 'Click the Pine Editor search result inside TradingView' }
+        ]
+      }, null, null, {
+        userMessage: 'in tradingview, click the pine editor search result',
+        actionExecutor: async (action) => {
+          if (action.type === 'focus_window') {
+            return {
+              success: true,
+              action: action.type,
+              requestedWindowHandle: 777,
+              actualForegroundHandle: 777,
+              actualForeground: {
+                success: true,
+                hwnd: 777,
+                title: 'LUNR ▲ 18.43 +12.72% / Unnamed',
+                processName: 'tradingview',
+                windowKind: 'main'
+              },
+              focusTarget: {
+                requestedWindowHandle: 777,
+                actualForegroundHandle: 777,
+                actualForeground: {
+                  success: true,
+                  hwnd: 777,
+                  title: 'LUNR ▲ 18.43 +12.72% / Unnamed',
+                  processName: 'tradingview',
+                  windowKind: 'main'
+                },
+                exactMatch: true,
+                outcome: 'exact'
+              }
+            };
+          }
+          if (action.type === 'click_element') {
+            assert.strictEqual(action.windowHandle, 777, 'click_element should still inherit the last accepted TradingView window handle');
+            assert.strictEqual(String(action?.criteria?.windowTitle || ''), '', 'dynamic TradingView chart titles should not be copied into strict UIA criteria');
+            return {
+              success: true,
+              element: {
+                Name: 'Pine Editor',
+                WindowHandle: action.windowHandle
+              }
+            };
+          }
+          return { success: true, action: action.type, message: 'executed' };
+        }
+      });
+
+      assert.strictEqual(execResult.success, true, 'dynamic-title TradingView semantic click should stay scoped and succeed');
+      assert.strictEqual(execResult.results[1].element?.WindowHandle, 777, 'clicked semantic result should still come from the TradingView window');
+    });
+  });
+
   await testAsync('TradingView get_text actions inherit the last accepted window title for scoped readback', async () => {
     const scopedTitles = [];
     await withPatchedSystemAutomation({

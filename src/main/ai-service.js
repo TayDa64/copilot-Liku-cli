@@ -4500,12 +4500,46 @@ function buildWindowProfileFromForeground(foreground, fallbackProfile = null) {
   };
 }
 
+function isTradingViewWindowProfile(profile = null) {
+  const haystack = [
+    profile?.processName,
+    profile?.title
+  ]
+    .map((value) => String(value || '').trim().toLowerCase())
+    .filter(Boolean)
+    .join(' ');
+
+  return /\btradingview\b|\btrading view\b/.test(haystack);
+}
+
+function looksLikeDynamicTradingViewChartTitle(title = '') {
+  const text = String(title || '').trim();
+  if (!text) return false;
+
+  const normalized = text.toLowerCase();
+  if (!/\bunnamed\b|\bchart\b|[▲▼]|[%/]/.test(text)) {
+    return false;
+  }
+
+  return /\bunnamed\b/.test(normalized)
+    || /[▲▼]/.test(text)
+    || /[+\-]\d/.test(text)
+    || /\d+(?:\.\d+)?%/.test(text)
+    || /\/\s*(unnamed|layout|tradingview)/i.test(text);
+}
+
 function scopeActionToTargetWindow(action, lastTargetWindowHandle, lastTargetWindowProfile = null) {
   if (!action || typeof action !== 'object') return action;
 
   const type = String(action.type || '').trim().toLowerCase();
   const targetWindowHandle = Number(lastTargetWindowHandle || 0) || 0;
   const targetWindowTitle = String(lastTargetWindowProfile?.title || '').trim();
+  const tradingViewWindow = isTradingViewWindowProfile(lastTargetWindowProfile)
+    || /\btradingview\b/.test(String(action?.processName || '').trim().toLowerCase())
+    || /\btradingview\b/.test(String(action?.verifyTarget?.appName || '').trim().toLowerCase())
+    || /\btradingview\b/.test(String(action?.searchSurfaceContract?.appName || '').trim().toLowerCase())
+    || /\btradingview\b/.test(String(action?.tradingViewShortcut?.surface || '').trim().toLowerCase());
+  const omitDynamicTradingViewTitle = tradingViewWindow && looksLikeDynamicTradingViewChartTitle(targetWindowTitle);
 
   if (type === 'click_element' || type === 'find_element') {
     const existingCriteria = action.criteria && typeof action.criteria === 'object'
@@ -4521,7 +4555,7 @@ function scopeActionToTargetWindow(action, lastTargetWindowHandle, lastTargetWin
         automationId: action.automationId,
         controlType: action.controlType,
         ...(existingCriteria || {}),
-        ...(targetWindowTitle && !String(existingCriteria?.windowTitle || '').trim()
+        ...(!omitDynamicTradingViewTitle && targetWindowTitle && !String(existingCriteria?.windowTitle || '').trim()
           ? { windowTitle: targetWindowTitle }
           : {})
       }
