@@ -2373,6 +2373,88 @@ async function run() {
     });
   });
 
+  await testAsync('pine editor activation accepts strong watcher surface evidence even when the TradingView title does not change', async () => {
+    const executed = [];
+    const previousWatcher = aiService.getUIWatcher();
+    aiService.setUIWatcher({
+      isPolling: true,
+      cache: {
+        lastUpdate: Date.now(),
+        activeWindow: {
+          hwnd: 777,
+          title: 'TradingView',
+          processName: 'tradingview',
+          windowKind: 'main'
+        },
+        elements: [
+          { id: 'tv-add', name: 'Add to chart', type: 'Button', windowHandle: 777, automationId: '', className: 'Button' },
+          { id: 'tv-publish', name: 'Publish script', type: 'Button', windowHandle: 777, automationId: '', className: 'Button' }
+        ]
+      },
+      waitForFreshState: async () => ({
+        fresh: true,
+        timedOut: false,
+        immediate: false,
+        activeWindow: {
+          hwnd: 777,
+          title: 'TradingView',
+          processName: 'tradingview',
+          windowKind: 'main'
+        },
+        lastUpdate: Date.now()
+      })
+    });
+
+    try {
+      await withPatchedSystemAutomation({
+        resolveWindowHandle: async (action) => action?.processName === 'tradingview' ? 777 : 0,
+        getForegroundWindowInfo: async () => ({ success: true, hwnd: 777, title: 'TradingView', processName: 'tradingview', windowKind: 'main' }),
+        focusWindow: async () => ({ success: true }),
+        getRunningProcessesByNames: async () => ([{ pid: 4242, processName: 'tradingview', mainWindowTitle: 'TradingView', startTime: '2026-03-23T00:00:00Z' }]),
+        findElementByText: async () => ({ success: true, count: 0, element: null, elements: [] }),
+        click: async () => {
+          throw new Error('semantic Pine result click should not be needed when watcher surface evidence is already strong');
+        }
+      }, async () => {
+        const execResult = await aiService.executeActions({
+          thought: 'Open TradingView Pine Editor and type a script',
+          verification: 'TradingView should show the Pine Editor before typing',
+          actions: [
+            { type: 'focus_window', title: 'TradingView', processName: 'tradingview' },
+            {
+              type: 'key',
+              key: 'ctrl+e',
+              reason: 'Open TradingView Pine Editor',
+              verify: {
+                kind: 'editor-active',
+                appName: 'TradingView',
+                target: 'pine-editor',
+                keywords: ['pine', 'pine editor', 'script'],
+                requiresObservedChange: true
+              }
+            },
+            { type: 'type', text: 'plot(close)', reason: 'Type Pine script' }
+          ]
+        }, null, null, {
+          userMessage: 'open pine editor in tradingview and type plot(close)',
+          actionExecutor: async (action) => {
+            executed.push(action.type);
+            return { success: true, action: action.type, message: 'executed' };
+          }
+        });
+
+        assert.strictEqual(execResult.success, true, 'Execution should proceed when watcher evidence shows Pine editor chrome in the active TradingView window');
+        assert.strictEqual(execResult.observationCheckpoints.length, 1, 'An editor-active checkpoint should be recorded');
+        assert.strictEqual(execResult.observationCheckpoints[0].verified, true, 'The editor-active checkpoint should pass on watcher surface evidence');
+        assert.strictEqual(execResult.observationCheckpoints[0].watcherSurfaceMatched, true, 'Checkpoint metadata should record watcher-backed Pine surface evidence');
+        assert.strictEqual(execResult.observationCheckpoints[0].watcherSurfaceAnchor, 'add to chart', 'Checkpoint should preserve the watcher anchor that proved editor activation');
+        assert.deepStrictEqual(executed, ['bring_window_to_front', 'wait', 'key', 'wait', 'type', 'wait', 'key', 'wait', 'wait', 'type'], 'Typing should continue after watcher-backed Pine editor verification succeeds');
+      });
+    } finally {
+      aiService.setUIWatcher(previousWatcher);
+    }
+  });
+
   await testAsync('TradingView click_element actions are scoped to the last accepted target window', async () => {
     await withPatchedSystemAutomation({
       resolveWindowHandle: async (action) => Number(action?.windowHandle || 0) || (action?.processName === 'tradingview' ? 777 : 0),
@@ -2561,6 +2643,61 @@ async function run() {
 
       assert.strictEqual(execResult.success, true, 'scoped TradingView text readback should succeed in the bounded test');
       assert.deepStrictEqual(scopedTitles, ['TradingView'], 'get_text should carry the last accepted TradingView window title into the criteria');
+    });
+  });
+
+  await testAsync('TradingView Pine get_text actions omit brittle dynamic chart titles during scoped readback', async () => {
+    const scopedTitles = [];
+    await withPatchedSystemAutomation({
+      resolveWindowHandle: async (action) => action?.processName === 'tradingview' ? 777 : Number(action?.windowHandle || 0) || 0,
+      focusWindow: async () => ({
+        success: true,
+        exactMatch: true,
+        actualForegroundHandle: 777,
+        actualForeground: {
+          success: true,
+          hwnd: 777,
+          title: 'LUNR ▲ 18.56 +13.52% / Unnamed',
+          processName: 'tradingview',
+          windowKind: 'main'
+        }
+      }),
+      getForegroundWindowInfo: async () => ({
+        success: true,
+        hwnd: 777,
+        title: 'LUNR ▲ 18.56 +13.52% / Unnamed',
+        processName: 'tradingview',
+        windowKind: 'main'
+      })
+    }, async () => {
+      const execResult = await aiService.executeActions({
+        thought: 'Focus TradingView and inspect Pine text',
+        verification: 'TradingView should stay as the bounded Pine readback window',
+        actions: [
+          { type: 'focus_window', title: 'TradingView', processName: 'tradingview' },
+          { type: 'get_text', text: 'Pine Editor', reason: 'Inspect current visible Pine Editor state', pineEvidenceMode: 'safe-authoring-inspect' }
+        ]
+      }, null, null, {
+        userMessage: 'in tradingview, create a new interactive pine indicator and inspect the pine editor state',
+        actionExecutor: async (action) => {
+          if (action.type === 'get_text') {
+            scopedTitles.push(String(action?.criteria?.windowTitle || ''));
+            return {
+              success: true,
+              method: 'mock',
+              text: 'Untitled script\nplot(close)',
+              pineStructuredSummary: {
+                evidenceMode: 'safe-authoring-inspect',
+                editorVisibleState: 'empty-or-starter'
+              }
+            };
+          }
+          return { success: true, action: action.type, message: 'executed' };
+        }
+      });
+
+      assert.strictEqual(execResult.success, true, 'dynamic-title Pine readback should still succeed in the bounded test');
+      assert.deepStrictEqual(scopedTitles, [''], 'get_text should omit dynamic TradingView chart titles from Pine criteria');
     });
   });
 

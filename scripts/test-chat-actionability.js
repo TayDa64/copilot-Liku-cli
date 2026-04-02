@@ -837,6 +837,10 @@ async function main() {
     'blocked Pine continuation should route through the saved bounded retry intent instead of raw continue text'
   );
   assert(
+    blockedPineContinuation.output.includes('the first Pine header line must be exactly `//@version=...`'),
+    'blocked Pine continuation should remind the model to emit a clean Pine version header without UI-label contamination'
+  );
+  assert(
     blockedPineContinuation.output.includes('PENDING_REQUESTED_TASK:null'),
     'blocked Pine continuation should clear the saved pending task once actionable steps are emitted'
   );
@@ -885,6 +889,10 @@ async function main() {
   assert(
     failedPineContinuationRetry.output.includes('PREFLIGHT_USER_MESSAGES:["Retry the blocked TradingView Pine authoring task.'),
     'failed Pine retry scenario should first execute the saved blocked-task intent'
+  );
+  assert(
+    failedPineContinuationRetry.output.includes('Do not return focus-only plans, clipboard-inspection-only plans, or websearch placeholder steps.'),
+    'failed Pine retry scenario should preserve the stricter Pine retry contract'
   );
   assert(
     !/There is not enough verified continuity state to continue safely/i.test(failedPineContinuationRetry.output),

@@ -435,6 +435,8 @@ function buildBlockedTradingViewPineResumeContract(userMessage = '', response = 
     '- Inspect the visible Pine Editor state before editing.',
     '- Do not overwrite an existing visible script implicitly; prefer a safe new-script or bounded starter-script path unless the user explicitly asked to replace the current script.',
     '- Insert the Pine script content.',
+    '- If you use Set-Clipboard, the clipboard payload must contain the actual Pine code, and the first Pine header line must be exactly `//@version=...` with no `Pine editor` or other leading contamination.',
+    '- Do not return focus-only plans, clipboard-inspection-only plans, or websearch placeholder steps.',
     requestedAddToChart
       ? '- Use Ctrl+Enter only after the script is inserted, then read visible compile/apply result text.'
       : '- After insertion, verify visible Pine compile/apply result text before claiming success.'
@@ -487,7 +489,9 @@ function buildFailedTradingViewPineRetryContract({ userMessage = '', executionIn
     '- Verify that Pine Editor actually became active before continuing.',
     '- Inspect the visible Pine Editor state before editing.',
     '- Do not overwrite an existing visible script implicitly; prefer a safe new-script or bounded starter-script path unless the user explicitly asked to replace the current script.',
-    '- Insert the Pine script content.'
+    '- Insert the Pine script content.',
+    '- If you use Set-Clipboard, the clipboard payload must contain the actual Pine code, and the first Pine header line must be exactly `//@version=...` with no `Pine editor` or other leading contamination.',
+    '- Do not return focus-only plans, clipboard-inspection-only plans, or websearch placeholder steps.'
   ];
 
   if (requestedAddToChart) {
