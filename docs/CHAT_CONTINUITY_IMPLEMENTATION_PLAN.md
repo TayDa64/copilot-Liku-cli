@@ -2391,22 +2391,6 @@ The most credible next roadmap is:
 
 ### Roadmap N5 — Runtime transcript to regression pipeline
 
-**Status (2026-03-30)**
-- first transcript-ingestion slice implemented
-- landed via:
-  - `scripts/transcript-regression-fixtures.js`
-  - `scripts/extract-transcript-regression.js`
-  - `scripts/run-transcript-regressions.js`
-  - `scripts/test-transcript-regression-pipeline.js`
-  - `scripts/fixtures/transcripts/inline-proof-chat-regressions.json`
-  - `docs/RUNTIME_REGRESSION_WORKFLOW.md`
-- current scope:
-  - added a checked-in transcript fixture format for sanitized `liku chat` regressions
-  - added an extraction helper that turns a runtime transcript or inline-proof log into a fixture skeleton
-  - added a fixture-driven runner that reuses the existing inline-proof transcript evaluator instead of introducing a second regression engine
-  - seeded the pipeline with checked-in transcript fixtures for repo-boundary and forgone-feature regressions
-  - documented the `runtime finding -> fixture -> focused rerun -> commit` workflow in repo docs and testing commands
-
 **Why this should be next**
 - The strongest recent improvements all came from real runtime transcripts, then hand-converted into tests.
 - That workflow works, but it is still too manual and easy to delay.
