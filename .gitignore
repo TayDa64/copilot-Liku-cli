@@ -33,3 +33,7 @@ docs/pdf/*.txt
 
 # Test artifacts
 .tmp-hook-check/
+
+# Local runtime / scratch artifacts
+.liku/
+tmp-websearch-*.html
