@@ -4,6 +4,11 @@ This document synthesizes brainstormed improvement ideas against current reposit
 
 It is intentionally grounded in codebase truth rather than aspirational architecture.
 
+## Follow-on documents
+
+- `docs/INSPECT_PROOF_TRACE_IMPLEMENTATION_SPEC.md` — concrete implementation spec for inspect grounding, proof-carrying execution, and trace-driven regression platformization
+- `docs/IMPRINT_SERIALIZATION_ASSESSMENT.md` — practical assessment of Imprint-style serialization ideas for future Liku realtime data paths
+
 ## Executive summary
 
 Liku is **not** an empty shell that still needs its first agentic architecture. The repo already contains substantial building blocks for:
@@ -25,6 +30,19 @@ In practice, the highest-leverage next steps are:
 2. strengthen generic verification/proof, not just TradingView-specific checks
 3. formalize trace-driven regression workflows from the telemetry/traces already present
 4. only then consider optional sync/cloud backends such as Convex
+
+## Progress since this analysis
+
+The first inspect/proof/trace slice is now landed:
+
+- inspect instructions and region IDs are now surfaced directly to the model
+- click-like actions can resolve `targetId` into `resolvedTarget`
+- action results now carry canonical proof
+- observation checkpoints now upgrade into `result.proof`
+- runtime action/proof traces are emitted as JSONL
+- runtime traces can now be converted into proof-aware regression fixtures
+
+That means the next natural step is no longer to design this chain in the abstract. It is to accumulate checked-in runtime-proof regression fixtures and continue lifting domain-specific verification into the generic proof model.
 
 ## Existing capabilities
 

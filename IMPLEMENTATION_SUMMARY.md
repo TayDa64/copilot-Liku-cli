@@ -1,7 +1,7 @@
 # Implementation Summary
 
 ## Scope
-This summary reflects the current state of `copilot-liku-cli` as of 2026-03-08, including the model capability separation, planning-mode routing, and automation hardening work completed in the latest implementation pass.
+This summary reflects the current state of `copilot-liku-cli` as of 2026-04-05, including the model capability separation, planning-mode routing, automation hardening, and the new inspect/proof/trace reliability slice.
 
 ## Current Architecture
 - CLI-first runtime with optional Electron overlay.
@@ -135,3 +135,81 @@ Documented and retained in current implementation:
 
 ## Outcome
 The runtime now treats model capability as a first-class concern, keeps the CLI and Electron selector surfaces aligned with backend state, exposes explicit routing behavior to the user, adds plan-only multi-agent review mode, and blocks stale-target coordinate clicks before low-level automation fires.
+
+## Session Implementations (2026-04-05)
+
+### 10. Inspect-Grounded Execution
+Implemented the first inspect-grounded execution slice across:
+
+- `src/main/ai-service/message-builder.js`
+- `src/main/inspect-service.js`
+- `src/main/system-automation.js`
+
+Behavior added:
+
+- inspect instructions are now injected as a system message
+- inspect prompt context now includes stable region IDs and selected region ID
+- click-like actions can now carry `targetId`
+- runtime target resolution returns `resolvedTarget` metadata
+- missing/stale targets fail with explicit structured errors unless explicit coordinate fallback is allowed
+
+### 11. Canonical Proof Contract
+Implemented proof normalization and checkpoint-to-proof merging in:
+
+- `src/main/system-automation.js`
+- `src/main/ai-service.js`
+- `src/main/chat-continuity-state.js`
+- `src/main/session-intent-state.js`
+
+Behavior added:
+
+- every executed action now returns a proof object
+- target grounding produces bounded proof (`level=1` when grounded)
+- observation checkpoints now upgrade/merge into canonical `result.proof`
+- proof-backed observation metadata is now preferred by continuity/session state consumers
+
+### 12. Runtime Proof Trace Logging and Regression Plumbing
+Implemented proof-aware runtime JSONL tracing and regression tooling in:
+
+- `src/main/traces/runtime-trace-log.js`
+- `scripts/run-transcript-regressions.js`
+- `scripts/transcript-regression-fixtures.js`
+- `scripts/extract-runtime-trace-regression.js`
+
+Behavior added:
+
+- runtime sessions now emit `action:plan`, `action:planned`, `action:start`, `action:target-resolved`, `action:complete`, `action:proof`, and `action:error`
+- transcript regression fixtures can now carry `traceMeta`, `actions`, and `proofExpectations`
+- the regression runner can now assert proof expectations alongside transcript expectations
+- runtime traces can now be converted into checked-in regression bundles
+
+### 13. Focused Tests Added
+Added focused seam coverage for the new slice:
+
+- `scripts/test-message-builder-inspect.js`
+- `scripts/test-inspect-target-resolution.js`
+- `scripts/test-system-automation-target-resolution.js`
+- `scripts/test-ai-service-proof-trace.js`
+- extended `scripts/test-transcript-regression-pipeline.js`
+
+### 14. Validation Performed for the 2026-04-05 Slice
+Focused validation passes:
+
+- `node scripts/test-ai-service-proof-trace.js`
+- `node scripts/test-transcript-regression-pipeline.js`
+- `node scripts/test-chat-continuity-state.js`
+- `node scripts/test-session-intent-state.js`
+- `node scripts/test-message-builder-inspect.js`
+- `node scripts/test-inspect-target-resolution.js`
+- `node scripts/test-system-automation-target-resolution.js`
+
+### 15. Outcome of the 2026-04-05 Slice
+The runtime now has an end-to-end first slice for:
+
+- inspect target grounding
+- bounded execution proof
+- checkpoint-to-proof upgrading
+- runtime proof trace emission
+- proof-aware regression fixture generation
+
+This turns the perception-to-action loop into a more testable chain instead of a set of isolated features.

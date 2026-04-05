@@ -1,0 +1,93 @@
+{
+  "runtime-proof-panel-open": {
+    "description": "Proof-aware runtime regression for a click action that opens the Pine Editor surface.",
+    "source": {
+      "capturedAt": "2026-04-05T22:41:10.000Z",
+      "origin": "runtime-proof synthetic seed",
+      "traceKind": "runtime-proof",
+      "tracePath": "synthetic://runtime-proof-panel-open",
+      "traceSessionId": "runtime-proof-session"
+    },
+    "transcriptLines": [],
+    "prompts": [],
+    "assistantTurns": [],
+    "observedHeaders": {
+      "runtimeModels": [],
+      "requestedModels": [],
+      "providers": []
+    },
+    "notes": [
+      "Checked-in proof-aware runtime regression seed.",
+      "Represents the minimum stable proof contract for an inspect-grounded surface-open action."
+    ],
+    "expectations": [],
+    "traceMeta": {
+      "sessionId": "runtime-proof-session",
+      "source": "runtime-trace",
+      "mode": "execute",
+      "filePath": "synthetic://runtime-proof-panel-open"
+    },
+    "actions": [
+      {
+        "index": 0,
+        "type": "click",
+        "reason": "Open Pine Editor",
+        "targetId": "region-1",
+        "success": true,
+        "resolvedTarget": {
+          "targetId": "region-1",
+          "resolutionMethod": "clickPoint",
+          "coordinateFallback": false,
+          "stale": false,
+          "fallbackReason": null
+        },
+        "observationCheckpoint": {
+          "classification": "panel-open",
+          "verified": true,
+          "reason": "Pine Editor visible"
+        },
+        "proof": {
+          "proofId": "proof-1",
+          "actionType": "click",
+          "level": 2,
+          "levelName": "effect-verified",
+          "status": "verified",
+          "claim": "The expected UI surface was observed after execution.",
+          "checks": [
+            {
+              "kind": "target-resolution",
+              "status": "pass",
+              "targetId": "region-1",
+              "method": "clickPoint"
+            },
+            {
+              "kind": "observation-checkpoint",
+              "status": "pass",
+              "classification": "panel-open"
+            }
+          ],
+          "limitations": [],
+          "boundedClaims": [],
+          "observation": {
+            "classification": "panel-open",
+            "verified": true,
+            "reason": "Pine Editor visible"
+          }
+        }
+      }
+    ],
+    "proofExpectations": [
+      {
+        "name": "panel open click is effect-verified",
+        "actionIndex": 0,
+        "minProofLevel": 2,
+        "status": "verified",
+        "actionType": "click",
+        "classification": "panel-open",
+        "targetId": "region-1",
+        "requiredCheckKind": "observation-checkpoint",
+        "requiredCheckStatus": "pass"
+      }
+    ]
+  }
+}
