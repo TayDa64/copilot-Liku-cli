@@ -334,6 +334,180 @@ function parseRelativeTimeToMinutes(value) {
   return null;
 }
 
+function getInspectServiceSafe() {
+  try {
+    return require('./inspect-service');
+  } catch {
+    return null;
+  }
+}
+
+function isClickLikeActionType(type) {
+  return type === ACTION_TYPES.CLICK
+    || type === ACTION_TYPES.DOUBLE_CLICK
+    || type === ACTION_TYPES.RIGHT_CLICK
+    || type === ACTION_TYPES.MOVE_MOUSE;
+}
+
+function toFinitePoint(x, y) {
+  const pointX = Number(x);
+  const pointY = Number(y);
+  if (!Number.isFinite(pointX) || !Number.isFinite(pointY)) {
+    return null;
+  }
+
+  return {
+    x: Math.round(pointX),
+    y: Math.round(pointY)
+  };
+}
+
+function buildProofId() {
+  return `proof-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function buildExecutionProof({ originalAction, effectiveAction, resolvedTarget, success, errorMessage, errorCode }) {
+  const requestedTargetId = originalAction?.targetId || effectiveAction?.targetId || null;
+  const targetGrounded = !!resolvedTarget
+    && !!resolvedTarget.targetId
+    && resolvedTarget.coordinateFallback !== true
+    && resolvedTarget.resolutionMethod !== 'explicit-coordinates';
+
+  const checks = [];
+  const limitations = [];
+
+  if (requestedTargetId) {
+    if (targetGrounded) {
+      checks.push({
+        kind: 'target-resolution',
+        status: 'pass',
+        targetId: resolvedTarget.targetId,
+        method: resolvedTarget.resolutionMethod
+      });
+    } else if (resolvedTarget?.coordinateFallback) {
+      checks.push({
+        kind: 'target-resolution',
+        status: success ? 'bounded' : 'fail',
+        targetId: requestedTargetId,
+        method: resolvedTarget.resolutionMethod || 'explicit-coordinates',
+        fallbackReason: resolvedTarget.fallbackReason || null
+      });
+      limitations.push('Execution used explicit coordinate fallback instead of a verified inspect target.');
+    } else {
+      checks.push({
+        kind: 'target-resolution',
+        status: 'fail',
+        targetId: requestedTargetId,
+        code: errorCode || 'TARGET_RESOLUTION_FAILED'
+      });
+      limitations.push('Inspect target grounding did not succeed.');
+    }
+  } else {
+    limitations.push('No inspect target grounding was requested for this action.');
+  }
+
+  if (resolvedTarget?.stale) {
+    limitations.push('The inspect snapshot was stale at execution time.');
+  }
+
+  return {
+    proofId: buildProofId(),
+    actionType: String(effectiveAction?.type || originalAction?.type || 'unknown'),
+    level: targetGrounded ? 1 : 0,
+    levelName: targetGrounded ? 'target-grounded' : 'executed',
+    status: success ? (targetGrounded ? 'verified' : 'bounded') : 'failed',
+    checks,
+    limitations,
+    error: errorMessage || null,
+    errorCode: errorCode || null
+  };
+}
+
+async function resolveActionTarget(action, runtimeOptions = {}) {
+  if (!action || typeof action !== 'object') {
+    return { success: true, action };
+  }
+
+  const type = String(action.type || '').trim().toLowerCase();
+  if (!isClickLikeActionType(type) || !action.targetId) {
+    return { success: true, action };
+  }
+
+  const inspectService = runtimeOptions.inspectService || getInspectServiceSafe();
+  const fallbackPoint = toFinitePoint(action.x, action.y);
+
+  if (!inspectService || typeof inspectService.resolveTarget !== 'function') {
+    if (action.allowCoordinateFallback === true && fallbackPoint) {
+      return {
+        success: true,
+        action: { ...action, x: fallbackPoint.x, y: fallbackPoint.y },
+        resolvedTarget: {
+          targetId: action.targetId,
+          resolutionMethod: 'explicit-coordinates',
+          resolvedPoint: fallbackPoint,
+          resolvedBounds: null,
+          runtimeId: null,
+          clickPoint: null,
+          window: null,
+          regionConfidence: null,
+          observedAt: null,
+          freshnessMs: null,
+          stale: true,
+          coordinateFallback: true,
+          fallbackReason: 'TARGET_RESOLUTION_UNAVAILABLE'
+        }
+      };
+    }
+
+    return {
+      success: false,
+      code: 'TARGET_RESOLUTION_UNAVAILABLE',
+      error: `Inspect target resolution is unavailable for targetId "${action.targetId}".`
+    };
+  }
+
+  const resolution = await Promise.resolve(inspectService.resolveTarget(action.targetId, {
+    maxAgeMs: Number.isFinite(Number(action.targetMaxAgeMs)) ? Number(action.targetMaxAgeMs) : 3000,
+    allowStale: action.allowStaleTarget === true,
+    fallbackX: action.x,
+    fallbackY: action.y,
+    allowCoordinateFallback: action.allowCoordinateFallback === true
+  }));
+
+  if (!resolution || !resolution.success) {
+    return {
+      success: false,
+      code: resolution?.code || 'TARGET_RESOLUTION_FAILED',
+      error: resolution?.error || `Failed to resolve inspect target "${action.targetId}".`,
+      resolvedTarget: resolution?.resolvedTarget || null
+    };
+  }
+
+  const resolvedPoint = toFinitePoint(
+    resolution?.resolvedTarget?.resolvedPoint?.x,
+    resolution?.resolvedTarget?.resolvedPoint?.y
+  );
+
+  if (!resolvedPoint) {
+    return {
+      success: false,
+      code: 'TARGET_RESOLUTION_INVALID_POINT',
+      error: `Inspect target "${action.targetId}" resolved without a valid point.`,
+      resolvedTarget: resolution?.resolvedTarget || null
+    };
+  }
+
+  return {
+    success: true,
+    action: {
+      ...action,
+      x: resolvedPoint.x,
+      y: resolvedPoint.y
+    },
+    resolvedTarget: resolution.resolvedTarget || null
+  };
+}
+
 function inferVisibleRevisionRecencySignal(minutes) {
   if (!Number.isFinite(minutes)) return 'unknown-visible-recency';
   if (minutes <= 60) return 'recent-churn-visible';
@@ -2785,7 +2959,7 @@ if (-not $procs) {
  * @param {Object} action - Action object from AI
  * @returns {Object} Result of the action
  */
-async function executeAction(action) {
+async function executeAction(action, runtimeOptions = {}) {
   // Normalize common schema variants from different models.
   // This keeps execution resilient when the model uses alternate action names.
   const normalizeAction = (a) => {
@@ -2835,7 +3009,12 @@ async function executeAction(action) {
   console.log(`[AUTOMATION] Executing action:`, JSON.stringify(action));
   
   const startTime = Date.now();
+  let effectiveAction = action;
+  let resolvedTarget = null;
   let result = { success: true, action: action.type };
+  const clickImpl = typeof runtimeOptions.click === 'function' ? runtimeOptions.click : click;
+  const doubleClickImpl = typeof runtimeOptions.doubleClick === 'function' ? runtimeOptions.doubleClick : doubleClick;
+  const moveMouseImpl = typeof runtimeOptions.moveMouse === 'function' ? runtimeOptions.moveMouse : moveMouse;
 
   const withInferredProcessName = (a) => {
     if (!a || typeof a !== 'object') return a;
@@ -2864,67 +3043,86 @@ async function executeAction(action) {
   };
   
   try {
-    switch (action.type) {
+    const targetResolution = await resolveActionTarget(action, runtimeOptions);
+    if (!targetResolution.success) {
+      const error = new Error(targetResolution.error || `Failed to resolve target for ${action.type}`);
+      error.code = targetResolution.code || 'TARGET_RESOLUTION_FAILED';
+      error.resolvedTarget = targetResolution.resolvedTarget || null;
+      throw error;
+    }
+
+    effectiveAction = targetResolution.action || action;
+    resolvedTarget = targetResolution.resolvedTarget || null;
+
+    switch (effectiveAction.type) {
       case ACTION_TYPES.CLICK:
-        await click(action.x, action.y, action.button || 'left');
-        result.message = `Clicked at (${action.x}, ${action.y})`;
+        await clickImpl(effectiveAction.x, effectiveAction.y, effectiveAction.button || 'left');
+        result.message = resolvedTarget
+          ? `Clicked target ${resolvedTarget.targetId} at (${effectiveAction.x}, ${effectiveAction.y})`
+          : `Clicked at (${effectiveAction.x}, ${effectiveAction.y})`;
         break;
         
       case ACTION_TYPES.DOUBLE_CLICK:
-        await doubleClick(action.x, action.y);
-        result.message = `Double-clicked at (${action.x}, ${action.y})`;
+        await doubleClickImpl(effectiveAction.x, effectiveAction.y);
+        result.message = resolvedTarget
+          ? `Double-clicked target ${resolvedTarget.targetId} at (${effectiveAction.x}, ${effectiveAction.y})`
+          : `Double-clicked at (${effectiveAction.x}, ${effectiveAction.y})`;
         break;
         
       case ACTION_TYPES.RIGHT_CLICK:
-        await click(action.x, action.y, 'right');
-        result.message = `Right-clicked at (${action.x}, ${action.y})`;
+        await clickImpl(effectiveAction.x, effectiveAction.y, 'right');
+        result.message = resolvedTarget
+          ? `Right-clicked target ${resolvedTarget.targetId} at (${effectiveAction.x}, ${effectiveAction.y})`
+          : `Right-clicked at (${effectiveAction.x}, ${effectiveAction.y})`;
         break;
         
       case ACTION_TYPES.MOVE_MOUSE:
-        await moveMouse(action.x, action.y);
-        result.message = `Mouse moved to (${action.x}, ${action.y})`;
+        await moveMouseImpl(effectiveAction.x, effectiveAction.y);
+        result.message = resolvedTarget
+          ? `Mouse moved to target ${resolvedTarget.targetId} at (${effectiveAction.x}, ${effectiveAction.y})`
+          : `Mouse moved to (${effectiveAction.x}, ${effectiveAction.y})`;
         break;
         
       case ACTION_TYPES.TYPE:
-        await typeText(action.text);
-        result.message = `Typed "${action.text.substring(0, 30)}${action.text.length > 30 ? '...' : ''}"`;
+        await typeText(effectiveAction.text);
+        result.message = `Typed "${effectiveAction.text.substring(0, 30)}${effectiveAction.text.length > 30 ? '...' : ''}"`;
         break;
         
       case ACTION_TYPES.KEY:
-        await pressKey(action.key, action);
-        result.message = `Pressed ${action.key}`;
+        await pressKey(effectiveAction.key, effectiveAction);
+        result.message = `Pressed ${effectiveAction.key}`;
         break;
         
       case ACTION_TYPES.SCROLL:
-        await scroll(action.direction, action.amount || 3);
-        result.message = `Scrolled ${action.direction}`;
+        await scroll(effectiveAction.direction, effectiveAction.amount || 3);
+        result.message = `Scrolled ${effectiveAction.direction}`;
         break;
         
       case ACTION_TYPES.WAIT:
-        await sleep(action.ms || 1000);
-        result.message = `Waited ${action.ms || 1000}ms`;
+        await sleep(effectiveAction.ms || 1000);
+        result.message = `Waited ${effectiveAction.ms || 1000}ms`;
         break;
         
       case ACTION_TYPES.DRAG:
-        await drag(action.fromX, action.fromY, action.toX, action.toY);
-        result.message = `Dragged from (${action.fromX}, ${action.fromY}) to (${action.toX}, ${action.toY})`;
+        await drag(effectiveAction.fromX, effectiveAction.fromY, effectiveAction.toX, effectiveAction.toY);
+        result.message = `Dragged from (${effectiveAction.fromX}, ${effectiveAction.fromY}) to (${effectiveAction.toX}, ${effectiveAction.toY})`;
         break;
         
       case ACTION_TYPES.SCREENSHOT:
         // Scoped screenshot — caller resolves capture based on scope
         result.needsScreenshot = true;
-        result.scope = action.scope || 'screen';         // screen | region | window | element
-        result.region = action.region || null;            // {x, y, width, height} for scope=region
-        result.hwnd = action.hwnd || null;                // window handle for scope=window
-        result.elementCriteria = action.elementCriteria || null; // {text, controlType} for scope=element
-        result.targetRegionId = action.targetRegionId || null;
+        result.scope = effectiveAction.scope || 'screen';         // screen | region | window | element
+        result.region = effectiveAction.region || null;            // {x, y, width, height} for scope=region
+        result.hwnd = effectiveAction.hwnd || null;                // window handle for scope=window
+        result.elementCriteria = effectiveAction.elementCriteria || null; // {text, controlType} for scope=element
+        result.targetRegionId = effectiveAction.targetRegionId || null;
         result.message = `Screenshot requested (scope: ${result.scope})`;
         break;
       
       // Semantic element-based actions (MORE RELIABLE than coordinates)
       case ACTION_TYPES.CLICK_ELEMENT: {
-        const criteria = action.criteria && typeof action.criteria === 'object'
-          ? action.criteria
+        const criteria = effectiveAction.criteria && typeof effectiveAction.criteria === 'object'
+          ? effectiveAction.criteria
           : null;
         if (criteria && String(criteria.windowTitle || '').trim()) {
           const ui = require('./ui-automation');
@@ -2937,14 +3135,14 @@ async function executeAction(action) {
             method: clickResult?.success ? 'uia-click' : (clickResult?.method || 'uia-click')
           };
           result.message = clickResult.success
-            ? `Clicked "${clickResult?.element?.name || criteria.text || action.text || 'element'}" via window-scoped UI Automation`
+            ? `Clicked "${clickResult?.element?.name || criteria.text || effectiveAction.text || 'element'}" via window-scoped UI Automation`
             : `Click element failed: ${clickResult.error || 'Element not found'}`;
         } else {
-          const clickResult = await clickElementByText(action.text, {
-            controlType: action.controlType || '',
-            exact: action.exact || false,
-            windowHandle: action.windowHandle || action.hwnd || 0,
-            foregroundOnly: !!action.foregroundOnly
+          const clickResult = await clickElementByText(effectiveAction.text, {
+            controlType: effectiveAction.controlType || '',
+            exact: effectiveAction.exact || false,
+            windowHandle: effectiveAction.windowHandle || effectiveAction.hwnd || 0,
+            foregroundOnly: !!effectiveAction.foregroundOnly
           });
           result = { ...result, ...clickResult };
         }
@@ -2952,8 +3150,8 @@ async function executeAction(action) {
       }
 
       case ACTION_TYPES.FIND_ELEMENT: {
-        const criteria = action.criteria && typeof action.criteria === 'object'
-          ? action.criteria
+        const criteria = effectiveAction.criteria && typeof effectiveAction.criteria === 'object'
+          ? effectiveAction.criteria
           : null;
         if (criteria && String(criteria.windowTitle || '').trim()) {
           const ui = require('./ui-automation');
@@ -2967,14 +3165,14 @@ async function executeAction(action) {
             error: findResult?.error
           };
           result.message = findResult?.success
-            ? `Found "${findResult?.element?.name || criteria.text || action.text || 'element'}" via window-scoped UI Automation`
+            ? `Found "${findResult?.element?.name || criteria.text || effectiveAction.text || 'element'}" via window-scoped UI Automation`
             : `Find element failed: ${findResult?.error || 'Element not found'}`;
         } else {
-          const findResult = await findElementByText(action.text, {
-            controlType: action.controlType || '',
-            exact: action.exact || false,
-            windowHandle: action.windowHandle || action.hwnd || 0,
-            foregroundOnly: !!action.foregroundOnly
+          const findResult = await findElementByText(effectiveAction.text, {
+            controlType: effectiveAction.controlType || '',
+            exact: effectiveAction.exact || false,
+            windowHandle: effectiveAction.windowHandle || effectiveAction.hwnd || 0,
+            foregroundOnly: !!effectiveAction.foregroundOnly
           });
           result = { ...result, ...findResult };
         }
@@ -2982,16 +3180,16 @@ async function executeAction(action) {
       }
       
       case ACTION_TYPES.RUN_COMMAND:
-        const cmdResult = await executeCommand(action.command, {
-          cwd: action.cwd,
-          shell: action.shell || 'powershell',
-          timeout: action.timeout || 30000
+        const cmdResult = await executeCommand(effectiveAction.command, {
+          cwd: effectiveAction.cwd,
+          shell: effectiveAction.shell || 'powershell',
+          timeout: effectiveAction.timeout || 30000
         });
         result = { 
           ...result, 
           ...cmdResult,
-          command: action.command,
-          cwd: action.cwd || os.homedir()
+          command: effectiveAction.command,
+          cwd: effectiveAction.cwd || os.homedir()
         };
         result.message = cmdResult.success 
           ? `Command completed (exit ${cmdResult.exitCode})`
@@ -3002,24 +3200,24 @@ async function executeAction(action) {
       case ACTION_TYPES.SEMANTIC_SEARCH_REPO:
       case ACTION_TYPES.PGREP_PROCESS: {
         const repoSearchActions = require('./repo-search-actions');
-        const searchResult = await repoSearchActions.executeRepoSearchAction(action);
+        const searchResult = await repoSearchActions.executeRepoSearchAction(effectiveAction);
         result = {
           ...result,
           ...searchResult
         };
         if (searchResult.success) {
-          const noun = action.type === ACTION_TYPES.PGREP_PROCESS ? 'process match' : 'repo match';
+          const noun = effectiveAction.type === ACTION_TYPES.PGREP_PROCESS ? 'process match' : 'repo match';
           const count = Number(searchResult.count || 0);
           result.message = `${count} ${noun}${count === 1 ? '' : 'es'} found`;
         } else {
-          result.message = searchResult.error || `${action.type} failed`;
+          result.message = searchResult.error || `${effectiveAction.type} failed`;
         }
         break;
       }
 
       case ACTION_TYPES.FOCUS_WINDOW:
       case ACTION_TYPES.BRING_WINDOW_TO_FRONT: {
-        const enriched = withInferredProcessName(action);
+        const enriched = withInferredProcessName(effectiveAction);
         const hwnd = await resolveWindowHandle(enriched);
         if (!hwnd) {
           const hint = enriched.title || enriched.processName || 'unknown';
@@ -3053,7 +3251,7 @@ async function executeAction(action) {
       }
 
       case ACTION_TYPES.SEND_WINDOW_TO_BACK: {
-        const hwnd = await resolveWindowHandle(withInferredProcessName(action));
+        const hwnd = await resolveWindowHandle(withInferredProcessName(effectiveAction));
         if (!hwnd) {
           throw new Error('Window not found. Provide hwnd/windowHandle or title/processName/className.');
         }
@@ -3063,7 +3261,7 @@ async function executeAction(action) {
       }
 
       case ACTION_TYPES.MINIMIZE_WINDOW: {
-        const hwnd = await resolveWindowHandle(withInferredProcessName(action));
+        const hwnd = await resolveWindowHandle(withInferredProcessName(effectiveAction));
         if (!hwnd) {
           throw new Error('Window not found. Provide hwnd/windowHandle or title/processName/className.');
         }
@@ -3073,7 +3271,7 @@ async function executeAction(action) {
       }
 
       case ACTION_TYPES.RESTORE_WINDOW: {
-        const hwnd = await resolveWindowHandle(withInferredProcessName(action));
+        const hwnd = await resolveWindowHandle(withInferredProcessName(effectiveAction));
         if (!hwnd) {
           throw new Error('Window not found. Provide hwnd/windowHandle or title/processName/className.');
         }
@@ -3086,8 +3284,8 @@ async function executeAction(action) {
       case ACTION_TYPES.SET_VALUE: {
         const uia = require('./ui-automation');
         const svResult = await uia.setElementValue(
-          action.criteria || { text: action.text, automationId: action.automationId, controlType: action.controlType },
-          action.value
+          effectiveAction.criteria || { text: effectiveAction.text, automationId: effectiveAction.automationId, controlType: effectiveAction.controlType },
+          effectiveAction.value
         );
         result = { ...result, ...svResult };
         result.message = svResult.success
@@ -3099,12 +3297,12 @@ async function executeAction(action) {
       case ACTION_TYPES.SCROLL_ELEMENT: {
         const uia = require('./ui-automation');
         const seResult = await uia.scrollElement(
-          action.criteria || { text: action.text, automationId: action.automationId, controlType: action.controlType },
-          { direction: action.direction || 'down', amount: action.amount ?? -1 }
+          effectiveAction.criteria || { text: effectiveAction.text, automationId: effectiveAction.automationId, controlType: effectiveAction.controlType },
+          { direction: effectiveAction.direction || 'down', amount: effectiveAction.amount ?? -1 }
         );
         result = { ...result, ...seResult };
         result.message = seResult.success
-          ? `Scrolled ${action.direction || 'down'} via ${seResult.method}`
+          ? `Scrolled ${effectiveAction.direction || 'down'} via ${seResult.method}`
           : `Scroll failed: ${seResult.error}`;
         break;
       }
@@ -3112,7 +3310,7 @@ async function executeAction(action) {
       case ACTION_TYPES.EXPAND_ELEMENT: {
         const uia = require('./ui-automation');
         const exResult = await uia.expandElement(
-          action.criteria || { text: action.text, automationId: action.automationId, controlType: action.controlType }
+          effectiveAction.criteria || { text: effectiveAction.text, automationId: effectiveAction.automationId, controlType: effectiveAction.controlType }
         );
         result = { ...result, ...exResult };
         result.message = exResult.success
@@ -3124,7 +3322,7 @@ async function executeAction(action) {
       case ACTION_TYPES.COLLAPSE_ELEMENT: {
         const uia = require('./ui-automation');
         const clResult = await uia.collapseElement(
-          action.criteria || { text: action.text, automationId: action.automationId, controlType: action.controlType }
+          effectiveAction.criteria || { text: effectiveAction.text, automationId: effectiveAction.automationId, controlType: effectiveAction.controlType }
         );
         result = { ...result, ...clResult };
         result.message = clResult.success
@@ -3136,40 +3334,40 @@ async function executeAction(action) {
       case ACTION_TYPES.GET_TEXT: {
         const uia = require('./ui-automation');
         let gtResult = await uia.getElementText(
-          action.criteria || { text: action.text, automationId: action.automationId, controlType: action.controlType }
+          effectiveAction.criteria || { text: effectiveAction.text, automationId: effectiveAction.automationId, controlType: effectiveAction.controlType }
         );
         if (!gtResult?.success) {
-          const pineFallbackResult = await getPineEditorTextFallback(action);
+          const pineFallbackResult = await getPineEditorTextFallback(effectiveAction);
           if (pineFallbackResult?.success) {
             gtResult = pineFallbackResult;
           } else {
-            const pineWatcherFallbackResult = getPineEditorWatcherFallback(action);
+            const pineWatcherFallbackResult = getPineEditorWatcherFallback(effectiveAction);
             if (pineWatcherFallbackResult?.success) {
               gtResult = pineWatcherFallbackResult;
             }
           }
         }
         result = { ...result, ...gtResult };
-        const pineTargetText = String(action?.text || action?.criteria?.text || '');
+        const pineTargetText = String(effectiveAction?.text || effectiveAction?.criteria?.text || '');
         if (gtResult.success
-          && action?.pineEvidenceMode === 'provenance-summary'
+          && effectiveAction?.pineEvidenceMode === 'provenance-summary'
           && /pine version history/i.test(pineTargetText)) {
-          result.pineStructuredSummary = buildPineVersionHistoryStructuredSummary(gtResult.text, action.pineSummaryFields);
+          result.pineStructuredSummary = buildPineVersionHistoryStructuredSummary(gtResult.text, effectiveAction.pineSummaryFields);
         } else if (gtResult.success && /pine logs/i.test(pineTargetText)) {
           result.pineStructuredSummary = buildPineLogsStructuredSummary(gtResult.text);
         } else if (gtResult.success && /pine profiler/i.test(pineTargetText)) {
           result.pineStructuredSummary = buildPineProfilerStructuredSummary(gtResult.text);
         } else if (gtResult.success && /pine editor/i.test(pineTargetText)) {
-          if (action?.pineEvidenceMode === 'safe-authoring-inspect') {
+          if (effectiveAction?.pineEvidenceMode === 'safe-authoring-inspect') {
             result.pineStructuredSummary = buildPineEditorSafeAuthoringSummary(gtResult.text);
           } else if (
-            action?.pineEvidenceMode === 'compile-result'
-            || action?.pineEvidenceMode === 'diagnostics'
-            || action?.pineEvidenceMode === 'line-budget'
-            || action?.pineEvidenceMode === 'save-status'
-            || action?.pineEvidenceMode === 'generic-status'
+            effectiveAction?.pineEvidenceMode === 'compile-result'
+            || effectiveAction?.pineEvidenceMode === 'diagnostics'
+            || effectiveAction?.pineEvidenceMode === 'line-budget'
+            || effectiveAction?.pineEvidenceMode === 'save-status'
+            || effectiveAction?.pineEvidenceMode === 'generic-status'
           ) {
-            result.pineStructuredSummary = buildPineEditorDiagnosticsStructuredSummary(gtResult.text, action.pineEvidenceMode);
+            result.pineStructuredSummary = buildPineEditorDiagnosticsStructuredSummary(gtResult.text, effectiveAction.pineEvidenceMode);
           }
         }
         result.message = gtResult.success
@@ -3182,24 +3380,24 @@ async function executeAction(action) {
         const toolRegistry = require('./tools/tool-registry');
         const sandbox = require('./tools/sandbox');
         const { runPreToolUseHook, runPostToolUseHook } = require('./tools/hook-runner');
-        const lookup = toolRegistry.lookupTool(action.toolName);
+        const lookup = toolRegistry.lookupTool(effectiveAction.toolName);
         if (!lookup) {
-          throw new Error(`Dynamic tool not found: ${action.toolName}`);
+          throw new Error(`Dynamic tool not found: ${effectiveAction.toolName}`);
         }
         if (!lookup.entry.approved) {
-          throw new Error(`Dynamic tool '${action.toolName}' has not been approved. Use approveTool() to approve it before execution.`);
+          throw new Error(`Dynamic tool '${effectiveAction.toolName}' has not been approved. Use approveTool() to approve it before execution.`);
         }
         // PreToolUse hook gate — security-check.ps1 can deny dynamic tools
-        const hookResult = runPreToolUseHook(`dynamic_${action.toolName}`, action.args || {});
+        const hookResult = runPreToolUseHook(`dynamic_${effectiveAction.toolName}`, effectiveAction.args || {});
         if (hookResult.denied) {
-          throw new Error(`Dynamic tool '${action.toolName}' denied by PreToolUse hook: ${hookResult.reason}`);
+          throw new Error(`Dynamic tool '${effectiveAction.toolName}' denied by PreToolUse hook: ${hookResult.reason}`);
         }
-        console.log(`[AUTOMATION] Executing dynamic tool: ${action.toolName}`);
-        const execResult = await sandbox.executeDynamicTool(lookup.absolutePath, action.args || {});
-        toolRegistry.recordInvocation(action.toolName);
+        console.log(`[AUTOMATION] Executing dynamic tool: ${effectiveAction.toolName}`);
+        const execResult = await sandbox.executeDynamicTool(lookup.absolutePath, effectiveAction.args || {});
+        toolRegistry.recordInvocation(effectiveAction.toolName);
         // PostToolUse hook — audit-log.ps1 for execution audit trail
         try {
-          runPostToolUseHook(`dynamic_${action.toolName}`, action.args || {}, {
+          runPostToolUseHook(`dynamic_${effectiveAction.toolName}`, effectiveAction.args || {}, {
             success: execResult.success,
             result: execResult.result,
             error: execResult.error
@@ -3208,19 +3406,36 @@ async function executeAction(action) {
         if (!execResult.success) {
           throw new Error(`Dynamic tool failed: ${execResult.error}`);
         }
-        result.message = `Dynamic tool '${action.toolName}' returned: ${JSON.stringify(execResult.result)}`;
+        result.message = `Dynamic tool '${effectiveAction.toolName}' returned: ${JSON.stringify(execResult.result)}`;
         result.toolResult = execResult.result;
         break;
       }
         
       default:
-        throw new Error(`Unknown action type: ${action.type}`);
+        throw new Error(`Unknown action type: ${effectiveAction.type}`);
     }
   } catch (error) {
     result.success = false;
     result.error = error.message;
+    result.errorCode = error.code || null;
+    if (error.resolvedTarget) {
+      resolvedTarget = error.resolvedTarget;
+    }
     console.error(`[AUTOMATION] Action failed:`, error);
   }
+
+  if (resolvedTarget) {
+    result.resolvedTarget = resolvedTarget;
+  }
+
+  result.proof = buildExecutionProof({
+    originalAction: action,
+    effectiveAction,
+    resolvedTarget,
+    success: result.success,
+    errorMessage: result.error || null,
+    errorCode: result.errorCode || null
+  });
   
   result.duration = Date.now() - startTime;
 
@@ -3230,8 +3445,13 @@ async function executeAction(action) {
       task: result.message || action.type,
       phase: 'execution',
       outcome: result.success ? 'success' : 'failure',
-      actions: [{ type: action.type, ...(action.text ? { text: action.text } : {}), ...(action.key ? { key: action.key } : {}) }],
-      context: { actionType: action.type, duration: result.duration }
+      actions: [{ type: action.type, ...(action.text ? { text: action.text } : {}), ...(action.key ? { key: action.key } : {}), ...(action.targetId ? { targetId: action.targetId } : {}) }],
+      context: {
+        actionType: action.type,
+        duration: result.duration,
+        proofLevel: result.proof?.level ?? 0,
+        proofStatus: result.proof?.status || null
+      }
     });
   } catch (_) { /* telemetry is non-fatal */ }
 
@@ -3517,6 +3737,8 @@ module.exports = {
   ACTION_TYPES,
   executeAction,
   executeActionSequence,
+  resolveActionTarget,
+  buildExecutionProof,
   parseAIActions,
   gridToPixels,
   moveMouse,

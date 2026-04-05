@@ -306,6 +306,16 @@ function createMessageBuilder(dependencies) {
     } catch {}
 
     try {
+      const inspect = getInspectService();
+      const inspectInstructions = inspect && typeof inspect.generateAIInstructions === 'function'
+        ? inspect.generateAIInstructions()
+        : '';
+      if (typeof inspectInstructions === 'string' && inspectInstructions.trim()) {
+        messages.push({ role: 'system', content: inspectInstructions.trim() });
+      }
+    } catch {}
+
+    try {
       const state = getBrowserSessionState();
       if (state.lastUpdated) {
         const continuity = [
@@ -422,8 +432,12 @@ function createMessageBuilder(dependencies) {
         const inspectContext = inspect.generateAIContext();
         if (inspectContext.regions && inspectContext.regions.length > 0) {
           inspectContextText = `\n\n## Detected UI Regions (Inspect Mode)\n${inspectContext.regions.slice(0, 20).map((region, index) =>
-            `${index + 1}. **${region.label || 'Unknown'}** (${region.role}) at (${region.center.x}, ${region.center.y}) - confidence: ${Math.round(region.confidence * 100)}%`
-          ).join('\n')}\n\n**Note**: Use the coordinates provided above for precise targeting. If confidence is below 70%, verify with user before clicking.`;
+            `${index + 1}. id=${region.id} label="${region.label || 'Unknown'}" role=${region.role} center=(${region.center.x}, ${region.center.y}) confidence=${Math.round(region.confidence * 100)}%`
+          ).join('\n')}\n\n**Note**: Prefer targetId-based actions when a region id is available. Coordinates are advisory when targetId is present.`;
+
+          if (inspectContext.selectedRegionId || inspectContext.selectedRegion?.id) {
+            inspectContextText += `\nselectedRegionId=${inspectContext.selectedRegionId || inspectContext.selectedRegion?.id}`;
+          }
 
           if (inspectContext.windowContext) {
             inspectContextText += `\n\n## Active Window\n- App: ${inspectContext.windowContext.appName || 'Unknown'}\n- Title: ${inspectContext.windowContext.windowTitle || 'Unknown'}\n- Scale Factor: ${inspectContext.windowContext.scaleFactor || 1}`;

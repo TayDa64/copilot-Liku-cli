@@ -29,13 +29,101 @@ function filterFixtures(fixtures, filters = {}) {
   });
 }
 
+function findActionByIndex(actions, actionIndex) {
+  if (!Array.isArray(actions)) return null;
+  return actions.find((action) => Number(action?.index) === Number(actionIndex))
+    || actions[Number(actionIndex)]
+    || null;
+}
+
+function evaluateProofExpectations(fixture) {
+  const expectations = Array.isArray(fixture?.suite?.proofExpectations)
+    ? fixture.suite.proofExpectations
+    : [];
+  const actions = Array.isArray(fixture?.actions) ? fixture.actions : [];
+
+  const results = expectations.map((expectation, index) => {
+    const actionIndex = Number.isFinite(Number(expectation?.actionIndex))
+      ? Number(expectation.actionIndex)
+      : index;
+    const action = findActionByIndex(actions, actionIndex);
+    const proof = action?.proof || null;
+    const failures = [];
+
+    if (!action) {
+      failures.push(`missing action at index ${actionIndex}`);
+    }
+
+    if (!proof) {
+      failures.push(`action ${actionIndex} is missing proof`);
+    }
+
+    if (proof) {
+      const proofLevel = Number.isFinite(Number(proof.level)) ? Number(proof.level) : 0;
+      if (Number.isFinite(Number(expectation?.minProofLevel)) && proofLevel < Number(expectation.minProofLevel)) {
+        failures.push(`expected proof level >= ${Number(expectation.minProofLevel)}, got ${proofLevel}`);
+      }
+
+      if (expectation?.status && String(proof.status || '') !== String(expectation.status)) {
+        failures.push(`expected proof status ${expectation.status}, got ${proof.status || 'null'}`);
+      }
+
+      if (expectation?.actionType && String(action?.type || proof.actionType || '') !== String(expectation.actionType)) {
+        failures.push(`expected action type ${expectation.actionType}, got ${action?.type || proof.actionType || 'null'}`);
+      }
+
+      const classification = proof?.observation?.classification
+        || action?.observationCheckpoint?.classification
+        || null;
+      if (expectation?.classification && String(classification || '') !== String(expectation.classification)) {
+        failures.push(`expected observation classification ${expectation.classification}, got ${classification || 'null'}`);
+      }
+
+      const targetId = action?.targetId || action?.resolvedTarget?.targetId || null;
+      if (expectation?.targetId && String(targetId || '') !== String(expectation.targetId)) {
+        failures.push(`expected targetId ${expectation.targetId}, got ${targetId || 'null'}`);
+      }
+
+      if (expectation?.requiredCheckKind) {
+        const matchedCheck = Array.isArray(proof.checks)
+          ? proof.checks.find((check) => (
+            String(check?.kind || '') === String(expectation.requiredCheckKind)
+            && (!expectation.requiredCheckStatus || String(check?.status || '') === String(expectation.requiredCheckStatus))
+          ))
+          : null;
+        if (!matchedCheck) {
+          failures.push(
+            expectation.requiredCheckStatus
+              ? `expected proof check ${expectation.requiredCheckKind} with status ${expectation.requiredCheckStatus}`
+              : `expected proof check ${expectation.requiredCheckKind}`
+          );
+        }
+      }
+    }
+
+    return {
+      name: expectation?.name || `proof expectation ${index + 1}`,
+      actionIndex,
+      passed: failures.length === 0,
+      failures
+    };
+  });
+
+  return {
+    passed: results.every((result) => result.passed),
+    results
+  };
+}
+
 function evaluateFixtureCases(fixtures) {
   return fixtures.map((fixture) => {
     const evaluation = evaluateTranscript(fixture.transcript, fixture.suite);
+    const proofEvaluation = evaluateProofExpectations(fixture);
     return {
       fixture,
       evaluation,
-      passed: evaluation.passed
+      proofEvaluation,
+      passed: evaluation.passed && proofEvaluation.passed
     };
   });
 }
@@ -55,6 +143,12 @@ function printFixtureResults(results) {
       }
       if (detail.countFailures.length > 0) {
         console.log(`    Count: ${detail.countFailures.join('; ')}`);
+      }
+    }
+    for (const detail of result.proofEvaluation.results.filter((entry) => !entry.passed)) {
+      console.log(`  - ${detail.name}`);
+      if (detail.failures.length > 0) {
+        console.log(`    Proof: ${detail.failures.join('; ')}`);
       }
     }
   }
@@ -91,6 +185,11 @@ function main() {
         missing: entry.missing.map((pattern) => pattern.toString()),
         forbidden: entry.forbidden.map((pattern) => pattern.toString()),
         countFailures: entry.countFailures
+      })),
+      proofFailures: result.proofEvaluation.results.filter((entry) => !entry.passed).map((entry) => ({
+        name: entry.name,
+        actionIndex: entry.actionIndex,
+        failures: entry.failures
       }))
     })), null, 2));
     return;
@@ -115,6 +214,7 @@ if (require.main === module) {
 
 module.exports = {
   evaluateFixtureCases,
+  evaluateProofExpectations,
   filterFixtures,
   printFixtureResults
 };

@@ -14,8 +14,12 @@ const {
 } = require(path.join(__dirname, 'transcript-regression-fixtures.js'));
 const {
   evaluateFixtureCases,
+  evaluateProofExpectations,
   filterFixtures
 } = require(path.join(__dirname, 'run-transcript-regressions.js'));
+const {
+  buildRuntimeTraceFixtureEntry
+} = require(path.join(__dirname, 'extract-runtime-trace-regression.js'));
 
 function test(name, fn) {
   try {
@@ -96,4 +100,88 @@ test('fixture runner evaluates checked-in transcript fixtures', () => {
   const results = evaluateFixtureCases(selected);
   assert.strictEqual(results.length, 1);
   assert.strictEqual(results[0].passed, true);
+});
+
+test('runtime trace fixtures preserve proof expectations and pass the combined runner', () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'liku-runtime-proof-fixtures-'));
+  try {
+    const entries = [
+      {
+        ts: '2026-04-05T22:41:10.000Z',
+        session: 'runtime-proof-session',
+        event: 'runtime:session:start',
+        metadata: { mode: 'execute' }
+      },
+      {
+        ts: '2026-04-05T22:41:10.050Z',
+        session: 'runtime-proof-session',
+        event: 'action:planned',
+        actionIndex: 0,
+        action: { type: 'click', targetId: 'region-1', reason: 'Open Pine Editor' }
+      },
+      {
+        ts: '2026-04-05T22:41:10.100Z',
+        session: 'runtime-proof-session',
+        event: 'action:complete',
+        actionIndex: 0,
+        action: { type: 'click', targetId: 'region-1', reason: 'Open Pine Editor' },
+        success: true,
+        resolvedTarget: { targetId: 'region-1', resolutionMethod: 'clickPoint' }
+      },
+      {
+        ts: '2026-04-05T22:41:10.120Z',
+        session: 'runtime-proof-session',
+        event: 'action:proof',
+        actionIndex: 0,
+        action: { type: 'click', targetId: 'region-1', reason: 'Open Pine Editor' },
+        proof: {
+          proofId: 'proof-1',
+          actionType: 'click',
+          level: 2,
+          levelName: 'effect-verified',
+          status: 'verified',
+          checks: [
+            { kind: 'target-resolution', status: 'pass', targetId: 'region-1', method: 'clickPoint' },
+            { kind: 'observation-checkpoint', status: 'pass', classification: 'panel-open' }
+          ],
+          observation: {
+            classification: 'panel-open',
+            verified: true,
+            reason: 'Pine Editor visible'
+          }
+        },
+        observationCheckpoint: {
+          classification: 'panel-open',
+          verified: true,
+          reason: 'Pine Editor visible'
+        }
+      }
+    ];
+
+    const entry = buildRuntimeTraceFixtureEntry(entries, {
+      fixtureName: 'runtime-proof-panel-open',
+      tracePath: 'C:/tmp/runtime-proof-session.jsonl'
+    });
+
+    assert.strictEqual(entry.traceMeta.sessionId, 'runtime-proof-session');
+    assert.strictEqual(entry.actions.length, 1);
+    assert.strictEqual(entry.proofExpectations.length, 1);
+    assert.strictEqual(entry.proofExpectations[0].minProofLevel, 2);
+
+    const filePath = path.join(tempDir, 'bundle.json');
+    upsertFixtureBundleEntry(filePath, 'runtime-proof-panel-open', entry);
+
+    const fixtures = loadTranscriptFixtures(tempDir);
+    assert.strictEqual(fixtures.length, 1);
+    assert.strictEqual(fixtures[0].suite.proofExpectations.length, 1);
+
+    const proofEvaluation = evaluateProofExpectations(fixtures[0]);
+    assert.strictEqual(proofEvaluation.passed, true);
+
+    const results = evaluateFixtureCases(fixtures);
+    assert.strictEqual(results.length, 1);
+    assert.strictEqual(results[0].passed, true);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
 });

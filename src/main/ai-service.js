@@ -151,6 +151,7 @@ const {
   createVisualContextStore
 } = require('./ai-service/visual-context');
 const { createMessageBuilder } = require('./ai-service/message-builder');
+const { createRuntimeTraceLog } = require('./traces/runtime-trace-log');
 const { buildCapabilityPolicySnapshot } = require('./capability-policy');
 const { SYSTEM_PROMPT } = require('./ai-service/system-prompt');
 const skillRouter = require('./memory/skill-router');
@@ -4831,6 +4832,302 @@ function buildWindowProfileFromForeground(foreground, fallbackProfile = null) {
   };
 }
 
+function buildProofId(prefix = 'proof') {
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function getProofLevelName(level) {
+  switch (Number(level) || 0) {
+    case 3:
+      return 'domain-verified';
+    case 2:
+      return 'effect-verified';
+    case 1:
+      return 'target-grounded';
+    default:
+      return 'executed';
+  }
+}
+
+function cloneProofChecks(checks) {
+  if (!Array.isArray(checks)) return [];
+  return checks
+    .filter((entry) => entry && typeof entry === 'object')
+    .map((entry) => ({ ...entry }));
+}
+
+function cloneProofTextList(values) {
+  if (!Array.isArray(values)) return [];
+  return values.map((value) => String(value || '').trim()).filter(Boolean);
+}
+
+function normalizeProofRecord(existingProof, result = {}) {
+  const proof = existingProof && typeof existingProof === 'object'
+    ? { ...existingProof }
+    : {};
+  const level = Number.isFinite(Number(proof.level)) ? Number(proof.level) : 0;
+  return {
+    ...proof,
+    proofId: String(proof.proofId || '').trim() || buildProofId('proof'),
+    actionType: String(proof.actionType || result.action || result.type || 'unknown'),
+    level,
+    levelName: String(proof.levelName || getProofLevelName(level)),
+    status: String(proof.status || (result.success ? 'bounded' : 'failed')).trim().toLowerCase() || (result.success ? 'bounded' : 'failed'),
+    claim: typeof proof.claim === 'string' && proof.claim.trim() ? proof.claim.trim() : null,
+    checks: cloneProofChecks(proof.checks),
+    limitations: cloneProofTextList(proof.limitations),
+    boundedClaims: cloneProofTextList(proof.boundedClaims),
+    error: typeof proof.error === 'string' && proof.error.trim()
+      ? proof.error.trim()
+      : (typeof result.error === 'string' && result.error.trim() ? result.error.trim() : null),
+    errorCode: typeof proof.errorCode === 'string' && proof.errorCode.trim()
+      ? proof.errorCode.trim()
+      : (typeof result.errorCode === 'string' && result.errorCode.trim() ? result.errorCode.trim() : null)
+  };
+}
+
+function pushUniqueProofText(list, value) {
+  const normalized = String(value || '').trim();
+  if (!normalized) return;
+  if (!list.includes(normalized)) {
+    list.push(normalized);
+  }
+}
+
+function appendProofCheck(proof, check) {
+  if (!check || typeof check !== 'object') return;
+  proof.checks.push(check);
+}
+
+function summarizeObservationCheckpointForProof(observationCheckpoint) {
+  if (!observationCheckpoint || typeof observationCheckpoint !== 'object') return null;
+  return {
+    classification: String(observationCheckpoint.classification || '').trim().toLowerCase() || null,
+    verified: observationCheckpoint.verified === true,
+    reason: observationCheckpoint.reason || observationCheckpoint.error || null,
+    matchReason: observationCheckpoint.matchReason || null,
+    popupHint: observationCheckpoint.popupHint || null,
+    observedChange: observationCheckpoint.observedChange === true,
+    freshObservation: observationCheckpoint.freshObservation === true,
+    keywordMatched: observationCheckpoint.keywordMatched === true,
+    titleHintMatched: observationCheckpoint.titleHintMatched === true,
+    windowKindMatched: observationCheckpoint.windowKindMatched === true,
+    watcherSurfaceMatched: observationCheckpoint.watcherSurfaceMatched === true,
+    watcherSurfaceAnchor: observationCheckpoint.watcherSurfaceAnchor || null,
+    editorActiveMatched: observationCheckpoint.editorActiveMatched === true,
+    tradingMode: observationCheckpoint.tradingMode || null,
+    recoveredBy: observationCheckpoint.recoveredBy || null,
+    foreground: observationCheckpoint.foreground?.success
+      ? {
+          hwnd: Number(observationCheckpoint.foreground.hwnd || 0) || 0,
+          title: observationCheckpoint.foreground.title || '',
+          processName: observationCheckpoint.foreground.processName || '',
+          windowKind: observationCheckpoint.foreground.windowKind || ''
+        }
+      : null
+  };
+}
+
+function mergeObservationCheckpointIntoProof(result, observationCheckpoint, context = {}) {
+  const proof = normalizeProofRecord(result?.proof, result);
+  const classification = String(observationCheckpoint?.classification || 'postcondition').trim().toLowerCase() || 'postcondition';
+  const observationSummary = summarizeObservationCheckpointForProof(observationCheckpoint);
+
+  appendProofCheck(proof, {
+    kind: 'observation-checkpoint',
+    status: observationCheckpoint?.verified ? 'pass' : 'fail',
+    classification,
+    matchReason: observationCheckpoint?.matchReason || null,
+    popupHint: observationCheckpoint?.popupHint || null,
+    observedChange: observationCheckpoint?.observedChange === true,
+    freshObservation: observationCheckpoint?.freshObservation === true,
+    keywordMatched: observationCheckpoint?.keywordMatched === true,
+    titleHintMatched: observationCheckpoint?.titleHintMatched === true,
+    windowKindMatched: observationCheckpoint?.windowKindMatched === true,
+    watcherSurfaceMatched: observationCheckpoint?.watcherSurfaceMatched === true,
+    editorActiveMatched: observationCheckpoint?.editorActiveMatched === true
+  });
+
+  if (observationCheckpoint?.foreground?.success) {
+    appendProofCheck(proof, {
+      kind: 'foreground-window',
+      status: observationCheckpoint?.verified ? 'pass' : 'fail',
+      expectedWindowHandle: Number(context.expectedWindowHandle || observationCheckpoint.expectedWindowHandle || 0) || null,
+      observedWindowHandle: Number(observationCheckpoint.foreground.hwnd || 0) || null,
+      observedTitle: observationCheckpoint.foreground.title || null,
+      observedProcessName: observationCheckpoint.foreground.processName || null,
+      observedWindowKind: observationCheckpoint.foreground.windowKind || null,
+      matchReason: observationCheckpoint.matchReason || null
+    });
+  }
+
+  if (observationCheckpoint?.verified) {
+    if ((Number(proof.level) || 0) < 2) {
+      proof.level = 2;
+      proof.levelName = getProofLevelName(2);
+    } else {
+      proof.levelName = getProofLevelName(proof.level);
+    }
+    if (proof.status !== 'failed') {
+      proof.status = 'verified';
+    }
+    proof.claim = proof.claim || (() => {
+      switch (classification) {
+        case 'editor-active':
+          return 'The expected editor surface was observed after execution.';
+        case 'dialog-open':
+        case 'input-surface-open':
+        case 'panel-open':
+          return 'The expected UI surface was observed after execution.';
+        case 'chart-state':
+          return 'The expected chart-facing state change was observed after execution.';
+        default:
+          return 'The expected postcondition was observed after execution.';
+      }
+    })();
+  } else {
+    proof.status = 'failed';
+    proof.error = observationCheckpoint?.error || proof.error || 'Observation checkpoint failed';
+    pushUniqueProofText(
+      proof.limitations,
+      observationCheckpoint?.error || 'Post-action verification did not confirm the expected surface change.'
+    );
+  }
+
+  proof.errorCode = proof.errorCode || (result?.errorCode || null);
+  proof.observation = observationSummary;
+  if (observationSummary?.tradingMode) {
+    proof.tradingMode = observationSummary.tradingMode;
+  }
+
+  result.proof = proof;
+  return proof;
+}
+
+function summarizeActionForTrace(action) {
+  if (!action || typeof action !== 'object') return null;
+  const summary = {
+    type: String(action.type || '').trim() || null,
+    reason: action.reason || null,
+    targetId: action.targetId || null,
+    key: action.key || null,
+    scope: action.scope || null,
+    title: action.title || action.windowTitle || null,
+    processName: action.processName || null,
+    verifyKind: action.verify?.kind || null,
+    verifyTarget: action.verify?.target || null
+  };
+
+  if (typeof action.text === 'string' && action.text.trim()) {
+    summary.text = action.text.slice(0, 160);
+  }
+
+  if (Number.isFinite(Number(action.x)) && Number.isFinite(Number(action.y))) {
+    summary.point = {
+      x: Math.round(Number(action.x)),
+      y: Math.round(Number(action.y))
+    };
+  }
+
+  return summary;
+}
+
+function summarizeResolvedTargetForTrace(resolvedTarget) {
+  if (!resolvedTarget || typeof resolvedTarget !== 'object') return null;
+  return {
+    targetId: resolvedTarget.targetId || null,
+    resolutionMethod: resolvedTarget.resolutionMethod || null,
+    resolvedPoint: resolvedTarget.resolvedPoint && typeof resolvedTarget.resolvedPoint === 'object'
+      ? {
+          x: Number.isFinite(Number(resolvedTarget.resolvedPoint.x)) ? Number(resolvedTarget.resolvedPoint.x) : null,
+          y: Number.isFinite(Number(resolvedTarget.resolvedPoint.y)) ? Number(resolvedTarget.resolvedPoint.y) : null
+        }
+      : null,
+    stale: resolvedTarget.stale === true,
+    coordinateFallback: resolvedTarget.coordinateFallback === true,
+    fallbackReason: resolvedTarget.fallbackReason || null,
+    window: resolvedTarget.window && typeof resolvedTarget.window === 'object'
+      ? {
+          appName: resolvedTarget.window.appName || null,
+          windowTitle: resolvedTarget.window.windowTitle || null,
+          pid: Number.isFinite(Number(resolvedTarget.window.pid)) ? Number(resolvedTarget.window.pid) : null
+        }
+      : null
+  };
+}
+
+function summarizeProofForTrace(proof) {
+  if (!proof || typeof proof !== 'object') return null;
+  return {
+    proofId: proof.proofId || null,
+    actionType: proof.actionType || null,
+    level: Number.isFinite(Number(proof.level)) ? Number(proof.level) : 0,
+    levelName: proof.levelName || getProofLevelName(Number(proof.level) || 0),
+    status: proof.status || null,
+    claim: proof.claim || null,
+    error: proof.error || null,
+    errorCode: proof.errorCode || null,
+    checks: Array.isArray(proof.checks)
+      ? proof.checks.slice(0, 8).map((check) => ({
+          kind: check.kind || null,
+          status: check.status || null,
+          classification: check.classification || null,
+          method: check.method || null,
+          targetId: check.targetId || null,
+          matchReason: check.matchReason || null
+        }))
+      : [],
+    limitations: cloneProofTextList(proof.limitations),
+    boundedClaims: cloneProofTextList(proof.boundedClaims),
+    observation: proof.observation || null,
+    tradingMode: proof.tradingMode || null
+  };
+}
+
+function buildRuntimeTraceLogForExecution(mode, actionPlan, options = {}) {
+  if (options.disableRuntimeTrace === true || process.env.LIKU_DISABLE_RUNTIME_TRACE === '1') {
+    return null;
+  }
+
+  if (options.runtimeTraceLog && typeof options.runtimeTraceLog.append === 'function') {
+    return options.runtimeTraceLog;
+  }
+
+  try {
+    return createRuntimeTraceLog({
+      metadata: {
+        mode,
+        thought: actionPlan?.thought || null,
+        verification: actionPlan?.verification || null,
+        userMessage: options.userMessage || null,
+        actionCount: Array.isArray(actionPlan?.actions) ? actionPlan.actions.length : 0,
+        pendingActionId: options.pendingActionId || null
+      }
+    });
+  } catch (error) {
+    console.warn('[AI-SERVICE] Runtime trace disabled after initialization failure:', error.message);
+    return null;
+  }
+}
+
+function appendRuntimeTraceEvent(traceLog, event, data = {}) {
+  if (!traceLog || typeof traceLog.append !== 'function') return;
+  try {
+    traceLog.append(event, data);
+  } catch (error) {
+    console.warn(`[AI-SERVICE] Runtime trace event "${event}" failed:`, error.message);
+  }
+}
+
+function closeRuntimeTraceLog(traceLog, summary = {}) {
+  if (!traceLog || typeof traceLog.close !== 'function') return;
+  try {
+    traceLog.close(summary);
+  } catch (error) {
+    console.warn('[AI-SERVICE] Runtime trace close failed:', error.message);
+  }
+}
+
 function isTradingViewWindowProfile(profile = null) {
   const haystack = [
     profile?.processName,
@@ -5282,6 +5579,15 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
   let focusRecoveryTarget = null;
   let postVerification = { applicable: false, verified: true, healed: false, attempts: 0 };
   const observationCheckpoints = [];
+  const runtimeTraceLog = buildRuntimeTraceLogForExecution('execute', actionData, options);
+
+  appendRuntimeTraceEvent(runtimeTraceLog, 'action:plan', {
+    thought: actionData.thought || null,
+    verification: actionData.verification || null,
+    actions: Array.isArray(actionData.actions)
+      ? actionData.actions.slice(0, 50).map(summarizeActionForTrace)
+      : []
+  });
 
   for (let i = 0; i < actionData.actions.length; i++) {
     const action = actionData.actions[i];
@@ -5521,6 +5827,12 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
 
     const effectiveAction = scopeActionToTargetWindow(action, lastTargetWindowHandle, lastTargetWindowProfile);
 
+    appendRuntimeTraceEvent(runtimeTraceLog, 'action:planned', {
+      actionIndex: i,
+      action: summarizeActionForTrace(action),
+      effectiveAction: summarizeActionForTrace(effectiveAction)
+    });
+
     const checkpointSpec = inferKeyObservationCheckpoint(effectiveAction, actionData, i, {
       userMessage,
       focusRecoveryTarget
@@ -5529,9 +5841,29 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
       ? await systemAutomation.getForegroundWindowInfo()
       : null;
 
+    appendRuntimeTraceEvent(runtimeTraceLog, 'action:start', {
+      actionIndex: i,
+      action: summarizeActionForTrace(effectiveAction),
+      checkpoint: checkpointSpec?.applicable
+        ? {
+            classification: checkpointSpec.classification,
+            requiresObservedChange: checkpointSpec.requiresObservedChange === true,
+            appName: checkpointSpec.appName || null
+          }
+        : null
+    });
+
     const result = await (actionExecutor ? actionExecutor(effectiveAction) : systemAutomation.executeAction(effectiveAction));
     result.reason = action.reason || '';
     result.safety = safety;
+
+    if (result.resolvedTarget) {
+      appendRuntimeTraceEvent(runtimeTraceLog, 'action:target-resolved', {
+        actionIndex: i,
+        action: summarizeActionForTrace(effectiveAction),
+        resolvedTarget: summarizeResolvedTargetForTrace(result.resolvedTarget)
+      });
+    }
 
     if (result.success && (action.type === 'focus_window' || action.type === 'bring_window_to_front')) {
       const classifiedFocus = classifyActionFocusTargetResult(action, result);
@@ -5574,6 +5906,9 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
           pineEditorSurfaceProbe: observationCheckpoint.pineEditorSurfaceProbe || null
         };
       }
+      mergeObservationCheckpointIntoProof(result, observationCheckpoint, {
+        expectedWindowHandle: lastTargetWindowHandle
+      });
       result.observationCheckpoint = observationCheckpoint;
       observationCheckpoints.push({
         ...observationCheckpoint,
@@ -5602,6 +5937,36 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
         result.success = false;
         result.error = observationCheckpoint.error;
       }
+    }
+
+    if (!result.proof || typeof result.proof !== 'object') {
+      result.proof = normalizeProofRecord(result.proof, result);
+    }
+
+    appendRuntimeTraceEvent(runtimeTraceLog, 'action:complete', {
+      actionIndex: i,
+      action: summarizeActionForTrace(effectiveAction),
+      success: result.success === true,
+      error: result.error || null,
+      durationMs: Number.isFinite(Number(result.duration)) ? Number(result.duration) : null,
+      resolvedTarget: summarizeResolvedTargetForTrace(result.resolvedTarget)
+    });
+
+    appendRuntimeTraceEvent(runtimeTraceLog, 'action:proof', {
+      actionIndex: i,
+      action: summarizeActionForTrace(effectiveAction),
+      proof: summarizeProofForTrace(result.proof),
+      observationCheckpoint: summarizeObservationCheckpointForProof(result.observationCheckpoint)
+    });
+
+    if (!result.success) {
+      appendRuntimeTraceEvent(runtimeTraceLog, 'action:error', {
+        actionIndex: i,
+        action: summarizeActionForTrace(effectiveAction),
+        error: result.error || null,
+        errorCode: result.errorCode || null,
+        proof: summarizeProofForTrace(result.proof)
+      });
     }
 
     if (
@@ -5963,6 +6328,16 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
     }
   }
 
+  closeRuntimeTraceLog(runtimeTraceLog, {
+    success,
+    error: error || null,
+    actionCount: Array.isArray(actionData.actions) ? actionData.actions.length : 0,
+    observationCheckpointCount: observationCheckpoints.length,
+    pendingConfirmation,
+    screenshotRequested,
+    reflectionApplied: reflectionApplied?.applied === true
+  });
+
   return {
     success,
     thought: actionData.thought,
@@ -5977,7 +6352,13 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
     pendingConfirmation,
     pendingActionId: pendingConfirmation ? getPendingAction()?.actionId : null,
     approvalPauseCapture: pendingConfirmation ? getPendingAction()?.approvalPauseCapture || null : null,
-    reflectionApplied
+    reflectionApplied,
+    runtimeTrace: runtimeTraceLog
+      ? {
+          sessionId: runtimeTraceLog.sessionId || null,
+          filePath: runtimeTraceLog.filePath || null
+        }
+      : null
   };
 }
 
@@ -6020,6 +6401,20 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
     ? pending.resumePrerequisites.filter((action) => action && typeof action === 'object')
     : [];
   const actionsToResume = resumePrerequisites.concat(Array.isArray(pending.remainingActions) ? pending.remainingActions : []);
+  const runtimeTraceLog = buildRuntimeTraceLogForExecution('resume', {
+    thought: pending.thought,
+    verification: pending.verification,
+    actions: actionsToResume
+  }, {
+    ...options,
+    pendingActionId: pending.actionId || null
+  });
+
+  appendRuntimeTraceEvent(runtimeTraceLog, 'action:plan', {
+    thought: pending.thought || null,
+    verification: pending.verification || null,
+    actions: actionsToResume.slice(0, 50).map(summarizeActionForTrace)
+  });
   
   // Execute the confirmed action and remaining actions
   for (let i = 0; i < actionsToResume.length; i++) {
@@ -6149,6 +6544,12 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
     };
     const effectiveAction = scopeActionToTargetWindow(action, lastTargetWindowHandle, lastTargetWindowProfile);
 
+    appendRuntimeTraceEvent(runtimeTraceLog, 'action:planned', {
+      actionIndex: pending.actionIndex + i,
+      action: summarizeActionForTrace(action),
+      effectiveAction: summarizeActionForTrace(effectiveAction)
+    });
+
     const checkpointSpec = inferKeyObservationCheckpoint(effectiveAction, resumeActionData, i, {
       userMessage,
       focusRecoveryTarget
@@ -6157,9 +6558,29 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
       ? await systemAutomation.getForegroundWindowInfo()
       : null;
 
+    appendRuntimeTraceEvent(runtimeTraceLog, 'action:start', {
+      actionIndex: pending.actionIndex + i,
+      action: summarizeActionForTrace(effectiveAction),
+      checkpoint: checkpointSpec?.applicable
+        ? {
+            classification: checkpointSpec.classification,
+            requiresObservedChange: checkpointSpec.requiresObservedChange === true,
+            appName: checkpointSpec.appName || null
+          }
+        : null
+    });
+
     const result = await (actionExecutor ? actionExecutor(effectiveAction) : systemAutomation.executeAction(effectiveAction));
     result.reason = action.reason || '';
     result.userConfirmed = resumePrerequisites.length === 0 && i === 0;
+
+    if (result.resolvedTarget) {
+      appendRuntimeTraceEvent(runtimeTraceLog, 'action:target-resolved', {
+        actionIndex: pending.actionIndex + i,
+        action: summarizeActionForTrace(effectiveAction),
+        resolvedTarget: summarizeResolvedTargetForTrace(result.resolvedTarget)
+      });
+    }
 
     if (result.success && (action.type === 'focus_window' || action.type === 'bring_window_to_front')) {
       const classifiedFocus = classifyActionFocusTargetResult(action, result);
@@ -6202,6 +6623,9 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
           pineEditorSurfaceProbe: observationCheckpoint.pineEditorSurfaceProbe || null
         };
       }
+      mergeObservationCheckpointIntoProof(result, observationCheckpoint, {
+        expectedWindowHandle: lastTargetWindowHandle
+      });
       result.observationCheckpoint = observationCheckpoint;
       observationCheckpoints.push({
         ...observationCheckpoint,
@@ -6232,6 +6656,36 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
       }
     }
 
+    if (!result.proof || typeof result.proof !== 'object') {
+      result.proof = normalizeProofRecord(result.proof, result);
+    }
+
+    appendRuntimeTraceEvent(runtimeTraceLog, 'action:complete', {
+      actionIndex: pending.actionIndex + i,
+      action: summarizeActionForTrace(effectiveAction),
+      success: result.success === true,
+      error: result.error || null,
+      durationMs: Number.isFinite(Number(result.duration)) ? Number(result.duration) : null,
+      resolvedTarget: summarizeResolvedTargetForTrace(result.resolvedTarget)
+    });
+
+    appendRuntimeTraceEvent(runtimeTraceLog, 'action:proof', {
+      actionIndex: pending.actionIndex + i,
+      action: summarizeActionForTrace(effectiveAction),
+      proof: summarizeProofForTrace(result.proof),
+      observationCheckpoint: summarizeObservationCheckpointForProof(result.observationCheckpoint)
+    });
+
+    if (!result.success) {
+      appendRuntimeTraceEvent(runtimeTraceLog, 'action:error', {
+        actionIndex: pending.actionIndex + i,
+        action: summarizeActionForTrace(effectiveAction),
+        error: result.error || null,
+        errorCode: result.errorCode || null,
+        proof: summarizeProofForTrace(result.proof)
+      });
+    }
+
     if (typeof systemAutomation.getForegroundWindowHandle === 'function') {
       if (
         action.type === 'click' ||
@@ -6253,7 +6707,7 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
       break;
     }
   }
-  
+
   clearPendingAction();
 
   let success = results.every(r => r.success);
@@ -6293,6 +6747,15 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
     postVerification,
     userMessage
   });
+
+  closeRuntimeTraceLog(runtimeTraceLog, {
+    success,
+    error: error || null,
+    actionCount: actionsToResume.length,
+    observationCheckpointCount: observationCheckpoints.length,
+    pendingActionId: pending.actionId || null,
+    screenshotRequested
+  });
   
   return {
     success,
@@ -6305,7 +6768,13 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
     focusVerification,
     postVerification,
     postVerificationFailed: !!(postVerification.applicable && !postVerification.verified),
-    userConfirmed: true
+    userConfirmed: true,
+    runtimeTrace: runtimeTraceLog
+      ? {
+          sessionId: runtimeTraceLog.sessionId || null,
+          filePath: runtimeTraceLog.filePath || null
+        }
+      : null
   };
 }
 

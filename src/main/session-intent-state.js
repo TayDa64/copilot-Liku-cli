@@ -77,6 +77,19 @@ function normalizeTradingMode(tradingMode) {
   };
 }
 
+function extractObservationCheckpointCandidate(result) {
+  if (result?.proof?.observation && typeof result.proof.observation === 'object') {
+    return {
+      ...result.proof.observation,
+      tradingMode: result.proof.tradingMode || result.proof.observation.tradingMode || null,
+      reason: result.proof.observation.reason || result.proof.error || null,
+      verified: result.proof.observation.verified === true || result.proof.status === 'verified'
+    };
+  }
+
+  return result?.observationCheckpoint || null;
+}
+
 function normalizePineStructuredSummary(summary) {
   if (!summary || typeof summary !== 'object') return null;
 
@@ -180,24 +193,27 @@ function normalizeActionPlanEntries(actions) {
 
 function normalizeActionResultEntries(results) {
   if (!Array.isArray(results)) return [];
-  return results.slice(0, 12).map((result, index) => ({
-    index: Number.isFinite(Number(result?.index)) ? Number(result.index) : index,
-    type: normalizeText(result?.type, 60),
-    success: !!result?.success,
-    error: normalizeText(result?.error, 180),
-    message: normalizeText(result?.message, 160),
-    userConfirmed: !!result?.userConfirmed,
-    blockedByPolicy: !!result?.blockedByPolicy,
-    pineStructuredSummary: normalizePineStructuredSummary(result?.pineStructuredSummary),
-    observationCheckpoint: result?.observationCheckpoint
-      ? {
-          classification: normalizeText(result.observationCheckpoint.classification, 80),
-          verified: !!result.observationCheckpoint.verified,
-          reason: normalizeText(result.observationCheckpoint.reason, 160),
-          tradingMode: normalizeTradingMode(result.observationCheckpoint.tradingMode)
-        }
-      : null
-  }));
+  return results.slice(0, 12).map((result, index) => {
+    const observationCheckpoint = extractObservationCheckpointCandidate(result);
+    return {
+      index: Number.isFinite(Number(result?.index)) ? Number(result.index) : index,
+      type: normalizeText(result?.type, 60),
+      success: !!result?.success,
+      error: normalizeText(result?.error, 180),
+      message: normalizeText(result?.message, 160),
+      userConfirmed: !!result?.userConfirmed,
+      blockedByPolicy: !!result?.blockedByPolicy,
+      pineStructuredSummary: normalizePineStructuredSummary(result?.pineStructuredSummary),
+      observationCheckpoint: observationCheckpoint
+        ? {
+            classification: normalizeText(observationCheckpoint.classification, 80),
+            verified: !!observationCheckpoint.verified,
+            reason: normalizeText(observationCheckpoint.reason, 160),
+            tradingMode: normalizeTradingMode(observationCheckpoint.tradingMode)
+          }
+        : null
+    };
+  });
 }
 
 function normalizeVerificationChecks(verificationChecks) {
@@ -289,7 +305,7 @@ function deriveTurnTradingMode(turnRecord = {}, actionResults = []) {
     turnRecord.observationCheckpoints.forEach((checkpoint) => addCandidate(checkpoint));
   }
 
-  actionResults.forEach((result) => addCandidate(result?.observationCheckpoint));
+  actionResults.forEach((result) => addCandidate(result?.observationCheckpoint || extractObservationCheckpointCandidate(result)));
 
   return candidates.find((candidate) => candidate?.mode) || null;
 }

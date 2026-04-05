@@ -97,6 +97,34 @@ function getRegions() {
 }
 
 /**
+ * Get a region by its stable inspect ID
+ * @param {string} regionId - Region identifier
+ * @returns {Object|null}
+ */
+function getRegionById(regionId) {
+  if (!regionId) return null;
+  const region = currentRegions.find(r => r.id === regionId);
+  return region ? cloneRegion(region) : null;
+}
+
+/**
+ * Get an immutable snapshot of current inspect state
+ * @returns {Object}
+ */
+function getSnapshot() {
+  const selectedRegion = getSelectedRegion();
+  return {
+    inspectMode,
+    timestamp: Date.now(),
+    regionCount: currentRegions.length,
+    selectedRegionId: selectedRegionId || null,
+    selectedRegion: selectedRegion ? cloneRegion(selectedRegion) : null,
+    windowContext: cloneWindowContext(windowContext),
+    regions: currentRegions.map(cloneRegion)
+  };
+}
+
+/**
  * Select a region by ID
  * @param {string} regionId - ID of region to select
  * @returns {Object|null} Selected region or null
@@ -227,6 +255,7 @@ function getActionTraces(limit = 10) {
  */
 function generateAIContext(options = {}) {
   const { maxRegions = 50, includeTraces = true } = options;
+  const selectedRegion = getSelectedRegion();
 
   // Format regions for AI
   const formattedRegions = currentRegions
@@ -243,7 +272,8 @@ function generateAIContext(options = {}) {
     } : null,
     regions: formattedRegions,
     regionCount: currentRegions.length,
-    selectedRegion: getSelectedRegion() ? inspectTypes.formatRegionForAI(getSelectedRegion()) : null
+    selectedRegionId: selectedRegionId || null,
+    selectedRegion: selectedRegion ? inspectTypes.formatRegionForAI(selectedRegion) : null
   };
 
   if (includeTraces) {
@@ -273,12 +303,110 @@ You have access to detected UI regions. Each region has:
 - **confidence**: Detection confidence (0-1)
 
 **IMPORTANT**: When clicking detected regions:
-1. Use the region's center coordinates for highest accuracy
-2. If confidence < 0.7, verify with the user before clicking
-3. Reference regions by their label or id in your explanations
+1. Prefer targetId-based actions when a region id is available
+2. Treat coordinates as advisory when targetId is present
+3. Use the region's center coordinates only as the fallback targeting point
+4. If confidence < 0.7, verify with the user before clicking
+5. Reference regions by their label or id in your explanations
 
 Current regions available: ${currentRegions.length}
 `;
+}
+
+/**
+ * Resolve an inspect target into an actionable point and metadata.
+ * @param {string} targetId - Inspect region id
+ * @param {Object} options - Resolution options
+ * @returns {{ success: boolean, code?: string, error?: string, region?: Object, resolvedTarget?: Object }}
+ */
+function resolveTarget(targetId, options = {}) {
+  const {
+    maxAgeMs = 3000,
+    allowStale = false,
+    fallbackX = null,
+    fallbackY = null,
+    allowCoordinateFallback = false
+  } = options;
+
+  if (!targetId) {
+    return {
+      success: false,
+      code: 'TARGET_ID_REQUIRED',
+      error: 'A targetId is required for inspect target resolution.'
+    };
+  }
+
+  const fallbackPoint = buildFallbackPoint(fallbackX, fallbackY);
+  const region = currentRegions.find(r => r.id === targetId) || null;
+
+  if (!region) {
+    if (allowCoordinateFallback && fallbackPoint) {
+      return {
+        success: true,
+        resolvedTarget: buildResolvedTargetRecord(targetId, null, fallbackPoint, {
+          resolutionMethod: 'explicit-coordinates',
+          stale: true,
+          coordinateFallback: true,
+          fallbackReason: 'TARGET_NOT_FOUND'
+        })
+      };
+    }
+
+    return {
+      success: false,
+      code: 'TARGET_NOT_FOUND',
+      error: `Inspect target "${targetId}" was not found in the current inspect snapshot.`
+    };
+  }
+
+  const observedAt = Number(region.timestamp || 0) || Date.now();
+  const freshnessMs = Math.max(0, Date.now() - observedAt);
+  const stale = Number.isFinite(Number(maxAgeMs)) && Number(maxAgeMs) >= 0 && freshnessMs > Number(maxAgeMs);
+  const point = region.clickPoint
+    ? { x: Math.round(region.clickPoint.x), y: Math.round(region.clickPoint.y) }
+    : {
+        x: Math.round(region.bounds.x + region.bounds.width / 2),
+        y: Math.round(region.bounds.y + region.bounds.height / 2)
+      };
+
+  if (stale && !allowStale) {
+    if (allowCoordinateFallback && fallbackPoint) {
+      return {
+        success: true,
+        region: cloneRegion(region),
+        resolvedTarget: buildResolvedTargetRecord(targetId, region, fallbackPoint, {
+          stale: true,
+          freshnessMs,
+          resolutionMethod: 'explicit-coordinates',
+          coordinateFallback: true,
+          fallbackReason: 'TARGET_STALE'
+        })
+      };
+    }
+
+    return {
+      success: false,
+      code: 'TARGET_STALE',
+      error: `Inspect target "${targetId}" is stale (${freshnessMs}ms old).`,
+      resolvedTarget: buildResolvedTargetRecord(targetId, region, point, {
+        stale: true,
+        freshnessMs,
+        resolutionMethod: region.clickPoint ? 'clickPoint' : 'bounds-center',
+        coordinateFallback: false
+      })
+    };
+  }
+
+  return {
+    success: true,
+    region: cloneRegion(region),
+    resolvedTarget: buildResolvedTargetRecord(targetId, region, point, {
+      stale,
+      freshnessMs,
+      resolutionMethod: region.clickPoint ? 'clickPoint' : 'bounds-center',
+      coordinateFallback: false
+    })
+  };
 }
 
 // ===== REGION DETECTION INTEGRATION =====
@@ -379,6 +507,78 @@ function calculateConfidence(region, source) {
   return Math.round(base * 100) / 100;
 }
 
+function cloneBounds(bounds) {
+  if (!bounds || typeof bounds !== 'object') return null;
+  return {
+    x: Number(bounds.x || bounds.X || 0),
+    y: Number(bounds.y || bounds.Y || 0),
+    width: Number(bounds.width || bounds.Width || 0),
+    height: Number(bounds.height || bounds.Height || 0)
+  };
+}
+
+function clonePoint(point) {
+  if (!point || typeof point !== 'object') return null;
+  return {
+    x: Number(point.x || point.X || 0),
+    y: Number(point.y || point.Y || 0)
+  };
+}
+
+function cloneWindowContext(context) {
+  if (!context || typeof context !== 'object') return null;
+  return {
+    appName: context.appName || '',
+    windowTitle: context.windowTitle || '',
+    pid: Number(context.pid || 0),
+    bounds: cloneBounds(context.bounds),
+    zOrder: Number(context.zOrder || 0),
+    scaleFactor: Number(context.scaleFactor || 1)
+  };
+}
+
+function cloneRegion(region) {
+  if (!region || typeof region !== 'object') return null;
+  return {
+    ...region,
+    bounds: cloneBounds(region.bounds),
+    clickPoint: clonePoint(region.clickPoint),
+    runtimeId: Array.isArray(region.runtimeId) ? [...region.runtimeId] : region.runtimeId || null
+  };
+}
+
+function buildFallbackPoint(x, y) {
+  const pointX = Number(x);
+  const pointY = Number(y);
+  if (!Number.isFinite(pointX) || !Number.isFinite(pointY)) {
+    return null;
+  }
+
+  return {
+    x: Math.round(pointX),
+    y: Math.round(pointY)
+  };
+}
+
+function buildResolvedTargetRecord(targetId, region, point, overrides = {}) {
+  const resolvedPoint = clonePoint(point) || { x: 0, y: 0 };
+  return {
+    targetId,
+    resolutionMethod: overrides.resolutionMethod || (region?.clickPoint ? 'clickPoint' : 'bounds-center'),
+    resolvedPoint,
+    resolvedBounds: cloneBounds(region?.bounds),
+    runtimeId: Array.isArray(region?.runtimeId) ? [...region.runtimeId] : region?.runtimeId || null,
+    clickPoint: clonePoint(region?.clickPoint),
+    window: cloneWindowContext(windowContext),
+    regionConfidence: typeof region?.confidence === 'number' ? region.confidence : null,
+    observedAt: Number(region?.timestamp || 0) || null,
+    freshnessMs: Number.isFinite(Number(overrides.freshnessMs)) ? Number(overrides.freshnessMs) : null,
+    stale: overrides.stale === true,
+    coordinateFallback: overrides.coordinateFallback === true,
+    fallbackReason: overrides.fallbackReason || null
+  };
+}
+
 /**
  * Merge regions, preferring newer and deduping overlaps
  * @param {Object[]} existing - Existing regions
@@ -467,9 +667,12 @@ module.exports = {
   updateRegions,
   clearRegions,
   getRegions,
+  getRegionById,
+  getSnapshot,
   selectRegion,
   getSelectedRegion,
   findRegionAt,
+  resolveTarget,
   
   // Window context
   updateWindowContext,

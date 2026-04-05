@@ -128,6 +128,132 @@ function expectationRuntimeToSpec(expectation = {}) {
   };
 }
 
+function normalizeTraceMeta(traceMeta = {}) {
+  if (!traceMeta || typeof traceMeta !== 'object') return null;
+  return {
+    sessionId: String(traceMeta.sessionId || '').trim() || null,
+    source: String(traceMeta.source || '').trim() || null,
+    mode: String(traceMeta.mode || '').trim() || null,
+    filePath: String(traceMeta.filePath || '').trim() || null
+  };
+}
+
+function normalizeTraceCheck(check = {}) {
+  if (!check || typeof check !== 'object') return null;
+  return {
+    kind: String(check.kind || '').trim() || null,
+    status: String(check.status || '').trim() || null,
+    classification: String(check.classification || '').trim() || null,
+    method: String(check.method || '').trim() || null,
+    targetId: String(check.targetId || '').trim() || null,
+    matchReason: String(check.matchReason || '').trim() || null
+  };
+}
+
+function normalizeTraceProof(proof = {}) {
+  if (!proof || typeof proof !== 'object') return null;
+
+  const observation = proof.observation && typeof proof.observation === 'object'
+    ? {
+        classification: String(proof.observation.classification || '').trim() || null,
+        verified: proof.observation.verified === true,
+        reason: String(proof.observation.reason || '').trim() || null,
+        tradingMode: proof.observation.tradingMode && typeof proof.observation.tradingMode === 'object'
+          ? {
+              mode: String(proof.observation.tradingMode.mode || '').trim() || null,
+              confidence: String(proof.observation.tradingMode.confidence || '').trim() || null
+            }
+          : null
+      }
+    : null;
+
+  return {
+    proofId: String(proof.proofId || '').trim() || null,
+    actionType: String(proof.actionType || '').trim() || null,
+    level: Number.isFinite(Number(proof.level)) ? Number(proof.level) : 0,
+    levelName: String(proof.levelName || '').trim() || null,
+    status: String(proof.status || '').trim() || null,
+    claim: String(proof.claim || '').trim() || null,
+    error: String(proof.error || '').trim() || null,
+    errorCode: String(proof.errorCode || '').trim() || null,
+    checks: Array.isArray(proof.checks)
+      ? proof.checks.map(normalizeTraceCheck).filter(Boolean)
+      : [],
+    limitations: Array.isArray(proof.limitations)
+      ? proof.limitations.map((value) => String(value || '').trim()).filter(Boolean)
+      : [],
+    boundedClaims: Array.isArray(proof.boundedClaims)
+      ? proof.boundedClaims.map((value) => String(value || '').trim()).filter(Boolean)
+      : [],
+    observation,
+    tradingMode: proof.tradingMode && typeof proof.tradingMode === 'object'
+      ? {
+          mode: String(proof.tradingMode.mode || '').trim() || null,
+          confidence: String(proof.tradingMode.confidence || '').trim() || null
+        }
+      : null
+  };
+}
+
+function normalizeTraceAction(action = {}, index = 0) {
+  if (!action || typeof action !== 'object') return null;
+
+  const proof = normalizeTraceProof(action.proof);
+  const observationCheckpoint = action.observationCheckpoint && typeof action.observationCheckpoint === 'object'
+    ? {
+        classification: String(action.observationCheckpoint.classification || '').trim() || null,
+        verified: action.observationCheckpoint.verified === true,
+        reason: String(action.observationCheckpoint.reason || action.observationCheckpoint.error || '').trim() || null,
+        tradingMode: action.observationCheckpoint.tradingMode && typeof action.observationCheckpoint.tradingMode === 'object'
+          ? {
+              mode: String(action.observationCheckpoint.tradingMode.mode || '').trim() || null,
+              confidence: String(action.observationCheckpoint.tradingMode.confidence || '').trim() || null
+            }
+          : null
+      }
+    : (proof?.observation || null);
+
+  return {
+    index: Number.isFinite(Number(action.index)) ? Number(action.index) : index,
+    type: String(action.type || proof?.actionType || '').trim() || null,
+    reason: String(action.reason || '').trim() || null,
+    targetId: String(action.targetId || '').trim() || null,
+    key: String(action.key || '').trim() || null,
+    text: String(action.text || '').trim() || null,
+    scope: String(action.scope || '').trim() || null,
+    title: String(action.title || '').trim() || null,
+    processName: String(action.processName || '').trim() || null,
+    success: typeof action.success === 'boolean' ? action.success : null,
+    error: String(action.error || '').trim() || null,
+    resolvedTarget: action.resolvedTarget && typeof action.resolvedTarget === 'object'
+      ? {
+          targetId: String(action.resolvedTarget.targetId || '').trim() || null,
+          resolutionMethod: String(action.resolvedTarget.resolutionMethod || '').trim() || null,
+          coordinateFallback: action.resolvedTarget.coordinateFallback === true,
+          stale: action.resolvedTarget.stale === true,
+          fallbackReason: String(action.resolvedTarget.fallbackReason || '').trim() || null
+        }
+      : null,
+    observationCheckpoint,
+    proof
+  };
+}
+
+function normalizeProofExpectation(expectation = {}, index = 0) {
+  if (!expectation || typeof expectation !== 'object') return null;
+  return {
+    name: String(expectation.name || `proof expectation ${index + 1}`),
+    actionIndex: Number.isFinite(Number(expectation.actionIndex)) ? Number(expectation.actionIndex) : index,
+    minProofLevel: Number.isFinite(Number(expectation.minProofLevel)) ? Number(expectation.minProofLevel) : null,
+    status: String(expectation.status || '').trim() || null,
+    actionType: String(expectation.actionType || '').trim() || null,
+    classification: String(expectation.classification || '').trim() || null,
+    targetId: String(expectation.targetId || '').trim() || null,
+    requiredCheckKind: String(expectation.requiredCheckKind || '').trim() || null,
+    requiredCheckStatus: String(expectation.requiredCheckStatus || '').trim() || null
+  };
+}
+
 function extractExpectationCandidateLines(turnText, maxCandidates = 2) {
   return splitTranscriptLines(turnText)
     .map((line) => line.trim())
@@ -190,6 +316,13 @@ function normalizeFixtureEntry(name, entry = {}, filePath = null) {
   const runtimeExpectations = Array.isArray(entry.expectations)
     ? entry.expectations.map(expectationSpecToRuntime)
     : [];
+  const proofExpectations = Array.isArray(entry.proofExpectations)
+    ? entry.proofExpectations.map(normalizeProofExpectation).filter(Boolean)
+    : [];
+  const traceMeta = normalizeTraceMeta(entry.traceMeta || null);
+  const actions = Array.isArray(entry.actions)
+    ? entry.actions.map(normalizeTraceAction).filter(Boolean)
+    : [];
 
   return {
     name,
@@ -203,9 +336,13 @@ function normalizeFixtureEntry(name, entry = {}, filePath = null) {
     notes: Array.isArray(entry.notes) ? entry.notes.map((note) => String(note)) : [],
     source: entry.source && typeof entry.source === 'object' ? entry.source : {},
     expectations: Array.isArray(entry.expectations) ? entry.expectations : [],
+    traceMeta,
+    actions,
+    proofExpectations: Array.isArray(entry.proofExpectations) ? entry.proofExpectations : [],
     suite: {
       description: String(entry.description || name),
-      expectations: runtimeExpectations
+      expectations: runtimeExpectations,
+      proofExpectations
     }
   };
 }
