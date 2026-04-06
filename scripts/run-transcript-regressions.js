@@ -79,6 +79,13 @@ function evaluateProofExpectations(fixture) {
         failures.push(`expected observation classification ${expectation.classification}, got ${classification || 'null'}`);
       }
 
+      const verifyKind = proof?.observation?.verifyKind
+        || action?.observationCheckpoint?.verifyKind
+        || null;
+      if (expectation?.verifyKind && String(verifyKind || '') !== String(expectation.verifyKind)) {
+        failures.push(`expected observation verifyKind ${expectation.verifyKind}, got ${verifyKind || 'null'}`);
+      }
+
       const targetId = action?.targetId || action?.resolvedTarget?.targetId || null;
       if (expectation?.targetId && String(targetId || '') !== String(expectation.targetId)) {
         failures.push(`expected targetId ${expectation.targetId}, got ${targetId || 'null'}`);

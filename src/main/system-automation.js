@@ -125,11 +125,21 @@ function normalizeKeyComboParts(keyCombo) {
 }
 
 function isTradingViewLikeWindowContext(options = {}) {
+  if (options?.tradingViewShortcut || options?.searchSurfaceContract) {
+    return true;
+  }
+
   const targetWindow = options?.targetWindow && typeof options.targetWindow === 'object'
     ? options.targetWindow
     : null;
   const verifyTarget = options?.verifyTarget && typeof options.verifyTarget === 'object'
     ? options.verifyTarget
+    : null;
+  const tradingViewShortcut = options?.tradingViewShortcut && typeof options.tradingViewShortcut === 'object'
+    ? options.tradingViewShortcut
+    : null;
+  const searchSurfaceContract = options?.searchSurfaceContract && typeof options.searchSurfaceContract === 'object'
+    ? options.searchSurfaceContract
     : null;
 
   const haystack = [
@@ -139,7 +149,13 @@ function isTradingViewLikeWindowContext(options = {}) {
     verifyTarget?.requestedAppName,
     verifyTarget?.normalizedAppName,
     ...(Array.isArray(verifyTarget?.processNames) ? verifyTarget.processNames : []),
-    ...(Array.isArray(verifyTarget?.titleHints) ? verifyTarget.titleHints : [])
+    ...(Array.isArray(verifyTarget?.titleHints) ? verifyTarget.titleHints : []),
+    tradingViewShortcut?.id,
+    tradingViewShortcut?.surface,
+    searchSurfaceContract?.id,
+    searchSurfaceContract?.route,
+    searchSurfaceContract?.surface,
+    searchSurfaceContract?.appName
   ]
     .map((value) => String(value || '').trim().toLowerCase())
     .filter(Boolean)
@@ -158,9 +174,17 @@ function shouldUseSendInputForKeyCombo(keyCombo, options = {}) {
   if (hasWinKey) return true;
 
   const hasAlt = parts.includes('alt');
+  const hasCtrl = parts.includes('ctrl') || parts.includes('control');
+  const hasShift = parts.includes('shift');
   const isEnterOnly = parts.length === 1 && ['enter', 'return'].includes(parts[0]);
+  const hasTradingViewShortcutContext = !!(
+    options?.tradingViewShortcut
+    || options?.searchSurfaceContract
+  );
 
-  if (!hasAlt && !isEnterOnly) return false;
+  if (!hasAlt && !isEnterOnly && !(hasTradingViewShortcutContext && (hasCtrl || hasShift))) {
+    return false;
+  }
   return isTradingViewLikeWindowContext(options);
 }
 
@@ -2886,6 +2910,118 @@ $obj | ConvertTo-Json -Compress
 }
 
 /**
+ * Get info for an arbitrary window handle (HWND, title, pid, process name).
+ * Best-effort: returns { success: false, error } on failure.
+ */
+async function getWindowInfoByHandle(hwnd) {
+  const numericHandle = Number(hwnd || 0);
+  if (!Number.isFinite(numericHandle) || numericHandle <= 0) {
+    return { success: false, error: 'Invalid window handle' };
+  }
+
+  const script = `
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public class WindowInfo {
+  [DllImport("user32.dll", SetLastError = true)]
+  public static extern bool IsWindow(IntPtr hWnd);
+
+  [DllImport("user32.dll", EntryPoint = "GetWindowLongPtr", SetLastError = true)]
+  public static extern IntPtr GetWindowLongPtr64(IntPtr hWnd, int nIndex);
+
+  [DllImport("user32.dll", EntryPoint = "GetWindowLong", SetLastError = true)]
+  public static extern IntPtr GetWindowLongPtr32(IntPtr hWnd, int nIndex);
+
+  [DllImport("user32.dll")]
+  public static extern IntPtr GetWindow(IntPtr hWnd, uint uCmd);
+
+  [DllImport("user32.dll")]
+  public static extern bool IsIconic(IntPtr hWnd);
+
+  [DllImport("user32.dll")]
+  public static extern bool IsZoomed(IntPtr hWnd);
+
+  [DllImport("user32.dll", SetLastError = true)]
+  public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
+  [DllImport("user32.dll", CharSet = CharSet.Auto)]
+  public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
+
+  public static string GetTitle(IntPtr handle) {
+    StringBuilder sb = new StringBuilder(512);
+    GetWindowText(handle, sb, sb.Capacity);
+    return sb.ToString();
+  }
+
+  public static IntPtr GetStyle(IntPtr handle, int index) {
+    return IntPtr.Size == 8 ? GetWindowLongPtr64(handle, index) : GetWindowLongPtr32(handle, index);
+  }
+}
+"@
+
+$hwnd = [IntPtr]::new([int64]${numericHandle})
+if ($hwnd -eq [IntPtr]::Zero -or -not [WindowInfo]::IsWindow($hwnd)) {
+  Write-Output '{"success":false,"error":"Window handle not found"}'
+  exit 0
+}
+
+$targetPid = 0
+[void][WindowInfo]::GetWindowThreadProcessId($hwnd, [ref]$targetPid)
+$title = [WindowInfo]::GetTitle($hwnd)
+
+$procName = ''
+try {
+  $p = Get-Process -Id $targetPid -ErrorAction Stop
+  $procName = $p.ProcessName
+} catch {
+  $procName = ''
+}
+
+$GWL_EXSTYLE = -20
+$GW_OWNER = 4
+$WS_EX_TOPMOST = 0x00000008
+$WS_EX_TOOLWINDOW = 0x00000080
+
+$exStyle = [int64][WindowInfo]::GetStyle($hwnd, $GWL_EXSTYLE)
+$owner = [WindowInfo]::GetWindow($hwnd, $GW_OWNER)
+$ownerHwnd = if ($owner -eq [IntPtr]::Zero) { 0 } else { [int64]$owner }
+$isTopmost = (($exStyle -band $WS_EX_TOPMOST) -ne 0)
+$isToolWindow = (($exStyle -band $WS_EX_TOOLWINDOW) -ne 0)
+$isMinimized = [WindowInfo]::IsIconic($hwnd)
+$isMaximized = [WindowInfo]::IsZoomed($hwnd)
+$windowKind = if ($ownerHwnd -ne 0 -and $isToolWindow) { 'palette' } elseif ($ownerHwnd -ne 0) { 'owned' } else { 'main' }
+
+$obj = [PSCustomObject]@{
+  success = $true
+  hwnd = $hwnd.ToInt64()
+  pid = [int]$targetPid
+  processName = $procName
+  title = $title
+  ownerHwnd = $ownerHwnd
+  isTopmost = $isTopmost
+  isToolWindow = $isToolWindow
+  isMinimized = $isMinimized
+  isMaximized = $isMaximized
+  windowKind = $windowKind
+}
+$obj | ConvertTo-Json -Compress
+`;
+
+  try {
+    const result = await executePowerShellScript(script, 8000);
+    const text = String(result?.stdout || '').trim();
+    if (!text) {
+      return { success: false, error: result?.stderr?.trim() || result?.error || 'No output' };
+    }
+    return JSON.parse(text);
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+}
+
+/**
  * Get running processes filtered by candidate names.
  * Returns lightweight awareness data for launch verification.
  *
@@ -3754,6 +3890,7 @@ module.exports = {
   getActiveWindowTitle,
   getForegroundWindowHandle,
   getForegroundWindowInfo,
+  getWindowInfoByHandle,
   getRunningProcessesByNames,
   resolveWindowHandle,
   minimizeWindow,

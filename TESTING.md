@@ -99,6 +99,76 @@
 
 ## Automated Testing
 
+## Observation Suite Caveats
+
+`node scripts/test-windows-observation-flow.js` is a high-value characterization suite, but it is **not** a full substitute for real `liku chat` validation.
+
+What the suite does well:
+
+- validates rewrite logic, checkpoint semantics, focus-lock behavior, and bounded TradingView workflows
+- catches regressions in quick-search clearing, watcher freshness, continuation safety, and proof promotion
+- gives fast deterministic feedback during refactors
+
+What it does **not** prove by itself:
+
+- that the real interactive `liku chat` command path behaves identically when VS Code is the active foreground app
+- that synthetic keyboard input lands in TradingView instead of VS Code or another focused surface
+- that quick-search text was semantically cleared in the live desktop app rather than merely selected/highlighted
+- that no editor-side UI, such as VS Code Accessibility View, was opened by accidental key routing during test or chat execution
+
+Treat the observation suite as a **necessary but insufficient** signal for TradingView reliability changes.
+
+## Real-World Validation Requirements for TradingView Changes
+
+When changing TradingView automation, do not stop at green observation-flow tests. Also validate through the real chat path.
+
+Minimum live checks:
+
+1. launch `liku chat`
+2. make sure TradingView is the actual foreground target before the command continues past the opener
+3. run a real command such as changing timeframe, symbol, or opening Pine Editor
+4. confirm the quick-search/query field is actually empty before typing begins, not just highlighted
+5. confirm the final chart/panel state changed in the live app
+6. preserve the transcript or runtime trace if behavior diverges from the suite
+
+For TradingView symbol changes specifically, validate all of the following in the live app:
+
+- the previous query is not merely highlighted; it must be cleared or replaced authoritatively
+- typing does not begin while stale text remains selected in the quick-search input
+- the workflow does not stop early because focus-lock cannot confirm the expected target window
+- Enter commits the intended symbol change and the chart title/state actually updates
+
+## VS Code Accessibility View Warning During Chat-Layer Testing
+
+If an Accessibility View window appears in VS Code while testing the real `liku chat` command, treat that as evidence that keyboard input may have been routed to VS Code instead of the intended target application.
+
+Implications:
+
+- a green module-level suite does not explain away the live failure
+- the active foreground app and focus-lock chain must be inspected
+- any result gathered after an unexpected VS Code popup should be treated as suspicious until reproduced with correct target focus
+
+Recommended handling:
+
+- close the popup
+- re-run with TradingView explicitly foregrounded
+- capture a transcript or runtime trace
+- compare the live trace against the bounded workflow expectations rather than assuming the suite already covered it
+
+## TradingView Quick-Search Failure Pattern to Watch For
+
+One important real-world failure pattern is:
+
+- the previous TradingView search query remains highlighted
+- Liku reports a short sequence and stops early, often around action 2
+- the run reports an error while the target PID is still present, which means process presence alone was not enough to guarantee usable focus/input routing
+
+Interpretation:
+
+- the system may have opened or targeted the correct process, but failed to prove the correct input surface was focused
+- selected text is not the same as a proven empty input
+- focus-lock and quick-search preflight both need live confirmation, not just synthetic harness coverage
+
 ### Runtime Smoke Tests (Recommended)
 
 Use these first before manual checklist items:
@@ -169,6 +239,12 @@ How to think about this section:
 - if a change is localized, run the most relevant individual seam test first, then rerun the bundle
 
 This is the right test layer when you are changing AI-service behavior, continuation logic, model-command handling, visual-context behavior, or other code that can regress without immediately breaking the Electron shell.
+
+Important limitation for this layer:
+
+- these are still characterization tests around seams and synthetic foreground states
+- passing results should be paired with at least one live `liku chat` run for TradingView workflow changes
+- if live behavior and the suite disagree, prefer the live finding and convert it into a transcript or runtime-proof fixture
 
 What they cover:
 

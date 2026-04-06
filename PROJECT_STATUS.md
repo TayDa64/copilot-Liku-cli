@@ -73,6 +73,11 @@
 
 ## Delivered in This Session
 
+### TradingView Validation Documentation Hardening
+- Documented that `test-windows-observation-flow.js` is characterization coverage, not a full real-world proof of `liku chat` behavior.
+- Added guidance for investigating unexpected VS Code Accessibility View popups during live chat-path testing.
+- Added explicit live-validation requirements for TradingView quick-search clearing, focus-lock, and stale highlighted query failures.
+
 ### Multi-Agent Enforcement Hardening
 - Added deterministic worker artifact persistence under `.github/hooks/artifacts/`.
 - Updated hook enforcement so read-only workers can write only to their artifact path, not arbitrary repo files.

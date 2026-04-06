@@ -1,0 +1,393 @@
+{
+  "runtime-proof-timeframe-updated-cold-start": {
+    "description": "Runtime proof regression for runtime-proof-timeframe-updated-cold-start",
+    "source": {
+      "traceKind": "runtime-proof",
+      "tracePath": "C:\\Users\\Tay Liku\\.liku\\traces\\runtime-1775384862855-50czi8yy.jsonl",
+      "traceSessionId": "runtime-1775384862855-50czi8yy",
+      "capturedAt": "2026-04-05T10:27:42.855Z"
+    },
+    "transcriptLines": [],
+    "prompts": [],
+    "assistantTurns": [],
+    "observedHeaders": {
+      "runtimeModels": [],
+      "requestedModels": [],
+      "providers": []
+    },
+    "notes": [
+      "Generated from runtime proof trace JSONL.",
+      "Tighten proof expectations manually if only a subset of the captured actions should remain stable."
+    ],
+    "expectations": [],
+    "traceMeta": {
+      "sessionId": "runtime-1775384862855-50czi8yy",
+      "source": "runtime-trace",
+      "mode": "execute",
+      "filePath": "C:\\Users\\Tay Liku\\.liku\\traces\\runtime-1775384862855-50czi8yy.jsonl"
+    },
+    "actions": [
+      {
+        "index": 0,
+        "type": "bring_window_to_front",
+        "reason": "Focus TradingView before the timeframe workflow",
+        "targetId": null,
+        "key": null,
+        "text": null,
+        "scope": null,
+        "title": "TradingView",
+        "processName": "tradingview",
+        "success": true,
+        "error": null,
+        "resolvedTarget": null,
+        "observationCheckpoint": null,
+        "proof": {
+          "proofId": "proof-1775384878819-gadszes5",
+          "actionType": "bring_window_to_front",
+          "level": 0,
+          "levelName": "executed",
+          "status": "bounded",
+          "claim": null,
+          "error": null,
+          "errorCode": null,
+          "checks": [],
+          "limitations": [
+            "No inspect target grounding was requested for this action."
+          ],
+          "boundedClaims": [],
+          "observation": null,
+          "tradingMode": null
+        }
+      },
+      {
+        "index": 1,
+        "type": "wait",
+        "reason": null,
+        "targetId": null,
+        "key": null,
+        "text": null,
+        "scope": null,
+        "title": null,
+        "processName": null,
+        "success": true,
+        "error": null,
+        "resolvedTarget": null,
+        "observationCheckpoint": null,
+        "proof": {
+          "proofId": "proof-1775384879487-ai0dokxc",
+          "actionType": "wait",
+          "level": 0,
+          "levelName": "executed",
+          "status": "bounded",
+          "claim": null,
+          "error": null,
+          "errorCode": null,
+          "checks": [],
+          "limitations": [
+            "No inspect target grounding was requested for this action."
+          ],
+          "boundedClaims": [],
+          "observation": null,
+          "tradingMode": null
+        }
+      },
+      {
+        "index": 2,
+        "type": "type",
+        "reason": "Type TradingView timeframe 5m into the active timeframe surface",
+        "targetId": null,
+        "key": null,
+        "text": "5m",
+        "scope": null,
+        "title": null,
+        "processName": null,
+        "success": true,
+        "error": null,
+        "resolvedTarget": null,
+        "observationCheckpoint": null,
+        "proof": {
+          "proofId": "proof-1775384881530-wdckvant",
+          "actionType": "type",
+          "level": 0,
+          "levelName": "executed",
+          "status": "bounded",
+          "claim": null,
+          "error": null,
+          "errorCode": null,
+          "checks": [],
+          "limitations": [
+            "No inspect target grounding was requested for this action."
+          ],
+          "boundedClaims": [],
+          "observation": null,
+          "tradingMode": null
+        }
+      },
+      {
+        "index": 3,
+        "type": "wait",
+        "reason": null,
+        "targetId": null,
+        "key": null,
+        "text": null,
+        "scope": null,
+        "title": null,
+        "processName": null,
+        "success": true,
+        "error": null,
+        "resolvedTarget": null,
+        "observationCheckpoint": null,
+        "proof": {
+          "proofId": "proof-1775384881720-gc1yduha",
+          "actionType": "wait",
+          "level": 0,
+          "levelName": "executed",
+          "status": "bounded",
+          "claim": null,
+          "error": null,
+          "errorCode": null,
+          "checks": [],
+          "limitations": [
+            "No inspect target grounding was requested for this action."
+          ],
+          "boundedClaims": [],
+          "observation": null,
+          "tradingMode": null
+        }
+      },
+      {
+        "index": 4,
+        "type": "key",
+        "reason": "Confirm TradingView timeframe 5m",
+        "targetId": null,
+        "key": "enter",
+        "text": null,
+        "scope": null,
+        "title": null,
+        "processName": null,
+        "success": true,
+        "error": null,
+        "resolvedTarget": null,
+        "observationCheckpoint": {
+          "appName": "TradingView",
+          "classification": "chart-state",
+          "verifyKind": "timeframe-updated",
+          "verifyTarget": "timeframe-updated",
+          "domainProofEligible": true,
+          "verified": true,
+          "reason": "Confirm TradingView timeframe 5m",
+          "matchReason": "process",
+          "popupHint": null,
+          "observedChange": false,
+          "freshObservation": true,
+          "keywordMatched": false,
+          "titleHintMatched": false,
+          "windowKindMatched": true,
+          "watcherSurfaceMatched": false,
+          "watcherSurfaceAnchor": null,
+          "editorActiveMatched": false,
+          "tradingMode": {
+            "mode": "paper",
+            "confidence": "high",
+            "evidence": [
+              "paper trading"
+            ]
+          },
+          "recoveredBy": null,
+          "foreground": {
+            "hwnd": 202426,
+            "title": "LUNR ▲ 23.99 +18.53% / Unnamed",
+            "processName": "TradingView",
+            "windowKind": "main"
+          }
+        },
+        "proof": {
+          "proofId": "proof-1775384884552-dstz1ih4",
+          "actionType": "key",
+          "level": 3,
+          "levelName": "domain-verified",
+          "status": "verified",
+          "claim": "The expected TradingView timeframe change was observed after execution.",
+          "error": null,
+          "errorCode": null,
+          "checks": [
+            {
+              "kind": "observation-checkpoint",
+              "status": "pass",
+              "classification": "chart-state",
+              "method": null,
+              "targetId": null,
+              "matchReason": "process"
+            },
+            {
+              "kind": "foreground-window",
+              "status": "pass",
+              "classification": null,
+              "method": null,
+              "targetId": null,
+              "matchReason": "process"
+            },
+            {
+              "kind": "domain-verification",
+              "status": "pass",
+              "classification": "chart-state",
+              "method": null,
+              "targetId": null,
+              "matchReason": null
+            }
+          ],
+          "limitations": [
+            "No inspect target grounding was requested for this action."
+          ],
+          "boundedClaims": [],
+          "observation": {
+            "appName": "TradingView",
+            "classification": "chart-state",
+            "verifyKind": "timeframe-updated",
+            "verifyTarget": "timeframe-updated",
+            "domainProofEligible": true,
+            "verified": true,
+            "reason": "Confirm TradingView timeframe 5m",
+            "matchReason": "process",
+            "popupHint": null,
+            "observedChange": false,
+            "freshObservation": true,
+            "keywordMatched": false,
+            "titleHintMatched": false,
+            "windowKindMatched": true,
+            "watcherSurfaceMatched": false,
+            "watcherSurfaceAnchor": null,
+            "editorActiveMatched": false,
+            "tradingMode": {
+              "mode": "paper",
+              "confidence": "high",
+              "evidence": [
+                "paper trading"
+              ]
+            },
+            "recoveredBy": null,
+            "foreground": {
+              "hwnd": 202426,
+              "title": "LUNR ▲ 23.99 +18.53% / Unnamed",
+              "processName": "TradingView",
+              "windowKind": "main"
+            }
+          },
+          "tradingMode": {
+            "mode": "paper",
+            "confidence": "high",
+            "evidence": [
+              "paper trading"
+            ]
+          }
+        }
+      },
+      {
+        "index": 5,
+        "type": "wait",
+        "reason": null,
+        "targetId": null,
+        "key": null,
+        "text": null,
+        "scope": null,
+        "title": null,
+        "processName": null,
+        "success": true,
+        "error": null,
+        "resolvedTarget": null,
+        "observationCheckpoint": null,
+        "proof": {
+          "proofId": "proof-1775384886913-vswnj2kv",
+          "actionType": "wait",
+          "level": 0,
+          "levelName": "executed",
+          "status": "bounded",
+          "claim": null,
+          "error": null,
+          "errorCode": null,
+          "checks": [],
+          "limitations": [
+            "No inspect target grounding was requested for this action."
+          ],
+          "boundedClaims": [],
+          "observation": null,
+          "tradingMode": null
+        }
+      }
+    ],
+    "proofExpectations": [
+      {
+        "name": "bring_window_to_front proof 0",
+        "actionIndex": 0,
+        "minProofLevel": 0,
+        "status": "bounded",
+        "actionType": "bring_window_to_front",
+        "classification": null,
+        "verifyKind": null,
+        "targetId": null,
+        "requiredCheckKind": null,
+        "requiredCheckStatus": null
+      },
+      {
+        "name": "wait proof 1",
+        "actionIndex": 1,
+        "minProofLevel": 0,
+        "status": "bounded",
+        "actionType": "wait",
+        "classification": null,
+        "verifyKind": null,
+        "targetId": null,
+        "requiredCheckKind": null,
+        "requiredCheckStatus": null
+      },
+      {
+        "name": "type proof 2",
+        "actionIndex": 2,
+        "minProofLevel": 0,
+        "status": "bounded",
+        "actionType": "type",
+        "classification": null,
+        "verifyKind": null,
+        "targetId": null,
+        "requiredCheckKind": null,
+        "requiredCheckStatus": null
+      },
+      {
+        "name": "wait proof 3",
+        "actionIndex": 3,
+        "minProofLevel": 0,
+        "status": "bounded",
+        "actionType": "wait",
+        "classification": null,
+        "verifyKind": null,
+        "targetId": null,
+        "requiredCheckKind": null,
+        "requiredCheckStatus": null
+      },
+      {
+        "name": "key proof 4",
+        "actionIndex": 4,
+        "minProofLevel": 3,
+        "status": "verified",
+        "actionType": "key",
+        "classification": "chart-state",
+        "verifyKind": "timeframe-updated",
+        "targetId": null,
+        "requiredCheckKind": "domain-verification",
+        "requiredCheckStatus": "pass"
+      },
+      {
+        "name": "wait proof 5",
+        "actionIndex": 5,
+        "minProofLevel": 0,
+        "status": "bounded",
+        "actionType": "wait",
+        "classification": null,
+        "verifyKind": null,
+        "targetId": null,
+        "requiredCheckKind": null,
+        "requiredCheckStatus": null
+      }
+    ]
+  }
+}

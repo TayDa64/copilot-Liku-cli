@@ -1,6 +1,9 @@
 const { buildVerifyTargetHintFromAppName } = require('./app-profile');
 const { extractTradingViewObservationKeywords } = require('./verification');
 const {
+  buildTradingViewShortcutAction,
+  buildTradingViewShortcutMetadata,
+  getTradingViewShortcut,
   getTradingViewShortcutMatchTerms,
   messageMentionsTradingViewShortcut,
   matchesTradingViewShortcutAction,
@@ -126,9 +129,9 @@ function extractRequestedTimeframe(userMessage = '') {
 function extractRequestedSymbol(userMessage = '') {
   const text = String(userMessage || '');
   const patterns = [
-    /\b(?:change|switch|set)\s+(?:the\s+)?(?:symbol|ticker)\s+(?:to\s+)?\$?([A-Za-z][A-Za-z0-9._-]{0,14})\b/i,
-    /\b(?:open|search\s+for|find)\s+(?:the\s+)?(?:symbol|ticker)\s+\$?([A-Za-z][A-Za-z0-9._-]{0,14})\b/i,
-    /\b(?:symbol|ticker)\s+(?:search\s+for\s+)?\$?([A-Za-z][A-Za-z0-9._-]{0,14})\b/i,
+    /\b(?:change|switch|set)\s+(?:the\s+)?(?:chart\s+)?(?:symbol|ticker)\s+(?:to\s+)?\$?([A-Za-z][A-Za-z0-9._-]{0,14})\b/i,
+    /\b(?:open|search\s+for|find)\s+(?:the\s+)?(?:chart\s+)?(?:symbol|ticker)\s+(?:for\s+|to\s+)?\$?([A-Za-z][A-Za-z0-9._-]{0,14})\b/i,
+    /\b(?:symbol|ticker)\s+(?:(?:search\s+for|to|for)\s+)?\$?([A-Za-z][A-Za-z0-9._-]{0,14})\b/i,
     /\b(?:to|for)\s+(?:the\s+)?\$?([A-Za-z][A-Za-z0-9._-]{0,14})\b(?=[^\n]{0,40}\b(?:in\s+tradingview|on\s+tradingview|chart|ticker|symbol))?/i
   ];
 
@@ -297,15 +300,27 @@ function buildTradingViewSymbolWorkflowActions(intent = {}) {
   const verifyTarget = buildVerifyTargetHintFromAppName(intent.appName || 'TradingView');
   const symbol = String(intent.symbol || '').trim().toUpperCase();
   const symbolSearchTerms = getTradingViewShortcutMatchTerms('symbol-search');
+  const quickSearchShortcut = getTradingViewShortcut('symbol-search');
+  const quickSearchAction = buildTradingViewShortcutAction('symbol-search', {
+    reason: 'Open TradingView quick search before selecting the requested symbol'
+  });
+  const quickSearchRouteMetadata = quickSearchShortcut
+    ? {
+        ...buildTradingViewShortcutMetadata(quickSearchShortcut),
+        route: 'quick-search'
+      }
+    : {
+        id: 'symbol-search',
+        surface: 'quick-search',
+        route: 'quick-search'
+      };
   const expectedKeywords = mergeUnique([
     'symbol',
     'symbol search',
     'ticker',
     symbol,
     symbolSearchTerms,
-    extractTradingViewObservationKeywords(`change tradingview symbol to ${symbol}`),
-    verifyTarget.chartKeywords,
-    verifyTarget.dialogKeywords
+    extractTradingViewObservationKeywords(`change tradingview symbol to ${symbol}`)
   ]);
 
   return [
@@ -318,26 +333,56 @@ function buildTradingViewSymbolWorkflowActions(intent = {}) {
     },
     { type: 'wait', ms: 650 },
     {
+      ...(quickSearchAction || {
+        type: 'key',
+        key: 'ctrl+k',
+        reason: 'Open TradingView quick search before selecting the requested symbol'
+      }),
+      searchSurfaceContract: quickSearchRouteMetadata
+    },
+    { type: 'wait', ms: 220 },
+    {
+      type: 'key',
+      key: 'ctrl+a',
+      reason: 'Select any existing TradingView quick-search text before replacing it with the requested symbol',
+      searchSurfaceContract: quickSearchRouteMetadata,
+      tradingViewShortcut: quickSearchRouteMetadata
+    },
+    { type: 'wait', ms: 90 },
+    {
+      type: 'key',
+      key: 'backspace',
+      reason: 'Clear the selected TradingView quick-search text before typing the requested symbol',
+      searchSurfaceContract: quickSearchRouteMetadata,
+      tradingViewShortcut: quickSearchRouteMetadata
+    },
+    { type: 'wait', ms: 90 },
+    {
       type: 'type',
       text: symbol,
       reason: symbol
-        ? `Type TradingView symbol ${symbol} into the active symbol surface`
-        : 'Type the requested TradingView symbol into the active symbol surface'
+        ? `Replace the active TradingView quick-search text with symbol ${symbol}`
+        : 'Replace the active TradingView quick-search text with the requested symbol',
+      searchSurfaceContract: quickSearchRouteMetadata,
+      tradingViewShortcut: quickSearchRouteMetadata
     },
-    { type: 'wait', ms: 180 },
+    { type: 'wait', ms: 260 },
     {
       type: 'key',
       key: 'enter',
       reason: symbol
-        ? `Confirm TradingView symbol ${symbol}`
+        ? `Confirm TradingView symbol ${symbol} after verified quick-search replacement`
         : 'Confirm the requested TradingView symbol',
       verify: {
         kind: 'symbol-updated',
         appName: 'TradingView',
         target: 'symbol-updated',
-        keywords: expectedKeywords
+        keywords: expectedKeywords,
+        requiresObservedChange: true
       },
-      verifyTarget
+      verifyTarget,
+      searchSurfaceContract: quickSearchRouteMetadata,
+      tradingViewShortcut: quickSearchRouteMetadata
     },
     { type: 'wait', ms: 900 }
   ];

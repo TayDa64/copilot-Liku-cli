@@ -35,6 +35,25 @@ function createObservationCheckpointRuntime(deps = {}) {
     'update on chart',
     'script saved'
   ]);
+  const QUICK_SEARCH_WATCHER_SURFACE_ANCHORS = Object.freeze([
+    'search tool or function',
+    'quick search',
+    'symbol search',
+    'search symbols',
+    'nothing matches your criteria'
+  ]);
+  const TRADINGVIEW_DOMAIN_VERIFICATION_KINDS = new Set([
+    'indicator-present',
+    'timeframe-updated',
+    'symbol-updated',
+    'watchlist-updated',
+    'chart-state-updated'
+  ]);
+
+  function isTradingViewDomainVerificationKind(kind = '') {
+    const normalized = String(kind || '').trim().toLowerCase();
+    return TRADINGVIEW_DOMAIN_VERIFICATION_KINDS.has(normalized);
+  }
 
   function summarizeForegroundSignature(foreground) {
     if (!foreground || !foreground.success) return null;
@@ -132,7 +151,7 @@ function createObservationCheckpointRuntime(deps = {}) {
       : null;
     const inferredTarget = inferLaunchVerificationTarget(actionData, options.userMessage || '');
     const appName = verify.appName || explicitTarget?.appName || inferredTarget?.appName || 'TradingView';
-    const verifyTarget = explicitTarget || buildVerifyTargetHintFromAppName(appName);
+    const verifyTargetHint = explicitTarget || buildVerifyTargetHintFromAppName(appName);
 
     const expectedKeywords = mergeUniqueKeywords(
       verify.keywords,
@@ -145,17 +164,17 @@ function createObservationCheckpointRuntime(deps = {}) {
         nextAction?.text,
         verify.target
       ].filter(Boolean).join(' ')),
-      classification === 'dialog-open' ? verifyTarget.dialogKeywords : [],
-      (classification === 'panel-open' || classification === 'editor-active') ? verifyTarget.pineKeywords : [],
-      classification === 'chart-state' ? verifyTarget.chartKeywords : [],
-      /indicator/.test(verify.target || '') ? verifyTarget.indicatorKeywords : []
+      classification === 'dialog-open' ? verifyTargetHint.dialogKeywords : [],
+      (classification === 'panel-open' || classification === 'editor-active') ? verifyTargetHint.pineKeywords : [],
+      classification === 'chart-state' ? verifyTargetHint.chartKeywords : [],
+      /indicator/.test(verify.target || '') ? verifyTargetHint.indicatorKeywords : []
     );
 
     const expectedWindowKinds = verify.windowKinds.length > 0
       ? verify.windowKinds
       : (classification === 'chart-state' || classification === 'panel-open' || classification === 'editor-active')
-        ? (verifyTarget.preferredWindowKinds || ['main'])
-        : (verifyTarget.dialogWindowKinds || ['owned', 'palette', 'main']);
+        ? (verifyTargetHint.preferredWindowKinds || ['main'])
+        : (verifyTargetHint.dialogWindowKinds || ['owned', 'palette', 'main']);
 
     return {
       applicable: true,
@@ -163,6 +182,9 @@ function createObservationCheckpointRuntime(deps = {}) {
       actionType,
       classification,
       appName,
+      verifyKind: verify.kind,
+      verifyTarget: verify.target,
+      domainProofEligible: isTradingViewDomainVerificationKind(verify.kind),
       tradingModeHint: inferTradingViewTradingMode({
         textSignals: [
           action.reason,
@@ -179,12 +201,12 @@ function createObservationCheckpointRuntime(deps = {}) {
         : verify.requiresObservedChange,
       allowWindowHandleChange: classification === 'dialog-open' || classification === 'input-surface-open',
       timeoutMs: keyCheckpointTimeoutMs,
-      verifyTarget: {
-        ...verifyTarget,
-        popupKeywords: mergeUniqueKeywords(verifyTarget.popupKeywords, expectedKeywords),
+      verifyTargetHint: {
+        ...verifyTargetHint,
+        popupKeywords: mergeUniqueKeywords(verifyTargetHint.popupKeywords, expectedKeywords),
         titleHints: Array.from(new Set([
-          ...(verifyTarget.titleHints || []),
-          ...(verifyTarget.dialogTitleHints || []),
+          ...(verifyTargetHint.titleHints || []),
+          ...(verifyTargetHint.dialogTitleHints || []),
           ...verify.titleHints
         ]))
       },
@@ -238,11 +260,14 @@ function createObservationCheckpointRuntime(deps = {}) {
       key,
       classification: tradingViewSpec.classification,
       appName: 'TradingView',
+      verifyKind: null,
+      verifyTarget: null,
+      verifyTargetHint: tradingViewSpec.verifyTarget,
+      domainProofEligible: false,
       tradingModeHint: tradingViewSpec.tradingModeHint,
       requiresObservedChange: tradingViewSpec.requiresObservedChange,
       allowWindowHandleChange: tradingViewSpec.allowWindowHandleChange,
       timeoutMs: keyCheckpointTimeoutMs,
-      verifyTarget: tradingViewSpec.verifyTarget,
       expectedKeywords: tradingViewSpec.expectedKeywords,
       expectedWindowKinds: tradingViewSpec.expectedWindowKinds,
       reason: action.reason || actionData?.verification || actionData?.thought || ''
@@ -259,10 +284,16 @@ function createObservationCheckpointRuntime(deps = {}) {
       : [];
     const pineEditorLike = spec?.classification === 'editor-active'
       && expectedKeywords.some((value) => value.includes('pine'));
+    const quickSearchLike = spec?.classification === 'input-surface-open'
+      && (
+        /quick-search|symbol-search/.test(String(spec?.verifyTarget || '').trim().toLowerCase())
+        || expectedKeywords.some((value) => value.includes('quick search') || value.includes('symbol search'))
+      );
 
-    const anchors = pineEditorLike
-      ? PINE_EDITOR_WATCHER_SURFACE_ANCHORS
-      : [];
+    const anchors = Array.from(new Set([
+      ...(pineEditorLike ? PINE_EDITOR_WATCHER_SURFACE_ANCHORS : []),
+      ...(quickSearchLike ? QUICK_SEARCH_WATCHER_SURFACE_ANCHORS : [])
+    ]));
     if (!anchors.length) {
       return { matched: false, anchor: null, element: null };
     }
@@ -329,7 +360,7 @@ function createObservationCheckpointRuntime(deps = {}) {
       }
 
       foreground = await systemAutomation.getForegroundWindowInfo();
-      evalResult = evaluateForegroundAgainstTarget(foreground, spec.verifyTarget || {});
+      evalResult = evaluateForegroundAgainstTarget(foreground, spec.verifyTargetHint || {});
       observedChange = didForegroundObservationChange(beforeForeground, foreground);
 
       const titleNorm = normalizeTextForMatch(foreground?.title || '');
@@ -339,7 +370,7 @@ function createObservationCheckpointRuntime(deps = {}) {
       });
       windowKindMatched = !(spec.expectedWindowKinds || []).length
         || (spec.expectedWindowKinds || []).includes(String(foreground?.windowKind || '').trim().toLowerCase());
-      titleHintMatched = (spec.verifyTarget?.dialogTitleHints || []).some((hint) => {
+      titleHintMatched = (spec.verifyTargetHint?.dialogTitleHints || []).some((hint) => {
         const norm = normalizeTextForMatch(hint);
         return norm && titleNorm.includes(norm);
       });
@@ -363,18 +394,35 @@ function createObservationCheckpointRuntime(deps = {}) {
 
       const freshObservation = !!watcherFreshness?.fresh;
       const surfaceChangeObserved = observedChange || keywordMatched || titleHintMatched || watcherSurfaceMatched;
-      const editorActiveMatched = spec.classification === 'editor-active'
+      const strictChartStateMatched = spec.classification === 'chart-state'
+        && ['symbol-updated', 'timeframe-updated', 'watchlist-updated'].includes(String(spec.verifyKind || '').trim().toLowerCase())
         ? !!(
           foreground?.success
           && evalResult.matched
           && windowKindMatched
-          && (watcherSurfaceMatched || (surfaceChangeObserved && (keywordMatched || titleHintMatched || freshObservation)))
+          && keywordMatched
+          && (observedChange || watcherSurfaceMatched)
+        )
+        : false;
+      const editorActiveMatched = spec.classification === 'editor-active'
+        ? !!(
+          foreground?.success
+          && windowKindMatched
+          && (
+            watcherSurfaceMatched
+            || (
+              evalResult.matched
+              && surfaceChangeObserved
+              && (keywordMatched || titleHintMatched || freshObservation)
+            )
+          )
         )
         : false;
       const verified = spec.requiresObservedChange
         ? (spec.classification === 'editor-active'
           ? editorActiveMatched
-          : !!(foreground?.success && evalResult.matched && windowKindMatched && surfaceChangeObserved))
+          : (strictChartStateMatched
+            || !!(foreground?.success && evalResult.matched && windowKindMatched && surfaceChangeObserved)))
         : !!(foreground?.success && evalResult.matched && windowKindMatched && (surfaceChangeObserved || freshObservation || !spec.requiresObservedChange));
 
       if (verified) {
@@ -382,6 +430,10 @@ function createObservationCheckpointRuntime(deps = {}) {
           applicable: true,
           verified: true,
           classification: spec.classification,
+          appName: spec.appName || null,
+          verifyKind: spec.verifyKind || null,
+          verifyTarget: spec.verifyTarget || null,
+          domainProofEligible: spec.domainProofEligible === true,
           attempts: attempt,
           observedChange,
           freshObservation,
@@ -408,6 +460,10 @@ function createObservationCheckpointRuntime(deps = {}) {
       applicable: true,
       verified: false,
       classification: spec.classification,
+      appName: spec.appName || null,
+      verifyKind: spec.verifyKind || null,
+      verifyTarget: spec.verifyTarget || null,
+      domainProofEligible: spec.domainProofEligible === true,
       attempts: keyCheckpointMaxPolls,
       observedChange,
       freshObservation: !!watcherFreshness?.fresh,

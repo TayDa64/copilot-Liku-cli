@@ -1,0 +1,142 @@
+{
+  "chat-tradingview-timeframe-cold-start": {
+    "description": "Runtime transcript regression for TradingView timeframe cold-start recovery",
+    "source": {
+      "tracePath": "c:\\dev\\copilot-Liku-cli\\artifacts\\live-validation\\20260405-032738-tradingview-timeframe-after-fix.log",
+      "capturedAt": "2026-04-05T10:29:40.844Z",
+      "observedProviders": [
+        "copilot"
+      ],
+      "observedRuntimeModels": [
+        "gpt-5.2"
+      ],
+      "observedRequestedModels": [
+        "gpt-5.2"
+      ]
+    },
+    "transcriptLines": [
+      "[AI] Restored 2 history entries from disk",
+      "Liku Chat (type /help for commands, exit to quit)",
+      "> /clear",
+      "> /status",
+      "Provider: copilot",
+      "Runtime model: GPT-5.2 (gpt-5.2)",
+      "Copilot: Authenticated",
+      "> set the TradingView chart to 5m and confirm it changed",
+      "[copilot:gpt-5.2]",
+      "```json",
+      "{",
+      "  \"thought\": \"Executing requested actions\",",
+      "  \"actions\": [",
+      "    {",
+      "      \"type\": \"bring_window_to_front\",",
+      "      \"title\": \"TradingView\"",
+      "    }",
+      "  ],",
+      "  \"verification\": \"Verify the actions completed successfully\"",
+      "}",
+      "```",
+      "[AI-SERVICE] Executing actions: Executing requested actions",
+      "[AUTOMATION] resolveWindowHandle: no window found for title=\"TradingView\" process=\"tradingview\" class=\"\"",
+      "[AI-SERVICE] Pre-action focus recovery 1/1 for TradingView",
+      "[AUTOMATION] Executing action: {\"type\":\"key\",\"key\":\"win\",\"reason\":\"Open Start menu\"}",
+      "[AUTOMATION] Executing action: {\"type\":\"type\",\"text\":\"TradingView\",\"reason\":\"Search for TradingView\"}",
+      "[AUTOMATION] Executing action: {\"type\":\"key\",\"key\":\"enter\",\"reason\":\"Launch TradingView\"}",
+      "[1/6] bring_window_to_front: Brought window 202426 to front",
+      "[AUTOMATION] Executing action: {\"type\":\"type\",\"text\":\"5m\",\"reason\":\"Type TradingView timeframe 5m into the active timeframe surface\"}",
+      "[AUTOMATION] Executing action: {\"type\":\"key\",\"key\":\"enter\",\"reason\":\"Confirm TradingView timeframe 5m\"}",
+      "Running target PID(s): 17592, 41116, 47288",
+      "> exit"
+    ],
+    "prompts": [
+      "/clear",
+      "/status",
+      "set the TradingView chart to 5m and confirm it changed",
+      "exit"
+    ],
+    "assistantTurns": [
+      "```json\n{\n  \"thought\": \"Executing requested actions\",\n  \"actions\": [\n    {\n      \"type\": \"bring_window_to_front\",\n      \"title\": \"TradingView\"\n    }\n  ],\n  \"verification\": \"Verify the actions completed successfully\"\n}\n```"
+    ],
+    "observedHeaders": {
+      "providers": [
+        "copilot"
+      ],
+      "runtimeModels": [
+        "gpt-5.2"
+      ],
+      "requestedModels": [
+        "gpt-5.2"
+      ]
+    },
+    "notes": [
+      "Minimal transcript fixture distilled from the successful live cold-start TradingView run.",
+      "Asserts that Liku launches TradingView first when the app is not already open."
+    ],
+    "expectations": [
+      {
+        "name": "status confirms copilot auth",
+        "scope": "transcript",
+        "include": [
+          {
+            "regex": "Provider:\\s+copilot",
+            "flags": "i"
+          },
+          {
+            "regex": "Copilot:\\s+Authenticated",
+            "flags": "i"
+          }
+        ]
+      },
+      {
+        "name": "cold-start tradingview recovery launches app first",
+        "scope": "transcript",
+        "include": [
+          {
+            "regex": "resolveWindowHandle: no window found.*TradingView.*tradingview",
+            "flags": "i"
+          },
+          {
+            "regex": "Pre-action focus recovery 1/1 for TradingView",
+            "flags": "i"
+          },
+          {
+            "regex": "Search for TradingView",
+            "flags": "i"
+          },
+          {
+            "regex": "Launch TradingView",
+            "flags": "i"
+          }
+        ],
+        "exclude": [
+          {
+            "regex": "One or more actions failed",
+            "flags": "i"
+          }
+        ]
+      },
+      {
+        "name": "timeframe workflow resumes after launch",
+        "scope": "transcript",
+        "include": [
+          {
+            "regex": "\\[1/6\\] bring_window_to_front: Brought window",
+            "flags": "i"
+          },
+          {
+            "regex": "Type TradingView timeframe 5m into the active timeframe surface",
+            "flags": "i"
+          },
+          {
+            "regex": "Confirm TradingView timeframe 5m",
+            "flags": "i"
+          },
+          {
+            "regex": "Running target PID\\(s\\):",
+            "flags": "i"
+          }
+        ]
+      }
+    ]
+  }
+}

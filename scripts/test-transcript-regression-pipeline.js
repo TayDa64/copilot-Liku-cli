@@ -102,7 +102,7 @@ test('fixture runner evaluates checked-in transcript fixtures', () => {
   assert.strictEqual(results[0].passed, true);
 });
 
-test('runtime trace fixtures preserve proof expectations and pass the combined runner', () => {
+test('runtime trace fixtures preserve domain proof expectations and pass the combined runner', () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'liku-runtime-proof-fixtures-'));
   try {
     const entries = [
@@ -117,59 +117,63 @@ test('runtime trace fixtures preserve proof expectations and pass the combined r
         session: 'runtime-proof-session',
         event: 'action:planned',
         actionIndex: 0,
-        action: { type: 'click', targetId: 'region-1', reason: 'Open Pine Editor' }
+        action: { type: 'key', key: 'enter', reason: 'Confirm the 5m timeframe in TradingView' }
       },
       {
         ts: '2026-04-05T22:41:10.100Z',
         session: 'runtime-proof-session',
         event: 'action:complete',
         actionIndex: 0,
-        action: { type: 'click', targetId: 'region-1', reason: 'Open Pine Editor' },
-        success: true,
-        resolvedTarget: { targetId: 'region-1', resolutionMethod: 'clickPoint' }
+        action: { type: 'key', key: 'enter', reason: 'Confirm the 5m timeframe in TradingView' },
+        success: true
       },
       {
         ts: '2026-04-05T22:41:10.120Z',
         session: 'runtime-proof-session',
         event: 'action:proof',
         actionIndex: 0,
-        action: { type: 'click', targetId: 'region-1', reason: 'Open Pine Editor' },
+        action: { type: 'key', key: 'enter', reason: 'Confirm the 5m timeframe in TradingView' },
         proof: {
           proofId: 'proof-1',
-          actionType: 'click',
-          level: 2,
-          levelName: 'effect-verified',
+          actionType: 'key',
+          level: 3,
+          levelName: 'domain-verified',
           status: 'verified',
           checks: [
-            { kind: 'target-resolution', status: 'pass', targetId: 'region-1', method: 'clickPoint' },
-            { kind: 'observation-checkpoint', status: 'pass', classification: 'panel-open' }
+            { kind: 'observation-checkpoint', status: 'pass', classification: 'chart-state' },
+            { kind: 'domain-verification', status: 'pass', classification: 'chart-state', verificationKind: 'timeframe-updated' }
           ],
           observation: {
-            classification: 'panel-open',
+            classification: 'chart-state',
+            verifyKind: 'timeframe-updated',
             verified: true,
-            reason: 'Pine Editor visible'
+            reason: 'TradingView shows the 5m timeframe'
           }
         },
         observationCheckpoint: {
-          classification: 'panel-open',
+          classification: 'chart-state',
+          verifyKind: 'timeframe-updated',
           verified: true,
-          reason: 'Pine Editor visible'
+          reason: 'TradingView shows the 5m timeframe'
         }
       }
     ];
 
     const entry = buildRuntimeTraceFixtureEntry(entries, {
-      fixtureName: 'runtime-proof-panel-open',
+      fixtureName: 'runtime-proof-timeframe-updated',
       tracePath: 'C:/tmp/runtime-proof-session.jsonl'
     });
 
     assert.strictEqual(entry.traceMeta.sessionId, 'runtime-proof-session');
     assert.strictEqual(entry.actions.length, 1);
     assert.strictEqual(entry.proofExpectations.length, 1);
-    assert.strictEqual(entry.proofExpectations[0].minProofLevel, 2);
+    assert.strictEqual(entry.proofExpectations[0].minProofLevel, 3);
+    assert.strictEqual(entry.proofExpectations[0].verifyKind, 'timeframe-updated');
+    assert.strictEqual(entry.proofExpectations[0].requiredCheckKind, 'domain-verification');
+    assert.strictEqual(entry.proofExpectations[0].requiredCheckStatus, 'pass');
 
     const filePath = path.join(tempDir, 'bundle.json');
-    upsertFixtureBundleEntry(filePath, 'runtime-proof-panel-open', entry);
+    upsertFixtureBundleEntry(filePath, 'runtime-proof-timeframe-updated', entry);
 
     const fixtures = loadTranscriptFixtures(tempDir);
     assert.strictEqual(fixtures.length, 1);
@@ -184,4 +188,71 @@ test('runtime trace fixtures preserve proof expectations and pass the combined r
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
+});
+
+test('runtime trace fixtures fall back to observation-checkpoint expectations when no domain proof exists', () => {
+  const entries = [
+    {
+      ts: '2026-04-05T22:41:10.000Z',
+      session: 'runtime-proof-panel-session',
+      event: 'runtime:session:start',
+      metadata: { mode: 'execute' }
+    },
+    {
+      ts: '2026-04-05T22:41:10.050Z',
+      session: 'runtime-proof-panel-session',
+      event: 'action:planned',
+      actionIndex: 0,
+      action: { type: 'click', targetId: 'region-1', reason: 'Open Pine Editor' }
+    },
+    {
+      ts: '2026-04-05T22:41:10.100Z',
+      session: 'runtime-proof-panel-session',
+      event: 'action:complete',
+      actionIndex: 0,
+      action: { type: 'click', targetId: 'region-1', reason: 'Open Pine Editor' },
+      success: true,
+      resolvedTarget: { targetId: 'region-1', resolutionMethod: 'clickPoint' }
+    },
+    {
+      ts: '2026-04-05T22:41:10.120Z',
+      session: 'runtime-proof-panel-session',
+      event: 'action:proof',
+      actionIndex: 0,
+      action: { type: 'click', targetId: 'region-1', reason: 'Open Pine Editor' },
+      proof: {
+        proofId: 'proof-panel',
+        actionType: 'click',
+        level: 2,
+        levelName: 'effect-verified',
+        status: 'verified',
+        checks: [
+          { kind: 'target-resolution', status: 'pass', targetId: 'region-1', method: 'clickPoint' },
+          { kind: 'observation-checkpoint', status: 'pass', classification: 'panel-open' }
+        ],
+        observation: {
+          classification: 'panel-open',
+          verifyKind: 'panel-open',
+          verified: true,
+          reason: 'Pine Editor visible'
+        }
+      },
+      observationCheckpoint: {
+        classification: 'panel-open',
+        verifyKind: 'panel-open',
+        verified: true,
+        reason: 'Pine Editor visible'
+      }
+    }
+  ];
+
+  const entry = buildRuntimeTraceFixtureEntry(entries, {
+    fixtureName: 'runtime-proof-panel-open',
+    tracePath: 'C:/tmp/runtime-proof-panel-session.jsonl'
+  });
+
+  assert.strictEqual(entry.proofExpectations.length, 1);
+  assert.strictEqual(entry.proofExpectations[0].verifyKind, 'panel-open');
+  assert.strictEqual(entry.proofExpectations[0].requiredCheckKind, 'observation-checkpoint');
+  assert.strictEqual(entry.proofExpectations[0].requiredCheckStatus, 'pass');
 });

@@ -489,6 +489,44 @@ function actionLooksLikePineEditorOpenIntent(action) {
   return /pine editor|pine script editor|open pine editor/i.test(combined);
 }
 
+function trimLeadingPineEditorOpenRouteActions(actions = []) {
+  const trailing = Array.isArray(actions) ? actions.slice() : [];
+  let index = 0;
+  let removedRouteAction = false;
+
+  while (index < trailing.length) {
+    const action = trailing[index];
+    const nextAction = trailing[index + 1] || null;
+    const type = getNormalizedActionType(action);
+    const combined = [action?.reason, action?.text, action?.title, action?.key]
+      .map((value) => String(value || '').trim())
+      .filter(Boolean)
+      .join(' ');
+
+    const isOpenerAction = actionLooksLikePineEditorOpenIntent(action)
+      || matchesTradingViewShortcutAction(action, 'symbol-search')
+      || (type === 'key'
+        && String(action?.key || '').trim().toLowerCase() === 'enter'
+        && /quick search|command palette|pine editor/i.test(combined));
+
+    const isRouteWait = type === 'wait' && (
+      removedRouteAction
+      || actionLooksLikePineEditorOpenIntent(nextAction)
+      || matchesTradingViewShortcutAction(nextAction, 'symbol-search')
+    );
+
+    if (isOpenerAction || isRouteWait) {
+      removedRouteAction = true;
+      index += 1;
+      continue;
+    }
+
+    break;
+  }
+
+  return removedRouteAction ? trailing.slice(index) : trailing;
+}
+
 function actionLooksLikeUnverifiedPineAuthoringEdit(action) {
   if (!action || typeof action !== 'object') return false;
 
@@ -722,6 +760,11 @@ function inferTradingViewPineIntent(userMessage = '', actions = []) {
     && surface?.target === 'pine-editor'
     && openerIndex < 0
     && allowsSyntheticPineAuthoringOpen(actions);
+  const syntheticSurfaceOpen = !pineAuthoringMode
+    && mentionsSafeOpenIntent
+    && surface?.target === 'pine-editor'
+    && openerIndex < 0
+    && allowsSyntheticPineAuthoringOpen(actions);
 
   if (!mentionsPineSurface || mentionsUnsafeAuthoringOnly) {
     if (!surface || surface.target !== 'pine-editor') return null;
@@ -731,6 +774,7 @@ function inferTradingViewPineIntent(userMessage = '', actions = []) {
         !actions.some((action) => actionLooksLikePineEditorOpenIntent(action))
         && !syntheticAuthoringPayload
         && !syntheticAuthoringOpen
+        && !syntheticSurfaceOpen
       )
     ) {
       return null;
@@ -739,7 +783,7 @@ function inferTradingViewPineIntent(userMessage = '', actions = []) {
   if (!surface) return null;
 
   const syntheticOpener = surface.target === 'pine-editor'
-    && !!pineAuthoringMode
+    && (mentionsSafeOpenIntent || !!pineAuthoringMode)
     && openerIndex < 0;
   if (openerIndex < 0 && !syntheticOpener) return null;
 
@@ -915,8 +959,12 @@ function buildTradingViewPineWorkflowActions(intent = {}, actions = []) {
     ]);
   }
 
-  const trailing = actions.slice(intent.syntheticOpener ? 0 : intent.openerIndex + 1)
+  let trailing = actions.slice(intent.syntheticOpener ? 0 : intent.openerIndex + 1)
     .filter((action) => action && typeof action === 'object' && action.type !== 'screenshot');
+
+  if (intent.surfaceTarget === 'pine-editor') {
+    trailing = trimLeadingPineEditorOpenRouteActions(trailing);
+  }
 
   if (!intent.explicitOverwriteAuthoring) {
     for (let index = trailing.length - 1; index >= 0; index--) {

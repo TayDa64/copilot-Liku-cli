@@ -490,11 +490,27 @@ function matchesTradingViewShortcutAction(action, id) {
 function buildTradingViewShortcutAction(id, overrides = {}) {
   const shortcut = getTradingViewShortcut(id);
   if (!shortcut || !shortcut.key || (Array.isArray(shortcut.keySequence) && shortcut.keySequence.length > 1)) return null;
-  return {
+  const action = {
     type: 'key',
     key: shortcut.key,
-    tradingViewShortcut: buildTradingViewShortcutMetadata(shortcut),
-    ...overrides
+    tradingViewShortcut: buildTradingViewShortcutMetadata(shortcut)
+  };
+
+  if (overrides.verify !== undefined) {
+    action.verify = cloneValue(overrides.verify);
+  } else if (shortcut.verificationContract) {
+    action.verify = cloneValue(shortcut.verificationContract);
+  };
+
+  if (overrides.verifyTarget !== undefined) {
+    action.verifyTarget = cloneValue(overrides.verifyTarget);
+  }
+
+  return {
+    ...action,
+    ...overrides,
+    verify: overrides.verify === undefined ? action.verify : overrides.verify,
+    verifyTarget: overrides.verifyTarget === undefined ? action.verifyTarget : overrides.verifyTarget
   };
 }
 
@@ -577,10 +593,26 @@ function buildTradingViewShortcutRoute(id, overrides = {}) {
     return [
       mergeAction(quickSearchAction, { searchSurfaceContract: routeMetadata }),
       { type: 'wait', ms: Number.isFinite(Number(overrides.searchWaitMs)) ? Number(overrides.searchWaitMs) : 220 },
+      {
+        type: 'key',
+        key: 'ctrl+a',
+        reason: overrides.clearReason || 'Select any existing TradingView quick-search text before replacing it',
+        searchSurfaceContract: routeMetadata,
+        tradingViewShortcut: routeMetadata
+      },
+      { type: 'wait', ms: Number.isFinite(Number(overrides.clearWaitMs)) ? Number(overrides.clearWaitMs) : 90 },
+      {
+        type: 'key',
+        key: 'backspace',
+        reason: overrides.eraseReason || 'Clear the selected TradingView quick-search text before typing Pine Editor',
+        searchSurfaceContract: routeMetadata,
+        tradingViewShortcut: routeMetadata
+      },
+      { type: 'wait', ms: Number.isFinite(Number(overrides.eraseWaitMs)) ? Number(overrides.eraseWaitMs) : 90 },
       mergeAction({
         type: 'type',
         text: overrides.searchText || 'Pine Editor',
-        reason: overrides.typeReason || 'Search for Pine Editor in TradingView quick search',
+        reason: overrides.typeReason || 'Replace the active TradingView quick-search text with Pine Editor',
         searchSurfaceContract: routeMetadata,
         tradingViewShortcut: routeMetadata
       }, queryActionOverrides),

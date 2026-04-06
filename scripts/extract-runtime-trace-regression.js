@@ -97,15 +97,26 @@ function buildRuntimeTraceFixtureEntry(entries, options = {}) {
 
   const proofExpectations = actions
     .filter((action) => action.proof && typeof action.proof === 'object')
-    .map((action) => ({
-      name: `${action.type || 'action'} proof ${action.index}`,
-      actionIndex: action.index,
-      minProofLevel: Number.isFinite(Number(action.proof.level)) ? Number(action.proof.level) : 0,
-      status: String(action.proof.status || '').trim() || null,
-      actionType: action.type || null,
-      classification: action.proof?.observation?.classification || action.observationCheckpoint?.classification || null,
-      targetId: action.targetId || action.resolvedTarget?.targetId || null
-    }));
+    .map((action) => {
+      const domainCheck = Array.isArray(action.proof?.checks)
+        ? action.proof.checks.find((check) => String(check?.kind || '') === 'domain-verification' && String(check?.status || '') === 'pass')
+        : null;
+      const observationCheck = domainCheck || (Array.isArray(action.proof?.checks)
+        ? action.proof.checks.find((check) => String(check?.kind || '') === 'observation-checkpoint' && String(check?.status || '') === 'pass')
+        : null);
+      return {
+        name: `${action.type || 'action'} proof ${action.index}`,
+        actionIndex: action.index,
+        minProofLevel: Number.isFinite(Number(action.proof.level)) ? Number(action.proof.level) : 0,
+        status: String(action.proof.status || '').trim() || null,
+        actionType: action.type || null,
+        classification: action.proof?.observation?.classification || action.observationCheckpoint?.classification || null,
+        verifyKind: action.proof?.observation?.verifyKind || action.observationCheckpoint?.verifyKind || null,
+        targetId: action.targetId || action.resolvedTarget?.targetId || null,
+        requiredCheckKind: observationCheck ? String(observationCheck.kind || '').trim() || null : null,
+        requiredCheckStatus: observationCheck ? String(observationCheck.status || '').trim() || null : null
+      };
+    });
 
   return {
     description: `Runtime proof regression for ${sanitizeFixtureName(options.fixtureName || sessionId)}`,

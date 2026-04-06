@@ -539,7 +539,7 @@ test('ai-service wires advisory-only DOM blocking into execution paths', () => {
   assert(aiServiceContent.includes('blockedByPolicy: true'), 'Blocked advisory-only DOM executions should be marked as policy-blocked');
 });
 
-test('system-automation uses SendInput for TradingView Alt/Enter key flows', () => {
+test('system-automation uses SendInput for TradingView Alt/Enter and shortcut-route key flows', () => {
   const sysAutoPath = path.join(__dirname, '..', 'src', 'main', 'system-automation.js');
   const systemAutomation = require(sysAutoPath);
 
@@ -555,10 +555,50 @@ test('system-automation uses SendInput for TradingView Alt/Enter key flows', () 
     'TradingView enter confirmations should use SendInput'
   );
   assertEqual(
+    systemAutomation.shouldUseSendInputForKeyCombo('ctrl+k', {
+      tradingViewShortcut: { id: 'symbol-search', surface: 'quick-search' },
+      searchSurfaceContract: { id: 'open-pine-editor', route: 'quick-search' }
+    }),
+    true,
+    'TradingView quick-search route openers should use SendInput'
+  );
+  assertEqual(
+    systemAutomation.shouldUseSendInputForKeyCombo('ctrl+a', {
+      tradingViewShortcut: { id: 'open-pine-editor', surface: 'pine-editor' },
+      searchSurfaceContract: { id: 'open-pine-editor', route: 'quick-search' }
+    }),
+    true,
+    'TradingView quick-search route clear steps should use SendInput'
+  );
+  assertEqual(
     systemAutomation.shouldUseSendInputForKeyCombo('ctrl+l', { verifyTarget: { appName: 'TradingView', processNames: ['tradingview'] } }),
     false,
-    'Non-Alt/Enter shortcuts should stay on the existing path'
+    'Generic non-shortcut TradingView Ctrl flows should stay on the existing path'
   );
+});
+
+test('ai-service treats bounded TradingView quick-search clear steps as benign', () => {
+  const aiServicePath = path.join(__dirname, '..', 'src', 'main', 'ai-service.js');
+  const aiService = require(aiServicePath);
+
+  assert(typeof aiService.analyzeActionSafety === 'function', 'ai-service should expose analyzeActionSafety');
+
+  const safety = aiService.analyzeActionSafety({
+    type: 'key',
+    key: 'backspace',
+    reason: 'Clear the selected TradingView quick-search text before typing Pine Editor',
+    searchSurfaceContract: {
+      id: 'open-pine-editor',
+      route: 'quick-search',
+      surface: 'pine-editor'
+    }
+  }, {
+    userMessage: 'open the pine editor in tradingview'
+  });
+
+  assertEqual(safety.riskLevel, aiService.ActionRiskLevel.MEDIUM, 'bounded TradingView quick-search clears should remain medium risk');
+  assertEqual(safety.requiresConfirmation, false, 'bounded TradingView quick-search clears should not require confirmation');
+  assert((safety.warnings || []).some((warning) => /search-surface clear/i.test(String(warning || ''))), 'bounded TradingView quick-search clears should preserve an explanatory warning');
 });
 
 test('system prompt explains control-surface boundaries honestly', () => {

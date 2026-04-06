@@ -53,6 +53,7 @@ test('inferTradingViewTimeframeIntent recognizes selector-style timeframe workfl
 
 test('extractRequestedSymbol normalizes common TradingView symbol phrases', () => {
   assert.strictEqual(extractRequestedSymbol('change the symbol to NVDA in tradingview'), 'NVDA');
+  assert.strictEqual(extractRequestedSymbol('change the chart symbol to BTCUSD and confirm it changed in tradingview'), 'BTCUSD');
   assert.strictEqual(extractRequestedSymbol('search for ticker msft in tradingview'), 'MSFT');
   assert.strictEqual(extractRequestedSymbol('set the ticker to spy on tradingview'), 'SPY');
   assert.strictEqual(extractRequestedSymbol('open Pine Editor for the LUNR chart in tradingview'), 'LUNR');
@@ -63,6 +64,13 @@ test('inferTradingViewSymbolIntent recognizes symbol-change workflows', () => {
   assert(intent, 'symbol intent should be inferred');
   assert.strictEqual(intent.appName, 'TradingView');
   assert.strictEqual(intent.symbol, 'NVDA');
+});
+
+test('inferTradingViewSymbolIntent preserves explicit chart symbol targets from natural phrasing', () => {
+  const intent = inferTradingViewSymbolIntent('In TradingView, change the chart symbol to BTCUSD and confirm it changed.');
+  assert(intent, 'symbol intent should be inferred for chart-symbol phrasing');
+  assert.strictEqual(intent.appName, 'TradingView');
+  assert.strictEqual(intent.symbol, 'BTCUSD');
 });
 
 test('inferTradingViewSymbolIntent recognizes shortcut-alias quick-search phrasing', () => {

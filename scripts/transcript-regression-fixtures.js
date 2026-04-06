@@ -156,6 +156,8 @@ function normalizeTraceProof(proof = {}) {
   const observation = proof.observation && typeof proof.observation === 'object'
     ? {
         classification: String(proof.observation.classification || '').trim() || null,
+        verifyKind: String(proof.observation.verifyKind || '').trim() || null,
+        verifyTarget: String(proof.observation.verifyTarget || '').trim() || null,
         verified: proof.observation.verified === true,
         reason: String(proof.observation.reason || '').trim() || null,
         tradingMode: proof.observation.tradingMode && typeof proof.observation.tradingMode === 'object'
@@ -202,6 +204,8 @@ function normalizeTraceAction(action = {}, index = 0) {
   const observationCheckpoint = action.observationCheckpoint && typeof action.observationCheckpoint === 'object'
     ? {
         classification: String(action.observationCheckpoint.classification || '').trim() || null,
+        verifyKind: String(action.observationCheckpoint.verifyKind || '').trim() || null,
+        verifyTarget: String(action.observationCheckpoint.verifyTarget || '').trim() || null,
         verified: action.observationCheckpoint.verified === true,
         reason: String(action.observationCheckpoint.reason || action.observationCheckpoint.error || '').trim() || null,
         tradingMode: action.observationCheckpoint.tradingMode && typeof action.observationCheckpoint.tradingMode === 'object'
@@ -248,6 +252,7 @@ function normalizeProofExpectation(expectation = {}, index = 0) {
     status: String(expectation.status || '').trim() || null,
     actionType: String(expectation.actionType || '').trim() || null,
     classification: String(expectation.classification || '').trim() || null,
+    verifyKind: String(expectation.verifyKind || '').trim() || null,
     targetId: String(expectation.targetId || '').trim() || null,
     requiredCheckKind: String(expectation.requiredCheckKind || '').trim() || null,
     requiredCheckStatus: String(expectation.requiredCheckStatus || '').trim() || null

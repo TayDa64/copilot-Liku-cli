@@ -4,6 +4,8 @@
 
 Turn a real `liku chat` runtime finding into a checked-in, repeatable regression with as little friction as possible.
 
+Important: if a live run disagrees with a green synthetic suite, the live run wins. Convert the live behavior into a transcript or runtime-proof fixture instead of assuming the suite is the deeper truth.
+
 This first N5 slice intentionally reuses the existing inline-proof transcript evaluator instead of introducing a second transcript engine. It now also supports proof-aware runtime trace fixtures. The workflow is:
 
 1. capture a runtime transcript or reuse an inline-proof `.log`
@@ -50,6 +52,16 @@ Proof-aware runtime cases may additionally include:
 - `actions`
 - `proofExpectations`
 
+Proof expectations can assert stable runtime-proof invariants such as:
+
+- `minProofLevel`
+- `status`
+- `classification`
+- `verifyKind`
+- `targetId`
+- `requiredCheckKind`
+- `requiredCheckStatus`
+
 Expectation semantics intentionally mirror the inline-proof harness:
 
 - `scope: transcript` for whole-transcript checks
@@ -92,6 +104,14 @@ Print a runtime-proof fixture without writing it:
 
 - `node scripts/extract-runtime-trace-regression.js --trace-file %USERPROFILE%\.liku\traces\runtime-123.jsonl --fixture-name runtime-proof-panel-open --print`
 
+Capture the canonical persisted runtime-proof traces and refresh the checked-in runtime fixture bundle:
+
+- `npm run regression:runtime:fixtures`
+
+Capture only one canonical runtime-proof fixture:
+
+- `npm run regression:runtime:fixtures -- --fixture runtime-proof-timeframe-updated`
+
 ## Recommended loop
 
 ### 1. Capture the failure
@@ -116,7 +136,7 @@ The helpers derive:
 - assistant turns
 - observed provider/model headers
 - placeholder expectations
-- proof-aware action summaries and `proofExpectations` when the input is a runtime trace
+- proof-aware action summaries and `proofExpectations` when the input is a runtime trace, including `verifyKind` and preferred proof checks when present
 
 Treat those expectations as a draft, not finished truth.
 
@@ -165,3 +185,25 @@ That keeps new hardening work grounded in observed runtime behavior instead of r
 3. Keep transcript fixtures deterministic and stable enough to survive harmless wording drift.
 4. If a transcript fixture starts growing broad, add or retain a narrower behavior test alongside it.
 5. For runtime-proof fixtures, prefer asserting stable proof invariants such as `minProofLevel`, `status`, `classification`, `targetId`, or required check kinds instead of mirroring every trace field.
+
+## Live-vs-Suite Escalation Rule
+
+Use this escalation rule for TradingView and other focus-sensitive desktop automations:
+
+- **green suite + bad live run** -> investigate the live run first
+- **unexpected VS Code UI during chat execution** -> suspect misrouted keyboard input or foreground drift
+- **highlighted-but-not-cleared search field** -> treat as a real bug or missing proof, not a cosmetic state
+
+Common examples that should be captured as runtime regressions:
+
+- VS Code Accessibility View opens during a real `liku chat` command
+- TradingView quick-search keeps the previous query highlighted and the workflow stops early
+- the action stream halts around action 2 even though the target PID exists
+- the app process is present but focus-lock cannot prove the correct window/input surface
+
+When these happen:
+
+1. save the transcript or runtime trace
+2. write down the real foreground app/window sequence if known
+3. add the smallest fixture that proves the failure mode
+4. only then generalize the fix into synthetic characterization coverage

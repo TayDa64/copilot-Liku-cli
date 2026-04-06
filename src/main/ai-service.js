@@ -2475,6 +2475,9 @@ function analyzeActionSafety(action, targetInfo = {}) {
   const benignPineStarterResetIntent = action?.type === 'key'
     && (String(action?.key || '').toLowerCase().includes('delete') || String(action?.key || '').toLowerCase().includes('backspace'))
     && action?.safePineStarterReset === true;
+  const benignSearchSurfaceClearIntent = action?.type === 'key'
+    && (String(action?.key || '').toLowerCase().includes('delete') || String(action?.key || '').toLowerCase().includes('backspace'))
+    && String(action?.searchSurfaceContract?.route || '').trim().toLowerCase() === 'quick-search';
 
   const result = {
     actionId: `action-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`,
@@ -2541,6 +2544,9 @@ function analyzeActionSafety(action, targetInfo = {}) {
         if (benignPineStarterResetIntent) {
           result.riskLevel = ActionRiskLevel.MEDIUM;
           result.warnings.push('Bounded Pine starter reset after safe editor inspection');
+        } else if (benignSearchSurfaceClearIntent) {
+          result.riskLevel = ActionRiskLevel.MEDIUM;
+          result.warnings.push('Bounded search-surface clear before replacing the active query');
         } else {
           result.riskLevel = ActionRiskLevel.HIGH;
           result.warnings.push('Delete/Backspace key may remove content');
@@ -2634,6 +2640,9 @@ function analyzeActionSafety(action, targetInfo = {}) {
   for (const pattern of DANGER_PATTERNS) {
     if (pattern.test(textToCheck)) {
       if (benignPineStarterResetIntent && /\b(delete|remove|erase|destroy|clear|reset|format)\b/i.test(String(textToCheck.match(pattern)?.[0] || ''))) {
+        continue;
+      }
+      if (benignSearchSurfaceClearIntent && /\b(delete|remove|erase|destroy|clear|reset|format)\b/i.test(String(textToCheck.match(pattern)?.[0] || ''))) {
         continue;
       }
       if (benignEnterIntent && /confirm/i.test(String(textToCheck.match(pattern)?.[0] || ''))) {
@@ -4412,8 +4421,8 @@ function buildPostLaunchSelfHealPlans(target, runtime = {}) {
     ? target.titleHints[0]
     : null;
 
-  // First try to focus existing running window to avoid accidental re-launch.
-  if (preferredProcess || preferredTitle) {
+  // First try to focus an already-running window to avoid accidental re-launch.
+  if ((preferredProcess || preferredTitle) && hasRunningCandidates) {
     plans.push([
       {
         type: 'bring_window_to_front',
@@ -4581,11 +4590,142 @@ async function verifyForegroundFocus(expectedWindowHandle, options = {}) {
   };
 }
 
+function buildFocusLockFailureMessage(action = {}, verification = {}) {
+  const foreground = verification?.foreground && verification.foreground.success
+    ? verification.foreground
+    : null;
+  const requestedHandle = Number(verification?.expectedWindowHandle || 0) || 0;
+  const targetLabel = requestedHandle
+    ? `target window ${requestedHandle}`
+    : 'the requested target window';
+  const actionLabel = action?.type === 'type'
+    ? 'typing'
+    : action?.type === 'key'
+      ? `sending ${String(action?.key || 'keyboard input').trim() || 'keyboard input'}`
+      : action?.type === 'click_element'
+        ? 'selecting the requested element'
+        : 'continuing the action';
+  const foregroundLabel = foreground
+    ? `${foreground.processName || 'unknown'} | ${foreground.title || 'untitled'}`
+    : 'unknown foreground';
+
+  return `Could not confirm focus on ${targetLabel} before ${actionLabel}; foreground remained ${foregroundLabel}`;
+}
+
+async function ensureFocusLockedBeforeInputAction(action = {}, context = {}) {
+  const lastTargetWindowHandle = Number(context.lastTargetWindowHandle || 0) || 0;
+  const lastTargetWindowProfile = context.lastTargetWindowProfile && typeof context.lastTargetWindowProfile === 'object'
+    ? context.lastTargetWindowProfile
+    : null;
+  const focusRecoveryTarget = context.focusRecoveryTarget && typeof context.focusRecoveryTarget === 'object'
+    ? context.focusRecoveryTarget
+    : null;
+  const forceRefocus = context.forceRefocus === true;
+
+  if (!lastTargetWindowHandle) {
+    return {
+      applicable: false,
+      ok: true,
+      verification: {
+        applicable: false,
+        verified: true,
+        drifted: false,
+        attempts: 0,
+        expectedWindowHandle: 0,
+        attemptedRestore: false,
+        attemptedRefocus: false,
+        foreground: null,
+        reason: 'no-expected-window'
+      },
+      lastTargetWindowHandle,
+      lastTargetWindowProfile,
+      focusRecoveryTarget
+    };
+  }
+
+  if (forceRefocus) {
+    let attemptedRestore = false;
+    if (focusRecoveryTarget && (focusRecoveryTarget.title || focusRecoveryTarget.processName)) {
+      attemptedRestore = true;
+      try {
+        await systemAutomation.executeAction({
+          type: 'restore_window',
+          title: focusRecoveryTarget.title || undefined,
+          processName: focusRecoveryTarget.processName || undefined,
+          continue_on_error: true,
+          reason: 'Focus verification self-heal: restore target window after mismatch'
+        });
+      } catch {}
+    }
+
+    try {
+      await systemAutomation.focusWindow(lastTargetWindowHandle);
+    } catch {}
+    await sleepMs(FOCUS_VERIFY_SETTLE_MS);
+    const forcedForeground = await systemAutomation.getForegroundWindowInfo();
+    if (Number(forcedForeground?.hwnd || 0) === lastTargetWindowHandle) {
+      return {
+        applicable: true,
+        ok: true,
+        verification: {
+          applicable: true,
+          verified: true,
+          drifted: true,
+          attempts: 1,
+          expectedWindowHandle: lastTargetWindowHandle,
+          attemptedRestore,
+          attemptedRefocus: true,
+          foreground: forcedForeground,
+          reason: 'forced-refocus-after-mismatch'
+        },
+        lastTargetWindowHandle,
+        lastTargetWindowProfile: buildWindowProfileFromForeground(forcedForeground, lastTargetWindowProfile),
+        focusRecoveryTarget: {
+          title: forcedForeground.title || focusRecoveryTarget?.title || undefined,
+          processName: forcedForeground.processName || focusRecoveryTarget?.processName || undefined
+        }
+      };
+    }
+  }
+
+  const verification = await verifyForegroundFocus(lastTargetWindowHandle, {
+    recoveryTarget: focusRecoveryTarget
+  });
+
+  if (verification?.applicable && verification.verified && verification.foreground?.success) {
+    const foreground = verification.foreground;
+    const observedHandle = Number(foreground.hwnd || 0) || lastTargetWindowHandle;
+    return {
+      applicable: true,
+      ok: true,
+      verification,
+      lastTargetWindowHandle: observedHandle,
+      lastTargetWindowProfile: buildWindowProfileFromForeground(foreground, lastTargetWindowProfile),
+      focusRecoveryTarget: {
+        title: foreground.title || focusRecoveryTarget?.title || undefined,
+        processName: foreground.processName || focusRecoveryTarget?.processName || undefined
+      }
+    };
+  }
+
+  return {
+    applicable: !!verification?.applicable,
+    ok: !verification?.applicable || !!verification?.verified,
+    verification,
+    lastTargetWindowHandle,
+    lastTargetWindowProfile,
+    focusRecoveryTarget
+  };
+}
+
 function buildFocusTargetHint(action = {}) {
   const target = {
     appName: null,
+    requestedAppName: null,
+    launchQuery: null,
     processNames: [],
-    titleHints: []
+    titleHints: [],
+    popupKeywords: []
   };
 
   if (action?.verifyTarget && typeof action.verifyTarget === 'object') {
@@ -4593,11 +4733,20 @@ function buildFocusTargetHint(action = {}) {
     if (typeof explicit.appName === 'string' && explicit.appName.trim()) {
       target.appName = explicit.appName.trim();
     }
+    if (typeof explicit.requestedAppName === 'string' && explicit.requestedAppName.trim()) {
+      target.requestedAppName = explicit.requestedAppName.trim();
+    }
+    if (typeof explicit.launchQuery === 'string' && explicit.launchQuery.trim()) {
+      target.launchQuery = explicit.launchQuery.trim();
+    }
     if (Array.isArray(explicit.processNames)) {
       target.processNames.push(...explicit.processNames.map((value) => String(value || '').trim()).filter(Boolean));
     }
     if (Array.isArray(explicit.titleHints)) {
       target.titleHints.push(...explicit.titleHints.map((value) => String(value || '').trim()).filter(Boolean));
+    }
+    if (Array.isArray(explicit.popupKeywords)) {
+      target.popupKeywords.push(...explicit.popupKeywords.map((value) => String(value || '').trim()).filter(Boolean));
     }
   }
 
@@ -4613,8 +4762,136 @@ function buildFocusTargetHint(action = {}) {
 
   target.processNames = Array.from(new Set(target.processNames.map((value) => String(value || '').trim().toLowerCase()).filter(Boolean)));
   target.titleHints = Array.from(new Set(target.titleHints.map((value) => String(value || '').trim()).filter(Boolean)));
+  target.popupKeywords = Array.from(new Set(target.popupKeywords.map((value) => String(value || '').trim().toLowerCase()).filter(Boolean)));
 
   return target;
+}
+
+async function maybeSelfHealFocusTargetBeforeAction(action = {}, options = {}) {
+  if (!action || (action.type !== 'focus_window' && action.type !== 'bring_window_to_front')) {
+    return {
+      attempted: false,
+      recovered: false,
+      hwnd: 0,
+      target: null,
+      runningPids: []
+    };
+  }
+
+  let hwnd = 0;
+  try {
+    hwnd = await systemAutomation.resolveWindowHandle(action);
+  } catch {}
+
+  if (hwnd) {
+    return {
+      attempted: false,
+      recovered: false,
+      hwnd,
+      target: null,
+      runningPids: []
+    };
+  }
+
+  const focusTarget = buildFocusTargetHint(action);
+  const target = inferLaunchVerificationTarget({ actions: [action] }, options.userMessage || '');
+  if (!target.appName && focusTarget.appName) {
+    target.appName = focusTarget.appName;
+  }
+  if (!target.requestedAppName && focusTarget.requestedAppName) {
+    target.requestedAppName = focusTarget.requestedAppName;
+  }
+  if (!target.launchQuery && focusTarget.launchQuery) {
+    target.launchQuery = focusTarget.launchQuery;
+  }
+  if (Array.isArray(focusTarget.processNames) && focusTarget.processNames.length) {
+    target.processNames.push(...focusTarget.processNames);
+  }
+  if (Array.isArray(focusTarget.titleHints) && focusTarget.titleHints.length) {
+    target.titleHints.push(...focusTarget.titleHints);
+  }
+  if (Array.isArray(focusTarget.popupKeywords) && focusTarget.popupKeywords.length) {
+    target.popupKeywords.push(...focusTarget.popupKeywords);
+  }
+
+  target.processNames = Array.from(new Set((target.processNames || []).map((value) => String(value || '').trim().toLowerCase()).filter(Boolean)));
+  target.titleHints = Array.from(new Set((target.titleHints || []).map((value) => String(value || '').trim()).filter(Boolean)));
+  target.popupKeywords = Array.from(new Set((target.popupKeywords || []).map((value) => String(value || '').trim().toLowerCase()).filter(Boolean)));
+
+  const hasTargetSignal = !!(target.appName || target.processNames.length || target.titleHints.length);
+  if (!hasTargetSignal) {
+    return {
+      attempted: false,
+      recovered: false,
+      hwnd: 0,
+      target: null,
+      runningPids: []
+    };
+  }
+
+  let runningProcesses = await getRunningTargetProcesses(target);
+  const recoveryPlans = buildPostLaunchSelfHealPlans(target, {
+    hasRunningCandidates: runningProcesses.length > 0
+  });
+  if (!recoveryPlans.length) {
+    return {
+      attempted: false,
+      recovered: false,
+      hwnd: 0,
+      target,
+      runningPids: runningProcesses.map((proc) => proc.pid).filter(Number.isFinite)
+    };
+  }
+
+  const targetLabel = target.requestedAppName || target.appName || action.processName || action.title || 'target window';
+  for (let attempt = 1; attempt <= recoveryPlans.length; attempt++) {
+    console.log(`[AI-SERVICE] Pre-action focus recovery ${attempt}/${recoveryPlans.length} for ${targetLabel}`);
+    const recoveryPlan = recoveryPlans[attempt - 1] || [];
+    let sequenceOk = true;
+
+    for (const recoveryAction of recoveryPlan) {
+      const recoveryResult = await (options.actionExecutor
+        ? options.actionExecutor(recoveryAction)
+        : systemAutomation.executeAction(recoveryAction));
+      if (!recoveryResult?.success && !recoveryAction.continue_on_error) {
+        sequenceOk = false;
+        break;
+      }
+    }
+
+    if (!sequenceOk) {
+      continue;
+    }
+
+    await sleepMs(POST_ACTION_VERIFY_SETTLE_MS);
+    try {
+      hwnd = await systemAutomation.resolveWindowHandle(action);
+    } catch {
+      hwnd = 0;
+    }
+
+    if (hwnd) {
+      runningProcesses = await getRunningTargetProcesses(target);
+      return {
+        attempted: true,
+        recovered: true,
+        hwnd,
+        target,
+        runningPids: runningProcesses.map((proc) => proc.pid).filter(Number.isFinite),
+        attempts: attempt
+      };
+    }
+  }
+
+  runningProcesses = await getRunningTargetProcesses(target);
+  return {
+    attempted: true,
+    recovered: false,
+    hwnd: 0,
+    target,
+    runningPids: runningProcesses.map((proc) => proc.pid).filter(Number.isFinite),
+    attempts: recoveryPlans.length
+  };
 }
 
 function classifyActionFocusTargetResult(action = {}, result = {}) {
@@ -4645,8 +4922,11 @@ function classifyActionFocusTargetResult(action = {}, result = {}) {
   const tradingViewLikeTarget = isTradingViewTargetHint(action?.verifyTarget || target)
     || normalizeTextForMatch(action?.processName || '').includes('tradingview')
     || normalizeTextForMatch(action?.title || action?.windowTitle || '').includes('tradingview');
+  const foregroundWindowKind = String(actualForeground?.windowKind || '').trim().toLowerCase();
+  const popupLikeTradingViewForeground = foregroundMatch?.needsFollowUp === true
+    || (foregroundWindowKind && foregroundWindowKind !== 'main');
 
-  if (actualForegroundHandle && foregroundMatch.matched && tradingViewLikeTarget) {
+  if (actualForegroundHandle && foregroundMatch.matched && tradingViewLikeTarget && !popupLikeTradingViewForeground) {
     return {
       outcome: 'recovered',
       accepted: true,
@@ -4677,41 +4957,159 @@ const PINE_EDITOR_SURFACE_PROBE_CANDIDATES = Object.freeze([
   { text: 'Strategy Tester', exact: false }
 ]);
 
-async function findForegroundElementByText(searchText, exact = false) {
-  if (typeof systemAutomation.findElementByText !== 'function') {
+const TRADINGVIEW_QUICK_SEARCH_SURFACE_PROBE_CANDIDATES = Object.freeze([
+  { text: 'Search tool or function', exact: true, controlType: 'Text' },
+  { text: 'Nothing matches your criteria', exact: false, controlType: 'Text' },
+  { text: 'Search', exact: true, controlType: 'Edit' }
+]);
+
+const TRADINGVIEW_QUICK_SEARCH_INPUT_FOCUS_CANDIDATES = Object.freeze([
+  { text: 'Search', exact: true, controlType: 'Edit' },
+  { text: 'Search tool or function', exact: true, controlType: 'Edit' }
+]);
+
+const TRADINGVIEW_QUICK_SEARCH_EMPTY_TEXT_PATTERNS = Object.freeze([
+  /^$/,
+  /^search$/i,
+  /^search\s+tool\s+or\s+function$/i
+]);
+
+function normalizeQuickSearchWindowProcessName(value = '') {
+  return String(value || '').trim().toLowerCase();
+}
+
+async function getQuickSearchTrustedWindowInfo(windowHandle, fallbackForeground = null) {
+  const numericHandle = Number(windowHandle || 0) || 0;
+  if (!numericHandle) return null;
+  if (Number(fallbackForeground?.hwnd || 0) === numericHandle) {
+    return fallbackForeground && typeof fallbackForeground === 'object'
+      ? fallbackForeground
+      : null;
+  }
+  if (typeof systemAutomation.getWindowInfoByHandle !== 'function') {
     return null;
   }
-
-  const foreground = await systemAutomation.getForegroundWindowInfo();
-  const foregroundHwnd = Number(foreground?.hwnd || 0) || 0;
-
   try {
-    const found = await systemAutomation.findElementByText(searchText, {
-      exact,
-      controlType: ''
-    });
-    const element = found?.element || null;
-    if (!element) return null;
-
-    const elementHwnd = Number(element?.WindowHandle || 0) || 0;
-    if (foregroundHwnd && elementHwnd && foregroundHwnd !== elementHwnd) {
-      return null;
-    }
-
-    return {
-      foreground,
-      element,
-      text: searchText,
-      exact
-    };
+    const info = await systemAutomation.getWindowInfoByHandle(numericHandle);
+    return info?.success ? info : null;
   } catch {
     return null;
   }
 }
 
+async function isTrustedTradingViewQuickSearchMatch(matched, options = {}) {
+  if (!matched?.element) {
+    return { trusted: false, reason: 'missing-element', trustedWindow: null };
+  }
+
+  const elementWindowHandle = Number(matched?.element?.WindowHandle || 0) || 0;
+  const expectedWindowHandle = Number(options.expectedWindowHandle || 0) || 0;
+  const foreground = options.foreground && typeof options.foreground === 'object'
+    ? options.foreground
+    : await systemAutomation.getForegroundWindowInfo();
+  const foregroundHandle = Number(foreground?.hwnd || 0) || 0;
+
+  if (elementWindowHandle && expectedWindowHandle && elementWindowHandle === expectedWindowHandle) {
+    return { trusted: true, reason: 'expected-window', trustedWindow: foreground };
+  }
+
+  if (elementWindowHandle && foregroundHandle && elementWindowHandle === foregroundHandle) {
+    return { trusted: true, reason: 'foreground-window', trustedWindow: foreground };
+  }
+
+  const trustedWindow = await getQuickSearchTrustedWindowInfo(elementWindowHandle, foreground);
+  const expectedProcessName = normalizeQuickSearchWindowProcessName(options.expectedProcessName || foreground?.processName || '');
+  const trustedProcessName = normalizeQuickSearchWindowProcessName(trustedWindow?.processName || '');
+  const trustedWindowKind = String(trustedWindow?.windowKind || '').trim().toLowerCase();
+
+  if (trustedWindow && expectedProcessName && trustedProcessName === expectedProcessName
+    && (!trustedWindowKind || ['main', 'owned', 'palette'].includes(trustedWindowKind))) {
+    return {
+      trusted: true,
+      reason: matched?.matchedBy === 'global-fallback' ? 'same-process-global-fallback' : 'same-process-window-family',
+      trustedWindow
+    };
+  }
+
+  return {
+    trusted: false,
+    reason: matched?.matchedBy === 'global-fallback' ? 'cross-window-global-fallback' : 'window-family-mismatch',
+    trustedWindow
+  };
+}
+
+async function findForegroundElementByText(searchText, options = {}) {
+  if (typeof systemAutomation.findElementByText !== 'function') {
+    return null;
+  }
+
+  const exact = typeof options === 'boolean'
+    ? options
+    : !!options?.exact;
+  const controlType = typeof options === 'object' && options !== null
+    ? String(options.controlType || '').trim()
+    : '';
+  const allowGlobalFallback = typeof options === 'object' && options !== null
+    ? options.allowGlobalFallback === true
+    : false;
+  const explicitWindowHandle = typeof options === 'object' && options !== null
+    ? (Number(options.windowHandle || 0) || 0)
+    : 0;
+
+  const foreground = await systemAutomation.getForegroundWindowInfo();
+  const foregroundHwnd = Number(foreground?.hwnd || 0) || 0;
+  const attempts = [];
+  if (explicitWindowHandle > 0) {
+    attempts.push({ windowHandle: explicitWindowHandle, foregroundOnly: true, enforceWindowHandle: true, matchedBy: 'explicit-window' });
+  } else if (foregroundHwnd > 0) {
+    attempts.push({ windowHandle: foregroundHwnd, foregroundOnly: true, enforceWindowHandle: true, matchedBy: 'foreground-window' });
+  }
+  if (allowGlobalFallback) {
+    attempts.push({ windowHandle: 0, foregroundOnly: false, enforceWindowHandle: false, matchedBy: 'global-fallback' });
+  }
+  if (attempts.length === 0) {
+    attempts.push({ windowHandle: 0, foregroundOnly: false, enforceWindowHandle: false, matchedBy: 'global-search' });
+  }
+
+  for (const attempt of attempts) {
+    try {
+      const found = await systemAutomation.findElementByText(searchText, {
+        exact,
+        controlType,
+        windowHandle: attempt.windowHandle,
+        foregroundOnly: attempt.foregroundOnly
+      });
+      const element = found?.element || null;
+      if (!element) {
+        continue;
+      }
+
+      const elementHwnd = Number(element?.WindowHandle || 0) || 0;
+      if (attempt.enforceWindowHandle && attempt.windowHandle && elementHwnd && attempt.windowHandle !== elementHwnd) {
+        continue;
+      }
+
+      return {
+        foreground,
+        element,
+        text: searchText,
+        exact,
+        controlType,
+        matchedBy: attempt.matchedBy
+      };
+    } catch {
+      // Continue to the next probe scope.
+    }
+  }
+
+  return null;
+}
+
 async function probeTradingViewPineEditorSurface() {
   for (const candidate of PINE_EDITOR_SURFACE_PROBE_CANDIDATES) {
-    const matched = await findForegroundElementByText(candidate.text, candidate.exact);
+    const matched = await findForegroundElementByText(candidate.text, {
+      exact: candidate.exact
+    });
     if (matched) {
       return {
         matched: true,
@@ -4724,6 +5122,335 @@ async function probeTradingViewPineEditorSurface() {
   }
 
   return null;
+}
+
+async function probeTradingViewQuickSearchSurface() {
+  const foreground = await systemAutomation.getForegroundWindowInfo();
+  const expectedWindowHandle = Number(foreground?.hwnd || 0) || 0;
+  const expectedProcessName = foreground?.processName || '';
+
+  for (const candidate of TRADINGVIEW_QUICK_SEARCH_SURFACE_PROBE_CANDIDATES) {
+    const matched = await findForegroundElementByText(candidate.text, {
+      exact: candidate.exact,
+      controlType: candidate.controlType,
+      allowGlobalFallback: true
+    });
+    if (matched) {
+      const trust = await isTrustedTradingViewQuickSearchMatch(matched, {
+        expectedWindowHandle,
+        expectedProcessName,
+        foreground
+      });
+      return {
+        matched: true,
+        text: candidate.text,
+        exact: candidate.exact,
+        controlType: candidate.controlType,
+        matchedBy: matched.matchedBy || 'foreground-window',
+        element: matched.element,
+        foreground: matched.foreground,
+        trusted: trust.trusted === true,
+        trustReason: trust.reason || null,
+        trustedWindow: trust.trustedWindow || null
+      };
+    }
+  }
+
+  return null;
+}
+
+function normalizeTradingViewQuickSearchInputText(value = '') {
+  return String(value || '')
+    .replace(/[\u200B-\u200D\uFEFF]/g, '')
+    .replace(/\r/g, '')
+    .trim();
+}
+
+function isTradingViewQuickSearchInputEmpty(value = '') {
+  const normalized = normalizeTradingViewQuickSearchInputText(value);
+  return TRADINGVIEW_QUICK_SEARCH_EMPTY_TEXT_PATTERNS.some((pattern) => pattern.test(normalized));
+}
+
+async function readTradingViewQuickSearchInputValue(inputMatch) {
+  const bounds = inputMatch?.element?.Bounds || null;
+  if (!bounds) {
+    return { success: false, error: 'Quick-search input bounds were not available for readback' };
+  }
+
+  try {
+    const uia = require('./ui-automation');
+    const host = uia.getSharedUIAHost();
+    const response = await host.getText(bounds.CenterX, bounds.CenterY);
+    const text = String(response?.text || '');
+    return {
+      success: true,
+      text,
+      normalizedText: normalizeTradingViewQuickSearchInputText(text),
+      method: response?.method || 'UIAHost.getText',
+      empty: isTradingViewQuickSearchInputEmpty(text)
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: error?.message || String(error || 'Quick-search input readback failed')
+    };
+  }
+}
+
+async function trySetTradingViewQuickSearchInputValue(inputMatch, value = '') {
+  const bounds = inputMatch?.element?.Bounds || null;
+  if (!bounds) {
+    return { success: false, error: 'Quick-search input bounds were not available for setValue' };
+  }
+
+  try {
+    const uia = require('./ui-automation');
+    const host = uia.getSharedUIAHost();
+    const response = await host.setValue(bounds.CenterX, bounds.CenterY, value);
+    return {
+      success: true,
+      method: 'ValuePattern',
+      response
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: error?.message || String(error || 'Quick-search input setValue failed')
+    };
+  }
+}
+
+async function ensureTradingViewQuickSearchInputClearBeforeTyping(action, preferredWindowHandle = 0) {
+  if (String(action?.type || '').trim().toLowerCase() !== 'type') {
+    return { applicable: false, ready: true };
+  }
+
+  if (String(action?.searchSurfaceContract?.route || '').trim().toLowerCase() !== 'quick-search') {
+    return { applicable: false, ready: true };
+  }
+
+  const inputFocus = await focusTradingViewQuickSearchInput(preferredWindowHandle);
+  if (!inputFocus?.focused) {
+    return {
+      applicable: true,
+      ready: false,
+      error: 'Could not re-focus the TradingView quick-search input before typing',
+      inputFocus: inputFocus || null
+    };
+  }
+
+  const initialRead = await readTradingViewQuickSearchInputValue(inputFocus);
+  if (!initialRead.success) {
+    return {
+      applicable: true,
+      ready: false,
+      error: initialRead.error || 'Could not read the TradingView quick-search input before typing',
+      inputFocus,
+      initialRead
+    };
+  }
+
+  if (initialRead.empty) {
+    return {
+      applicable: true,
+      ready: true,
+      emptyConfirmed: true,
+      clearedBy: 'already-empty',
+      inputFocus,
+      initialRead,
+      finalRead: initialRead
+    };
+  }
+
+  const valueClearAttempt = await trySetTradingViewQuickSearchInputValue(inputFocus, '');
+  await sleepMs(80);
+  const afterValueClearRead = await readTradingViewQuickSearchInputValue(inputFocus);
+  if (valueClearAttempt.success && afterValueClearRead.success && afterValueClearRead.empty) {
+    return {
+      applicable: true,
+      ready: true,
+      emptyConfirmed: true,
+      clearedBy: 'value-pattern',
+      inputFocus,
+      initialRead,
+      clearAttempt: valueClearAttempt,
+      finalRead: afterValueClearRead
+    };
+  }
+
+  const keyboardFallback = {
+    attempted: false,
+    success: false,
+    error: null
+  };
+  if (typeof systemAutomation.pressKey === 'function') {
+    keyboardFallback.attempted = true;
+    try {
+      await systemAutomation.pressKey('ctrl+a', action);
+      await sleepMs(90);
+      await systemAutomation.pressKey('backspace', action);
+      await sleepMs(90);
+      keyboardFallback.success = true;
+    } catch (error) {
+      keyboardFallback.error = error?.message || String(error || 'Keyboard fallback failed');
+    }
+  }
+
+  const afterKeyboardClearRead = await readTradingViewQuickSearchInputValue(inputFocus);
+  if (afterKeyboardClearRead.success && afterKeyboardClearRead.empty) {
+    return {
+      applicable: true,
+      ready: true,
+      emptyConfirmed: true,
+      clearedBy: keyboardFallback.success ? 'keyboard-fallback' : 'already-empty-after-recheck',
+      inputFocus,
+      initialRead,
+      clearAttempt: valueClearAttempt,
+      keyboardFallback,
+      finalRead: afterKeyboardClearRead
+    };
+  }
+
+  return {
+    applicable: true,
+    ready: false,
+    error: 'TradingView quick-search input could not be proven empty before typing the query',
+    inputFocus,
+    initialRead,
+    clearAttempt: valueClearAttempt,
+    keyboardFallback,
+    finalRead: afterKeyboardClearRead.success ? afterKeyboardClearRead : afterValueClearRead
+  };
+}
+
+async function focusTradingViewQuickSearchInput(preferredWindowHandle = 0) {
+  if (typeof systemAutomation.click !== 'function') {
+    return null;
+  }
+
+  const foreground = await systemAutomation.getForegroundWindowInfo();
+  const expectedWindowHandle = Number(preferredWindowHandle || 0) || Number(foreground?.hwnd || 0) || 0;
+  const expectedProcessName = foreground?.processName || '';
+
+  for (const candidate of TRADINGVIEW_QUICK_SEARCH_INPUT_FOCUS_CANDIDATES) {
+    const matched = await findForegroundElementByText(candidate.text, {
+      exact: candidate.exact,
+      controlType: candidate.controlType,
+      windowHandle: preferredWindowHandle,
+      allowGlobalFallback: true
+    });
+    if (!matched?.element?.Bounds) {
+      continue;
+    }
+
+    const trust = await isTrustedTradingViewQuickSearchMatch(matched, {
+      expectedWindowHandle,
+      expectedProcessName,
+      foreground
+    });
+    if (!trust.trusted) {
+      continue;
+    }
+
+    const clickResult = {
+      success: true,
+      coordinates: {
+        x: matched.element.Bounds.CenterX,
+        y: matched.element.Bounds.CenterY
+      }
+    };
+
+    try {
+      await systemAutomation.click(
+        matched.element.Bounds.CenterX,
+        matched.element.Bounds.CenterY,
+        'left'
+      );
+    } catch (error) {
+      clickResult.success = false;
+      clickResult.error = error?.message || String(error || 'click failed');
+    }
+
+    if (!clickResult.success) {
+      continue;
+    }
+
+    await sleepMs(160);
+
+    return {
+      focused: true,
+      text: candidate.text,
+      exact: candidate.exact,
+      controlType: candidate.controlType,
+      matchedBy: matched.matchedBy || 'foreground-window',
+      element: matched.element,
+      foreground: matched.foreground,
+      trusted: true,
+      trustReason: trust.reason || null,
+      trustedWindow: trust.trustedWindow || null,
+      clickResult
+    };
+  }
+
+  return null;
+}
+
+async function maybeRecoverTradingViewQuickSearchOpen(action, checkpointSpec, checkpointBeforeForeground, observationCheckpoint, options = {}) {
+  const verifyTarget = String(action?.verify?.target || '').trim().toLowerCase();
+  const key = String(action?.key || '').trim().toLowerCase();
+  const shortcutId = String(action?.tradingViewShortcut?.id || '').trim().toLowerCase();
+  const searchRoute = String(action?.searchSurfaceContract?.route || '').trim().toLowerCase();
+
+  if (verifyTarget !== 'quick-search' || key !== 'ctrl+k') {
+    return null;
+  }
+
+  if (shortcutId !== 'symbol-search' && searchRoute !== 'quick-search') {
+    return null;
+  }
+
+  const probeMatched = await probeTradingViewQuickSearchSurface();
+  if (!probeMatched) {
+    return null;
+  }
+
+  if (probeMatched.trusted !== true) {
+    return null;
+  }
+
+  const preferredWindowHandle = Number(probeMatched?.trustedWindow?.hwnd || 0)
+    || Number(probeMatched?.element?.WindowHandle || 0)
+    || Number(probeMatched?.foreground?.hwnd || 0)
+    || 0;
+  const focusedInput = await focusTradingViewQuickSearchInput(preferredWindowHandle);
+  if (!focusedInput?.focused) {
+    return null;
+  }
+  const relaxedCheckpoint = await verifyKeyObservationCheckpoint({
+    ...checkpointSpec,
+    requiresObservedChange: false
+  }, checkpointBeforeForeground, {
+    expectedWindowHandle: options.expectedWindowHandle
+  });
+
+  const foreground = relaxedCheckpoint?.foreground?.success
+    ? relaxedCheckpoint.foreground
+    : await systemAutomation.getForegroundWindowInfo();
+
+  return {
+    recovered: true,
+    checkpoint: {
+      ...observationCheckpoint,
+      ...(relaxedCheckpoint || {}),
+      verified: true,
+      error: null,
+      foreground,
+      matchReason: relaxedCheckpoint?.matchReason || 'quick-search-surface-probe',
+      recoveredBy: focusedInput?.focused ? 'semantic-input-focus' : 'surface-probe',
+      quickSearchSurfaceProbe: probeMatched,
+      quickSearchInputFocus: focusedInput || null
+    }
+  };
 }
 
 async function maybeRecoverTradingViewPineEditorOpen(action, checkpointSpec, checkpointBeforeForeground, observationCheckpoint, options = {}) {
@@ -4757,7 +5484,9 @@ async function maybeRecoverTradingViewPineEditorOpen(action, checkpointSpec, che
   }
 
   for (const candidate of PINE_EDITOR_RESULT_CLICK_CANDIDATES) {
-    const matchedResult = await findForegroundElementByText(candidate.text, candidate.exact);
+    const matchedResult = await findForegroundElementByText(candidate.text, {
+      exact: candidate.exact
+    });
     if (!matchedResult?.element?.Bounds) {
       continue;
     }
@@ -4899,10 +5628,75 @@ function appendProofCheck(proof, check) {
   proof.checks.push(check);
 }
 
+function normalizeObservationCheckpointVerifyTarget(verifyTarget) {
+  if (!verifyTarget) return null;
+
+  if (typeof verifyTarget === 'string') {
+    return String(verifyTarget || '').trim().toLowerCase() || null;
+  }
+
+  if (typeof verifyTarget === 'object') {
+    return String(
+      verifyTarget.target
+      || verifyTarget.surface
+      || verifyTarget.requestedTarget
+      || verifyTarget.requestedAppName
+      || verifyTarget.appName
+      || ''
+    ).trim().toLowerCase() || null;
+  }
+
+  return String(verifyTarget || '').trim().toLowerCase() || null;
+}
+
+function inferTradingViewDomainClaim(verificationKind, classification) {
+  switch (String(verificationKind || '').trim().toLowerCase()) {
+    case 'timeframe-updated':
+      return 'The expected TradingView timeframe change was observed after execution.';
+    case 'symbol-updated':
+      return 'The expected TradingView symbol change was observed after execution.';
+    case 'watchlist-updated':
+      return 'The expected TradingView watchlist change was observed after execution.';
+    case 'indicator-present':
+      return 'The expected TradingView indicator presence was observed after execution.';
+    case 'chart-state-updated':
+      return 'The expected TradingView chart state change was observed after execution.';
+    default:
+      return classification === 'chart-state'
+        ? 'The expected TradingView chart-facing state change was observed after execution.'
+        : 'The expected TradingView domain state was observed after execution.';
+  }
+}
+
+function getObservationCheckpointDomainVerification(observationCheckpoint) {
+  if (!observationCheckpoint || typeof observationCheckpoint !== 'object') return null;
+
+  const domainProofEligible = observationCheckpoint.domainProofEligible === true;
+  const verifyKind = String(observationCheckpoint.verifyKind || '').trim().toLowerCase() || null;
+  const verifyTarget = normalizeObservationCheckpointVerifyTarget(observationCheckpoint.verifyTarget);
+  const classification = String(observationCheckpoint.classification || '').trim().toLowerCase() || null;
+
+  if (!domainProofEligible || !verifyKind) {
+    return null;
+  }
+
+  return {
+    domain: 'tradingview',
+    verificationKind: verifyKind,
+    verificationTarget: verifyTarget,
+    classification,
+    claim: inferTradingViewDomainClaim(verifyKind, classification)
+  };
+}
+
 function summarizeObservationCheckpointForProof(observationCheckpoint) {
   if (!observationCheckpoint || typeof observationCheckpoint !== 'object') return null;
   return {
+    appName: String(observationCheckpoint.appName || '').trim() || null,
     classification: String(observationCheckpoint.classification || '').trim().toLowerCase() || null,
+    verifyKind: String(observationCheckpoint.verifyKind || '').trim().toLowerCase() || null,
+    verifyTarget: normalizeObservationCheckpointVerifyTarget(observationCheckpoint.verifyTarget),
+    domainProofEligible: observationCheckpoint.domainProofEligible === true,
     verified: observationCheckpoint.verified === true,
     reason: observationCheckpoint.reason || observationCheckpoint.error || null,
     matchReason: observationCheckpoint.matchReason || null,
@@ -4932,6 +5726,7 @@ function mergeObservationCheckpointIntoProof(result, observationCheckpoint, cont
   const proof = normalizeProofRecord(result?.proof, result);
   const classification = String(observationCheckpoint?.classification || 'postcondition').trim().toLowerCase() || 'postcondition';
   const observationSummary = summarizeObservationCheckpointForProof(observationCheckpoint);
+  const domainVerification = getObservationCheckpointDomainVerification(observationCheckpoint);
 
   appendProofCheck(proof, {
     kind: 'observation-checkpoint',
@@ -4961,17 +5756,29 @@ function mergeObservationCheckpointIntoProof(result, observationCheckpoint, cont
     });
   }
 
+  if (domainVerification) {
+    appendProofCheck(proof, {
+      kind: 'domain-verification',
+      status: observationCheckpoint?.verified ? 'pass' : 'fail',
+      classification,
+      domain: domainVerification.domain,
+      verificationKind: domainVerification.verificationKind,
+      verificationTarget: domainVerification.verificationTarget
+    });
+  }
+
   if (observationCheckpoint?.verified) {
-    if ((Number(proof.level) || 0) < 2) {
-      proof.level = 2;
-      proof.levelName = getProofLevelName(2);
+    const targetLevel = domainVerification ? 3 : 2;
+    if ((Number(proof.level) || 0) < targetLevel) {
+      proof.level = targetLevel;
+      proof.levelName = getProofLevelName(targetLevel);
     } else {
       proof.levelName = getProofLevelName(proof.level);
     }
     if (proof.status !== 'failed') {
       proof.status = 'verified';
     }
-    proof.claim = proof.claim || (() => {
+    proof.claim = proof.claim || (domainVerification?.claim || (() => {
       switch (classification) {
         case 'editor-active':
           return 'The expected editor surface was observed after execution.';
@@ -4984,7 +5791,7 @@ function mergeObservationCheckpointIntoProof(result, observationCheckpoint, cont
         default:
           return 'The expected postcondition was observed after execution.';
       }
-    })();
+    })());
   } else {
     proof.status = 'failed';
     proof.error = observationCheckpoint?.error || proof.error || 'Observation checkpoint failed';
@@ -5168,6 +5975,9 @@ function scopeActionToTargetWindow(action, lastTargetWindowHandle, lastTargetWin
     || /\btradingview\b/.test(String(action?.searchSurfaceContract?.appName || '').trim().toLowerCase())
     || /\btradingview\b/.test(String(action?.tradingViewShortcut?.surface || '').trim().toLowerCase());
   const omitDynamicTradingViewTitle = tradingViewWindow && looksLikeDynamicTradingViewChartTitle(targetWindowTitle);
+  const omitTradingViewPineGetTextTitle = tradingViewWindow
+    && type === 'get_text'
+    && !!String(action?.pineEvidenceMode || '').trim();
 
   if (type === 'click_element' || type === 'find_element') {
     const existingCriteria = action.criteria && typeof action.criteria === 'object'
@@ -5191,7 +6001,7 @@ function scopeActionToTargetWindow(action, lastTargetWindowHandle, lastTargetWin
   }
 
   if (type === 'get_text') {
-    if (!targetWindowTitle || omitDynamicTradingViewTitle) return action;
+    if (!targetWindowTitle || omitDynamicTradingViewTitle || omitTradingViewPineGetTextTitle) return action;
     const existingCriteria = action.criteria && typeof action.criteria === 'object'
       ? action.criteria
       : null;
@@ -5577,6 +6387,7 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
   let lastTargetWindowHandle = null;
   let lastTargetWindowProfile = null;
   let focusRecoveryTarget = null;
+  let requirePreInputRefocus = false;
   let postVerification = { applicable: false, verified: true, healed: false, attempts: 0 };
   const observationCheckpoints = [];
   const runtimeTraceLog = buildRuntimeTraceLogForExecution('execute', actionData, options);
@@ -5608,7 +6419,11 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
     // re-focus it. Without this, focus can drift back to the overlay/terminal.
     if (action.type === 'focus_window' || action.type === 'bring_window_to_front') {
       try {
-        const hwnd = await systemAutomation.resolveWindowHandle(action);
+        const focusRecovery = await maybeSelfHealFocusTargetBeforeAction(action, {
+          userMessage,
+          actionExecutor
+        });
+        const hwnd = Number(focusRecovery?.hwnd || 0) || 0;
         if (hwnd) {
           lastTargetWindowHandle = hwnd;
           lastTargetWindowProfile = {
@@ -5618,8 +6433,8 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
             title: action.title || action.windowTitle || lastTargetWindowProfile?.title || undefined
           };
           focusRecoveryTarget = {
-            title: action.title || undefined,
-            processName: action.processName || undefined
+            title: focusRecovery?.target?.titleHints?.[0] || action.title || undefined,
+            processName: focusRecovery?.target?.processNames?.[0] || action.processName || undefined
           };
         }
       } catch {}
@@ -5802,9 +6617,34 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
 
     // Ensure focus-sensitive input goes to the last known target window.
     if ((action.type === 'key' || action.type === 'type' || action.type === 'click_element') && lastTargetWindowHandle) {
-      console.log(`[AI-SERVICE] Re-focusing last target window ${lastTargetWindowHandle} before ${action.type}`);
-      await systemAutomation.focusWindow(lastTargetWindowHandle);
-      await new Promise(r => setTimeout(r, 125));
+      console.log(`[AI-SERVICE] Verifying locked focus on target window ${lastTargetWindowHandle} before ${action.type}`);
+      const focusLock = await ensureFocusLockedBeforeInputAction(action, {
+        lastTargetWindowHandle,
+        lastTargetWindowProfile,
+        focusRecoveryTarget,
+        forceRefocus: requirePreInputRefocus
+      });
+      lastTargetWindowHandle = focusLock.lastTargetWindowHandle;
+      lastTargetWindowProfile = focusLock.lastTargetWindowProfile;
+      focusRecoveryTarget = focusLock.focusRecoveryTarget;
+      requirePreInputRefocus = false;
+
+      if (!focusLock.ok) {
+        const blockedResult = {
+          success: false,
+          action: action.type,
+          error: buildFocusLockFailureMessage(action, focusLock.verification),
+          reason: action.reason || '',
+          safety,
+          blockedByFocusLock: true,
+          focusVerification: focusLock.verification
+        };
+        results.push(blockedResult);
+        if (onAction) {
+          onAction(blockedResult, i, actionData.actions.length);
+        }
+        break;
+      }
     }
 
     // Smart browser click: when clicking in a browser, try URL navigation or UIA before
@@ -5841,6 +6681,37 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
       ? await systemAutomation.getForegroundWindowInfo()
       : null;
 
+    const quickSearchPreflight = await ensureTradingViewQuickSearchInputClearBeforeTyping(
+      effectiveAction,
+      lastTargetWindowHandle
+    );
+    if (quickSearchPreflight?.applicable && !quickSearchPreflight.ready) {
+      const failedResult = {
+        success: false,
+        action: effectiveAction.type,
+        error: quickSearchPreflight.error || 'Quick-search input empty-state proof failed before typing',
+        reason: action.reason || '',
+        safety,
+        quickSearchPreflight
+      };
+      results.push(failedResult);
+      appendRuntimeTraceEvent(runtimeTraceLog, 'action:error', {
+        actionIndex: i,
+        action: summarizeActionForTrace(effectiveAction),
+        error: failedResult.error,
+        quickSearchPreflight: {
+          emptyConfirmed: false,
+          clearedBy: quickSearchPreflight.clearedBy || null,
+          initialRead: quickSearchPreflight.initialRead?.normalizedText || null,
+          finalRead: quickSearchPreflight.finalRead?.normalizedText || null
+        }
+      });
+      if (onAction) {
+        onAction(failedResult, i, actionData.actions.length);
+      }
+      break;
+    }
+
     appendRuntimeTraceEvent(runtimeTraceLog, 'action:start', {
       actionIndex: i,
       action: summarizeActionForTrace(effectiveAction),
@@ -5856,6 +6727,9 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
     const result = await (actionExecutor ? actionExecutor(effectiveAction) : systemAutomation.executeAction(effectiveAction));
     result.reason = action.reason || '';
     result.safety = safety;
+    if (quickSearchPreflight?.applicable) {
+      result.quickSearchPreflight = quickSearchPreflight;
+    }
 
     if (result.resolvedTarget) {
       appendRuntimeTraceEvent(runtimeTraceLog, 'action:target-resolved', {
@@ -5883,6 +6757,9 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
             title: classifiedFocus.foreground?.title || focusRecoveryTarget?.title || action.title || undefined,
             processName: classifiedFocus.foreground?.processName || focusRecoveryTarget?.processName || action.processName || undefined
           };
+          requirePreInputRefocus = false;
+        } else {
+          requirePreInputRefocus = true;
         }
       }
     }
@@ -5893,6 +6770,19 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
       let observationCheckpoint = await verifyKeyObservationCheckpoint(checkpointSpec, checkpointBeforeForeground, {
         expectedWindowHandle: lastTargetWindowHandle
       });
+      const quickSearchRecovery = !observationCheckpoint.verified
+        ? await maybeRecoverTradingViewQuickSearchOpen(effectiveAction, checkpointSpec, checkpointBeforeForeground, observationCheckpoint, {
+          expectedWindowHandle: lastTargetWindowHandle
+        })
+        : null;
+      if (quickSearchRecovery?.checkpoint) {
+        observationCheckpoint = quickSearchRecovery.checkpoint;
+        result.quickSearchRecovery = {
+          recoveredBy: observationCheckpoint.recoveredBy || 'surface-probe',
+          quickSearchSurfaceProbe: observationCheckpoint.quickSearchSurfaceProbe || null,
+          quickSearchInputFocus: observationCheckpoint.quickSearchInputFocus || null
+        };
+      }
       const pineEditorRecovery = !observationCheckpoint.verified
         ? await maybeRecoverTradingViewPineEditorOpen(effectiveAction, checkpointSpec, checkpointBeforeForeground, observationCheckpoint, {
           expectedWindowHandle: lastTargetWindowHandle
@@ -6395,6 +7285,7 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
     ? { ...pending.lastTargetWindowProfile }
     : null;
   let focusRecoveryTarget = null;
+  let requirePreInputRefocus = false;
   let postVerification = { applicable: false, verified: true, healed: false, attempts: 0 };
   const observationCheckpoints = [];
   const resumePrerequisites = Array.isArray(pending.resumePrerequisites)
@@ -6422,7 +7313,11 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
 
     if (action.type === 'focus_window' || action.type === 'bring_window_to_front') {
       try {
-        const hwnd = await systemAutomation.resolveWindowHandle(action);
+        const focusRecovery = await maybeSelfHealFocusTargetBeforeAction(action, {
+          userMessage,
+          actionExecutor
+        });
+        const hwnd = Number(focusRecovery?.hwnd || 0) || 0;
         if (hwnd) {
           lastTargetWindowHandle = hwnd;
           lastTargetWindowProfile = {
@@ -6432,8 +7327,8 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
             title: action.title || action.windowTitle || lastTargetWindowProfile?.title || undefined
           };
           focusRecoveryTarget = {
-            title: action.title || undefined,
-            processName: action.processName || undefined
+            title: focusRecovery?.target?.titleHints?.[0] || action.title || undefined,
+            processName: focusRecovery?.target?.processNames?.[0] || action.processName || undefined
           };
         }
       } catch {}
@@ -6516,9 +7411,34 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
     }
 
     if ((action.type === 'key' || action.type === 'type' || action.type === 'click_element') && lastTargetWindowHandle) {
-      console.log(`[AI-SERVICE] (resume) Re-focusing last target window ${lastTargetWindowHandle} before ${action.type}`);
-      await systemAutomation.focusWindow(lastTargetWindowHandle);
-      await new Promise(r => setTimeout(r, 125));
+      console.log(`[AI-SERVICE] (resume) Verifying locked focus on target window ${lastTargetWindowHandle} before ${action.type}`);
+      const focusLock = await ensureFocusLockedBeforeInputAction(action, {
+        lastTargetWindowHandle,
+        lastTargetWindowProfile,
+        focusRecoveryTarget,
+        forceRefocus: requirePreInputRefocus
+      });
+      lastTargetWindowHandle = focusLock.lastTargetWindowHandle;
+      lastTargetWindowProfile = focusLock.lastTargetWindowProfile;
+      focusRecoveryTarget = focusLock.focusRecoveryTarget;
+      requirePreInputRefocus = false;
+
+      if (!focusLock.ok) {
+        const blockedResult = {
+          success: false,
+          action: action.type,
+          error: buildFocusLockFailureMessage(action, focusLock.verification),
+          reason: action.reason || '',
+          userConfirmed: resumePrerequisites.length === 0 && i === 0,
+          blockedByFocusLock: true,
+          focusVerification: focusLock.verification
+        };
+        results.push(blockedResult);
+        if (onAction) {
+          onAction(blockedResult, i, actionsToResume.length);
+        }
+        break;
+      }
     }
 
     // Smart browser click: same as main loop — try URL navigation / UIA before coordinate click.
@@ -6558,6 +7478,37 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
       ? await systemAutomation.getForegroundWindowInfo()
       : null;
 
+    const quickSearchPreflight = await ensureTradingViewQuickSearchInputClearBeforeTyping(
+      effectiveAction,
+      lastTargetWindowHandle
+    );
+    if (quickSearchPreflight?.applicable && !quickSearchPreflight.ready) {
+      const failedResult = {
+        success: false,
+        action: effectiveAction.type,
+        error: quickSearchPreflight.error || 'Quick-search input empty-state proof failed before typing',
+        reason: action.reason || '',
+        userConfirmed: resumePrerequisites.length === 0 && i === 0,
+        quickSearchPreflight
+      };
+      results.push(failedResult);
+      appendRuntimeTraceEvent(runtimeTraceLog, 'action:error', {
+        actionIndex: pending.actionIndex + i,
+        action: summarizeActionForTrace(effectiveAction),
+        error: failedResult.error,
+        quickSearchPreflight: {
+          emptyConfirmed: false,
+          clearedBy: quickSearchPreflight.clearedBy || null,
+          initialRead: quickSearchPreflight.initialRead?.normalizedText || null,
+          finalRead: quickSearchPreflight.finalRead?.normalizedText || null
+        }
+      });
+      if (onAction) {
+        onAction(failedResult, pending.actionIndex + i, pending.actionIndex + actionsToResume.length);
+      }
+      break;
+    }
+
     appendRuntimeTraceEvent(runtimeTraceLog, 'action:start', {
       actionIndex: pending.actionIndex + i,
       action: summarizeActionForTrace(effectiveAction),
@@ -6573,6 +7524,9 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
     const result = await (actionExecutor ? actionExecutor(effectiveAction) : systemAutomation.executeAction(effectiveAction));
     result.reason = action.reason || '';
     result.userConfirmed = resumePrerequisites.length === 0 && i === 0;
+    if (quickSearchPreflight?.applicable) {
+      result.quickSearchPreflight = quickSearchPreflight;
+    }
 
     if (result.resolvedTarget) {
       appendRuntimeTraceEvent(runtimeTraceLog, 'action:target-resolved', {
@@ -6600,6 +7554,9 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
             title: classifiedFocus.foreground?.title || focusRecoveryTarget?.title || action.title || undefined,
             processName: classifiedFocus.foreground?.processName || focusRecoveryTarget?.processName || action.processName || undefined
           };
+          requirePreInputRefocus = false;
+        } else {
+          requirePreInputRefocus = true;
         }
       }
     }
@@ -6610,6 +7567,19 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
       let observationCheckpoint = await verifyKeyObservationCheckpoint(checkpointSpec, checkpointBeforeForeground, {
         expectedWindowHandle: lastTargetWindowHandle
       });
+      const quickSearchRecovery = !observationCheckpoint.verified
+        ? await maybeRecoverTradingViewQuickSearchOpen(effectiveAction, checkpointSpec, checkpointBeforeForeground, observationCheckpoint, {
+          expectedWindowHandle: lastTargetWindowHandle
+        })
+        : null;
+      if (quickSearchRecovery?.checkpoint) {
+        observationCheckpoint = quickSearchRecovery.checkpoint;
+        result.quickSearchRecovery = {
+          recoveredBy: observationCheckpoint.recoveredBy || 'surface-probe',
+          quickSearchSurfaceProbe: observationCheckpoint.quickSearchSurfaceProbe || null,
+          quickSearchInputFocus: observationCheckpoint.quickSearchInputFocus || null
+        };
+      }
       const pineEditorRecovery = !observationCheckpoint.verified
         ? await maybeRecoverTradingViewPineEditorOpen(effectiveAction, checkpointSpec, checkpointBeforeForeground, observationCheckpoint, {
           expectedWindowHandle: lastTargetWindowHandle
