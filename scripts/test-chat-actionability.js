@@ -333,6 +333,10 @@ const preferencesStub = {
 
 const sessionIntentStateStub = {
   getChatContinuityState: () => continuityState,
+  getSessionIntentState: () => ({
+    chatContinuity: continuityState,
+    pendingRequestedTask
+  }),
   getPendingRequestedTask: () => pendingRequestedTask,
   recordChatContinuityTurn: (turnRecord) => {
     lastRecordedTurn = turnRecord;
@@ -466,6 +470,7 @@ async function main() {
   assert.strictEqual(stateBackedContinuation.exitCode, 0, 'state-backed continuation scenario should exit successfully');
   assert(stateBackedContinuation.output.includes('EXECUTE_COUNT:1'), 'state-backed continuation should execute emitted actions');
   assert(stateBackedContinuation.output.includes('SEEN_MESSAGES:["continue"]'), 'state-backed continuation should still send the minimal prompt while execution routing relies on saved continuity');
+  assert(/Using saved continuity intent instead of the literal input:/i.test(stateBackedContinuation.output), 'state-backed continuation should explicitly signal saved continuity reuse');
 
   const pineDiagnosticsContinuation = await runScenarioWithContinuity(['continue'], {
     activeGoal: 'Diagnose the visible Pine script errors in TradingView',
@@ -832,6 +837,7 @@ async function main() {
   ]);
   assert.strictEqual(blockedPineContinuation.exitCode, 0, 'blocked Pine continuation scenario should exit successfully');
   assert(blockedPineContinuation.output.includes('EXECUTE_COUNT:1'), 'blocked Pine continuation should execute after replaying the saved retry intent');
+  assert(/Using saved pending task intent instead of the literal input:/i.test(blockedPineContinuation.output), 'blocked Pine continuation should explicitly signal saved pending-task reuse');
   assert(
     blockedPineContinuation.output.includes('PREFLIGHT_USER_MESSAGES:["Retry the blocked TradingView Pine authoring task.'),
     'blocked Pine continuation should route through the saved bounded retry intent instead of raw continue text'

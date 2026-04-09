@@ -132,6 +132,9 @@ const {
   persistPineScriptState
 } = require('./tradingview/pine-script-state');
 const {
+  buildExecutionContextEnvelope
+} = require('./ai-service/execution-context');
+const {
   maybeRewriteTradingViewPaperWorkflow
 } = require('./tradingview/paper-workflows');
 const {
@@ -183,6 +186,55 @@ let lastSkillSelection = {
   currentUrlHost: null,
   selectedAt: 0
 };
+
+let lastMemorySelection = {
+  ids: [],
+  query: '',
+  summary: null,
+  selectedAt: 0
+};
+
+let lastSelectionProvenance = {
+  skills: { ids: [], summary: null },
+  memories: { ids: [], summary: null },
+  executionContext: null,
+  selectedAt: 0
+};
+
+function cloneSerializable(value) {
+  if (value === null || value === undefined) return value ?? null;
+  try {
+    return JSON.parse(JSON.stringify(value));
+  } catch {
+    return null;
+  }
+}
+
+function buildSelectionProvenance({ executionContextEnvelope = null, skillSelection = null, memorySelection = null } = {}) {
+  return {
+    skills: {
+      ids: Array.isArray(skillSelection?.ids) ? [...skillSelection.ids] : [],
+      summary: cloneSerializable(skillSelection?.summary || null)
+    },
+    memories: {
+      ids: Array.isArray(memorySelection?.ids) ? [...memorySelection.ids] : [],
+      summary: cloneSerializable(memorySelection?.summary || null)
+    },
+    executionContext: cloneSerializable(executionContextEnvelope || null),
+    selectedAt: Date.now()
+  };
+}
+
+function summarizeSelectionProvenanceForTrace(selectionProvenance = null) {
+  if (!selectionProvenance || typeof selectionProvenance !== 'object') return null;
+  return {
+    selectedSkillIds: Array.isArray(selectionProvenance.skills?.ids) ? selectionProvenance.skills.ids.slice(0, 8) : [],
+    selectedMemoryIds: Array.isArray(selectionProvenance.memories?.ids) ? selectionProvenance.memories.ids.slice(0, 8) : [],
+    skillSummary: cloneSerializable(selectionProvenance.skills?.summary || null),
+    memorySummary: cloneSerializable(selectionProvenance.memories?.summary || null),
+    executionContext: cloneSerializable(selectionProvenance.executionContext || null)
+  };
+}
 
 // ===== CONFIGURATION =====
 
@@ -450,6 +502,9 @@ async function buildMessages(userMessage, includeVisual = false, options = {}) {
   const mergedOptions = { ...(options || {}) };
   try {
     const sessionState = getSessionIntentState({ cwd: process.cwd() });
+    if (!mergedOptions.sessionState || typeof mergedOptions.sessionState !== 'object') {
+      mergedOptions.sessionState = sessionState;
+    }
     if (!(typeof mergedOptions.sessionIntentContext === 'string' && mergedOptions.sessionIntentContext.trim())) {
       mergedOptions.sessionIntentContext = formatSessionIntentContext(sessionState) || '';
     }
@@ -1607,10 +1662,15 @@ async function sendMessage(userMessage, options = {}) {
   // Fetch relevant skills (Phase 4 — Semantic Skill Router)
   let skillsContextText = '';
   let selectedSkillIds = [];
+  let skillSelection = { ids: [], matches: [], summary: null, text: '' };
+  let memorySelection = { ids: [], notes: [], matches: [], summary: null, text: '' };
+  let selectedMemoryIds = [];
   let currentProcessName = null;
   let currentWindowTitle = null;
   let currentWindowKind = null;
   let currentUrlHost = null;
+  let selectionExecutionContextEnvelope = null;
+  let sessionState = null;
   try {
     const fg = await systemAutomation.getForegroundWindowInfo();
     if (fg && fg.success && fg.processName) {
@@ -1622,8 +1682,47 @@ async function sendMessage(userMessage, options = {}) {
   try {
     currentUrlHost = skillRouter.extractHost(getBrowserSessionState().url || '');
   } catch {}
+
+  // Fetch relevant memory notes (Phase 1 — Agentic Memory)
+  let memoryContextText = '';
+
+  let sessionIntentContextText = '';
+  let chatContinuityContextText = '';
   try {
-    const skillSelection = skillRouter.getRelevantSkillsSelection(enhancedMessage, {
+    ingestUserIntentState(enhancedMessage, { cwd: process.cwd() });
+    sessionState = getSessionIntentState({ cwd: process.cwd() });
+    sessionIntentContextText = formatSessionIntentContext(sessionState) || '';
+    chatContinuityContextText = formatChatContinuityContext(sessionState, { userMessage: enhancedMessage }) || '';
+  } catch (err) {
+    console.warn('[AI] Session intent state error (non-fatal):', err.message);
+  }
+
+  try {
+    selectionExecutionContextEnvelope = buildExecutionContextEnvelope({
+      cwd: process.cwd(),
+      foreground: {
+        processName: currentProcessName,
+        title: currentWindowTitle,
+        windowTitle: currentWindowTitle,
+        windowKind: currentWindowKind
+      },
+      sessionIntentContext: sessionIntentContextText,
+      chatContinuityContext: chatContinuityContextText,
+      sessionState,
+      userMessage: enhancedMessage
+    });
+  } catch (err) {
+    console.warn('[AI] Execution context envelope build error (non-fatal):', err.message);
+  }
+
+  try {
+    skillSelection = skillRouter.getRelevantSkillsSelection(enhancedMessage, {
+      executionContextEnvelope: selectionExecutionContextEnvelope,
+      repoName: selectionExecutionContextEnvelope?.repo?.name || null,
+      projectRoot: selectionExecutionContextEnvelope?.repo?.projectRoot || null,
+      appId: selectionExecutionContextEnvelope?.foreground?.appId || null,
+      taskFamily: selectionExecutionContextEnvelope?.taskFamily || null,
+      compartmentKey: selectionExecutionContextEnvelope?.compartmentKey || null,
       currentProcessName,
       currentWindowTitle,
       currentWindowKind,
@@ -1654,24 +1753,36 @@ async function sendMessage(userMessage, options = {}) {
     };
   }
 
-  // Fetch relevant memory notes (Phase 1 — Agentic Memory)
-  let memoryContextText = '';
   try {
-    memoryContextText = memoryStore.getMemoryContext(enhancedMessage) || '';
+    memorySelection = memoryStore.getRelevantNotesSelection(enhancedMessage, {
+      executionContextEnvelope: selectionExecutionContextEnvelope,
+      repoName: selectionExecutionContextEnvelope?.repo?.name || null,
+      projectRoot: selectionExecutionContextEnvelope?.repo?.projectRoot || null,
+      appId: selectionExecutionContextEnvelope?.foreground?.appId || null,
+      processName: currentProcessName,
+      taskFamily: selectionExecutionContextEnvelope?.taskFamily || null,
+      compartmentKey: selectionExecutionContextEnvelope?.compartmentKey || null,
+      limit: 5
+    }) || { ids: [], notes: [], matches: [], summary: null, text: '' };
+    memoryContextText = memorySelection.text || '';
+    selectedMemoryIds = Array.isArray(memorySelection.ids) ? memorySelection.ids : [];
   } catch (err) {
     console.warn('[AI] Memory store error (non-fatal):', err.message);
   }
 
-  let sessionIntentContextText = '';
-  let chatContinuityContextText = '';
-  try {
-    ingestUserIntentState(enhancedMessage, { cwd: process.cwd() });
-    const sessionState = getSessionIntentState({ cwd: process.cwd() });
-    sessionIntentContextText = formatSessionIntentContext(sessionState) || '';
-    chatContinuityContextText = formatChatContinuityContext(sessionState, { userMessage: enhancedMessage }) || '';
-  } catch (err) {
-    console.warn('[AI] Session intent state error (non-fatal):', err.message);
-  }
+  lastMemorySelection = {
+    ids: selectedMemoryIds,
+    query: enhancedMessage,
+    summary: cloneSerializable(memorySelection.summary || null),
+    selectedAt: Date.now()
+  };
+
+  const selectionProvenance = buildSelectionProvenance({
+    executionContextEnvelope: selectionExecutionContextEnvelope,
+    skillSelection,
+    memorySelection
+  });
+  lastSelectionProvenance = selectionProvenance;
 
   const satisfiedBrowserResponse = maybeBuildSatisfiedBrowserNoOpResponse(enhancedMessage, {
     browserState: getBrowserSessionState(),
@@ -1696,7 +1807,8 @@ async function sendMessage(userMessage, options = {}) {
       endpointHost: null,
       routingNote: 'browser-goal-satisfied-short-circuit',
       routing: { mode: 'browser-goal-satisfied-short-circuit' },
-      hasVisualContext: false
+      hasVisualContext: false,
+      selection: selectionProvenance
     };
   }
 
@@ -1706,7 +1818,8 @@ async function sendMessage(userMessage, options = {}) {
     skillsContext: skillsContextText,
     memoryContext: memoryContextText,
     sessionIntentContext: sessionIntentContextText,
-    chatContinuityContext: chatContinuityContextText
+    chatContinuityContext: chatContinuityContextText,
+    executionContextEnvelope: selectionExecutionContextEnvelope
   });
 
   try {
@@ -2064,7 +2177,8 @@ async function sendMessage(userMessage, options = {}) {
       endpointHost: providerMetadata?.endpointHost || null,
       routingNote: routingNoteOverride || providerMetadata?.routing?.message || null,
       routing: routingOverride || providerMetadata?.routing || null,
-      hasVisualContext: includeVisualContext && visualContextStore.getVisualContextCount() > 0
+      hasVisualContext: includeVisualContext && visualContextStore.getVisualContextCount() > 0,
+      selection: selectionProvenance
     };
 
   } catch (error) {
@@ -2072,7 +2186,8 @@ async function sendMessage(userMessage, options = {}) {
       success: false,
       error: error.message,
       provider: getCurrentProvider(),
-      model: resolveCopilotModelKey(model)
+      model: resolveCopilotModelKey(model),
+      selection: selectionProvenance
     };
   }
 }
@@ -2465,6 +2580,388 @@ const SAFE_PATTERNS = [
  */
 let pendingAction = null;
 
+function firstNonEmptyString(...values) {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) {
+      return value.trim();
+    }
+  }
+  return '';
+}
+
+function humanizeConfirmationToken(value = '') {
+  const normalized = String(value || '').trim();
+  if (!normalized) return '';
+
+  const lower = normalized.toLowerCase();
+  const aliases = {
+    'quick-search': 'quick-search query',
+    'pine-editor': 'Pine Editor',
+    'pine-logs': 'Pine Logs',
+    'pine-profiler': 'Pine Profiler',
+    'pine-version-history': 'Pine Version History',
+    'create-alert': 'Create Alert dialog',
+    'timeframe': 'timeframe selector',
+    'watchlist': 'watchlist',
+    'symbol': 'symbol selector',
+    'chart': 'chart surface',
+    'dom': 'Depth of Market panel',
+    'paper-trading': 'Paper Trading panel',
+    'drawing-tools': 'drawing tools',
+    'object-tree': 'Object Tree',
+    'repo-editor': 'repo editor'
+  };
+
+  if (aliases[lower]) return aliases[lower];
+
+  return normalized
+    .replace(/[-_]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function shortenForDisplay(value = '', maxLength = 120) {
+  const normalized = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!normalized) return '';
+  if (normalized.length <= maxLength) return normalized;
+  return `${normalized.slice(0, Math.max(0, maxLength - 3)).trimEnd()}...`;
+}
+
+function inferRepoPathFromCommand(command = '') {
+  const raw = String(command || '');
+  if (!raw.trim()) return null;
+
+  const patterns = [
+    /(?:^|&&|;|\|)\s*cd\s+(["']?)([A-Za-z]:\\[^&;|\n\r]+?)\1\s*(?=&&|;|\||$)/i,
+    /(?:^|&&|;|\|)\s*Set-Location\s+(["'])(.+?)\1\s*(?=&&|;|\||$)/i,
+    /(?:^|&&|;|\|)\s*Push-Location\s+(["'])(.+?)\1\s*(?=&&|;|\||$)/i
+  ];
+
+  for (const pattern of patterns) {
+    const match = raw.match(pattern);
+    const candidate = match?.[2] || match?.[1] || '';
+    if (candidate && /^[A-Za-z]:\\/.test(candidate.trim())) {
+      return candidate.trim();
+    }
+  }
+
+  return null;
+}
+
+function inferConfirmationAppName(action, targetInfo = {}) {
+  const direct = firstNonEmptyString(
+    targetInfo.appName,
+    action?.verifyTarget?.appName,
+    action?.verify?.appName,
+    action?.searchSurfaceContract?.appName,
+    action?.verifyTarget?.requestedAppName,
+    action?.verify?.requestedAppName
+  );
+  if (direct) return direct;
+
+  const processName = String(action?.processName || '').trim();
+  if (/tradingview/i.test(processName)) return 'TradingView';
+
+  const inferred = extractRequestedAppName([
+    action?.reason || '',
+    targetInfo.text || '',
+    targetInfo.buttonText || '',
+    targetInfo.label || '',
+    targetInfo.userMessage || '',
+    action?.title || ''
+  ].join(' '));
+
+  if (!inferred) {
+    const fallbackSignal = [
+      action?.reason || '',
+      targetInfo.text || '',
+      targetInfo.buttonText || '',
+      targetInfo.label || '',
+      targetInfo.userMessage || '',
+      action?.title || ''
+    ].join(' ');
+    if (/\btradingview\b/i.test(fallbackSignal)) {
+      return 'TradingView';
+    }
+  }
+
+  return inferred || null;
+}
+
+function inferConfirmationSurface(action, targetInfo = {}, appName = null) {
+  if (String(action?.searchSurfaceContract?.route || '').trim().toLowerCase() === 'quick-search') {
+    return 'quick-search';
+  }
+
+  const direct = firstNonEmptyString(
+    targetInfo.surface,
+    action?.verify?.surface,
+    action?.verify?.target,
+    action?.searchSurfaceContract?.surface,
+    action?.tradingViewShortcut?.surface,
+    action?.verifyTarget?.surface
+  );
+  if (direct) return String(direct).trim().toLowerCase().replace(/\s+/g, '-');
+
+  const signal = [
+    action?.reason || '',
+    targetInfo.text || '',
+    targetInfo.buttonText || '',
+    targetInfo.label || '',
+    targetInfo.userMessage || ''
+  ].join(' ');
+  const normalized = String(signal || '').toLowerCase();
+
+  if (/pine\s+editor/.test(normalized)) return 'pine-editor';
+  if (/pine\s+logs/.test(normalized)) return 'pine-logs';
+  if (/pine\s+profiler|profiler/.test(normalized)) return 'pine-profiler';
+  if (/version\s+history/.test(normalized)) return 'pine-version-history';
+  if (/depth\s+of\s+market|\bdom\b/.test(normalized)) return 'dom';
+  if (/paper\s+trading/.test(normalized)) return 'paper-trading';
+  if (/drawing\s+tools?/.test(normalized)) return 'drawing-tools';
+  if (/object(?:\s+|-)tree/.test(normalized)) return 'object-tree';
+  if (/time\s*frame|timeframe/.test(normalized)) return 'timeframe';
+  if (/watchlist/.test(normalized)) return 'watchlist';
+  if (/\bsymbol\b/.test(normalized)) return 'symbol';
+  if (/chart/.test(normalized)) return 'chart';
+
+  if (appName === 'TradingView') return 'chart';
+  return null;
+}
+
+function buildConfirmationObjectLabel(action, targetInfo = {}, context = {}) {
+  const explicitLabel = firstNonEmptyString(targetInfo.objectLabel, targetInfo.text, targetInfo.buttonText, targetInfo.label);
+  if (explicitLabel) return explicitLabel;
+
+  if (String(action?.type || '').trim().toLowerCase() === 'run_command') {
+    return shortenForDisplay(action?.command || '', 96) || 'shell command';
+  }
+
+  if (context.surface === 'quick-search') {
+    return `${context.appName ? `${context.appName} ` : ''}quick-search query`;
+  }
+
+  if (context.surface === 'pine-editor') {
+    return `${context.appName ? `${context.appName} ` : ''}Pine Editor buffer`;
+  }
+
+  if (context.surface) {
+    return humanizeConfirmationToken(context.surface);
+  }
+
+  if (context.appName) {
+    return context.appName;
+  }
+
+  return '';
+}
+
+function buildConfirmationObjectType(action, context = {}) {
+  const type = String(action?.type || '').trim().toLowerCase();
+  if (type === 'run_command') return 'command';
+  if (type === 'click' || type === 'double_click' || type === 'right_click') return 'control';
+  if (type === 'type') {
+    if (context.surface === 'quick-search') return 'query';
+    if (context.surface === 'pine-editor') return 'editor-buffer';
+    return 'text-input';
+  }
+  if (type === 'key') {
+    const key = String(action?.key || '').toLowerCase();
+    if (key.includes('delete') || key.includes('backspace')) {
+      if (context.surface === 'quick-search') return 'query';
+      if (context.surface === 'pine-editor') return 'editor-buffer';
+      return 'content';
+    }
+    if (key.includes('enter') || key.includes('return')) return 'confirmation-step';
+    return 'keyboard-action';
+  }
+  if (type.includes('window')) return 'window';
+  return type || 'action';
+}
+
+function buildConfirmationExpectedProof(action, targetInfo = {}, context = {}) {
+  const explicit = firstNonEmptyString(targetInfo.expectedProof, action?.expectedProof);
+  if (explicit) return explicit;
+
+  if (String(action?.searchSurfaceContract?.surface || '').trim()) {
+    const targetSurface = humanizeConfirmationToken(action.searchSurfaceContract.surface);
+    const prefix = context.appName ? `${context.appName} ` : '';
+    return `Observe ${prefix}${targetSurface} after the quick-search route completes.`;
+  }
+
+  if (String(action?.verify?.target || '').trim()) {
+    const verifyTarget = humanizeConfirmationToken(action.verify.target);
+    const prefix = context.appName ? `${context.appName} ` : '';
+    return `Observe ${prefix}${verifyTarget} after execution.`;
+  }
+
+  if (String(action?.verifyTarget?.appName || '').trim()) {
+    return `Observe ${action.verifyTarget.appName.trim()} in the foreground after execution.`;
+  }
+
+  if (String(action?.type || '').trim().toLowerCase() === 'run_command' && context.repoPath) {
+    return `Inspect shell output for ${context.repoPath}.`;
+  }
+
+  return null;
+}
+
+function buildActionConfirmationContext(action, targetInfo = {}) {
+  const appName = inferConfirmationAppName(action, targetInfo);
+  const surface = inferConfirmationSurface(action, targetInfo, appName);
+  const repoPath = firstNonEmptyString(targetInfo.repoPath, targetInfo.cwd, inferRepoPathFromCommand(action?.command || '')) || null;
+  const context = {
+    objectType: null,
+    objectLabel: null,
+    surface,
+    appName,
+    repoPath,
+    whyNow: firstNonEmptyString(action?.reason, targetInfo.whyNow, targetInfo.userMessage) || null,
+    expectedProof: null,
+    commandPreview: String(action?.type || '').trim().toLowerCase() === 'run_command'
+      ? shortenForDisplay(action?.command || '', 120)
+      : null
+  };
+
+  context.objectLabel = buildConfirmationObjectLabel(action, targetInfo, context) || null;
+  context.objectType = buildConfirmationObjectType(action, context);
+  context.expectedProof = buildConfirmationExpectedProof(action, targetInfo, context);
+  return context;
+}
+
+function buildConfirmationObjectPhrase(context = {}) {
+  const label = String(context?.objectLabel || '').trim();
+  const appName = String(context?.appName || '').trim();
+
+  if (label) return label;
+  if (appName) return appName;
+  return '';
+}
+
+function extractPrimaryDangerVerb(keyword = '') {
+  const lower = String(keyword || '').trim().toLowerCase();
+  if (!lower) return '';
+
+  const verbMatch = lower.match(/delete|remove|erase|destroy|clear|reset|uninstall|format|buy|purchase|checkout|pay|payment|subscribe|donate|transfer|send money|logout|log out|sign out|deactivate|close account|cancel subscription|shutdown|restart|reboot|sleep|hibernate|power off|admin|administrator|root|sudo|elevated|run as/);
+  return verbMatch?.[0] || lower;
+}
+
+function buildConcreteDangerWarning(keyword, action, confirmationContext = {}) {
+  const matchedKeyword = String(keyword || '').trim();
+  if (!matchedKeyword) return '';
+
+  const lowerKeyword = matchedKeyword.toLowerCase();
+  const actionType = String(action?.type || '').trim().toLowerCase();
+  const objectPhrase = buildConfirmationObjectPhrase(confirmationContext);
+  const repoScope = confirmationContext?.repoPath ? ` in repo ${confirmationContext.repoPath}` : '';
+
+  if (actionType === 'run_command') {
+    if (/delete|remove|erase|destroy|clear|reset|uninstall|format/.test(lowerKeyword)) {
+      return `Run delete command${repoScope}`;
+    }
+    if (/admin|administrator|root|sudo|elevated|run as/.test(lowerKeyword)) {
+      return `Run elevated command${repoScope}`;
+    }
+    if (/shutdown|restart|reboot|sleep|hibernate|power off/.test(lowerKeyword)) {
+      return `Run system power command${repoScope}`;
+    }
+    return `Run risky command${repoScope}`;
+  }
+
+  if (confirmationContext?.appName === 'TradingView' && confirmationContext?.surface === 'quick-search' && /delete|remove|erase|destroy|clear|reset|format/.test(lowerKeyword)) {
+    return 'Clear TradingView quick-search query';
+  }
+
+  if (confirmationContext?.surface === 'pine-editor' && /delete|remove|erase|destroy|clear|reset|format/.test(lowerKeyword)) {
+    return 'Overwrite Pine Editor buffer';
+  }
+
+  if (!objectPhrase) {
+    return `Detected risky keyword: ${matchedKeyword}`;
+  }
+
+  const verb = extractPrimaryDangerVerb(lowerKeyword);
+  const verbMap = {
+    clear: 'Clear',
+    delete: 'Delete',
+    remove: 'Remove',
+    erase: 'Erase',
+    destroy: 'Destroy',
+    reset: 'Reset',
+    uninstall: 'Uninstall',
+    format: 'Format',
+    buy: 'Buy',
+    purchase: 'Purchase',
+    checkout: 'Checkout',
+    pay: 'Pay',
+    payment: 'Pay for',
+    subscribe: 'Subscribe to',
+    donate: 'Donate to',
+    transfer: 'Transfer from',
+    'send money': 'Send money from',
+    logout: 'Sign out of',
+    'log out': 'Sign out of',
+    'sign out': 'Sign out of',
+    deactivate: 'Deactivate',
+    'close account': 'Close',
+    'cancel subscription': 'Cancel',
+    shutdown: 'Shut down',
+    restart: 'Restart',
+    reboot: 'Reboot',
+    sleep: 'Put to sleep',
+    hibernate: 'Hibernate',
+    'power off': 'Power off',
+    admin: 'Use admin privileges on',
+    administrator: 'Use administrator privileges on',
+    root: 'Use root privileges on',
+    sudo: 'Use sudo for',
+    elevated: 'Run elevated action on',
+    'run as': 'Run as administrator for'
+  };
+
+  return `${verbMap[verb] || 'Modify'} ${objectPhrase}`;
+}
+
+function buildSafetyConfirmationPrompt(result) {
+  if (!result?.requiresConfirmation) return null;
+
+  const warnings = Array.isArray(result.warnings)
+    ? result.warnings.map((warning) => String(warning || '').trim()).filter(Boolean)
+    : [];
+  const primaryWarning = warnings.find((warning) => /\bin repo\b|tradingview|pine editor|quick-search|buffer|dialog|selector|surface/i.test(warning))
+    || warnings[0]
+    || '';
+  const description = String(result.description || '').trim();
+  const expectedProof = String(result.confirmationContext?.expectedProof || '').trim();
+
+  const parts = [];
+  if (primaryWarning) parts.push(primaryWarning);
+  if (description && (!primaryWarning || description.toLowerCase() !== primaryWarning.toLowerCase())) {
+    parts.push(description);
+  }
+  if (expectedProof) {
+    parts.push(`Expected proof: ${expectedProof}`);
+  }
+
+  if (parts.length === 0) return 'Action requires confirmation.';
+  return `Confirmation required: ${parts.join('. ')}`;
+}
+
+function buildActionSafetyKeywordContext(action, targetInfo = {}) {
+  if (String(action?.type || '').trim().toLowerCase() === 'run_command') {
+    return String(action?.command || '');
+  }
+
+  return [
+    targetInfo.text || '',
+    targetInfo.buttonText || '',
+    targetInfo.label || '',
+    action.reason || '',
+    targetInfo.userMessage || '',
+    ...(Array.isArray(targetInfo.nearbyText) ? targetInfo.nearbyText : [])
+  ].join(' ');
+}
+
 /**
  * Analyze the safety/risk level of an action
  * @param {Object} action - The action to analyze
@@ -2489,6 +2986,8 @@ function analyzeActionSafety(action, targetInfo = {}) {
     blockExecution: false,
     blockReason: null,
     description: '',
+    confirmationContext: buildActionConfirmationContext(action, targetInfo),
+    confirmationPrompt: null,
     timestamp: Date.now()
   };
   
@@ -2543,17 +3042,21 @@ function analyzeActionSafety(action, targetInfo = {}) {
       if (key.includes('delete') || key.includes('backspace')) {
         if (benignPineStarterResetIntent) {
           result.riskLevel = ActionRiskLevel.MEDIUM;
-          result.warnings.push('Bounded Pine starter reset after safe editor inspection');
+          result.warnings.push('Bounded Pine Editor starter reset after safe inspection');
         } else if (benignSearchSurfaceClearIntent) {
           result.riskLevel = ActionRiskLevel.MEDIUM;
-          result.warnings.push('Bounded search-surface clear before replacing the active query');
+          result.warnings.push('Bounded clear of the TradingView quick-search query before replacing it');
         } else {
           result.riskLevel = ActionRiskLevel.HIGH;
-          result.warnings.push('Delete/Backspace key may remove content');
+          result.warnings.push(result.confirmationContext?.objectLabel
+            ? `Delete/Backspace may modify ${result.confirmationContext.objectLabel}`
+            : 'Delete/Backspace key may remove content');
         }
       } else if (key.includes('enter') || key.includes('return')) {
         result.riskLevel = ActionRiskLevel.MEDIUM;
-        result.warnings.push('Enter key may submit form or confirm action');
+        result.warnings.push(result.confirmationContext?.objectLabel
+          ? `Enter may confirm ${result.confirmationContext.objectLabel}`
+          : 'Enter key may submit form or confirm action');
       } else if (key.includes('ctrl') || key.includes('cmd') || key.includes('alt')) {
         result.riskLevel = ActionRiskLevel.MEDIUM;
         result.warnings.push('Keyboard shortcut detected');
@@ -2608,21 +3111,14 @@ function analyzeActionSafety(action, targetInfo = {}) {
   }
   
   // Check target info for dangerous patterns
-  const textToCheck = [
-    targetInfo.text || '',
-    targetInfo.buttonText || '',
-    targetInfo.label || '',
-    action.reason || '',
-    targetInfo.userMessage || '',
-    ...(targetInfo.nearbyText || [])
-  ].join(' ');
+  const riskTextToCheck = buildActionSafetyKeywordContext(action, targetInfo);
 
   const benignEnterIntent = action?.type === 'key'
     && /(enter|return)/i.test(String(action?.key || ''))
-    && /\b(time\s*frame|timeframe|chart|symbol|watchlist|indicator|search|open|focus|switch|selector|tab|5m|1m|15m|30m|1h|4h|1d)\b/i.test(textToCheck)
-    && !/\b(delete|remove|purchase|payment|transfer|permanent|irreversible|shutdown|restart|unsubscribe|close account)\b/i.test(textToCheck);
+    && /\b(time\s*frame|timeframe|chart|symbol|watchlist|indicator|search|open|focus|switch|selector|tab|5m|1m|15m|30m|1h|4h|1d)\b/i.test(riskTextToCheck)
+    && !/\b(delete|remove|purchase|payment|transfer|permanent|irreversible|shutdown|restart|unsubscribe|close account)\b/i.test(riskTextToCheck);
 
-  const tradingDomainRisk = detectTradingViewDomainActionRisk(textToCheck, ActionRiskLevel, {
+  const tradingDomainRisk = detectTradingViewDomainActionRisk(riskTextToCheck, ActionRiskLevel, {
     actionType: action?.type
   });
   if (tradingDomainRisk) {
@@ -2638,18 +3134,19 @@ function analyzeActionSafety(action, targetInfo = {}) {
   
   // Check for danger patterns
   for (const pattern of DANGER_PATTERNS) {
-    if (pattern.test(textToCheck)) {
-      if (benignPineStarterResetIntent && /\b(delete|remove|erase|destroy|clear|reset|format)\b/i.test(String(textToCheck.match(pattern)?.[0] || ''))) {
+    if (pattern.test(riskTextToCheck)) {
+      const matchedKeyword = String(riskTextToCheck.match(pattern)?.[0] || '');
+      if (benignPineStarterResetIntent && /\b(delete|remove|erase|destroy|clear|reset|format)\b/i.test(matchedKeyword)) {
         continue;
       }
-      if (benignSearchSurfaceClearIntent && /\b(delete|remove|erase|destroy|clear|reset|format)\b/i.test(String(textToCheck.match(pattern)?.[0] || ''))) {
+      if (benignSearchSurfaceClearIntent && /\b(delete|remove|erase|destroy|clear|reset|format)\b/i.test(matchedKeyword)) {
         continue;
       }
-      if (benignEnterIntent && /confirm/i.test(String(textToCheck.match(pattern)?.[0] || ''))) {
+      if (benignEnterIntent && /confirm/i.test(matchedKeyword)) {
         continue;
       }
       result.riskLevel = ActionRiskLevel.HIGH;
-      result.warnings.push(`Detected risky keyword: ${textToCheck.match(pattern)?.[0]}`);
+      result.warnings.push(buildConcreteDangerWarning(matchedKeyword, action, result.confirmationContext));
       result.requiresConfirmation = true;
     }
   }
@@ -2680,7 +3177,8 @@ function analyzeActionSafety(action, targetInfo = {}) {
   }
   
   // Generate human-readable description
-  result.description = describeAction(action, targetInfo);
+  result.description = describeAction(action, targetInfo, result.confirmationContext);
+  result.confirmationPrompt = buildSafetyConfirmationPrompt(result);
   
   return result;
 }
@@ -2688,21 +3186,49 @@ function analyzeActionSafety(action, targetInfo = {}) {
 /**
  * Generate human-readable description of an action
  */
-function describeAction(action, targetInfo = {}) {
+function describeAction(action, targetInfo = {}, confirmationContext = null) {
+  const context = confirmationContext || buildActionConfirmationContext(action, targetInfo);
   const target = targetInfo.text || targetInfo.buttonText || targetInfo.label || '';
   const location = action.x !== undefined ? `at (${action.x}, ${action.y})` : '';
+  const appName = String(context?.appName || '').trim();
+  const surfaceLabel = humanizeConfirmationToken(context?.surface || '');
+  const objectLabel = String(context?.objectLabel || '').trim() || target;
+  const repoPath = String(context?.repoPath || '').trim();
+  const key = String(action?.key || '').trim();
   
   switch (action.type) {
     case 'click':
-      return `Click ${target ? `"${target}"` : ''} ${location}`.trim();
+      if (objectLabel && appName && !objectLabel.toLowerCase().includes(appName.toLowerCase())) {
+        return `Click "${objectLabel}" in ${appName}`.trim();
+      }
+      if (objectLabel) return `Click "${objectLabel}" ${location}`.trim();
+      return `Click ${location}`.trim();
     case 'double_click':
-      return `Double-click ${target ? `"${target}"` : ''} ${location}`.trim();
+      if (objectLabel && appName && !objectLabel.toLowerCase().includes(appName.toLowerCase())) {
+        return `Double-click "${objectLabel}" in ${appName}`.trim();
+      }
+      if (objectLabel) return `Double-click "${objectLabel}" ${location}`.trim();
+      return `Double-click ${location}`.trim();
     case 'right_click':
-      return `Right-click ${target ? `"${target}"` : ''} ${location}`.trim();
+      if (objectLabel && appName && !objectLabel.toLowerCase().includes(appName.toLowerCase())) {
+        return `Right-click "${objectLabel}" in ${appName}`.trim();
+      }
+      if (objectLabel) return `Right-click "${objectLabel}" ${location}`.trim();
+      return `Right-click ${location}`.trim();
     case 'type':
       const preview = action.text?.length > 30 ? action.text.substring(0, 30) + '...' : action.text;
+      if (objectLabel) return `Type "${preview}" into ${objectLabel}`;
+      if (surfaceLabel && appName) return `Type "${preview}" into ${appName} ${surfaceLabel}`;
       return `Type "${preview}"`;
     case 'key':
+      if ((/delete|backspace/i.test(key)) && context?.surface === 'quick-search' && appName === 'TradingView') {
+        return 'Clear TradingView quick-search query';
+      }
+      if ((/delete|backspace/i.test(key)) && context?.surface === 'pine-editor') {
+        return 'Overwrite Pine Editor buffer';
+      }
+      if (surfaceLabel && appName) return `Press ${action.key} in ${appName} ${surfaceLabel}`;
+      if (objectLabel) return `Press ${action.key} for ${objectLabel}`;
       return `Press ${action.key}`;
     case 'scroll':
       return `Scroll ${action.direction} ${action.amount || 3} times`;
@@ -2722,6 +3248,11 @@ function describeAction(action, targetInfo = {}) {
       return `Wait ${action.ms}ms`;
     case 'screenshot':
       return 'Take screenshot';
+    case 'run_command':
+      if (repoPath) {
+        return `Run shell command in repo ${repoPath}: ${shortenForDisplay(action.command || '', 96)}`;
+      }
+      return `Run shell command: ${shortenForDisplay(action.command || '', 96)}`;
     case 'grep_repo':
       return `Search repo for "${action.pattern || action.query || ''}"`.trim();
     case 'semantic_search_repo':
@@ -2739,6 +3270,49 @@ function describeAction(action, targetInfo = {}) {
 function setPendingAction(actionData) {
   pendingAction = actionData;
   return actionData.actionId;
+}
+
+async function buildExecutionContextEnvelopeForPendingAction(options = {}) {
+  const sessionState = options.sessionState || getSessionIntentState({ cwd: options.cwd || process.cwd() });
+  const action = options.action && typeof options.action === 'object' ? options.action : null;
+  const lastTargetWindowProfile = options.lastTargetWindowProfile && typeof options.lastTargetWindowProfile === 'object'
+    ? options.lastTargetWindowProfile
+    : null;
+
+  let foreground = options.foreground || null;
+  if (!foreground) {
+    try {
+      foreground = await systemAutomation.getForegroundWindowInfo();
+    } catch {
+      foreground = null;
+    }
+  }
+
+  if ((!foreground || !foreground.processName) && (action?.processName || lastTargetWindowProfile?.processName || action?.title || action?.windowTitle || lastTargetWindowProfile?.title)) {
+    foreground = {
+      ...(foreground && typeof foreground === 'object' ? foreground : {}),
+      processName: action?.processName || lastTargetWindowProfile?.processName || foreground?.processName || null,
+      title: action?.title || action?.windowTitle || lastTargetWindowProfile?.title || foreground?.title || null
+    };
+  }
+
+  try {
+    return buildExecutionContextEnvelope({
+      cwd: options.cwd || process.cwd(),
+      foreground,
+      sessionState,
+      userMessage: options.userMessage || ''
+    });
+  } catch {
+    return null;
+  }
+}
+
+function executionContextsMatch(left = null, right = null) {
+  const leftKey = String(left?.compartmentKey || '').trim();
+  const rightKey = String(right?.compartmentKey || '').trim();
+  if (!leftKey || !rightKey) return true;
+  return leftKey === rightKey;
 }
 
 /**
@@ -2787,7 +3361,10 @@ function preflightActions(actionData, options = {}) {
   if (!actionData || !Array.isArray(actionData.actions)) return actionData;
   const userMessage = typeof options.userMessage === 'string' ? options.userMessage : '';
   const normalized = actionData.actions.map(normalizeActionForReliability);
-  const rewritten = rewriteActionsForReliability(normalized, { userMessage });
+  const rewritten = rewriteActionsForReliability(normalized, {
+    ...options,
+    userMessage
+  });
   if (rewritten === actionData.actions) return actionData;
   return { ...actionData, actions: rewritten, _rewrittenForReliability: true };
 }
@@ -3863,6 +4440,19 @@ function rewriteActionsForReliability(actions, context = {}) {
   if (!Array.isArray(actions) || actions.length === 0) return actions;
 
   const userMessage = typeof context.userMessage === 'string' ? context.userMessage : '';
+  let executionContextEnvelope = context.executionContextEnvelope || null;
+  if (!executionContextEnvelope) {
+    try {
+      executionContextEnvelope = buildExecutionContextEnvelope({
+        chatContinuityContext: context.chatContinuityContext,
+        cwd: context.cwd || process.cwd(),
+        foreground: context.foreground,
+        sessionIntentContext: context.sessionIntentContext,
+        sessionState: context.sessionState || getSessionIntentState({ cwd: context.cwd || process.cwd() }),
+        userMessage
+      });
+    } catch {}
+  }
 
   const tradingViewTimeframeRewrite = maybeRewriteTradingViewTimeframeWorkflow(actions, { userMessage });
   if (tradingViewTimeframeRewrite) {
@@ -3884,7 +4474,11 @@ function rewriteActionsForReliability(actions, context = {}) {
     return tradingViewDrawingRewrite;
   }
 
-  const tradingViewPineRewrite = maybeRewriteTradingViewPineWorkflow(actions, { userMessage });
+  const tradingViewPineRewrite = maybeRewriteTradingViewPineWorkflow(actions, {
+    ...context,
+    executionContextEnvelope,
+    userMessage
+  });
   if (tradingViewPineRewrite) {
     return tradingViewPineRewrite;
   }
@@ -5901,6 +6495,7 @@ function buildRuntimeTraceLogForExecution(mode, actionPlan, options = {}) {
   }
 
   try {
+    const selection = summarizeSelectionProvenanceForTrace(options.selectionProvenance || null);
     return createRuntimeTraceLog({
       metadata: {
         mode,
@@ -5908,7 +6503,8 @@ function buildRuntimeTraceLogForExecution(mode, actionPlan, options = {}) {
         verification: actionPlan?.verification || null,
         userMessage: options.userMessage || null,
         actionCount: Array.isArray(actionPlan?.actions) ? actionPlan.actions.length : 0,
-        pendingActionId: options.pendingActionId || null
+        pendingActionId: options.pendingActionId || null,
+        selection
       }
     });
   } catch (error) {
@@ -6373,8 +6969,27 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
     enablePopupRecipes = false
   } = options;
 
+  const sessionState = getSessionIntentState({ cwd: process.cwd() });
+  const executionContextEnvelope = options.executionContextEnvelope
+    || await buildExecutionContextEnvelopeForPendingAction({
+      cwd: process.cwd(),
+      sessionState,
+      userMessage,
+      foreground: null
+    });
+  const selectionProvenance = cloneSerializable(options.selection || options.selectionProvenance || lastSelectionProvenance) || buildSelectionProvenance({
+    executionContextEnvelope,
+    skillSelection: { ids: Array.isArray(lastSkillSelection.ids) ? lastSkillSelection.ids : [], summary: null },
+    memorySelection: { ids: Array.isArray(lastMemorySelection.ids) ? lastMemorySelection.ids : [], summary: lastMemorySelection.summary || null }
+  });
+
   console.log('[AI-SERVICE] Executing actions:', actionData.thought || 'No thought provided');
-  const preflighted = preflightActions(actionData, { userMessage });
+  const preflighted = preflightActions(actionData, {
+    userMessage,
+    executionContextEnvelope,
+    cwd: process.cwd(),
+    sessionState
+  });
   if (preflighted !== actionData) {
     actionData = preflighted;
     console.log('[AI-SERVICE] Actions rewritten for reliability');
@@ -6390,11 +7005,15 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
   let requirePreInputRefocus = false;
   let postVerification = { applicable: false, verified: true, healed: false, attempts: 0 };
   const observationCheckpoints = [];
-  const runtimeTraceLog = buildRuntimeTraceLogForExecution('execute', actionData, options);
+  const runtimeTraceLog = buildRuntimeTraceLogForExecution('execute', actionData, {
+    ...options,
+    selectionProvenance
+  });
 
   appendRuntimeTraceEvent(runtimeTraceLog, 'action:plan', {
     thought: actionData.thought || null,
     verification: actionData.verification || null,
+    selection: summarizeSelectionProvenanceForTrace(selectionProvenance),
     actions: Array.isArray(actionData.actions)
       ? actionData.actions.slice(0, 50).map(summarizeActionForTrace)
       : []
@@ -6559,6 +7178,8 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
         userMessage: options.userMessage || actionData.userMessage || '',
         lastTargetWindowHandle,
         lastTargetWindowProfile,
+        executionContextEnvelope: executionContextEnvelope || null,
+        selectionProvenance,
         resumePrerequisites,
         approvalPauseCapture
       });
@@ -7042,6 +7663,14 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
         context: userMessage || actionData.thought || '',
         keywords: extractKeywords(userMessage || actionData.thought || ''),
         tags: ['execution', outcomeLabel],
+        scope: {
+          repoNames: [executionContextEnvelope?.repo?.name || ''].filter(Boolean),
+          projectRoots: [executionContextEnvelope?.repo?.projectRoot || ''].filter(Boolean),
+          appIds: [executionContextEnvelope?.foreground?.appId || ''].filter(Boolean),
+          processNames: [executionContextEnvelope?.foreground?.processName || postVerification?.foreground?.processName || ''].filter(Boolean),
+          taskFamilies: [executionContextEnvelope?.taskFamily || ''].filter(Boolean),
+          compartmentKeys: [executionContextEnvelope?.compartmentKey || ''].filter(Boolean)
+        },
         source: { type: 'execution', timestamp: new Date().toISOString(), outcome: outcomeLabel }
       });
 
@@ -7075,6 +7704,14 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
             context: userMessage || actionData.thought || '',
             keywords: procedureKeywords,
             tags: ['procedure', 'awm', 'success'],
+            scope: {
+              repoNames: [executionContextEnvelope?.repo?.name || ''].filter(Boolean),
+              projectRoots: [executionContextEnvelope?.repo?.projectRoot || ''].filter(Boolean),
+              appIds: [executionContextEnvelope?.foreground?.appId || ''].filter(Boolean),
+              processNames: [executionContextEnvelope?.foreground?.processName || postVerification?.foreground?.processName || ''].filter(Boolean),
+              taskFamilies: [executionContextEnvelope?.taskFamily || ''].filter(Boolean),
+              compartmentKeys: [executionContextEnvelope?.compartmentKey || ''].filter(Boolean)
+            },
             source: { type: 'awm-extraction', timestamp: new Date().toISOString(), stepCount: actionSummary.length }
           });
 
@@ -7136,6 +7773,7 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
             failedCount: failedActions.length,
             totalCount: results.length,
             selectedSkillIds: lastSkillSelection.ids,
+            selectedMemoryIds: selectionProvenance?.memories?.ids || [],
             currentProcessName: postVerification?.foreground?.processName || lastSkillSelection.currentProcessName || null,
             currentWindowTitle: postVerification?.foreground?.title || lastSkillSelection.currentWindowTitle || null,
             currentWindowKind: postVerification?.foreground?.windowKind || lastSkillSelection.currentWindowKind || null,
@@ -7185,6 +7823,7 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
                 error,
                 reflectionIteration,
                 selectedSkillIds: lastSkillSelection.ids,
+                selectedMemoryIds: selectionProvenance?.memories?.ids || [],
                 currentProcessName: postVerification?.foreground?.processName || lastSkillSelection.currentProcessName || null,
                 currentWindowTitle: postVerification?.foreground?.title || lastSkillSelection.currentWindowTitle || null,
                 currentWindowKind: postVerification?.foreground?.windowKind || lastSkillSelection.currentWindowKind || null,
@@ -7243,12 +7882,14 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
     pendingActionId: pendingConfirmation ? getPendingAction()?.actionId : null,
     approvalPauseCapture: pendingConfirmation ? getPendingAction()?.approvalPauseCapture || null : null,
     reflectionApplied,
+    selectionProvenance,
     runtimeTrace: runtimeTraceLog
       ? {
           sessionId: runtimeTraceLog.sessionId || null,
           filePath: runtimeTraceLog.filePath || null
         }
-      : null
+      : null,
+    pendingCompartmentKey: pendingConfirmation ? getPendingAction()?.executionContextEnvelope?.compartmentKey || null : null
   };
 }
 
@@ -7263,8 +7904,28 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
   if (!pending) {
     return { success: false, error: 'No pending action to resume' };
   }
+
+  const selectionProvenance = cloneSerializable(pending.selectionProvenance || options.selection || options.selectionProvenance || lastSelectionProvenance)
+    || buildSelectionProvenance({ executionContextEnvelope: pending.executionContextEnvelope || options.executionContextEnvelope || null });
   
   const { actionExecutor, userMessage, enablePopupRecipes = false } = options;
+
+  if (options.executionContextEnvelope && pending.executionContextEnvelope && !executionContextsMatch(pending.executionContextEnvelope, options.executionContextEnvelope)) {
+    return {
+      success: false,
+      error: `Pending confirmation belongs to compartment ${pending.executionContextEnvelope.compartmentKey}, not ${options.executionContextEnvelope.compartmentKey}.`,
+      results: [{
+        success: false,
+        action: pending.remainingActions?.[0]?.type || 'pending-confirmation',
+        error: `Pending confirmation belongs to compartment ${pending.executionContextEnvelope.compartmentKey}, not ${options.executionContextEnvelope.compartmentKey}.`,
+        compartmentMismatch: true,
+        blockedByPolicy: true
+      }],
+      pendingConfirmation: true,
+      pendingActionId: pending.actionId || null,
+      observationCheckpoints: []
+    };
+  }
   
   console.log('[AI-SERVICE] Resuming after user confirmation');
 
@@ -7272,7 +7933,12 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
   // if the remaining actions include brittle UIA clicks or screenshot detours.
   if (Array.isArray(pending.remainingActions) && pending.remainingActions.length > 0) {
     const original = pending.remainingActions;
-    pending.remainingActions = rewriteActionsForReliability(pending.remainingActions, { userMessage });
+    pending.remainingActions = rewriteActionsForReliability(pending.remainingActions, {
+      userMessage,
+      executionContextEnvelope: pending.executionContextEnvelope || options.executionContextEnvelope || null,
+      cwd: process.cwd(),
+      sessionState: getSessionIntentState({ cwd: process.cwd() })
+    });
     if (pending.remainingActions !== original) {
       console.log('[AI-SERVICE] (resume) Actions rewritten for reliability');
     }
@@ -7298,12 +7964,14 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
     actions: actionsToResume
   }, {
     ...options,
+    selectionProvenance,
     pendingActionId: pending.actionId || null
   });
 
   appendRuntimeTraceEvent(runtimeTraceLog, 'action:plan', {
     thought: pending.thought || null,
     verification: pending.verification || null,
+    selection: summarizeSelectionProvenanceForTrace(selectionProvenance),
     actions: actionsToResume.slice(0, 50).map(summarizeActionForTrace)
   });
   
@@ -7739,6 +8407,7 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
     postVerification,
     postVerificationFailed: !!(postVerification.applicable && !postVerification.verified),
     userConfirmed: true,
+    selectionProvenance,
     runtimeTrace: runtimeTraceLog
       ? {
           sessionId: runtimeTraceLog.sessionId || null,

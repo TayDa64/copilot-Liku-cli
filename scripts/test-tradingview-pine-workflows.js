@@ -31,6 +31,21 @@ test('inferTradingViewPineIntent recognizes Pine Editor surface requests', () =>
   assert.strictEqual(intent.verifyKind, 'panel-visible');
 });
 
+test('inferTradingViewPineIntent preserves explicit Pine requests outside TradingView foreground', () => {
+  const intent = inferTradingViewPineIntent('open pine editor and summarize the compile result', [
+    { type: 'key', key: 'ctrl+e' }
+  ], {
+    foreground: {
+      success: true,
+      processName: 'code',
+      title: 'README.md - Visual Studio Code'
+    }
+  });
+
+  assert(intent, 'explicit Pine requests should stay eligible even outside TradingView foreground');
+  assert.strictEqual(intent.surfaceTarget, 'pine-editor');
+});
+
 test('buildTradingViewPineWorkflowActions wraps the opener with panel verification', () => {
   const actions = buildTradingViewPineWorkflowActions({
     appName: 'TradingView',
@@ -124,6 +139,32 @@ test('maybeRewriteTradingViewPineWorkflow synthesizes a Pine Editor opener from 
   assert.strictEqual(rewritten[0].type, 'bring_window_to_front');
   assert.strictEqual(pineSearchActions.length, 1, 'synthetic Pine route should search for Pine Editor exactly once');
   assert(opener, 'synthetic Pine route should retain a verified Pine Editor opener');
+});
+
+test('maybeRewriteTradingViewPineWorkflow does not hijack shell-only plans when Pine prose mentions Pine Editor', () => {
+  const rewritten = maybeRewriteTradingViewPineWorkflow([
+    { type: 'run_command', command: 'cd c:\\dev\\copilot-Liku-cli && dir', reason: 'Inspect the workspace contents' }
+  ], {
+    userMessage: 'Open Pine Editor in TradingView and clear the selected quick-search text before typing Pine Editor.'
+  });
+
+  assert.strictEqual(rewritten, null, 'run_command-only plans should stay shell-only unless the plan itself is Pine-targeted');
+});
+
+test('maybeRewriteTradingViewPineWorkflow suppresses Pine rewrites for unrelated repo/editor prompts', () => {
+  const rewritten = maybeRewriteTradingViewPineWorkflow([
+    { type: 'key', key: 'ctrl+e' },
+    { type: 'type', text: 'plot(close)' }
+  ], {
+    userMessage: 'help me inspect this VS Code workspace',
+    foreground: {
+      success: true,
+      processName: 'code',
+      title: 'README.md - Visual Studio Code'
+    }
+  });
+
+  assert.strictEqual(rewritten, null, 'Pine rewrites should stay disabled when the shared execution context is unrelated repo/editor work');
 });
 
 test('TradingView Pine workflow rewrites generic authoring prompts into safe inspect-first flow', () => {

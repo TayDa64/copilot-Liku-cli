@@ -30,9 +30,17 @@ async function main() {
   assert(sessionMessage, 'session constraints section is injected');
   assert(sessionMessage.content.includes('terminal-liku ui'));
 
+  const envelopeMessage = messages.find((entry) => entry.role === 'system' && entry.content.includes('## Execution Context Envelope'));
+  assert(envelopeMessage, 'execution context envelope section is injected');
+  assert(/- repo: copilot-liku-cli/i.test(envelopeMessage.content));
+  assert(envelopeMessage.content.includes('taskFamily: general'));
+
   const continuityMessage = messages.find((entry) => entry.role === 'system' && entry.content.includes('## Recent Action Continuity'));
   assert(continuityMessage, 'chat continuity section is injected');
   assert(continuityMessage.content.includes('lastExecutedActions: focus_window -> screenshot'));
+
+  assert(messages.indexOf(envelopeMessage) > messages.indexOf(sessionMessage), 'execution envelope should follow session constraints');
+  assert(messages.indexOf(envelopeMessage) < messages.indexOf(continuityMessage), 'execution envelope should appear before recent action continuity');
 
   console.log('PASS message builder session intent');
 }

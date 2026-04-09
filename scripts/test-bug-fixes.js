@@ -598,7 +598,79 @@ test('ai-service treats bounded TradingView quick-search clear steps as benign',
 
   assertEqual(safety.riskLevel, aiService.ActionRiskLevel.MEDIUM, 'bounded TradingView quick-search clears should remain medium risk');
   assertEqual(safety.requiresConfirmation, false, 'bounded TradingView quick-search clears should not require confirmation');
-  assert((safety.warnings || []).some((warning) => /search-surface clear/i.test(String(warning || ''))), 'bounded TradingView quick-search clears should preserve an explanatory warning');
+  assertEqual(safety.confirmationContext?.appName, 'TradingView', 'bounded TradingView quick-search clears should record the app name');
+  assertEqual(safety.confirmationContext?.surface, 'quick-search', 'bounded TradingView quick-search clears should record the concrete surface');
+  assert(/quick-search query/i.test(String(safety.confirmationContext?.objectLabel || '')), 'bounded TradingView quick-search clears should record the concrete object label');
+  assert(/clear tradingview quick-search query/i.test(String(safety.description || '')), 'bounded TradingView quick-search clears should use object-specific description text');
+  assert((safety.warnings || []).some((warning) => /quick-search query/i.test(String(warning || ''))), 'bounded TradingView quick-search clears should preserve an explanatory warning with surface context');
+});
+
+test('ai-service keeps run_command risk grounded in the command when Pine prose mentions clear', () => {
+  const aiServicePath = path.join(__dirname, '..', 'src', 'main', 'ai-service.js');
+  const aiService = require(aiServicePath);
+
+  const pineClearProse = 'Open Pine Editor in TradingView and clear the selected quick-search text before typing Pine Editor';
+  const benign = aiService.analyzeActionSafety({
+    type: 'run_command',
+    command: 'cd c:\\dev\\muse-ai && dir',
+    reason: 'Inspect the workspace contents'
+  }, {
+    userMessage: pineClearProse
+  });
+
+  assertEqual(benign.riskLevel, aiService.ActionRiskLevel.MEDIUM, 'benign run_command actions should not escalate just because Pine prose mentions clear');
+  assertEqual(benign.requiresConfirmation, false, 'benign run_command actions should not require confirmation due to unrelated Pine clear prose');
+  assertEqual(benign.confirmationContext?.repoPath, 'c:\\dev\\muse-ai', 'benign run_command actions should still infer repo context for explanation');
+  assert(/repo c:\\dev\\muse-ai/i.test(String(benign.description || '')), 'benign run_command descriptions should name the concrete repo context');
+  assert(!(benign.warnings || []).some((warning) => /Detected risky keyword: clear/i.test(String(warning || ''))), 'benign run_command actions should not inherit clear warnings from unrelated user prose');
+
+  const destructive = aiService.analyzeActionSafety({
+    type: 'run_command',
+    command: 'Remove-Item -Recurse -Force .\\tmp',
+    reason: 'Delete temporary files'
+  }, {
+    userMessage: pineClearProse,
+    cwd: 'c:\\dev\\muse-ai'
+  });
+
+  assertEqual(destructive.riskLevel, aiService.ActionRiskLevel.CRITICAL, 'destructive commands should still escalate based on the command itself');
+  assertEqual(destructive.requiresConfirmation, true, 'destructive commands should still require confirmation');
+  assert((destructive.warnings || []).some((warning) => /Potentially destructive command/i.test(String(warning || ''))), 'destructive commands should preserve the command-grounded warning');
+  assert(/run delete command in repo c:\\dev\\muse-ai/i.test(String(destructive.confirmationPrompt || '')), 'destructive command confirmation text should name the concrete repo instead of a bare keyword');
+});
+
+test('pending action storage preserves enriched confirmation context', () => {
+  const aiServicePath = path.join(__dirname, '..', 'src', 'main', 'ai-service.js');
+  const aiService = require(aiServicePath);
+
+  aiService.clearPendingAction();
+  try {
+    const safety = aiService.analyzeActionSafety({
+      type: 'key',
+      key: 'delete',
+      reason: 'Clear the Pine Editor buffer before overwriting it'
+    }, {
+      text: 'Pine Editor',
+      userMessage: 'clear the pine editor and replace it with a new script'
+    });
+
+    aiService.setPendingAction({
+      ...safety,
+      actionIndex: 0,
+      remainingActions: [{ type: 'key', key: 'delete', reason: 'Clear the Pine Editor buffer before overwriting it' }],
+      completedResults: [],
+      thought: 'Replace the visible Pine script',
+      verification: 'Pine Editor should stay visible after confirmation'
+    });
+
+    const pending = aiService.getPendingAction();
+    assert(pending, 'pending action should be stored');
+    assertDeepEqual(pending.confirmationContext, safety.confirmationContext, 'pending action should preserve the enriched confirmation context');
+    assertEqual(pending.description, safety.description, 'pending action should preserve the concrete description');
+    assertEqual(pending.confirmationPrompt, safety.confirmationPrompt, 'pending action should preserve the concrete confirmation prompt');
+  } finally {
+    aiService.clearPendingAction();
+  }
 });
 
 test('system prompt explains control-surface boundaries honestly', () => {

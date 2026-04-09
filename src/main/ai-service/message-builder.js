@@ -5,6 +5,12 @@ const {
   classifyActiveAppCapability: classifyActiveAppCapabilityFromPolicy,
   isScreenLikeCaptureMode
 } = require('../capability-policy');
+const {
+  buildExecutionContextEnvelope,
+  formatExecutionContextEnvelope,
+  isTradingViewPineContextEligible
+} = require('./execution-context');
+const { TRADINGVIEW_PINE_PROMPT_OVERLAY } = require('./system-prompt');
 
 function classifyActiveAppCapability(options) {
   return classifyActiveAppCapabilityFromPolicy(options);
@@ -248,10 +254,20 @@ function createMessageBuilder(dependencies) {
 
   async function buildMessages(userMessage, includeVisual = false, options = {}) {
     const messages = [{ role: 'system', content: systemPrompt }];
-    const { extraSystemMessages = [], skillsContext = '', memoryContext = '', sessionIntentContext = '', chatContinuityContext = '' } = options || {};
+    const {
+      extraSystemMessages = [],
+      skillsContext = '',
+      memoryContext = '',
+      sessionIntentContext = '',
+      chatContinuityContext = '',
+      sessionState = null,
+      executionContextEnvelope: suppliedExecutionContextEnvelope = null
+    } = options || {};
     let currentForeground = null;
     let activeAppCapability = null;
     let capabilitySnapshot = null;
+    let capabilityBlock = '';
+    let executionContextEnvelope = suppliedExecutionContextEnvelope || null;
 
     try {
       let prefText = '';
@@ -279,6 +295,30 @@ function createMessageBuilder(dependencies) {
       }
     } catch {}
 
+    try {
+      const watcher = getUIWatcher();
+      const browserState = getBrowserSessionState();
+      if (typeof getForegroundWindowInfo === 'function') {
+        currentForeground = await getForegroundWindowInfo();
+      }
+      const watcherSnapshot = watcher && typeof watcher.getCapabilitySnapshot === 'function'
+        ? watcher.getCapabilitySnapshot()
+        : null;
+      const appPolicy = typeof dependencies?.getAppPolicy === 'function' && currentForeground?.processName
+        ? dependencies.getAppPolicy(currentForeground.processName)
+        : null;
+      capabilitySnapshot = buildCapabilityPolicySnapshot({
+        foreground: currentForeground,
+        watcherSnapshot,
+        browserState,
+        latestVisual: includeVisual ? getLatestVisualContext() : null,
+        appPolicy,
+        userMessage
+      });
+      activeAppCapability = capabilitySnapshot?.surface || classifyActiveAppCapability({ foreground: currentForeground, watcherSnapshot, browserState });
+      capabilityBlock = buildCapabilityPolicySystemMessage(capabilitySnapshot);
+    } catch {}
+
     // Inject skills context with a dedicated section header for model clarity
     try {
       if (typeof skillsContext === 'string' && skillsContext.trim()) {
@@ -296,6 +336,21 @@ function createMessageBuilder(dependencies) {
     try {
       if (typeof sessionIntentContext === 'string' && sessionIntentContext.trim()) {
         messages.push({ role: 'system', content: `## Session Constraints\n${sessionIntentContext.trim()}` });
+      }
+    } catch {}
+
+    try {
+      executionContextEnvelope = executionContextEnvelope || buildExecutionContextEnvelope({
+        capabilitySnapshot,
+        chatContinuityContext,
+        foreground: currentForeground,
+        sessionIntentContext,
+        sessionState,
+        userMessage
+      });
+      const executionContextBlock = formatExecutionContextEnvelope(executionContextEnvelope);
+      if (executionContextBlock) {
+        messages.push({ role: 'system', content: executionContextBlock });
       }
     } catch {}
 
@@ -337,29 +392,14 @@ function createMessageBuilder(dependencies) {
     } catch {}
 
     try {
-      const watcher = getUIWatcher();
-      const browserState = getBrowserSessionState();
-      if (typeof getForegroundWindowInfo === 'function') {
-        currentForeground = await getForegroundWindowInfo();
-      }
-      const watcherSnapshot = watcher && typeof watcher.getCapabilitySnapshot === 'function'
-        ? watcher.getCapabilitySnapshot()
-        : null;
-      const appPolicy = typeof dependencies?.getAppPolicy === 'function' && currentForeground?.processName
-        ? dependencies.getAppPolicy(currentForeground.processName)
-        : null;
-      capabilitySnapshot = buildCapabilityPolicySnapshot({
-        foreground: currentForeground,
-        watcherSnapshot,
-        browserState,
-        latestVisual: includeVisual ? getLatestVisualContext() : null,
-        appPolicy,
-        userMessage
-      });
-      activeAppCapability = capabilitySnapshot?.surface || classifyActiveAppCapability({ foreground: currentForeground, watcherSnapshot, browserState });
-      const capabilityBlock = buildCapabilityPolicySystemMessage(capabilitySnapshot);
       if (capabilityBlock) {
         messages.push({ role: 'system', content: capabilityBlock });
+      }
+    } catch {}
+
+    try {
+      if (isTradingViewPineContextEligible(executionContextEnvelope) && typeof TRADINGVIEW_PINE_PROMPT_OVERLAY === 'string' && TRADINGVIEW_PINE_PROMPT_OVERLAY.trim()) {
+        messages.push({ role: 'system', content: TRADINGVIEW_PINE_PROMPT_OVERLAY.trim() });
       }
     } catch {}
 
@@ -382,10 +422,12 @@ function createMessageBuilder(dependencies) {
     } catch {}
 
     try {
-      const pineEvidenceConstraint = buildPineEvidenceConstraint({
-        foreground: currentForeground,
-        userMessage
-      });
+      const pineEvidenceConstraint = isTradingViewPineContextEligible(executionContextEnvelope)
+        ? buildPineEvidenceConstraint({
+          foreground: currentForeground,
+          userMessage
+        })
+        : '';
       if (pineEvidenceConstraint) {
         messages.push({ role: 'system', content: pineEvidenceConstraint });
       }

@@ -125,6 +125,75 @@ function buildVisualReference(latestVisual) {
   return ts ? `${mode}@${ts}` : null;
 }
 
+function normalizeExecutionContextIdentity(executionContext = null) {
+  if (!executionContext || typeof executionContext !== 'object') return null;
+
+  const normalized = {
+    compartmentKey: normalizeText(executionContext.compartmentKey, 180),
+    repoName: normalizeText(executionContext.repo?.name || executionContext.repoName, 120),
+    projectRoot: normalizeText(executionContext.repo?.projectRoot || executionContext.projectRoot, 260),
+    appId: normalizeText(executionContext.foreground?.appId || executionContext.appId, 80),
+    processName: normalizeText(executionContext.foreground?.processName || executionContext.processName, 80),
+    windowTitle: normalizeText(executionContext.foreground?.windowTitle || executionContext.windowTitle, 160),
+    surfaceClass: normalizeText(executionContext.foreground?.surfaceClass || executionContext.surfaceClass, 80),
+    interactionMode: normalizeText(executionContext.foreground?.interactionMode || executionContext.interactionMode, 80),
+    taskFamily: normalizeText(executionContext.taskFamily, 80),
+    confidence: normalizeText(executionContext.confidence, 40)
+  };
+
+  if (!normalized.compartmentKey
+    && !normalized.repoName
+    && !normalized.projectRoot
+    && !normalized.appId
+    && !normalized.processName
+    && !normalized.windowTitle
+    && !normalized.surfaceClass
+    && !normalized.interactionMode
+    && !normalized.taskFamily
+    && !normalized.confidence) {
+    return null;
+  }
+
+  return normalized;
+}
+
+function normalizeIdList(values, maxItems = 8, maxLength = 120) {
+  if (!Array.isArray(values)) return [];
+  return values
+    .map((value) => normalizeText(value, maxLength))
+    .filter(Boolean)
+    .slice(0, maxItems);
+}
+
+function normalizeSelectionSummary(summary = null) {
+  if (!summary || typeof summary !== 'object') return null;
+
+  const normalized = {
+    selectedCount: safeNumber(summary.selectedCount),
+    scopedMatchCount: safeNumber(summary.scopedMatchCount),
+    fallbackCount: safeNumber(summary.fallbackCount),
+    mismatchCount: safeNumber(summary.mismatchCount),
+    scopeContext: normalizeExecutionContextIdentity({
+      compartmentKey: summary.scopeContext?.compartmentKey,
+      repoName: summary.scopeContext?.repoName,
+      projectRoot: summary.scopeContext?.projectRoot,
+      appId: summary.scopeContext?.appId,
+      processName: summary.scopeContext?.processName,
+      taskFamily: summary.scopeContext?.taskFamily
+    })
+  };
+
+  if (normalized.selectedCount === null
+    && normalized.scopedMatchCount === null
+    && normalized.fallbackCount === null
+    && normalized.mismatchCount === null
+    && !normalized.scopeContext) {
+    return null;
+  }
+
+  return normalized;
+}
+
 function normalizeActionPlan(actions) {
   if (!Array.isArray(actions)) return [];
   return actions.slice(0, 12).map((action, index) => ({
@@ -291,11 +360,16 @@ function buildChatContinuityTurnRecord({ actionData, execResult, details = {}, l
   const verificationChecks = buildVerificationChecks(execResult);
   const verificationStatus = inferVerificationStatus(execResult, verificationChecks);
   const tradingMode = inferTradingMode(execResult, actionResults, details);
+  const executionContext = normalizeExecutionContextIdentity(details.executionContextEnvelope || details.executionContext || null);
+  const selectionProvenance = execResult?.selectionProvenance || details.selectionProvenance || null;
 
   return {
     recordedAt: details.recordedAt || new Date().toISOString(),
     userMessage: details.userMessage || '',
     executionIntent: details.executionIntent || details.userMessage || '',
+    executionIntentSource: normalizeText(details.executionIntentSource, 80) || 'literal-user-input',
+    executionContext,
+    compartmentKey: executionContext?.compartmentKey || null,
     activeGoal: details.executionIntent || details.userMessage || '',
     currentSubgoal: actionData?.thought || details.executionIntent || details.userMessage || '',
     committedSubgoal: actionData?.thought || details.executionIntent || details.userMessage || '',
@@ -305,6 +379,12 @@ function buildChatContinuityTurnRecord({ actionData, execResult, details = {}, l
     executionResult: buildExecutionResult(execResult, actionResults),
     observationEvidence: buildObservationEvidence(latestVisual, execResult, watcherSnapshot, details),
     tradingMode,
+    selectedSkillIds: normalizeIdList(selectionProvenance?.skills?.ids || details.selectedSkillIds),
+    selectedMemoryIds: normalizeIdList(selectionProvenance?.memories?.ids || details.selectedMemoryIds),
+    retrievalSummary: {
+      skills: normalizeSelectionSummary(selectionProvenance?.skills?.summary || details.skillRetrievalSummary || null),
+      memories: normalizeSelectionSummary(selectionProvenance?.memories?.summary || details.memoryRetrievalSummary || null)
+    },
     verification: {
       status: verificationStatus,
       checks: verificationChecks

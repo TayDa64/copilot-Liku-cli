@@ -1847,6 +1847,8 @@ function setupIPC() {
           action: action,
           safety: safety,
           description: safety.description,
+          confirmationPrompt: safety.confirmationPrompt || null,
+          confirmationContext: safety.confirmationContext || null,
           riskLevel: safety.riskLevel,
           warnings: safety.warnings
         });
@@ -1857,7 +1859,9 @@ function setupIPC() {
         pending: true,
         actionId: safety.actionId,
         riskLevel: safety.riskLevel,
-        message: `Action requires confirmation: ${safety.warnings.join(', ')}`
+        confirmationPrompt: safety.confirmationPrompt || null,
+        confirmationContext: safety.confirmationContext || null,
+        message: safety.confirmationPrompt || `Action requires confirmation: ${safety.warnings.join(', ')}`
       };
     }
     

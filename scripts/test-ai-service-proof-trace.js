@@ -56,45 +56,46 @@ async function main() {
       getForegroundWindowInfo: async () => ({
         success: true,
         hwnd: 330552,
-        title: 'Pine Editor - TradingView',
-        processName: 'tradingview',
+        title: 'Settings - ExampleApp',
+        processName: 'exampleapp',
         windowKind: 'main'
       })
     }, async () => {
       const execResult = await aiService.executeActions({
-        thought: 'Open the Pine Editor surface',
-        verification: 'The Pine Editor should be visible',
+        thought: 'Open the Settings panel',
+        verification: 'The Settings panel should be visible',
         actions: [{
-          type: 'click',
-          targetId: 'region-1',
-          reason: 'Open Pine Editor',
+          type: 'key',
+          key: 'f10',
+          reason: 'Open Settings panel',
           verify: {
             kind: 'panel-open',
-            target: 'pine-editor',
-            appName: 'TradingView',
-            titleHints: ['Pine Editor'],
-            keywords: ['Pine Editor']
+            target: 'settings-panel',
+            appName: 'ExampleApp',
+            titleHints: ['Settings'],
+            keywords: ['Settings']
           }
         }]
       }, null, null, {
-        userMessage: 'open the pine editor',
+        userMessage: 'open the settings panel',
         runtimeTraceLog,
+        selectionProvenance: {
+          skills: {
+            ids: ['skill-example-settings-panel'],
+            summary: { selectedCount: 1, scopedMatchCount: 1, fallbackCount: 0, mismatchCount: 0 }
+          },
+          memories: {
+            ids: ['note-settings-panel-context'],
+            summary: { selectedCount: 1, scopedMatchCount: 1, fallbackCount: 0, mismatchCount: 0 }
+          },
+          executionContext: {
+            compartmentKey: 'copilot-liku-cli::exampleapp::unknown::general'
+          }
+        },
         actionExecutor: async (action) => ({
           success: true,
           action: action.type,
-          message: 'clicked',
-          resolvedTarget: {
-            targetId: action.targetId,
-            resolutionMethod: 'clickPoint',
-            resolvedPoint: { x: 42, y: 84 },
-            stale: false,
-            coordinateFallback: false,
-            window: {
-              appName: 'TradingView',
-              windowTitle: 'Pine Editor - TradingView',
-              pid: 321
-            }
-          },
+          message: 'opened settings',
           proof: {
             proofId: 'proof-base',
             actionType: action.type,
@@ -104,8 +105,8 @@ async function main() {
             checks: [{
               kind: 'target-resolution',
               status: 'pass',
-              targetId: action.targetId,
-              method: 'clickPoint'
+              targetId: 'settings-panel',
+              method: 'shortcut'
             }],
             limitations: []
           }
@@ -119,7 +120,14 @@ async function main() {
       assert.strictEqual(execResult.results[0].proof.level, 2, 'verified observation should upgrade proof to effect-verified');
       assert.strictEqual(execResult.results[0].proof.status, 'verified');
       assert.strictEqual(execResult.results[0].proof.observation.classification, 'panel-open');
+      assert.deepStrictEqual(execResult.selectionProvenance.skills.ids, ['skill-example-settings-panel']);
+      assert.deepStrictEqual(execResult.selectionProvenance.memories.ids, ['note-settings-panel-context']);
       assert(execResult.results[0].proof.checks.some((check) => check.kind === 'observation-checkpoint' && check.status === 'pass'));
+
+      const planEvent = traceEvents.find((entry) => entry.event === 'action:plan');
+      assert(planEvent, 'runtime trace should record plan events');
+      assert.deepStrictEqual(planEvent.selection.selectedSkillIds, ['skill-example-settings-panel']);
+      assert.deepStrictEqual(planEvent.selection.selectedMemoryIds, ['note-settings-panel-context']);
 
       const proofEvent = traceEvents.find((entry) => entry.event === 'action:proof');
       assert(proofEvent, 'runtime trace should record proof events');

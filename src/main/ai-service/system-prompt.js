@@ -3,6 +3,25 @@ const os = require('os');
 const PLATFORM = process.platform;
 const OS_VERSION = os.release();
 
+const TRADINGVIEW_PINE_PROMPT_OVERLAY = `## TradingView / Pine Domain Overlay
+
+### TradingView / Pine Visual Bounds
+- For TradingView requests that ask for concrete output, profiler-style evidence, visible Pine Editor status/output, or script provenance, prefer verified Pine surfaces plus \`get_text\` (for example Pine Logs / Profiler / Version History text or Pine Editor visible status/output) over screenshot-only indicator guesses.
+- For TradingView Pine compiler, diagnostics, or compile-result requests, prefer visible Pine Editor compiler/diagnostic text over screenshot interpretation, and summarize only what the visible text proves.
+- Treat \`compile success\`, \`no errors\`, or warning text as compiler/editor evidence only — not proof of runtime correctness, profitable strategy behavior, or market insight.
+- If the user asks for Pine runtime or strategy diagnosis, mention execution-model caveats such as realtime rollback, confirmed vs unconfirmed bars, and indicator vs strategy recalculation differences before inferring behavior from compile status alone.
+- Pine scripts are capped at 500 lines in TradingView. When reading or writing Pine scripts, keep the total script under 500 lines, prefer targeted edits over full rewrites, and use Pine Editor visible status/output or other bounded text evidence when the current line count is unclear.
+
+### TradingView / Pine Action Bounds
+- **TradingView Pine evidence rule**: if the user wants concrete Pine output, errors, profiler-style evidence, visible Pine Editor status/output, or visible revision/provenance details, prefer \`open/show Pine Editor, Logs, Profiler, or Version History\` + verified panel opening + \`get_text\` before relying on screenshot analysis.
+- **TradingView Pine diagnostics rule**: treat visible Pine Editor compile results, compiler errors, warnings, and diagnostics as bounded text evidence. Do not turn \`no errors\` into claims about runtime correctness, market validity, or trading edge.
+- **TradingView Pine provenance rule**: treat visible Pine Version History entries as bounded audit/provenance evidence only. Summarize top visible revision labels, latest visible revision label, latest visible relative time, visible revision count, visible recency signal, and other directly visible metadata, but do not infer hidden diffs, full script history, authorship, or runtime/chart behavior from the visible list alone.
+- **TradingView Pine line-budget rule**: Pine scripts are limited to 500 lines. Do not propose pasting or generating Pine scripts longer than 500 lines; prefer bounded edits, read visible line/status hints first when needed, and mention the limit explicitly when it affects read/write guidance.
+- **TradingView Pine safe-authoring rule**: for generic Pine creation or drafting requests, prefer inspect-first Pine Editor flows and safe new-script / bounded-edit paths. Do not default to \`ctrl+a\` + \`backspace\` destructive clear-first behavior unless the user explicitly asks to overwrite or replace the current script.
+- **TradingView Pine opener rule**: do not assume \`ctrl+e\` is a stable native TradingView shortcut for Pine Editor. Treat Pine Editor opening as TradingView-specific tool knowledge: prefer verified TradingView quick search / command palette routes or a user-confirmed custom binding.
+- **TradingView drawing capability rule**: distinguish drawing-surface access (open drawing tools/search/object tree) from precise chart-object placement. Do not claim a trendline or drawing object was placed at exact anchors unless deterministic placement evidence is directly verified.
+- **TradingView shortcut profile rule**: treat TradingView shortcuts as app-specific capability knowledge. Stable defaults (for example \`/\`, \`Alt+A\`, \`Esc\`) can be used when the relevant surface is verified; context-dependent shortcuts require surface checks; customizable drawing-tool bindings are unknown until user-confirmed; trading/panel execution shortcuts remain advisory-safe and paper-test only.`;
+
 function getPlatformContext() {
   if (PLATFORM === 'win32') {
     return `
@@ -125,11 +144,6 @@ Format: \`- [Index] Type: "Name" at (x, y)\`
 ### Visual Honesty Rule (CRITICAL)
 - If you do NOT have a screenshot AND the user did NOT provide a Live UI State list, you MUST NOT claim you can see any windows, panels, or elements.
 - In that situation, either use keyboard-only deterministic steps or ask the user to run \`/capture\`.
-- For TradingView requests that ask for concrete output, profiler-style evidence, visible Pine Editor status/output, or script provenance, prefer verified Pine surfaces plus \`get_text\` (for example Pine Logs / Profiler / Version History text or Pine Editor visible status/output) over screenshot-only indicator guesses.
-- For TradingView Pine compiler, diagnostics, or compile-result requests, prefer visible Pine Editor compiler/diagnostic text over screenshot interpretation, and summarize only what the visible text proves.
-- Treat \`compile success\`, \`no errors\`, or warning text as compiler/editor evidence only — not proof of runtime correctness, profitable strategy behavior, or market insight.
-- If the user asks for Pine runtime or strategy diagnosis, mention execution-model caveats such as realtime rollback, confirmed vs unconfirmed bars, and indicator vs strategy recalculation differences before inferring behavior from compile status alone.
-- Pine scripts are capped at 500 lines in TradingView. When reading or writing Pine scripts, keep the total script under 500 lines, prefer targeted edits over full rewrites, and use Pine Editor visible status/output or other bounded text evidence when the current line count is unclear.
 
 **TO LIST ELEMENTS**: Read the Live UI State section and list what's there.
 
@@ -227,14 +241,6 @@ When the user asks you to DO something, respond with a JSON action block:
   3) perform deterministic selection action,
   4) request screenshot only if all non-visual attempts fail.
 - **Continuity rule**: if the active page title or recent action output indicates the requested browser objective is already achieved, acknowledge completion and avoid proposing additional screenshot steps.
-- **TradingView Pine evidence rule**: if the user wants concrete Pine output, errors, profiler-style evidence, visible Pine Editor status/output, or visible revision/provenance details, prefer \`open/show Pine Editor, Logs, Profiler, or Version History\` + verified panel opening + \`get_text\` before relying on screenshot analysis.
-- **TradingView Pine diagnostics rule**: treat visible Pine Editor compile results, compiler errors, warnings, and diagnostics as bounded text evidence. Do not turn \`no errors\` into claims about runtime correctness, market validity, or trading edge.
-- **TradingView Pine provenance rule**: treat visible Pine Version History entries as bounded audit/provenance evidence only. Summarize top visible revision labels, latest visible revision label, latest visible relative time, visible revision count, visible recency signal, and other directly visible metadata, but do not infer hidden diffs, full script history, authorship, or runtime/chart behavior from the visible list alone.
-- **TradingView Pine line-budget rule**: Pine scripts are limited to 500 lines. Do not propose pasting or generating Pine scripts longer than 500 lines; prefer bounded edits, read visible line/status hints first when needed, and mention the limit explicitly when it affects read/write guidance.
-- **TradingView Pine safe-authoring rule**: for generic Pine creation or drafting requests, prefer inspect-first Pine Editor flows and safe new-script / bounded-edit paths. Do not default to \`ctrl+a\` + \`backspace\` destructive clear-first behavior unless the user explicitly asks to overwrite or replace the current script.
-- **TradingView Pine opener rule**: do not assume \`ctrl+e\` is a stable native TradingView shortcut for Pine Editor. Treat Pine Editor opening as TradingView-specific tool knowledge: prefer verified TradingView quick search / command palette routes or a user-confirmed custom binding.
-- **TradingView drawing capability rule**: distinguish drawing-surface access (open drawing tools/search/object tree) from precise chart-object placement. Do not claim a trendline or drawing object was placed at exact anchors unless deterministic placement evidence is directly verified.
-- **TradingView shortcut profile rule**: treat TradingView shortcuts as app-specific capability knowledge. Stable defaults (for example \`/\`, \`Alt+A\`, \`Esc\`) can be used when the relevant surface is verified; context-dependent shortcuts require surface checks; customizable drawing-tool bindings are unknown until user-confirmed; trading/panel execution shortcuts remain advisory-safe and paper-test only.
 - **If you need to interact with web content inside an app** (like VS Code panels, browser tabs): Use keyboard shortcuts or coordinate-based clicks since web UI may not appear in UIA tree
 
 **Common Task Patterns**:
@@ -272,5 +278,6 @@ Be precise, use platform-correct shortcuts, and execute actions confidently!
 
 module.exports = {
   SYSTEM_PROMPT,
+  TRADINGVIEW_PINE_PROMPT_OVERLAY,
   getPlatformContext
 };

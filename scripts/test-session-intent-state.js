@@ -12,6 +12,7 @@ const {
   formatSessionIntentContext,
   formatSessionIntentSummary
 } = require(path.join(__dirname, '..', 'src', 'main', 'session-intent-state.js'));
+const { buildExecutionContextEnvelope } = require(path.join(__dirname, '..', 'src', 'main', 'ai-service', 'execution-context.js'));
 
 function test(name, fn) {
   try {
@@ -129,6 +130,74 @@ test('session intent store records and clears chat continuity state', () => {
   fs.rmSync(tempDir, { recursive: true, force: true });
 });
 
+test('session intent store retrieves chat continuity by compartment while preserving active legacy mirror', () => {
+  const repoRoot = path.join(__dirname, '..');
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'liku-session-intent-'));
+  const stateFile = path.join(tempDir, 'session-intent-state.json');
+  const store = createSessionIntentStateStore({ stateFile });
+
+  const tradingViewEnvelope = buildExecutionContextEnvelope({
+    cwd: repoRoot,
+    foreground: { processName: 'tradingview', title: 'TradingView - LUNR' },
+    sessionState: store.getState({ cwd: repoRoot }),
+    userMessage: 'continue tradingview chart inspection'
+  });
+  const repoEditorEnvelope = buildExecutionContextEnvelope({
+    cwd: repoRoot,
+    foreground: { processName: 'code', title: 'README.md - Visual Studio Code' },
+    sessionState: store.getState({ cwd: repoRoot }),
+    userMessage: 'continue inspecting this VS Code workspace'
+  });
+
+  store.recordExecutedTurn({
+    userMessage: 'continue tradingview chart inspection',
+    executionIntent: 'Inspect the active TradingView chart',
+    executionIntentSource: 'saved-chat-continuity',
+    executionContextEnvelope: tradingViewEnvelope,
+    committedSubgoal: 'Inspect the active TradingView chart',
+    actionPlan: [{ type: 'focus_window', processName: 'tradingview' }, { type: 'screenshot' }],
+    success: true,
+    screenshotCaptured: true,
+    observationEvidence: { captureMode: 'window', captureTrusted: true },
+    verification: { status: 'verified' },
+    nextRecommendedStep: 'Continue from the latest chart evidence.'
+  }, { cwd: repoRoot, executionContextEnvelope: tradingViewEnvelope });
+
+  const recorded = store.recordExecutedTurn({
+    userMessage: 'continue inspecting this VS Code workspace',
+    executionIntent: 'Inspect the active VS Code workspace',
+    executionIntentSource: 'saved-chat-continuity',
+    executionContextEnvelope: repoEditorEnvelope,
+    committedSubgoal: 'Inspect the active VS Code workspace',
+    actionPlan: [{ type: 'focus_window', processName: 'code' }, { type: 'screenshot' }],
+    success: true,
+    screenshotCaptured: true,
+    observationEvidence: { captureMode: 'window', captureTrusted: true },
+    verification: { status: 'verified' },
+    nextRecommendedStep: 'Continue from the current workspace state.'
+  }, { cwd: repoRoot, executionContextEnvelope: repoEditorEnvelope });
+
+  const tradingViewContinuity = store.getChatContinuity({ cwd: repoRoot, executionContextEnvelope: tradingViewEnvelope });
+  const repoEditorContinuity = store.getChatContinuity({ cwd: repoRoot, executionContextEnvelope: repoEditorEnvelope });
+
+  assert.strictEqual(tradingViewContinuity.activeGoal, 'Inspect the active TradingView chart');
+  assert.strictEqual(tradingViewContinuity.lastTurn.executionContext.appId, 'tradingview');
+  assert.strictEqual(repoEditorContinuity.activeGoal, 'Inspect the active VS Code workspace');
+  assert.strictEqual(repoEditorContinuity.lastTurn.executionContext.appId, 'code');
+  assert.strictEqual(recorded.chatContinuity.activeGoal, 'Inspect the active VS Code workspace', 'legacy top-level mirror should follow the active compartment');
+
+  const unrelatedEnvelope = buildExecutionContextEnvelope({
+    cwd: repoRoot,
+    foreground: { processName: 'chrome', title: 'Google Chrome' },
+    sessionState: store.getState({ cwd: repoRoot }),
+    userMessage: 'continue browser research'
+  });
+  const unrelatedContinuity = store.getChatContinuity({ cwd: repoRoot, executionContextEnvelope: unrelatedEnvelope });
+  assert.strictEqual(unrelatedContinuity.activeGoal, null, 'strict compartment lookup should not fall back to unrelated continuity');
+
+  fs.rmSync(tempDir, { recursive: true, force: true });
+});
+
 test('session intent store persists and clears pending requested task state', () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'liku-session-intent-'));
   const stateFile = path.join(tempDir, 'session-intent-state.json');
@@ -151,6 +220,63 @@ test('session intent store persists and clears pending requested task state', ()
 
   const cleared = store.clearPendingRequestedTask({ cwd: path.join(__dirname, '..') });
   assert.strictEqual(cleared.pendingRequestedTask, null);
+
+  fs.rmSync(tempDir, { recursive: true, force: true });
+});
+
+test('session intent store retrieves pending requested tasks by compartment while preserving active legacy mirror', () => {
+  const repoRoot = path.join(__dirname, '..');
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'liku-session-intent-'));
+  const stateFile = path.join(tempDir, 'session-intent-state.json');
+  const store = createSessionIntentStateStore({ stateFile });
+
+  const tradingViewEnvelope = buildExecutionContextEnvelope({
+    cwd: repoRoot,
+    foreground: { processName: 'tradingview', title: 'TradingView - LUNR' },
+    sessionState: store.getState({ cwd: repoRoot }),
+    userMessage: 'apply volume profile in tradingview'
+  });
+  const repoEditorEnvelope = buildExecutionContextEnvelope({
+    cwd: repoRoot,
+    foreground: { processName: 'code', title: 'README.md - Visual Studio Code' },
+    sessionState: store.getState({ cwd: repoRoot }),
+    userMessage: 'continue inspecting this VS Code workspace'
+  });
+
+  store.setPendingRequestedTask({
+    userMessage: 'yes, lets apply the volume profile',
+    executionIntent: 'Apply Volume Profile in TradingView',
+    executionIntentSource: 'saved-pending-requested-task',
+    taskSummary: 'Apply Volume Profile in TradingView',
+    targetApp: 'tradingview',
+    executionContextEnvelope: tradingViewEnvelope
+  }, { cwd: repoRoot, executionContextEnvelope: tradingViewEnvelope });
+
+  const recorded = store.setPendingRequestedTask({
+    userMessage: 'continue',
+    executionIntent: 'Inspect the active VS Code workspace',
+    executionIntentSource: 'saved-chat-continuity',
+    taskSummary: 'Inspect the active VS Code workspace',
+    targetApp: 'code',
+    executionContextEnvelope: repoEditorEnvelope
+  }, { cwd: repoRoot, executionContextEnvelope: repoEditorEnvelope });
+
+  const tradingViewTask = store.getPendingRequestedTask({ cwd: repoRoot, executionContextEnvelope: tradingViewEnvelope });
+  const repoEditorTask = store.getPendingRequestedTask({ cwd: repoRoot, executionContextEnvelope: repoEditorEnvelope });
+
+  assert.strictEqual(tradingViewTask.taskSummary, 'Apply Volume Profile in TradingView');
+  assert.strictEqual(tradingViewTask.executionContext.appId, 'tradingview');
+  assert.strictEqual(repoEditorTask.taskSummary, 'Inspect the active VS Code workspace');
+  assert.strictEqual(repoEditorTask.executionContext.appId, 'code');
+  assert.strictEqual(recorded.pendingRequestedTask.taskSummary, 'Inspect the active VS Code workspace', 'legacy top-level pending task mirror should follow the active compartment');
+
+  const unrelatedEnvelope = buildExecutionContextEnvelope({
+    cwd: repoRoot,
+    foreground: { processName: 'chrome', title: 'Google Chrome' },
+    sessionState: store.getState({ cwd: repoRoot }),
+    userMessage: 'continue browser research'
+  });
+  assert.strictEqual(store.getPendingRequestedTask({ cwd: repoRoot, executionContextEnvelope: unrelatedEnvelope }), null, 'strict compartment lookup should not fall back to unrelated pending tasks');
 
   fs.rmSync(tempDir, { recursive: true, force: true });
 });

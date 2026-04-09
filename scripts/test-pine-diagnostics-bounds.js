@@ -45,6 +45,12 @@ async function buildPineEvidenceMessage(userMessage) {
   return messages.find((entry) => entry.role === 'system' && entry.content.includes('## Pine Evidence Bounds'));
 }
 
+async function buildTradingViewOverlayMessage(userMessage, foreground) {
+  const builder = createBuilder({ foreground: foreground || null });
+  const messages = await builder.buildMessages(userMessage, false);
+  return messages.find((entry) => entry.role === 'system' && entry.content.includes('## TradingView / Pine Domain Overlay'));
+}
+
 async function main() {
   await test('pine compile-result prompt bounds compile success claims', async () => {
     const evidenceMessage = await buildPineEvidenceMessage('open pine editor in tradingview and summarize the compile result');
@@ -90,6 +96,27 @@ async function main() {
     assert(evidenceMessage.content.includes('requestKind: generic-status'));
     assert(evidenceMessage.content.includes('bounded editor evidence only'));
     assert(evidenceMessage.content.includes('do not turn generic status text into runtime, chart, or market claims'));
+  });
+
+  await test('TradingView/Pine overlay stays out of generic repo/editor prompts', async () => {
+    const overlayMessage = await buildTradingViewOverlayMessage('help me inspect this VS Code workspace', {
+      success: true,
+      processName: 'code',
+      title: 'README.md - Visual Studio Code'
+    });
+
+    assert.strictEqual(overlayMessage, undefined, 'TradingView/Pine overlay should not be injected for unrelated repo/editor prompts');
+  });
+
+  await test('TradingView/Pine overlay still applies to explicit Pine requests outside TradingView foreground', async () => {
+    const overlayMessage = await buildTradingViewOverlayMessage('open pine editor and summarize the compile result', {
+      success: true,
+      processName: 'code',
+      title: 'README.md - Visual Studio Code'
+    });
+
+    assert(overlayMessage, 'explicit Pine requests should still get the TradingView/Pine overlay');
+    assert(overlayMessage.content.includes('TradingView Pine diagnostics rule'));
   });
 }
 

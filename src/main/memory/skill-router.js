@@ -54,13 +54,237 @@ function normalizeScope(scope) {
   const processNames = normalizeArray(scope.processNames).map((value) => value.toLowerCase());
   const windowTitles = normalizeArray(scope.windowTitles);
   const domains = normalizeArray(scope.domains).map((value) => extractHost(value) || value.toLowerCase());
+  const repoNames = normalizeArray(scope.repoNames).map((value) => value.toLowerCase());
+  const projectRoots = normalizeArray(scope.projectRoots).map((value) => path.resolve(String(value || '')).toLowerCase());
+  const appIds = normalizeArray(scope.appIds).map((value) => value.toLowerCase());
+  const taskFamilies = normalizeArray(scope.taskFamilies).map((value) => value.toLowerCase());
+  const compartmentKeys = normalizeArray(scope.compartmentKeys).map((value) => value.toLowerCase());
   const kind = scope.kind ? String(scope.kind).trim().toLowerCase() : null;
-  if (!processNames.length && !windowTitles.length && !domains.length && !kind) return null;
+  if (!processNames.length
+    && !windowTitles.length
+    && !domains.length
+    && !repoNames.length
+    && !projectRoots.length
+    && !appIds.length
+    && !taskFamilies.length
+    && !compartmentKeys.length
+    && !kind) return null;
   return {
     ...(kind ? { kind } : {}),
     ...(processNames.length ? { processNames } : {}),
     ...(windowTitles.length ? { windowTitles } : {}),
-    ...(domains.length ? { domains } : {})
+    ...(domains.length ? { domains } : {}),
+    ...(repoNames.length ? { repoNames } : {}),
+    ...(projectRoots.length ? { projectRoots } : {}),
+    ...(appIds.length ? { appIds } : {}),
+    ...(taskFamilies.length ? { taskFamilies } : {}),
+    ...(compartmentKeys.length ? { compartmentKeys } : {})
+  };
+}
+
+function normalizeScopeContext(options = {}) {
+  const envelope = options.executionContextEnvelope && typeof options.executionContextEnvelope === 'object'
+    ? options.executionContextEnvelope
+    : null;
+  const repoName = String(
+    options.repoName
+    || envelope?.repo?.name
+    || ''
+  ).trim().toLowerCase() || null;
+  const projectRootRaw = String(
+    options.projectRoot
+    || envelope?.repo?.projectRoot
+    || ''
+  ).trim();
+  const projectRoot = projectRootRaw ? path.resolve(projectRootRaw).toLowerCase() : null;
+  const appId = String(
+    options.appId
+    || envelope?.foreground?.appId
+    || ''
+  ).trim().toLowerCase() || null;
+  const processName = String(
+    options.currentProcessName
+    || options.processName
+    || envelope?.foreground?.processName
+    || ''
+  ).trim().toLowerCase() || null;
+  const windowTitle = String(
+    options.currentWindowTitle
+    || options.windowTitle
+    || envelope?.foreground?.windowTitle
+    || ''
+  ).trim() || null;
+  const windowKind = String(
+    options.currentWindowKind
+    || options.windowKind
+    || envelope?.foreground?.surfaceClass
+    || ''
+  ).trim().toLowerCase() || null;
+  const taskFamily = String(
+    options.taskFamily
+    || envelope?.taskFamily
+    || ''
+  ).trim().toLowerCase() || null;
+  const compartmentKey = String(
+    options.compartmentKey
+    || envelope?.compartmentKey
+    || ''
+  ).trim().toLowerCase() || null;
+  const currentUrlHost = extractHost(options.currentUrlHost || options.currentUrl || '');
+
+  return {
+    repoName,
+    projectRoot,
+    appId,
+    currentProcessName: processName,
+    currentWindowTitle: windowTitle,
+    currentWindowKind: windowKind,
+    taskFamily,
+    compartmentKey,
+    currentUrlHost,
+    currentUrl: options.currentUrl || null,
+    query: options.query || ''
+  };
+}
+
+function matchesNormalizedValue(currentValue, candidateValue) {
+  const current = String(currentValue || '').trim().toLowerCase();
+  const candidate = String(candidateValue || '').trim().toLowerCase();
+  if (!current || !candidate) return false;
+  return current === candidate || current.includes(candidate) || candidate.includes(current);
+}
+
+function evaluateScopeSignal(values, currentValue, options = {}) {
+  const normalizedValues = normalizeArray(values).map((value) => String(value || '').trim()).filter(Boolean);
+  const current = String(currentValue || '').trim();
+  if (normalizedValues.length === 0) {
+    return { applicable: false, matched: false, mismatched: false, value: null };
+  }
+  if (!current) {
+    return { applicable: true, matched: false, mismatched: false, value: null };
+  }
+
+  const matcher = typeof options.matcher === 'function'
+    ? options.matcher
+    : (candidate, liveValue) => matchesNormalizedValue(liveValue, candidate);
+  const matchedValue = normalizedValues.find((candidate) => matcher(candidate, current));
+  if (matchedValue) {
+    return { applicable: true, matched: true, mismatched: false, value: matchedValue };
+  }
+
+  return { applicable: true, matched: false, mismatched: true, value: normalizedValues[0] };
+}
+
+function analyzeScopeMatch(entry, options = {}) {
+  const scope = entry?.scope;
+  if (!scope) {
+    return {
+      score: 0,
+      matchedSignals: 0,
+      mismatchedSignals: 0,
+      fallbackEligible: true,
+      classification: 'unscoped-fallback'
+    };
+  }
+
+  const context = normalizeScopeContext(options);
+  const evaluations = [
+    {
+      key: 'compartmentKey',
+      weight: 7,
+      mismatchPenalty: -4.5,
+      evaluation: evaluateScopeSignal(scope.compartmentKeys, context.compartmentKey)
+    },
+    {
+      key: 'repoName',
+      weight: 4,
+      mismatchPenalty: -2.5,
+      evaluation: evaluateScopeSignal(scope.repoNames, context.repoName)
+    },
+    {
+      key: 'projectRoot',
+      weight: 4,
+      mismatchPenalty: -2.5,
+      evaluation: evaluateScopeSignal(scope.projectRoots, context.projectRoot)
+    },
+    {
+      key: 'appId',
+      weight: 4,
+      mismatchPenalty: -3,
+      evaluation: evaluateScopeSignal(scope.appIds, context.appId)
+    },
+    {
+      key: 'taskFamily',
+      weight: 3,
+      mismatchPenalty: -2,
+      evaluation: evaluateScopeSignal(scope.taskFamilies, context.taskFamily)
+    },
+    {
+      key: 'processName',
+      weight: 3,
+      mismatchPenalty: -1.5,
+      evaluation: evaluateScopeSignal(scope.processNames, context.currentProcessName)
+    },
+    {
+      key: 'windowTitle',
+      weight: 2,
+      mismatchPenalty: -0.75,
+      evaluation: evaluateScopeSignal(scope.windowTitles, context.currentWindowTitle)
+    },
+    {
+      key: 'windowKind',
+      weight: 2,
+      mismatchPenalty: -1,
+      evaluation: evaluateScopeSignal(scope.kind ? [scope.kind] : [], context.currentWindowKind)
+    },
+    {
+      key: 'domain',
+      weight: 3,
+      mismatchPenalty: -1,
+      evaluation: evaluateScopeSignal(scope.domains, context.currentUrlHost, {
+        matcher: (candidate, liveValue) => {
+          const normalizedCandidate = extractHost(candidate) || String(candidate || '').trim().toLowerCase();
+          const normalizedLive = extractHost(liveValue) || String(liveValue || '').trim().toLowerCase();
+          if (!normalizedCandidate || !normalizedLive) return false;
+          return normalizedLive === normalizedCandidate
+            || normalizedLive.endsWith(`.${normalizedCandidate}`)
+            || normalizedCandidate.endsWith(`.${normalizedLive}`);
+        }
+      })
+    }
+  ];
+
+  let score = 0;
+  let matchedSignals = 0;
+  let mismatchedSignals = 0;
+  let constrainedSignals = 0;
+
+  evaluations.forEach(({ weight, mismatchPenalty, evaluation }) => {
+    if (!evaluation.applicable) return;
+    constrainedSignals += 1;
+    if (evaluation.matched) {
+      matchedSignals += 1;
+      score += weight;
+      return;
+    }
+    if (evaluation.mismatched) {
+      mismatchedSignals += 1;
+      score += mismatchPenalty;
+    }
+  });
+
+  let classification = 'scoped-neutral';
+  if (matchedSignals > 0 && mismatchedSignals === 0) classification = 'scoped-match';
+  else if (matchedSignals > 0 && mismatchedSignals > 0) classification = 'scoped-mixed';
+  else if (mismatchedSignals > 0) classification = 'scoped-mismatch';
+
+  return {
+    score,
+    matchedSignals,
+    mismatchedSignals,
+    constrainedSignals,
+    fallbackEligible: matchedSignals === 0,
+    classification
   };
 }
 
@@ -139,8 +363,13 @@ function buildScopeSignature(scope) {
   const processPart = (normalizedScope.processNames || []).join('|');
   const titlePart = (normalizedScope.windowTitles || []).map((value) => value.toLowerCase()).join('|');
   const domainPart = (normalizedScope.domains || []).join('|');
+  const repoPart = (normalizedScope.repoNames || []).join('|');
+  const rootPart = (normalizedScope.projectRoots || []).join('|');
+  const appPart = (normalizedScope.appIds || []).join('|');
+  const taskFamilyPart = (normalizedScope.taskFamilies || []).join('|');
+  const compartmentPart = (normalizedScope.compartmentKeys || []).join('|');
   const kindPart = normalizedScope.kind || '';
-  return [processPart, titlePart, domainPart, kindPart].join('::');
+  return [processPart, titlePart, domainPart, repoPart, rootPart, appPart, taskFamilyPart, compartmentPart, kindPart].join('::');
 }
 
 function buildSkillFamilySignature({ keywords = [], tags = [], content = '', verification = '' } = {}) {
@@ -186,80 +415,11 @@ function scoreVariantSpecificity(entry, options = {}) {
 }
 
 function getMatchedScopeSignals(entry, options = {}) {
-  const currentProcessName = String(options.currentProcessName || '').trim().toLowerCase();
-  const currentWindowTitle = String(options.currentWindowTitle || '').trim().toLowerCase();
-  const currentWindowKind = String(options.currentWindowKind || '').trim().toLowerCase();
-  const currentUrlHost = extractHost(options.currentUrlHost || options.currentUrl || '');
-  const scope = entry?.scope;
-  if (!scope) return 0;
-
-  let matchedSignals = 0;
-  if (currentProcessName && Array.isArray(scope.processNames) && scope.processNames.some((value) => currentProcessName === value || currentProcessName.includes(value) || value.includes(currentProcessName))) {
-    matchedSignals += 1;
-  }
-  if (currentWindowTitle && Array.isArray(scope.windowTitles) && scope.windowTitles.some((value) => {
-    const normalizedValue = String(value || '').trim().toLowerCase();
-    return normalizedValue && (currentWindowTitle.includes(normalizedValue) || normalizedValue.includes(currentWindowTitle));
-  })) {
-    matchedSignals += 1;
-  }
-  if (currentWindowKind && scope.kind && currentWindowKind === scope.kind) {
-    matchedSignals += 1;
-  }
-  if (currentUrlHost && Array.isArray(scope.domains) && scope.domains.some((value) => currentUrlHost === value || currentUrlHost.endsWith(`.${value}`) || value.endsWith(`.${currentUrlHost}`))) {
-    matchedSignals += 1;
-  }
-  return matchedSignals;
+  return analyzeScopeMatch(entry, options).matchedSignals;
 }
 
 function getScopeScore(entry, options = {}) {
-  const scope = entry?.scope;
-  if (!scope) return 0;
-
-  let score = 0;
-  const currentProcessName = String(options.currentProcessName || '').trim().toLowerCase();
-  if (currentProcessName && Array.isArray(scope.processNames) && scope.processNames.length) {
-    if (scope.processNames.some((value) => currentProcessName === value || currentProcessName.includes(value) || value.includes(currentProcessName))) {
-      score += 3;
-    } else {
-      score -= 1.5;
-    }
-  }
-
-  const queryLower = String(options.query || '').toLowerCase();
-  if (queryLower && Array.isArray(scope.domains) && scope.domains.length) {
-    if (scope.domains.some((value) => queryLower.includes(value))) {
-      score += 1.5;
-    }
-  }
-
-  const currentWindowTitle = String(options.currentWindowTitle || '').trim().toLowerCase();
-  if (currentWindowTitle && Array.isArray(scope.windowTitles) && scope.windowTitles.length) {
-    if (scope.windowTitles.some((value) => {
-      const normalizedValue = String(value || '').trim().toLowerCase();
-      return normalizedValue && (currentWindowTitle.includes(normalizedValue) || normalizedValue.includes(currentWindowTitle));
-    })) {
-      score += 2;
-    }
-  }
-
-  const currentWindowKind = String(options.currentWindowKind || '').trim().toLowerCase();
-  const scopeKind = String(scope.kind || '').trim().toLowerCase();
-  if (currentWindowKind && scopeKind) {
-    if (currentWindowKind === scopeKind) score += 2;
-    else score -= 1;
-  }
-
-  const currentUrlHost = extractHost(options.currentUrlHost || options.currentUrl || '');
-  if (currentUrlHost && Array.isArray(scope.domains) && scope.domains.length) {
-    if (scope.domains.some((value) => currentUrlHost === value || currentUrlHost.endsWith(`.${value}`) || value.endsWith(`.${currentUrlHost}`))) {
-      score += 3;
-    } else {
-      score -= 1;
-    }
-  }
-
-  return score;
+  return analyzeScopeMatch(entry, options).score;
 }
 
 // ─── Index I/O ──────────────────────────────────────────────
@@ -443,35 +603,36 @@ function getRelevantSkillsSelection(userMessage, options = {}) {
   const limit = options.limit || DEFAULT_LIMIT;
   const messageLower = userMessage.toLowerCase();
   const tfidf = tfidfScores(index, userMessage);
+  const scopeContext = normalizeScopeContext({ ...options, query: userMessage });
 
   const scored = entries
     .map(([id, entry]) => {
       if (!isInjectableSkill(entry)) return null;
       const keywordScore = scoreSkill(entry, messageLower);
       const semanticScore = (tfidf.get(id) || 0) * 5;
-      const scopeScore = getScopeScore(entry, {
-        currentProcessName: options.currentProcessName,
-        currentWindowTitle: options.currentWindowTitle,
-        currentWindowKind: options.currentWindowKind,
-        currentUrlHost: options.currentUrlHost,
-        query: userMessage
-      });
-      const variantSpecificity = scoreVariantSpecificity(entry, {
-        currentProcessName: options.currentProcessName,
-        currentWindowTitle: options.currentWindowTitle,
-        currentWindowKind: options.currentWindowKind,
-        currentUrlHost: options.currentUrlHost,
-        currentUrl: options.currentUrl
-      });
+      const scopeMatch = analyzeScopeMatch(entry, scopeContext);
+      const scopeScore = scopeMatch.score;
+      const variantSpecificity = scoreVariantSpecificity(entry, scopeContext);
       const variantSpecificityScore = variantSpecificity.score;
       const matchedScopeSignals = variantSpecificity.matchedSignals;
       const score = keywordScore + semanticScore + scopeScore + variantSpecificityScore;
-      return { id, entry, score, keywordScore, semanticScore, scopeScore, variantSpecificityScore, matchedScopeSignals };
+      return {
+        id,
+        entry,
+        score,
+        keywordScore,
+        semanticScore,
+        scopeScore,
+        scopeMatch,
+        variantSpecificityScore,
+        matchedScopeSignals
+      };
     })
     .filter((value) => value && value.score > 0)
     .sort((a, b) =>
       (b.matchedScopeSignals - a.matchedScopeSignals)
       || (b.score - a.score)
+      || ((a.scopeMatch?.mismatchedSignals || 0) - (b.scopeMatch?.mismatchedSignals || 0))
       || (b.variantSpecificityScore - a.variantSpecificityScore)
       || (b.scopeScore - a.scopeScore)
       || (b.keywordScore - a.keywordScore)
@@ -507,10 +668,31 @@ function getRelevantSkillsSelection(userMessage, options = {}) {
 
   try { saveIndex(index); } catch { /* non-critical */ }
 
+  const selectedMatches = scored.slice(0, ids.length);
+  const scopedMatchCount = selectedMatches.filter((match) => match.scopeMatch?.classification === 'scoped-match').length;
+  const fallbackCount = selectedMatches.filter((match) => match.scopeMatch?.classification === 'unscoped-fallback').length;
+  const mismatchCount = selectedMatches.filter((match) => String(match.scopeMatch?.classification || '').includes('mismatch')).length;
+
   return {
     text: sections.length ? `\n--- Relevant Skills ---\n${sections.join('\n\n')}\n--- End Skills ---\n` : '',
     ids,
-    matches: scored.slice(0, ids.length)
+    matches: selectedMatches,
+    summary: {
+      selectedCount: ids.length,
+      scopedMatchCount,
+      fallbackCount,
+      mismatchCount,
+      scopeContext: {
+        repoName: scopeContext.repoName,
+        projectRoot: scopeContext.projectRoot,
+        appId: scopeContext.appId,
+        currentProcessName: scopeContext.currentProcessName,
+        currentWindowKind: scopeContext.currentWindowKind,
+        taskFamily: scopeContext.taskFamily,
+        compartmentKey: scopeContext.compartmentKey,
+        currentUrlHost: scopeContext.currentUrlHost
+      }
+    }
   };
 }
 
@@ -556,6 +738,9 @@ function addSkill(id, { file, keywords, tags, content, status, origin, scope, si
 
   // Write skill file if content provided
   if (content) {
+    if (!fs.existsSync(SKILLS_DIR)) {
+      fs.mkdirSync(SKILLS_DIR, { recursive: true, mode: 0o700 });
+    }
     const skillPath = path.join(SKILLS_DIR, normalized.file);
     fs.writeFileSync(skillPath, content, 'utf-8');
   }
@@ -631,6 +816,9 @@ function upsertLearnedSkill({ idHint, keywords, tags, content, scope, signature,
 
   index[skillId] = normalizeSkillEntry(skillId, entry);
   if (content) {
+    if (!fs.existsSync(SKILLS_DIR)) {
+      fs.mkdirSync(SKILLS_DIR, { recursive: true, mode: 0o700 });
+    }
     fs.writeFileSync(path.join(SKILLS_DIR, index[skillId].file), content, 'utf-8');
   }
   saveIndex(index);

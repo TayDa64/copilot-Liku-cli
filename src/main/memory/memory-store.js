@@ -29,6 +29,129 @@ const DEFAULT_NOTE_LIMIT = 5;
 const MAX_NOTES = 500;
 const MEMORY_VERBOSE = /^(1|true|yes)$/i.test(String(process.env.LIKU_MEMORY_VERBOSE || '').trim());
 
+function normalizeArray(values) {
+  return Array.from(new Set((Array.isArray(values) ? values : [])
+    .map((value) => String(value || '').trim())
+    .filter(Boolean)));
+}
+
+function normalizeScope(scope) {
+  if (!scope || typeof scope !== 'object') return null;
+
+  const repoNames = normalizeArray(scope.repoNames).map((value) => value.toLowerCase());
+  const projectRoots = normalizeArray(scope.projectRoots).map((value) => path.resolve(String(value || '')).toLowerCase());
+  const appIds = normalizeArray(scope.appIds).map((value) => value.toLowerCase());
+  const processNames = normalizeArray(scope.processNames).map((value) => value.toLowerCase());
+  const taskFamilies = normalizeArray(scope.taskFamilies).map((value) => value.toLowerCase());
+  const compartmentKeys = normalizeArray(scope.compartmentKeys).map((value) => value.toLowerCase());
+
+  if (!repoNames.length
+    && !projectRoots.length
+    && !appIds.length
+    && !processNames.length
+    && !taskFamilies.length
+    && !compartmentKeys.length) {
+    return null;
+  }
+
+  return {
+    ...(repoNames.length ? { repoNames } : {}),
+    ...(projectRoots.length ? { projectRoots } : {}),
+    ...(appIds.length ? { appIds } : {}),
+    ...(processNames.length ? { processNames } : {}),
+    ...(taskFamilies.length ? { taskFamilies } : {}),
+    ...(compartmentKeys.length ? { compartmentKeys } : {})
+  };
+}
+
+function normalizeSelectionOptions(limitOrOptions, fallbackOptions = {}) {
+  if (typeof limitOrOptions === 'number') {
+    return { ...fallbackOptions, limit: limitOrOptions };
+  }
+  if (limitOrOptions && typeof limitOrOptions === 'object') {
+    return { ...limitOrOptions };
+  }
+  return { ...fallbackOptions };
+}
+
+function buildSelectionContext(options = {}) {
+  const envelope = options.executionContextEnvelope && typeof options.executionContextEnvelope === 'object'
+    ? options.executionContextEnvelope
+    : null;
+  const projectRootRaw = String(options.projectRoot || envelope?.repo?.projectRoot || '').trim();
+  return {
+    repoName: String(options.repoName || envelope?.repo?.name || '').trim().toLowerCase() || null,
+    projectRoot: projectRootRaw ? path.resolve(projectRootRaw).toLowerCase() : null,
+    appId: String(options.appId || envelope?.foreground?.appId || '').trim().toLowerCase() || null,
+    processName: String(options.processName || options.currentProcessName || envelope?.foreground?.processName || '').trim().toLowerCase() || null,
+    taskFamily: String(options.taskFamily || envelope?.taskFamily || '').trim().toLowerCase() || null,
+    compartmentKey: String(options.compartmentKey || envelope?.compartmentKey || '').trim().toLowerCase() || null
+  };
+}
+
+function evaluateScopeSignal(values, currentValue) {
+  const candidates = normalizeArray(values).map((value) => String(value || '').trim().toLowerCase());
+  const current = String(currentValue || '').trim().toLowerCase();
+  if (!candidates.length) return { applicable: false, matched: false, mismatched: false };
+  if (!current) return { applicable: true, matched: false, mismatched: false };
+  const matched = candidates.some((candidate) => current === candidate || current.includes(candidate) || candidate.includes(current));
+  return {
+    applicable: true,
+    matched,
+    mismatched: !matched
+  };
+}
+
+function analyzeNoteScope(scope, selectionContext = {}) {
+  const normalizedScope = normalizeScope(scope);
+  if (!normalizedScope) {
+    return {
+      score: 0,
+      matchedSignals: 0,
+      mismatchedSignals: 0,
+      classification: 'unscoped-fallback'
+    };
+  }
+
+  const signals = [
+    { evaluation: evaluateScopeSignal(normalizedScope.compartmentKeys, selectionContext.compartmentKey), weight: 6, mismatchPenalty: -4 },
+    { evaluation: evaluateScopeSignal(normalizedScope.repoNames, selectionContext.repoName), weight: 4, mismatchPenalty: -2.5 },
+    { evaluation: evaluateScopeSignal(normalizedScope.projectRoots, selectionContext.projectRoot), weight: 4, mismatchPenalty: -2.5 },
+    { evaluation: evaluateScopeSignal(normalizedScope.appIds, selectionContext.appId), weight: 3.5, mismatchPenalty: -2.5 },
+    { evaluation: evaluateScopeSignal(normalizedScope.processNames, selectionContext.processName), weight: 2.5, mismatchPenalty: -1.5 },
+    { evaluation: evaluateScopeSignal(normalizedScope.taskFamilies, selectionContext.taskFamily), weight: 3, mismatchPenalty: -2 }
+  ];
+
+  let score = 0;
+  let matchedSignals = 0;
+  let mismatchedSignals = 0;
+
+  signals.forEach(({ evaluation, weight, mismatchPenalty }) => {
+    if (!evaluation.applicable) return;
+    if (evaluation.matched) {
+      matchedSignals += 1;
+      score += weight;
+      return;
+    }
+    if (evaluation.mismatched) {
+      mismatchedSignals += 1;
+      score += mismatchPenalty;
+    }
+  });
+
+  let classification = 'scoped-neutral';
+  if (matchedSignals > 0 && mismatchedSignals === 0) classification = 'scoped-match';
+  else if (matchedSignals > 0 && mismatchedSignals > 0) classification = 'scoped-mixed';
+  else if (mismatchedSignals > 0) classification = 'scoped-mismatch';
+
+  return {
+    score,
+    matchedSignals,
+    mismatchedSignals,
+    classification
+  };
+}
+
 // ─── ULID-lite (monotonic, no dependency) ──────────────────
 
 let lastTs = 0;
@@ -162,6 +285,23 @@ function scoreNote(indexEntry, queryLower) {
   return score;
 }
 
+function buildSelectionSummary(selected = [], selectionContext = {}) {
+  return {
+    selectedCount: selected.length,
+    scopedMatchCount: selected.filter((entry) => entry.scopeMatch?.classification === 'scoped-match').length,
+    fallbackCount: selected.filter((entry) => entry.scopeMatch?.classification === 'unscoped-fallback').length,
+    mismatchCount: selected.filter((entry) => String(entry.scopeMatch?.classification || '').includes('mismatch')).length,
+    scopeContext: {
+      repoName: selectionContext.repoName,
+      projectRoot: selectionContext.projectRoot,
+      appId: selectionContext.appId,
+      processName: selectionContext.processName,
+      taskFamily: selectionContext.taskFamily,
+      compartmentKey: selectionContext.compartmentKey
+    }
+  };
+}
+
 // ─── Public API ─────────────────────────────────────────────
 
 /**
@@ -175,6 +315,7 @@ function scoreNote(indexEntry, queryLower) {
 function addNote(noteData) {
   const id = generateNoteId();
   const now = new Date().toISOString();
+  const normalizedScope = normalizeScope(noteData.scope);
 
   const note = {
     id,
@@ -183,6 +324,7 @@ function addNote(noteData) {
     context: noteData.context || '',
     keywords: noteData.keywords || [],
     tags: noteData.tags || [],
+    scope: normalizedScope,
     source: noteData.source || null,
     links: [],
     createdAt: now,
@@ -197,6 +339,7 @@ function addNote(noteData) {
     type: note.type,
     keywords: note.keywords,
     tags: note.tags,
+    scope: note.scope,
     links: [],
     createdAt: now,
     updatedAt: now
@@ -226,6 +369,7 @@ function updateNote(id, updates) {
   if (updates.context !== undefined) note.context = updates.context;
   if (updates.keywords) note.keywords = updates.keywords;
   if (updates.tags) note.tags = updates.tags;
+  if (updates.scope !== undefined) note.scope = normalizeScope(updates.scope);
   if (updates.links) note.links = updates.links;
   note.updatedAt = now;
 
@@ -236,6 +380,7 @@ function updateNote(id, updates) {
   if (index.notes[id]) {
     index.notes[id].keywords = note.keywords;
     index.notes[id].tags = note.tags;
+    index.notes[id].scope = note.scope || null;
     index.notes[id].updatedAt = now;
 
     // Re-link after keyword/tag changes
@@ -289,48 +434,93 @@ function getNote(id) {
  * @param {number} [limit] - Maximum notes to return (default: 5)
  * @returns {object[]} Array of full note objects, highest relevance first
  */
-function getRelevantNotes(query, limit) {
-  if (!query) return [];
-  limit = limit || DEFAULT_NOTE_LIMIT;
+function getRelevantNotesSelection(query, options = {}) {
+  if (!query) {
+    return {
+      text: '',
+      ids: [],
+      notes: [],
+      matches: [],
+      summary: buildSelectionSummary([], buildSelectionContext(normalizeSelectionOptions(options, { limit: DEFAULT_NOTE_LIMIT })))
+    };
+  }
+
+  const normalizedOptions = normalizeSelectionOptions(options, { limit: DEFAULT_NOTE_LIMIT });
+  const limit = normalizedOptions.limit || DEFAULT_NOTE_LIMIT;
 
   const index = loadIndex();
   const entries = Object.entries(index.notes || {});
-  if (entries.length === 0) return [];
+  if (entries.length === 0) return { text: '', ids: [], notes: [], matches: [], summary: buildSelectionSummary([], buildSelectionContext(normalizedOptions)) };
 
   const queryLower = query.toLowerCase();
+  const selectionContext = buildSelectionContext(normalizedOptions);
 
   const scored = entries
-    .map(([id, entry]) => ({ id, entry, score: scoreNote(entry, queryLower) }))
+    .map(([id, entry]) => {
+      const baseScore = scoreNote(entry, queryLower);
+      const scopeMatch = analyzeNoteScope(entry.scope, selectionContext);
+      return {
+        id,
+        entry,
+        baseScore,
+        score: baseScore + scopeMatch.score,
+        scopeMatch
+      };
+    })
     .filter(s => s.score > 0)
-    .sort((a, b) => b.score - a.score)
+    .sort((a, b) =>
+      (b.score - a.score)
+      || ((a.scopeMatch?.mismatchedSignals || 0) - (b.scopeMatch?.mismatchedSignals || 0))
+      || ((b.scopeMatch?.matchedSignals || 0) - (a.scopeMatch?.matchedSignals || 0))
+    )
     .slice(0, limit);
 
-  return scored
-    .map(s => readNote(s.id))
+  const notes = scored
+    .map((selection) => {
+      const note = readNote(selection.id);
+      if (!note) return null;
+      return {
+        ...selection,
+        note
+      };
+    })
     .filter(Boolean);
+
+  let totalTokens = 0;
+  const sections = [];
+  const selectedIds = [];
+  const selectedMatches = [];
+
+  for (const selection of notes) {
+    const entry = `[${selection.note.type}] ${selection.note.content}`;
+    const entryTokens = countTokens(entry);
+    if (totalTokens + entryTokens > MEMORY_TOKEN_BUDGET) break;
+    sections.push(entry);
+    totalTokens += entryTokens;
+    selectedIds.push(selection.id);
+    selectedMatches.push(selection);
+  }
+
+  return {
+    text: sections.length ? `\n--- Memory Context ---\n${sections.join('\n')}\n--- End Memory ---\n` : '',
+    ids: selectedIds,
+    notes: selectedMatches.map((selection) => selection.note),
+    matches: selectedMatches,
+    summary: buildSelectionSummary(selectedMatches, selectionContext)
+  };
+}
+
+function getRelevantNotes(query, limitOrOptions) {
+  const selection = getRelevantNotesSelection(query, limitOrOptions);
+  return Array.isArray(selection.notes) ? selection.notes : [];
 }
 
 /**
  * Format relevant notes as a system-prompt–injectable string.
  * Respects MEMORY_TOKEN_BUDGET.
  */
-function getMemoryContext(query, limit) {
-  const notes = getRelevantNotes(query, limit);
-  if (notes.length === 0) return '';
-
-  let totalTokens = 0;
-  const sections = [];
-
-  for (const note of notes) {
-    const entry = `[${note.type}] ${note.content}`;
-    const entryTokens = countTokens(entry);
-    if (totalTokens + entryTokens > MEMORY_TOKEN_BUDGET) break;
-    sections.push(entry);
-    totalTokens += entryTokens;
-  }
-
-  if (sections.length === 0) return '';
-  return `\n--- Memory Context ---\n${sections.join('\n')}\n--- End Memory ---\n`;
+function getMemoryContext(query, limitOrOptions) {
+  return getRelevantNotesSelection(query, limitOrOptions).text || '';
 }
 
 /**
@@ -345,6 +535,7 @@ module.exports = {
   updateNote,
   removeNote,
   getNote,
+  getRelevantNotesSelection,
   getRelevantNotes,
   getMemoryContext,
   listNotes,

@@ -12,9 +12,11 @@ const {
   clearPendingRequestedTask,
   getChatContinuityState,
   getPendingRequestedTask,
+  getSessionIntentState,
   recordChatContinuityTurn,
   setPendingRequestedTask
 } = require('../../main/session-intent-state');
+const { buildExecutionContextEnvelope } = require('../../main/ai-service/execution-context');
 const {
   buildProofCarryingAnswerPrompt,
   buildProofCarryingObservationFallback,
@@ -385,10 +387,32 @@ function buildPendingRequestedTaskRecord({ userMessage, executionIntent, actionD
     recordedAt: new Date().toISOString(),
     userMessage,
     executionIntent,
+    executionIntentSource: executionIntent && executionIntent !== userMessage ? 'saved-intent-reuse' : 'literal-user-input',
     taskSummary: String(actionData?.thought || actionData?.verification || executionIntent || actionSummary || userMessage || '').trim() || null,
     targetApp: targetProcessName || null,
     targetWindowTitle: targetWindowTitle || null
   };
+}
+
+async function buildContinuationExecutionContext(ai, userInput, fallbackIntent = '') {
+  try {
+    const sessionState = getSessionIntentState({ cwd: process.cwd() });
+    const foreground = await systemAutomation.getForegroundWindowInfo();
+    return buildExecutionContextEnvelope({
+      cwd: process.cwd(),
+      foreground: foreground && foreground.success ? foreground : null,
+      sessionState,
+      userMessage: fallbackIntent || userInput || ''
+    });
+  } catch {
+    return null;
+  }
+}
+
+function summarizeExplicitReuseIntent(intent) {
+  const text = String(intent || '').replace(/\s+/g, ' ').trim();
+  if (!text) return '';
+  return text.length > 140 ? `${text.slice(0, 137)}...` : text;
 }
 
 function normalizePendingTaskText(value, maxLength = 280) {
@@ -757,6 +781,15 @@ function recordContinuityFromExecution(ai, actionData, execResult, details = {})
       ? watcher.getCapabilitySnapshot()
       : null;
     const targetWindowHandle = Number(details.targetWindowHandle || execResult?.focusVerification?.expectedWindowHandle || 0) || null;
+    const executionContextEnvelope = details.executionContextEnvelope || buildExecutionContextEnvelope({
+      cwd: process.cwd(),
+      foreground: {
+        processName: details.targetProcessName || latestVisual?.processName || null,
+        title: latestVisual?.windowTitle || details.windowTitle || null
+      },
+      sessionState: getSessionIntentState({ cwd: process.cwd() }),
+      userMessage: details.executionIntent || details.userMessage || ''
+    });
     const turnRecord = buildChatContinuityTurnRecord({
       actionData,
       execResult: {
@@ -769,6 +802,7 @@ function recordContinuityFromExecution(ai, actionData, execResult, details = {})
       watcherSnapshot,
       details: {
         ...details,
+        executionContextEnvelope,
         recordedAt: new Date().toISOString(),
         targetWindowHandle,
         nextRecommendedStep: inferNextRecommendedStep(execResult),
@@ -1194,6 +1228,7 @@ async function autoCapture(ai, options = {}) {
 
 async function executeActionBatchWithSafeguards(ai, actionData, session, userMessage, options = {}) {
   const enablePopupRecipes = !!options.enablePopupRecipes;
+  const selectionProvenance = options.selectionProvenance || options.selection || null;
   let pendingSafety = null;
   let screenshotCaptured = false;
   const execResult = await ai.executeActions(
@@ -1208,7 +1243,8 @@ async function executeActionBatchWithSafeguards(ai, actionData, session, userMes
         pendingSafety = safety;
       },
       userMessage,
-      enablePopupRecipes
+      enablePopupRecipes,
+      selectionProvenance
     }
   );
 
@@ -1238,7 +1274,8 @@ async function executeActionBatchWithSafeguards(ai, actionData, session, userMes
       },
       {
         userMessage,
-        enablePopupRecipes
+        enablePopupRecipes,
+        selectionProvenance
       }
     );
     return { ...resumed, screenshotCaptured };
@@ -1291,8 +1328,21 @@ async function runChatLoop(ai, options) {
     const lowerLine = line.toLowerCase();
     const isContinueLike = isLikelyApprovalOrContinuationInput(lowerLine);
     const isAffirmativeExplicitOperation = isAffirmativeExplicitOperationInput(line);
-    const chatContinuity = isContinueLike ? getChatContinuityState({ cwd: process.cwd() }) : null;
-    const pendingRequestedTask = isContinueLike ? getPendingRequestedTask({ cwd: process.cwd() }) : null;
+    const continuationSeedState = isContinueLike ? getSessionIntentState({ cwd: process.cwd() }) : null;
+    const continuationSeedIntent = isContinueLike
+      ? String(
+        continuationSeedState?.pendingRequestedTask?.executionIntent
+        || continuationSeedState?.pendingRequestedTask?.continuationIntent
+        || continuationSeedState?.chatContinuity?.activeGoal
+        || lastNonTrivialUserMessage
+        || line
+      ).trim()
+      : '';
+    const continuationExecutionContextEnvelope = isContinueLike
+      ? await buildContinuationExecutionContext(ai, line, continuationSeedIntent)
+      : null;
+    const chatContinuity = isContinueLike ? getChatContinuityState({ cwd: process.cwd(), executionContextEnvelope: continuationExecutionContextEnvelope }) : null;
+    const pendingRequestedTask = isContinueLike ? getPendingRequestedTask({ cwd: process.cwd(), executionContextEnvelope: continuationExecutionContextEnvelope }) : null;
     const continuationDecision = isContinueLike
       ? getContinuationDecision(line, chatContinuity, pendingRequestedTask)
       : { block: false, useContinuityState: false, reason: null };
@@ -1316,6 +1366,16 @@ async function runChatLoop(ai, options) {
       : continuationDecision.usePendingRequestedTask
         ? continuationDecision.effectiveIntent
       : (isContinueLike && !isAffirmativeExplicitOperation ? (lastNonTrivialUserMessage || line) : line);
+    const executionIntentSource = continuationDecision.useContinuityState
+      ? 'saved-chat-continuity'
+      : continuationDecision.usePendingRequestedTask
+        ? 'saved-pending-requested-task'
+        : 'literal-user-input';
+
+    if ((continuationDecision.useContinuityState || continuationDecision.usePendingRequestedTask) && executionIntent && executionIntent !== line) {
+      const reuseKind = continuationDecision.usePendingRequestedTask ? 'saved pending task' : 'saved continuity';
+      info(`Using ${reuseKind} intent instead of the literal input: ${summarizeExplicitReuseIntent(executionIntent)}`);
+    }
 
     // Slash commands are handled by ai-service
     if (line.startsWith('/')) {
@@ -1730,7 +1790,10 @@ async function runChatLoop(ai, options) {
       actionData,
       session,
       effectiveUserMessage,
-      { enablePopupRecipes: popupRecipesEnabled }
+      {
+        enablePopupRecipes: popupRecipesEnabled,
+        selectionProvenance: resp.selection || null
+      }
     );
 
     // Record auto-run outcomes and demote on repeated failures (UI drift).
@@ -1813,6 +1876,10 @@ async function runChatLoop(ai, options) {
     recordContinuityFromExecution(ai, actionData, execResult, {
       userMessage: line,
       executionIntent: effectiveUserMessage,
+      executionIntentSource,
+      executionContextEnvelope: continuationExecutionContextEnvelope,
+      selectionProvenance: resp.selection || null,
+      targetProcessName,
       targetWindowHandle: actionData?.actions?.find((action) => action?.windowHandle || action?.targetWindowHandle)?.windowHandle
         || actionData?.actions?.find((action) => action?.windowHandle || action?.targetWindowHandle)?.targetWindowHandle
         || null
@@ -1929,7 +1996,10 @@ async function runChatLoop(ai, options) {
           contActionData,
           session,
           effectiveUserMessage,
-          { enablePopupRecipes: popupRecipesEnabled }
+          {
+            enablePopupRecipes: popupRecipesEnabled,
+            selectionProvenance: contResp.selection || null
+          }
         );
 
         if (contExecResult?.cancelled) break;
@@ -1942,6 +2012,9 @@ async function runChatLoop(ai, options) {
         recordContinuityFromExecution(ai, contActionData, contExecResult, {
           userMessage: line,
           executionIntent: effectiveUserMessage,
+          executionIntentSource,
+          executionContextEnvelope: continuationExecutionContextEnvelope,
+          selectionProvenance: contResp.selection || null,
           targetWindowHandle: contActionData?.actions?.find((action) => action?.windowHandle || action?.targetWindowHandle)?.windowHandle
             || contActionData?.actions?.find((action) => action?.windowHandle || action?.targetWindowHandle)?.targetWindowHandle
             || null

@@ -2137,6 +2137,17 @@ async function run() {
     const pending = {
       actionId: 'action-test-confirm',
       actionIndex: 0,
+      description: 'Press enter in TradingView timeframe selector',
+      confirmationPrompt: 'Confirmation required: Press enter in TradingView timeframe selector. Expected proof: Observe TradingView timeframe selector after execution.',
+      confirmationContext: {
+        objectType: 'confirmation-step',
+        objectLabel: 'TradingView timeframe selector',
+        surface: 'timeframe',
+        appName: 'TradingView',
+        repoPath: null,
+        whyNow: 'Confirm 5m timeframe',
+        expectedProof: 'Observe TradingView timeframe selector after execution.'
+      },
       remainingActions: [
         { type: 'key', key: 'enter', reason: 'Confirm 5m timeframe' },
         { type: 'wait', ms: 10 }
@@ -2149,6 +2160,8 @@ async function run() {
     aiService.setPendingAction(pending);
     const confirmed = aiService.confirmPendingAction('action-test-confirm');
     assert(confirmed && confirmed.confirmed, 'confirmPendingAction should preserve the pending action and mark it confirmed');
+  assert.strictEqual(confirmed.confirmationContext.objectLabel, 'TradingView timeframe selector', 'confirmPendingAction should preserve enriched confirmation object metadata');
+  assert(/timeframe selector/i.test(String(confirmed.confirmationPrompt || '')), 'confirmPendingAction should preserve the object-specific confirmation prompt');
     assert(aiService.getPendingAction(), 'Pending action should still be available for resumeAfterConfirmation');
 
     const originalExecuteAction = aiService.systemAutomation.executeAction;
@@ -2173,6 +2186,54 @@ async function run() {
       aiService.systemAutomation.executeAction = originalExecuteAction;
       aiService.systemAutomation.getForegroundWindowInfo = originalGetForegroundWindowInfo;
       aiService.systemAutomation.focusWindow = originalFocusWindow;
+      aiService.clearPendingAction();
+    }
+  });
+
+  await testAsync('pending confirmation resume refuses explicit compartment mismatch', async () => {
+    aiService.clearPendingAction();
+
+    aiService.setPendingAction({
+      actionId: 'action-test-compartment-mismatch',
+      actionIndex: 0,
+      confirmed: true,
+      description: 'Press enter in TradingView Pine Editor',
+      confirmationPrompt: 'Confirmation required: Overwrite Pine Editor buffer. Expected proof: Observe TradingView Pine Editor after execution.',
+      confirmationContext: {
+        objectType: 'editor-buffer',
+        objectLabel: 'TradingView Pine Editor buffer',
+        surface: 'pine-editor',
+        appName: 'TradingView',
+        repoPath: null,
+        whyNow: 'Confirm TradingView action',
+        expectedProof: 'Observe TradingView Pine Editor after execution.'
+      },
+      remainingActions: [
+        { type: 'key', key: 'enter', reason: 'Confirm TradingView action' }
+      ],
+      completedResults: [],
+      thought: 'Confirm TradingView action',
+      verification: 'TradingView should receive the confirmed input',
+      executionContextEnvelope: {
+        compartmentKey: 'copilot-liku-cli::tradingview::unknown::tradingview'
+      }
+    });
+
+    try {
+      const resumed = await aiService.resumeAfterConfirmation(null, null, {
+        userMessage: 'yes',
+        executionContextEnvelope: {
+          compartmentKey: 'copilot-liku-cli::code::unknown::repo-editor'
+        },
+        actionExecutor: async () => ({ success: true, action: 'key', message: 'should not execute' })
+      });
+
+      assert.strictEqual(resumed.success, false, 'resumeAfterConfirmation should fail closed on explicit compartment mismatch');
+      assert.strictEqual(resumed.results[0].compartmentMismatch, true, 'resumeAfterConfirmation should surface compartment mismatch metadata');
+      assert(/belongs to compartment/i.test(resumed.error || ''), 'resumeAfterConfirmation should explain the mismatch');
+      assert(aiService.getPendingAction(), 'pending action should remain available after mismatch refusal');
+      assert.strictEqual(aiService.getPendingAction()?.confirmationContext?.surface, 'pine-editor', 'pending action should retain enriched confirmation metadata after mismatch refusal');
+    } finally {
       aiService.clearPendingAction();
     }
   });

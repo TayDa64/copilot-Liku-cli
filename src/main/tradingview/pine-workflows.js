@@ -8,6 +8,10 @@ const {
   messageMentionsTradingViewShortcut,
   matchesTradingViewShortcutAction
 } = require('./shortcut-profile');
+const {
+  buildExecutionContextEnvelope,
+  isTradingViewPineContextEligible
+} = require('../ai-service/execution-context');
 const PINE_SURFACE_ALIASES = Object.freeze({
   'pine-logs': ['pine logs', 'compiler logs'],
   'pine-profiler': ['pine profiler', 'performance profiler'],
@@ -101,7 +105,30 @@ function allowsSyntheticPineAuthoringOpen(actions = []) {
     'find_element'
   ]);
 
-  return actions.every((action) => lowSignalTypes.has(getNormalizedActionType(action)));
+  const normalizedActions = actions.filter((action) => action && typeof action === 'object');
+  if (normalizedActions.every((action) => lowSignalTypes.has(getNormalizedActionType(action)))) {
+    return true;
+  }
+
+  const hasAuthoringPayloadSignal = normalizedActions.some((action) =>
+    isPineClipboardPreparationAction(action)
+    || isPineScriptTypeAction(action)
+    || hasValidatedCanonicalPineState([action])
+  );
+  if (!hasAuthoringPayloadSignal) {
+    return false;
+  }
+
+  return normalizedActions.every((action) => {
+    const type = getNormalizedActionType(action);
+    return lowSignalTypes.has(type)
+      || isPineClipboardPreparationAction(action)
+      || isPineScriptTypeAction(action)
+      || isPinePasteStep(action)
+      || isPineSaveStep(action)
+      || isPineAddToChartStep(action)
+      || hasValidatedCanonicalPineState([action]);
+  });
 }
 
 function cloneAction(action) {
@@ -731,11 +758,24 @@ function inferPineSurfaceTarget(raw = '') {
   return null;
 }
 
-function inferTradingViewPineIntent(userMessage = '', actions = []) {
+function inferTradingViewPineIntent(userMessage = '', actions = [], context = {}) {
   const raw = String(userMessage || '').trim();
   if (!raw) return null;
 
+  const executionContextEnvelope = context.executionContextEnvelope || buildExecutionContextEnvelope({
+    capabilitySnapshot: context.capabilitySnapshot,
+    chatContinuityContext: context.chatContinuityContext,
+    cwd: context.cwd,
+    foreground: context.foreground,
+    sessionIntentContext: context.sessionIntentContext,
+    sessionState: context.sessionState,
+    userMessage: raw
+  });
+  if (!isTradingViewPineContextEligible(executionContextEnvelope)) return null;
+
   const mentionsTradingView = /\btradingview|trading view\b/i.test(raw)
+    || executionContextEnvelope?.signals?.foregroundTradingView === true
+    || executionContextEnvelope?.signals?.explicitTradingViewPineRequest === true
     || (Array.isArray(actions) && actions.some((action) => /tradingview/i.test(String(action?.title || '')) || /tradingview/i.test(String(action?.processName || ''))));
   if (!mentionsTradingView) return null;
 
@@ -784,7 +824,8 @@ function inferTradingViewPineIntent(userMessage = '', actions = []) {
 
   const syntheticOpener = surface.target === 'pine-editor'
     && (mentionsSafeOpenIntent || !!pineAuthoringMode)
-    && openerIndex < 0;
+    && openerIndex < 0
+    && allowsSyntheticPineAuthoringOpen(actions);
   if (openerIndex < 0 && !syntheticOpener) return null;
 
   const nextAction = openerIndex >= 0 ? getNextMeaningfulAction(actions, openerIndex + 1) : getNextMeaningfulAction(actions, 0);
@@ -1007,7 +1048,7 @@ function buildTradingViewPineWorkflowActions(intent = {}, actions = []) {
 function maybeRewriteTradingViewPineWorkflow(actions, context = {}) {
   if (!Array.isArray(actions) || actions.length === 0) return null;
 
-  const intent = inferTradingViewPineIntent(context.userMessage || '', actions);
+  const intent = inferTradingViewPineIntent(context.userMessage || '', actions, context);
   if (!intent || (!intent.syntheticOpener && intent.openerIndex < 0)) return null;
 
   if (intent.syntheticOpener) {

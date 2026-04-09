@@ -3,6 +3,7 @@ const path = require('path');
 
 const { LIKU_HOME } = require('../shared/liku-home');
 const { normalizeName, resolveProjectIdentity } = require('../shared/project-identity');
+const { buildExecutionContextEnvelope } = require('./ai-service/execution-context');
 
 const SESSION_INTENT_SCHEMA_VERSION = 'session-intent.v1';
 const SESSION_INTENT_FILE = path.join(LIKU_HOME, 'session-intent-state.json');
@@ -14,6 +15,7 @@ function defaultChatContinuity() {
   return {
     activeGoal: null,
     currentSubgoal: null,
+    compartmentKey: null,
     lastTurn: null,
     continuationReady: false,
     degradedReason: null,
@@ -40,9 +42,240 @@ function defaultState() {
     downstreamRepoIntent: null,
     forgoneFeatures: [],
     explicitCorrections: [],
+    activeCompartmentKey: null,
     pendingRequestedTask: null,
-    chatContinuity: defaultChatContinuity()
+    pendingRequestedTaskByCompartment: {},
+    chatContinuity: defaultChatContinuity(),
+    chatContinuityByCompartment: {}
   };
+}
+
+function normalizeCompartmentKey(value) {
+  return String(value || '').trim() || null;
+}
+
+function hasMeaningfulChatContinuity(continuity = null) {
+  if (!continuity || typeof continuity !== 'object') return false;
+  return !!(
+    continuity.activeGoal
+    || continuity.currentSubgoal
+    || continuity.lastTurn
+  );
+}
+
+function normalizeExecutionContextIdentity(executionContext = null) {
+  if (!executionContext || typeof executionContext !== 'object') return null;
+
+  const normalized = {
+    compartmentKey: normalizeCompartmentKey(executionContext.compartmentKey),
+    repoName: normalizeText(executionContext.repoName || executionContext.repo?.name, 120),
+    projectRoot: normalizeText(executionContext.projectRoot || executionContext.repo?.projectRoot, 260),
+    appId: normalizeText(executionContext.appId || executionContext.foreground?.appId || executionContext.processName, 80),
+    processName: normalizeText(executionContext.processName || executionContext.foreground?.processName, 80),
+    windowTitle: normalizeText(executionContext.windowTitle || executionContext.foreground?.windowTitle, 160),
+    surfaceClass: normalizeText(executionContext.surfaceClass || executionContext.foreground?.surfaceClass, 80),
+    interactionMode: normalizeText(executionContext.interactionMode || executionContext.foreground?.interactionMode, 80),
+    taskFamily: normalizeText(executionContext.taskFamily, 80),
+    confidence: normalizeText(executionContext.confidence, 40)
+  };
+
+  if (!normalized.compartmentKey
+    && !normalized.repoName
+    && !normalized.projectRoot
+    && !normalized.appId
+    && !normalized.processName
+    && !normalized.windowTitle
+    && !normalized.surfaceClass
+    && !normalized.interactionMode
+    && !normalized.taskFamily
+    && !normalized.confidence) {
+    return null;
+  }
+
+  return normalized;
+}
+
+function extractForegroundHint(source = {}) {
+  if (!source || typeof source !== 'object') return null;
+
+  const executionContext = normalizeExecutionContextIdentity(source.executionContext || source.executionContextEnvelope || null);
+  const processName = normalizeText(
+    executionContext?.processName
+      || executionContext?.appId
+      || source.targetApp
+      || source.processName
+      || source.appId
+      || source.lastTurn?.executionContext?.processName,
+    80
+  );
+  const title = normalizeText(
+    executionContext?.windowTitle
+      || source.targetWindowTitle
+      || source.windowTitle
+      || source.title
+      || source.lastTurn?.windowTitle,
+    160
+  );
+
+  const foreground = {};
+  if (processName) foreground.processName = processName;
+  if (title) foreground.title = title;
+  return Object.keys(foreground).length > 0 ? foreground : null;
+}
+
+function extractUserMessageHint(source = {}) {
+  return normalizeText(
+    source.executionIntent
+      || source.userMessage
+      || source.taskSummary
+      || source.activeGoal
+      || source.currentSubgoal,
+    280
+  ) || '';
+}
+
+function hasExplicitCompartmentSelectionHints(options = {}, source = {}) {
+  if (normalizeCompartmentKey(options.compartmentKey)) return true;
+  if (options.executionContextEnvelope && typeof options.executionContextEnvelope === 'object') return true;
+  if (options.foreground && typeof options.foreground === 'object') return true;
+  if (source.executionContextEnvelope && typeof source.executionContextEnvelope === 'object') return true;
+  if (source.executionContext && typeof source.executionContext === 'object') return true;
+  if (source.targetApp || source.processName || source.appId || source.targetWindowTitle || source.windowTitle || source.title) return true;
+  if (source.userMessage || source.executionIntent || source.taskSummary || source.activeGoal || source.currentSubgoal) return true;
+  return false;
+}
+
+function buildCompartmentEnvelopeHint(state, source = {}, options = {}) {
+  const explicitEnvelope = options.executionContextEnvelope || source.executionContextEnvelope || null;
+  if (explicitEnvelope?.compartmentKey) {
+    return explicitEnvelope;
+  }
+
+  const normalizedExecutionContext = normalizeExecutionContextIdentity(source.executionContext || null);
+  if (normalizedExecutionContext?.compartmentKey) {
+    return normalizedExecutionContext;
+  }
+
+  const foreground = options.foreground || extractForegroundHint(source);
+  const userMessage = options.userMessage || extractUserMessageHint(source);
+
+  try {
+    return buildExecutionContextEnvelope({
+      cwd: options.cwd || state?.currentRepo?.projectRoot || process.cwd(),
+      foreground,
+      sessionState: state,
+      userMessage
+    });
+  } catch {
+    return null;
+  }
+}
+
+function findLatestCompartmentKeyForRepo(map = {}, normalizedRepoName = '') {
+  const prefix = normalizeText(normalizedRepoName, 120);
+  if (!prefix) return null;
+
+  let latestKey = null;
+  let latestTimestamp = 0;
+  for (const [key, value] of Object.entries(map || {})) {
+    if (!String(key).startsWith(`${prefix}::`)) continue;
+    const recordedAt = Date.parse(value?.lastTurn?.recordedAt || value?.recordedAt || 0) || 0;
+    if (!latestKey || recordedAt >= latestTimestamp) {
+      latestKey = key;
+      latestTimestamp = recordedAt;
+    }
+  }
+  return latestKey;
+}
+
+function pickActiveCompartmentKey(state) {
+  const explicit = normalizeCompartmentKey(state?.activeCompartmentKey);
+  if (explicit) return explicit;
+
+  const repoName = state?.currentRepo?.normalizedRepoName || '';
+  return findLatestCompartmentKeyForRepo(state?.chatContinuityByCompartment, repoName)
+    || findLatestCompartmentKeyForRepo(state?.pendingRequestedTaskByCompartment, repoName)
+    || null;
+}
+
+function resolveSelectedCompartmentKey(state, options = {}, source = null) {
+  const explicitKey = normalizeCompartmentKey(options.compartmentKey);
+  if (explicitKey) return { compartmentKey: explicitKey, strict: true };
+
+  if (!hasExplicitCompartmentSelectionHints(options, source || {})) {
+    return { compartmentKey: pickActiveCompartmentKey(state), strict: false };
+  }
+
+  const envelope = buildCompartmentEnvelopeHint(state, source || {}, options);
+  const envelopeKey = normalizeCompartmentKey(envelope?.compartmentKey);
+  if (envelopeKey) return { compartmentKey: envelopeKey, strict: true };
+
+  return { compartmentKey: pickActiveCompartmentKey(state), strict: false };
+}
+
+function getChatContinuityForCompartment(state, compartmentKey, options = {}) {
+  const key = normalizeCompartmentKey(compartmentKey);
+  if (key && state?.chatContinuityByCompartment && state.chatContinuityByCompartment[key]) {
+    return hydrateChatContinuity(state.chatContinuityByCompartment[key]);
+  }
+  if (options.strict) return defaultChatContinuity();
+  if (hasMeaningfulChatContinuity(state?.chatContinuity)) return hydrateChatContinuity(state.chatContinuity);
+  return defaultChatContinuity();
+}
+
+function getPendingRequestedTaskForCompartment(state, compartmentKey, options = {}) {
+  const key = normalizeCompartmentKey(compartmentKey);
+  if (key && state?.pendingRequestedTaskByCompartment && state.pendingRequestedTaskByCompartment[key]) {
+    return normalizePendingRequestedTask(state.pendingRequestedTaskByCompartment[key]);
+  }
+  if (options.strict) return null;
+  return normalizePendingRequestedTask(state?.pendingRequestedTask || null);
+}
+
+function mirrorStateToCompartment(state, compartmentKey, options = {}) {
+  const activeCompartmentKey = normalizeCompartmentKey(compartmentKey) || pickActiveCompartmentKey(state);
+  return {
+    ...state,
+    activeCompartmentKey,
+    chatContinuity: getChatContinuityForCompartment(state, activeCompartmentKey, options),
+    pendingRequestedTask: getPendingRequestedTaskForCompartment(state, activeCompartmentKey, options)
+  };
+}
+
+function migrateLegacyCompartmentState(state) {
+  const nextState = {
+    ...state,
+    pendingRequestedTaskByCompartment: state?.pendingRequestedTaskByCompartment && typeof state.pendingRequestedTaskByCompartment === 'object'
+      ? { ...state.pendingRequestedTaskByCompartment }
+      : {},
+    chatContinuityByCompartment: state?.chatContinuityByCompartment && typeof state.chatContinuityByCompartment === 'object'
+      ? { ...state.chatContinuityByCompartment }
+      : {}
+  };
+
+  if (hasMeaningfulChatContinuity(nextState.chatContinuity) && Object.keys(nextState.chatContinuityByCompartment).length === 0) {
+    const derived = resolveSelectedCompartmentKey(nextState, {
+      cwd: nextState.currentRepo?.projectRoot || process.cwd(),
+      userMessage: nextState.chatContinuity?.activeGoal || nextState.chatContinuity?.lastTurn?.userMessage || ''
+    }, nextState.chatContinuity);
+    if (derived.compartmentKey) {
+      nextState.chatContinuityByCompartment[derived.compartmentKey] = hydrateChatContinuity(nextState.chatContinuity);
+      nextState.activeCompartmentKey = nextState.activeCompartmentKey || derived.compartmentKey;
+    }
+  }
+
+  if (nextState.pendingRequestedTask && Object.keys(nextState.pendingRequestedTaskByCompartment).length === 0) {
+    const derived = resolveSelectedCompartmentKey(nextState, {
+      cwd: nextState.currentRepo?.projectRoot || process.cwd(),
+      userMessage: nextState.pendingRequestedTask.executionIntent || nextState.pendingRequestedTask.userMessage || ''
+    }, nextState.pendingRequestedTask);
+    if (derived.compartmentKey) {
+      nextState.pendingRequestedTaskByCompartment[derived.compartmentKey] = normalizePendingRequestedTask(nextState.pendingRequestedTask);
+      nextState.activeCompartmentKey = nextState.activeCompartmentKey || derived.compartmentKey;
+    }
+  }
+
+  return mirrorStateToCompartment(nextState, nextState.activeCompartmentKey);
 }
 
 function normalizeText(value, maxLength = 240) {
@@ -58,6 +291,43 @@ function normalizeEvidenceList(values, maxLength = 80) {
     .map((value) => normalizeText(value, maxLength))
     .filter(Boolean)
     .slice(0, 6);
+}
+
+function normalizeIdList(values, maxItems = 8, maxLength = 120) {
+  if (!Array.isArray(values)) return [];
+  return values
+    .map((value) => normalizeText(value, maxLength))
+    .filter(Boolean)
+    .slice(0, maxItems);
+}
+
+function normalizeRetrievalSummary(summary = null) {
+  if (!summary || typeof summary !== 'object') return null;
+
+  const normalized = {
+    selectedCount: Number.isFinite(Number(summary.selectedCount)) ? Number(summary.selectedCount) : null,
+    scopedMatchCount: Number.isFinite(Number(summary.scopedMatchCount)) ? Number(summary.scopedMatchCount) : null,
+    fallbackCount: Number.isFinite(Number(summary.fallbackCount)) ? Number(summary.fallbackCount) : null,
+    mismatchCount: Number.isFinite(Number(summary.mismatchCount)) ? Number(summary.mismatchCount) : null,
+    scopeContext: normalizeExecutionContextIdentity({
+      compartmentKey: summary.scopeContext?.compartmentKey,
+      repoName: summary.scopeContext?.repoName,
+      projectRoot: summary.scopeContext?.projectRoot,
+      appId: summary.scopeContext?.appId,
+      processName: summary.scopeContext?.processName,
+      taskFamily: summary.scopeContext?.taskFamily
+    })
+  };
+
+  if (normalized.selectedCount === null
+    && normalized.scopedMatchCount === null
+    && normalized.fallbackCount === null
+    && normalized.mismatchCount === null
+    && !normalized.scopeContext) {
+    return null;
+  }
+
+  return normalized;
 }
 
 function normalizeTradingMode(tradingMode) {
@@ -427,6 +697,11 @@ function hydrateChatContinuity(continuity = defaultChatContinuity()) {
   return {
     ...base,
     ...freshness,
+    compartmentKey: normalizeCompartmentKey(
+      base.compartmentKey
+        || base.lastTurn?.compartmentKey
+        || base.lastTurn?.executionContext?.compartmentKey
+    ),
     continuationReady: base.continuationReady === true && freshness.freshnessState !== 'stale-recoverable' && freshness.freshnessState !== 'expired',
     degradedReason: baseDegradedReason || (freshnessBlocksContinuation ? freshness.freshnessReason : null)
   };
@@ -573,6 +848,13 @@ function normalizeTurnRecord(turnRecord = {}, previousContinuity = defaultChatCo
     recordedAt: normalizeText(turnRecord.recordedAt, 60) || nowIso(),
     userMessage: normalizeText(turnRecord.userMessage, 280),
     executionIntent: normalizeText(turnRecord.executionIntent, 280),
+    executionIntentSource: normalizeText(turnRecord.executionIntentSource, 80) || 'literal-user-input',
+    executionContext: normalizeExecutionContextIdentity(turnRecord.executionContext || turnRecord.executionContextEnvelope || null),
+    compartmentKey: normalizeCompartmentKey(
+      turnRecord.compartmentKey
+        || turnRecord.executionContext?.compartmentKey
+        || turnRecord.executionContextEnvelope?.compartmentKey
+    ),
     committedSubgoal: currentSubgoal,
     thought: normalizeText(turnRecord.thought, 240),
     actionTypes,
@@ -583,6 +865,12 @@ function normalizeTurnRecord(turnRecord = {}, previousContinuity = defaultChatCo
     executedCount: Number.isFinite(Number(turnRecord.executedCount)) ? Number(turnRecord.executedCount) : actionTypes.length,
     executionResult,
     tradingMode,
+    selectedSkillIds: normalizeIdList(turnRecord.selectedSkillIds),
+    selectedMemoryIds: normalizeIdList(turnRecord.selectedMemoryIds),
+    retrievalSummary: {
+      skills: normalizeRetrievalSummary(turnRecord?.retrievalSummary?.skills),
+      memories: normalizeRetrievalSummary(turnRecord?.retrievalSummary?.memories)
+    },
     verificationStatus,
     verificationChecks,
     observationEvidence,
@@ -598,6 +886,7 @@ function normalizeTurnRecord(turnRecord = {}, previousContinuity = defaultChatCo
   return hydrateChatContinuity({
     activeGoal,
     currentSubgoal,
+    compartmentKey: normalizedTurn.compartmentKey || previousContinuity?.compartmentKey || null,
     lastTurn: normalizedTurn,
     continuationReady: normalizedTurn.executionStatus === 'succeeded' && !degradedReason,
     degradedReason
@@ -761,6 +1050,7 @@ function formatSessionIntentContext(state) {
 function formatChatContinuitySummary(state) {
   const continuity = hydrateChatContinuity(state?.chatContinuity || state || defaultChatContinuity());
   const lines = [];
+  if (continuity.compartmentKey) lines.push(`Compartment: ${continuity.compartmentKey}`);
   if (continuity.activeGoal) lines.push(`Active goal: ${continuity.activeGoal}`);
   if (continuity.currentSubgoal) lines.push(`Current subgoal: ${continuity.currentSubgoal}`);
   if (continuity.lastTurn?.actionSummary) lines.push(`Last actions: ${continuity.lastTurn.actionSummary}`);
@@ -818,9 +1108,14 @@ function formatChatContinuityContext(state, options = {}) {
   }
 
   const lines = [];
+  if (continuity.compartmentKey) lines.push(`- compartmentKey: ${continuity.compartmentKey}`);
   if (continuity.activeGoal) lines.push(`- activeGoal: ${continuity.activeGoal}`);
   if (continuity.currentSubgoal) lines.push(`- currentSubgoal: ${continuity.currentSubgoal}`);
   if (lastTurn?.userMessage) lines.push(`- lastUserMessage: ${lastTurn.userMessage}`);
+  if (lastTurn?.executionIntentSource) lines.push(`- executionIntentSource: ${lastTurn.executionIntentSource}`);
+  if (lastTurn?.executionContext?.appId || lastTurn?.executionContext?.windowTitle) {
+    lines.push(`- continuityExecutionContext: ${(lastTurn.executionContext.appId || 'unknown-app')}${lastTurn.executionContext.windowTitle ? ` | ${lastTurn.executionContext.windowTitle}` : ''}`);
+  }
   if (lastTurn?.actionSummary) lines.push(`- lastExecutedActions: ${lastTurn.actionSummary}`);
   if (lastTurn?.executionStatus) lines.push(`- lastExecutionStatus: ${lastTurn.executionStatus}`);
   if (lastTurn?.executionResult?.successCount !== undefined || lastTurn?.executionResult?.failureCount !== undefined) {
@@ -1005,6 +1300,7 @@ function normalizePendingRequestedTask(task = {}) {
     recordedAt: normalizeText(task.recordedAt, 60) || nowIso(),
     userMessage: normalizeText(task.userMessage, 280),
     executionIntent: normalizeText(task.executionIntent, 280),
+    executionIntentSource: normalizeText(task.executionIntentSource, 80) || 'literal-user-input',
     taskSummary,
     targetApp: normalizeText(task.targetApp, 80),
     targetWindowTitle: normalizeText(task.targetWindowTitle, 160),
@@ -1016,7 +1312,13 @@ function normalizePendingRequestedTask(task = {}) {
     blockedReason: normalizeText(task.blockedReason, 120),
     continuationIntent: normalizeText(task.continuationIntent, 1200),
     recoveryNote: normalizeText(task.recoveryNote, 240),
-    requestedAddToChart: typeof task.requestedAddToChart === 'boolean' ? task.requestedAddToChart : null
+    requestedAddToChart: typeof task.requestedAddToChart === 'boolean' ? task.requestedAddToChart : null,
+    executionContext: normalizeExecutionContextIdentity(task.executionContext || task.executionContextEnvelope || null),
+    compartmentKey: normalizeCompartmentKey(
+      task.compartmentKey
+        || task.executionContext?.compartmentKey
+        || task.executionContextEnvelope?.compartmentKey
+    )
   };
 }
 
@@ -1033,27 +1335,54 @@ function createSessionIntentStateStore(options = {}) {
     };
     if (!Array.isArray(cachedState.forgoneFeatures)) cachedState.forgoneFeatures = [];
     if (!Array.isArray(cachedState.explicitCorrections)) cachedState.explicitCorrections = [];
-    if (!cachedState.chatContinuity || typeof cachedState.chatContinuity !== 'object') {
-      cachedState.chatContinuity = defaultChatContinuity();
-    } else {
-      cachedState.chatContinuity = {
-        ...defaultChatContinuity(),
-        ...cachedState.chatContinuity
-      };
-    }
+    cachedState.chatContinuity = hydrateChatContinuity(cachedState.chatContinuity || defaultChatContinuity());
+    cachedState = migrateLegacyCompartmentState(cachedState);
     return cachedState;
   }
 
   function saveState(nextState) {
-    const hydratedChatContinuity = hydrateChatContinuity(nextState.chatContinuity);
-    const state = {
+    const normalizedChatContinuityByCompartment = {};
+    for (const [key, value] of Object.entries(nextState.chatContinuityByCompartment || {})) {
+      const normalizedKey = normalizeCompartmentKey(key);
+      if (!normalizedKey || !hasMeaningfulChatContinuity(value)) continue;
+      normalizedChatContinuityByCompartment[normalizedKey] = hydrateChatContinuity({
+        ...(value && typeof value === 'object' ? value : {}),
+        compartmentKey: normalizedKey
+      });
+    }
+
+    const normalizedPendingRequestedTaskByCompartment = {};
+    for (const [key, value] of Object.entries(nextState.pendingRequestedTaskByCompartment || {})) {
+      const normalizedKey = normalizeCompartmentKey(key);
+      const normalizedTask = normalizePendingRequestedTask(value);
+      if (!normalizedKey || !normalizedTask) continue;
+      normalizedPendingRequestedTaskByCompartment[normalizedKey] = {
+        ...normalizedTask,
+        compartmentKey: normalizedTask.compartmentKey || normalizedKey
+      };
+    }
+
+    const activeCompartmentKey = normalizeCompartmentKey(nextState.activeCompartmentKey)
+      || pickActiveCompartmentKey({
+        ...nextState,
+        chatContinuityByCompartment: normalizedChatContinuityByCompartment,
+        pendingRequestedTaskByCompartment: normalizedPendingRequestedTaskByCompartment
+      });
+
+    const mirroredState = mirrorStateToCompartment({
       ...defaultState(),
       ...nextState,
       updatedAt: nowIso(),
       forgoneFeatures: limitList(nextState.forgoneFeatures || [], 12),
       explicitCorrections: limitList(nextState.explicitCorrections || [], 12),
-      chatContinuity: hydratedChatContinuity
-    };
+      activeCompartmentKey,
+      chatContinuityByCompartment: normalizedChatContinuityByCompartment,
+      pendingRequestedTaskByCompartment: normalizedPendingRequestedTaskByCompartment,
+      chatContinuity: hydrateChatContinuity(nextState.chatContinuity),
+      pendingRequestedTask: normalizePendingRequestedTask(nextState.pendingRequestedTask)
+    }, activeCompartmentKey);
+
+    const state = mirroredState;
     cachedState = state;
     ensureParentDir(stateFile);
     fs.writeFileSync(stateFile, JSON.stringify(state, null, 2));
@@ -1068,6 +1397,11 @@ function createSessionIntentStateStore(options = {}) {
       existing.normalizedRepoName !== currentRepo.normalizedRepoName
     ) {
       state.currentRepo = currentRepo;
+      if (!String(state.activeCompartmentKey || '').startsWith(`${currentRepo.normalizedRepoName || ''}::`)) {
+        state.activeCompartmentKey = findLatestCompartmentKeyForRepo(state.chatContinuityByCompartment, currentRepo.normalizedRepoName)
+          || findLatestCompartmentKeyForRepo(state.pendingRequestedTaskByCompartment, currentRepo.normalizedRepoName)
+          || null;
+      }
       return true;
     }
     return false;
@@ -1078,8 +1412,8 @@ function createSessionIntentStateStore(options = {}) {
     if (syncCurrentRepo(state, options.cwd)) {
       return saveState(state);
     }
-    state.chatContinuity = hydrateChatContinuity(state.chatContinuity);
-    return state;
+    const selection = resolveSelectedCompartmentKey(state, options);
+    return mirrorStateToCompartment(state, selection.compartmentKey, { strict: selection.strict });
   }
 
   function clearState(options = {}) {
@@ -1091,20 +1425,45 @@ function createSessionIntentStateStore(options = {}) {
   function clearChatContinuity(options = {}) {
     const state = cloneState(loadState());
     syncCurrentRepo(state, options.cwd || process.cwd());
-    state.chatContinuity = defaultChatContinuity();
+    const selection = resolveSelectedCompartmentKey(state, options);
+    const compartmentKey = selection.compartmentKey || state.activeCompartmentKey;
+    if (compartmentKey && state.chatContinuityByCompartment[compartmentKey]) {
+      delete state.chatContinuityByCompartment[compartmentKey];
+      state.chatContinuity = defaultChatContinuity();
+      if (state.activeCompartmentKey === compartmentKey) {
+        state.activeCompartmentKey = pickActiveCompartmentKey(state);
+      }
+    } else {
+      state.chatContinuity = defaultChatContinuity();
+    }
     return saveState(state);
   }
 
   function setPendingRequestedTask(task, options = {}) {
     const state = cloneState(loadState());
     syncCurrentRepo(state, options.cwd || process.cwd());
-    state.pendingRequestedTask = normalizePendingRequestedTask(task);
+    const normalizedTask = normalizePendingRequestedTask(task);
+    const selection = resolveSelectedCompartmentKey(state, options, normalizedTask || task);
+    const compartmentKey = selection.compartmentKey;
+    state.pendingRequestedTask = normalizedTask;
+    if (normalizedTask && compartmentKey) {
+      state.pendingRequestedTaskByCompartment[compartmentKey] = {
+        ...normalizedTask,
+        compartmentKey: normalizedTask.compartmentKey || compartmentKey
+      };
+      state.activeCompartmentKey = compartmentKey;
+    }
     return saveState(state);
   }
 
   function clearPendingRequestedTask(options = {}) {
     const state = cloneState(loadState());
     syncCurrentRepo(state, options.cwd || process.cwd());
+    const selection = resolveSelectedCompartmentKey(state, options);
+    const compartmentKey = selection.compartmentKey || state.activeCompartmentKey;
+    if (compartmentKey && state.pendingRequestedTaskByCompartment[compartmentKey]) {
+      delete state.pendingRequestedTaskByCompartment[compartmentKey];
+    }
     state.pendingRequestedTask = null;
     return saveState(state);
   }
@@ -1181,7 +1540,20 @@ function createSessionIntentStateStore(options = {}) {
   function recordExecutedTurn(turnRecord, options = {}) {
     const state = cloneState(loadState());
     syncCurrentRepo(state, options.cwd || process.cwd());
-    state.chatContinuity = normalizeTurnRecord(turnRecord, state.chatContinuity);
+    const selection = resolveSelectedCompartmentKey(state, options, turnRecord);
+    const previousContinuity = getChatContinuityForCompartment(state, selection.compartmentKey, { strict: false });
+    const normalizedContinuity = normalizeTurnRecord(turnRecord, previousContinuity);
+    const compartmentKey = normalizedContinuity.compartmentKey
+      || normalizedContinuity.lastTurn?.compartmentKey
+      || selection.compartmentKey;
+    state.chatContinuity = normalizedContinuity;
+    if (compartmentKey) {
+      state.chatContinuityByCompartment[compartmentKey] = {
+        ...normalizedContinuity,
+        compartmentKey
+      };
+      state.activeCompartmentKey = compartmentKey;
+    }
     return saveState(state);
   }
 
