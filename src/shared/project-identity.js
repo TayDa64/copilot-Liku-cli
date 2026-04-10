@@ -1,6 +1,40 @@
 const fs = require('fs');
 const path = require('path');
 
+const projectRootByCwdCache = new Map();
+const projectIdentityCache = new Map();
+
+function cloneAliases(aliases) {
+  return Array.isArray(aliases) ? aliases.slice() : [];
+}
+
+function clearProjectIdentityCache() {
+  projectRootByCwdCache.clear();
+  projectIdentityCache.clear();
+}
+
+function invalidateProjectIdentityCache(options = {}) {
+  const cwd = options.cwd ? normalizePath(options.cwd) : null;
+  const projectRoot = options.projectRoot ? normalizePath(options.projectRoot) : null;
+
+  if (cwd) projectRootByCwdCache.delete(cwd);
+  if (projectRoot) {
+    projectIdentityCache.delete(projectRoot);
+    for (const [cachedCwd, cachedRoot] of projectRootByCwdCache.entries()) {
+      if (cachedRoot === projectRoot || (cachedCwd && isPathInside(projectRoot, cachedCwd))) {
+        projectRootByCwdCache.delete(cachedCwd);
+      }
+    }
+  }
+}
+
+function getProjectIdentityCacheStats() {
+  return {
+    cwdProjectRootEntries: projectRootByCwdCache.size,
+    projectIdentityEntries: projectIdentityCache.size
+  };
+}
+
 function normalizePath(value) {
   if (!value) return null;
   const resolved = path.resolve(String(value));
@@ -93,16 +127,60 @@ function buildAliases(parts) {
 }
 
 function detectProjectRoot(startPath = process.cwd()) {
-  return walkUpFor(startPath, (candidate) => fs.existsSync(path.join(candidate, 'package.json')))
-    || normalizePath(startPath || process.cwd());
+  const normalizedStart = normalizePath(startPath || process.cwd());
+  const cachedRoot = projectRootByCwdCache.get(normalizedStart);
+  if (cachedRoot && isPathInside(cachedRoot, normalizedStart) && fs.existsSync(path.join(cachedRoot, 'package.json'))) {
+    return cachedRoot;
+  }
+
+  const detectedRoot = walkUpFor(normalizedStart, (candidate) => fs.existsSync(path.join(candidate, 'package.json')))
+    || normalizedStart;
+
+  projectRootByCwdCache.set(normalizedStart, detectedRoot);
+  return detectedRoot;
+}
+
+function getFileSignature(filePath) {
+  if (!filePath || !fs.existsSync(filePath)) return 'missing';
+  try {
+    const stat = fs.statSync(filePath);
+    return `${stat.size}:${Number(stat.mtimeMs || 0)}`;
+  } catch {
+    return 'unreadable';
+  }
 }
 
 function resolveProjectIdentity(options = {}) {
   const cwd = normalizePath(options.cwd || process.cwd());
   const projectRoot = detectProjectRoot(cwd);
+  const cacheMode = options.cache;
+  const useCache = cacheMode !== false && cacheMode !== 'off';
   const packagePath = path.join(projectRoot, 'package.json');
-  const packageJson = safeReadJson(packagePath) || {};
   const gitDir = parseGitDirectory(projectRoot);
+  const gitConfigPath = gitDir ? path.join(gitDir, 'config') : null;
+  const packageSignature = getFileSignature(packagePath);
+  const gitConfigSignature = getFileSignature(gitConfigPath);
+
+  if (useCache) {
+    const cached = projectIdentityCache.get(projectRoot);
+    if (cached
+      && cached.packageSignature === packageSignature
+      && cached.gitConfigSignature === gitConfigSignature) {
+      return {
+        cwd,
+        projectRoot: cached.identity.projectRoot,
+        folderName: cached.identity.folderName,
+        packageName: cached.identity.packageName,
+        packageVersion: cached.identity.packageVersion,
+        repoName: cached.identity.repoName,
+        normalizedRepoName: cached.identity.normalizedRepoName,
+        gitRemote: cached.identity.gitRemote,
+        aliases: cloneAliases(cached.identity.aliases)
+      };
+    }
+  }
+
+  const packageJson = safeReadJson(packagePath) || {};
   const gitRemote = extractGitRemote(readGitConfig(gitDir));
   const folderName = path.basename(projectRoot);
   const packageName = typeof packageJson.name === 'string' ? packageJson.name.trim() : null;
@@ -110,7 +188,7 @@ function resolveProjectIdentity(options = {}) {
   const repoName = remoteRepoName || packageName || folderName;
   const aliases = buildAliases([repoName, packageName, folderName]);
 
-  return {
+  const stableIdentity = {
     cwd,
     projectRoot,
     folderName,
@@ -120,6 +198,23 @@ function resolveProjectIdentity(options = {}) {
     normalizedRepoName: normalizeName(packageName || repoName || folderName),
     gitRemote,
     aliases
+  };
+
+  if (useCache) {
+    projectIdentityCache.set(projectRoot, {
+      packageSignature,
+      gitConfigSignature,
+      identity: {
+        ...stableIdentity,
+        cwd: projectRoot,
+        aliases: cloneAliases(aliases)
+      }
+    });
+  }
+
+  return {
+    ...stableIdentity,
+    aliases: cloneAliases(aliases)
   };
 }
 
@@ -164,7 +259,10 @@ function validateProjectIdentity(options = {}) {
 }
 
 module.exports = {
+  clearProjectIdentityCache,
   detectProjectRoot,
+  getProjectIdentityCacheStats,
+  invalidateProjectIdentityCache,
   normalizePath,
   normalizeName,
   resolveProjectIdentity,

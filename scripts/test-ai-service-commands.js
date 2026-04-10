@@ -199,6 +199,35 @@ test('state command reports current repo and forgone features', () => {
   assert.ok(result.message.includes('Continuation ready: yes'));
 });
 
+test('state command omits stale continuity lines when compartment-switched continuity is empty', () => {
+  const snapshot = {
+    activeGoal: chatContinuityState.activeGoal,
+    currentSubgoal: chatContinuityState.currentSubgoal,
+    continuationReady: chatContinuityState.continuationReady,
+    lastTurn: chatContinuityState.lastTurn
+  };
+
+  chatContinuityState.activeGoal = null;
+  chatContinuityState.currentSubgoal = null;
+  chatContinuityState.continuationReady = false;
+  chatContinuityState.lastTurn = null;
+
+  try {
+    const result = handler.handleCommand('/state');
+    assert.strictEqual(result.type, 'info');
+    assert.ok(result.message.includes('Current repo: copilot-liku-cli'));
+    assert.ok(!result.message.includes('Active goal:'), 'state output should not leak stale continuity goals');
+    assert.ok(!result.message.includes('Current subgoal:'), 'state output should not leak stale continuity subgoals');
+    assert.ok(!result.message.includes('Last actions:'), 'state output should not leak stale action summaries');
+    assert.ok(result.message.includes('Continuation ready: no'));
+  } finally {
+    chatContinuityState.activeGoal = snapshot.activeGoal;
+    chatContinuityState.currentSubgoal = snapshot.currentSubgoal;
+    chatContinuityState.continuationReady = snapshot.continuationReady;
+    chatContinuityState.lastTurn = snapshot.lastTurn;
+  }
+});
+
 test('state clear command clears session intent state', () => {
   clearedSessionIntent = false;
   clearedChatContinuity = false;

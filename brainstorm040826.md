@@ -1140,3 +1140,358 @@ Success means:
 - and every major claim is backed by regression or runtime proof.
 
 The orchestrator should keep the fleet moving in that order, with proof at every boundary.
+
+---
+
+## 20. Post-Phase-6 external review synthesis (grounded in codebase truth)
+
+This section translates external review feedback into **repo-true** guidance.
+
+It is intentionally additive.
+
+It does **not** invalidate earlier sections, and it must **not** be used as justification to remove already-established functionality that has already been verified in slices 1–6.
+
+### 20.1 What the codebase already validates
+
+The external review is directionally correct on the big picture: Liku's architecture is moving in the right direction because the repo now has real implementations for the three most important anti-state-bleed primitives.
+
+#### A. Deterministic execution context already exists
+
+**Code truth:** `src/main/ai-service/execution-context.js` builds the envelope from deterministic repo/window/session signals:
+- `resolveProjectIdentity({ cwd })`
+- foreground process/title/capability snapshot
+- session state
+- user-message task-family detection
+
+This means the execution context is **not currently LLM-guessed**.
+
+That is correct and should remain the rule.
+
+**Implementation guardrail:**
+- the LLM may consume the envelope,
+- but the orchestrator/runtime must continue to **produce** the envelope from deterministic host signals first.
+
+#### B. Command-grounded safety already exists
+
+**Code truth:** in `src/main/ai-service.js`, `buildActionSafetyKeywordContext()` already routes `run_command` risk evaluation to `action.command` instead of user prose.
+
+That means the system has already crossed the most important safety threshold:
+- user prose can still inform explanation,
+- but shell-command escalation is now primarily grounded in the actual command payload.
+
+This must remain protected.
+
+#### C. Compartment continuity is already real
+
+**Code truth:** `src/main/session-intent-state.js` already stores continuity and pending-requested tasks by compartment, with `activeCompartmentKey`, `chatContinuityByCompartment`, and `pendingRequestedTaskByCompartment`.
+
+This means the system no longer has a purely single-global continuity model.
+
+That must remain the default safety posture.
+
+#### D. Scoped retrieval already exists, but as weighted matching rather than inheritance
+
+**Code truth:**
+- `src/main/memory/skill-router.js` scores by repo/project/app/task-family/compartment/domain
+- `src/main/memory/memory-store.js` scores notes by analogous scope metadata while preserving unscoped fallback behavior
+
+This means the codebase already avoids the worst form of memory starvation by design, because unscoped/global-like notes and skills are still eligible as fallback.
+
+However, the current system does **not yet** expose an explicit `global/domain/local` hierarchy.
+
+That is a valid next improvement area.
+
+#### E. Provenance and traceability are already partially implemented
+
+**Code truth:** slices 5 and 6 already added:
+- selection provenance,
+- context authority,
+- rewrite sources,
+- proof refs,
+- runtime trace `plan:rewrite` events,
+- runtime-trace fixture extraction support.
+
+This means the repo already has the beginnings of the “flight data recorder” concept the external review praised.
+
+That path should continue.
+
+---
+
+### 20.2 Where the external review is useful, but must be reframed to fit this codebase
+
+The following recommendations are valuable, but they must be integrated in a way that matches the current architecture.
+
+#### A. “Bridge compartment” should be implemented as **context bridging**, not as a second parallel state model
+
+The review correctly identifies a real risk:
+- strict compartments can make cross-app workflows clumsy,
+- especially transitions like VS Code → browser research,
+- or editor → TradingView.
+
+However, the repo should **not** rush into a brand-new “bridge compartment” persistence subsystem unless the simpler mechanism fails.
+
+**Codebase-truth recommendation:**
+- Keep compartment state strict by default.
+- Add a lightweight **transition/bridge hint** to the execution context when the user explicitly invokes a cross-domain shift.
+- Inject the previous compartment's active goal/current subgoal as **read-only inherited context** into prompt assembly for that turn only.
+- Do **not** merge the two compartments' writable continuity state by default.
+
+This preserves contamination safety while enabling baton-passing across domains.
+
+#### B. “Skill hierarchy” should be implemented as an explicit scope tier over the current weighted router, not as a replacement
+
+The external review is right that the current scoped router can over-constrain if future learned skills become too repo-local.
+
+But codebase truth matters:
+- the current system already deliberately supports unscoped fallback,
+- so it is not yet a pure starvation architecture.
+
+**Codebase-truth recommendation:**
+- Preserve the current weighted scoring model in `skill-router.js` and `memory-store.js`.
+- Add an explicit tier concept on top of current scope metadata:
+  - `global`
+  - `domain`
+  - `local`
+- `global` should remain eligible everywhere.
+- `domain` should be boosted only when the execution context matches.
+- `local` should remain the most tightly compartmented.
+- Unscoped legacy entries should continue to behave as fallback-eligible rather than disappearing.
+
+This is an additive evolution of the current router, not a redesign.
+
+#### C. Continuity GC / stale-state cleanup is valid, but should be framed as lifecycle hygiene rather than a correctness prerequisite
+
+The review correctly identifies that compartment state can grow over time.
+
+**Code truth:**
+- the repo already has freshness logic for continuity,
+- but it does **not** yet implement LRU eviction for compartment entries.
+
+That makes this a good next-step improvement, but not evidence that the current architecture is invalid.
+
+**Codebase-truth recommendation:**
+- add compartment-level `lastAccessedAt` or equivalent access metadata,
+- run lightweight cleanup on CLI startup,
+- clear stale pending actions first,
+- compress very old continuity to a lighter episodic summary before deleting active state.
+
+This should be implemented carefully so it does not erase still-useful recent workflows.
+
+#### D. Read-only command allowlist is a valid hardening layer on top of command-grounded safety
+
+The review is right that command-grounded safety alone is not the same as an explicit low-risk read-only allowlist.
+
+**Code truth:**
+- the current code already distinguishes many destructive patterns and already avoids prose-driven escalation for `run_command`,
+- but it does not yet appear to formalize a strong first-class read-only shell allowlist in the roadmap.
+
+**Codebase-truth recommendation:**
+- add a bounded allowlist for commands like `git status`, `dir`, `ls`, `pwd`, `Get-ChildItem`, `Test-Path`, `cat`/`type`, `echo`, and similar read-only inspection commands,
+- ensure they stay `LOW` or lower unless combined with clearly mutating flags or shells that imply mutation,
+- keep destructive-pattern detection intact.
+
+This should be treated as a safety hardening layer, not as a weakening of the existing confirmation model.
+
+#### E. Execution-context performance/caching is a legitimate improvement area
+
+The review is correct that repeatedly rebuilding repo identity can become unnecessary overhead.
+
+**Code truth:**
+- `src/shared/project-identity.js` is deterministic and file-system based,
+- but it does not currently appear to expose a session cache for stable repo metadata.
+
+**Codebase-truth recommendation:**
+- cache repo-root / package / git-remote identity for the active session when `cwd` remains under the same project root,
+- continue to retrieve foreground/window state dynamically,
+- do not cache dynamic app/window state that could become stale mid-turn.
+
+---
+
+### 20.3 Additive improvement stream spawned from the synthesis
+
+This review should become a **new additive stream**, not a rewrite of slices 1–6.
+
+## Stream G — Post-Phase-6 hardening for fluidity without contamination
+
+**Primary goal:** preserve strict anti-state-bleed guarantees while improving cross-compartment fluidity, scoped reuse, lifecycle hygiene, and operator transparency.
+
+**Key files:**
+- `src/main/ai-service/execution-context.js`
+- `src/main/ai-service/message-builder.js`
+- `src/main/session-intent-state.js`
+- `src/main/memory/skill-router.js`
+- `src/main/memory/memory-store.js`
+- `src/shared/project-identity.js`
+- `src/cli/commands/chat.js`
+- `src/main/ai-service.js`
+- relevant tests in `scripts/test-session-intent-state.js`, `scripts/test-chat-actionability.js`, `scripts/test-ai-service-proof-trace.js`, and transcript/runtime-proof fixtures.
+
+---
+
+### 20.4 Stream G milestone map
+
+### Milestone G.1 — Deterministic envelope hardening and performance cache
+
+**Objective**
+Keep the execution context deterministic while reducing unnecessary repeated repo-identity work.
+
+**Tasks**
+- [ ] Add session-local caching for stable project identity signals derived from `cwd` / repo root.
+- [ ] Keep foreground/window/app state dynamic.
+- [ ] Explicitly document that the LLM consumes but does not generate the execution context envelope.
+
+**Files**
+- `src/shared/project-identity.js`
+- `src/main/ai-service/execution-context.js`
+
+**Acceptance criteria**
+- Execution context remains deterministic.
+- Static repo identity does not require full repeated recomputation on every turn when unchanged.
+
+---
+
+### Milestone G.2 — Context bridging for explicit cross-compartment workflows
+
+**Objective**
+Allow explicit cross-domain baton-passing without reopening global state bleed.
+
+**Tasks**
+- [x] Detect explicit domain-transition intent in the execution context envelope.
+- [x] Add a temporary read-only inherited-context block for the immediately previous compartment when the user explicitly invokes a cross-domain shift.
+- [x] Keep writable continuity state compartmentalized; do not silently merge compartments.
+
+**Files**
+- `src/main/ai-service/execution-context.js`
+- `src/main/ai-service/message-builder.js`
+- `src/cli/commands/chat.js`
+- `src/main/session-intent-state.js`
+
+**Acceptance criteria**
+- VS Code → browser / browser → TradingView handoffs can carry the baton intentionally.
+- Same-compartment safety rules and contamination guards remain intact.
+
+---
+
+### Milestone G.3 — Explicit scope inheritance for skills and memory
+
+**Objective**
+Prevent future memory starvation without weakening scoped routing.
+
+**Tasks**
+- [x] Add explicit scope-tier metadata (`global`, `domain`, `local`) on top of current scope objects.
+- [x] Keep unscoped entries fallback-eligible.
+- [x] Update scoring so global skills always remain eligible, domain skills boost only in-matching contexts, and local skills remain tightly compartmented.
+
+**Files**
+- `src/main/memory/skill-router.js`
+- `src/main/memory/memory-store.js`
+
+**Acceptance criteria**
+- Generic Git / shell / repo-debugging knowledge remains reusable across projects.
+- TradingView and repo-local behavior remain strongly scoped.
+
+---
+
+### Milestone G.4 — Compartment lifecycle cleanup and stale-state hygiene
+
+**Objective**
+Prevent long-term state-file bloat without weakening current continuity semantics.
+
+**Tasks**
+- [ ] Record access timestamps for compartment entries.
+- [ ] Add startup cleanup for stale pending actions and long-unused compartment state.
+- [ ] Prefer compressing stale continuity into episodic memory before full deletion where appropriate.
+
+**Files**
+- `src/main/session-intent-state.js`
+- possibly `src/main/memory/memory-store.js`
+
+**Acceptance criteria**
+- Compartment state does not grow without bound over long-lived usage.
+- Recent workflows remain intact.
+
+---
+
+### Milestone G.5 — Read-only command allowlist hardening
+
+**Objective**
+Reduce confirmation fatigue while preserving command-grounded safety.
+
+**Tasks**
+- [ ] Add a first-class read-only shell allowlist for common inspection commands.
+- [ ] Keep destructive and privilege-elevating detection unchanged.
+- [ ] Prove that benign inspection commands remain low-risk even when the surrounding prose contains dangerous verbs.
+
+**Files**
+- `src/main/ai-service.js`
+- `scripts/test-bug-fixes.js`
+- `scripts/test-ai-service-commands.js`
+
+**Acceptance criteria**
+- Common inspection commands avoid unnecessary confirmations.
+- Destructive commands still escalate correctly.
+
+---
+
+### Milestone G.6 — Operator-visible context switching and trace surfacing
+
+**Objective**
+Make context isolation visible as a feature rather than a perceived memory bug.
+
+**Tasks**
+- [ ] Surface lightweight context-switch notices in the CLI when Liku parks old continuity and starts fresh in a new compartment.
+- [ ] Add a small operator-facing runtime trace summary/export path for the last execution.
+- [ ] Keep the UX lightweight and non-spammy.
+
+**Files**
+- `src/cli/commands/chat.js`
+- `src/main/ai-service.js`
+- any CLI command surface added for trace export
+
+**Acceptance criteria**
+- Users can tell when Liku intentionally switched compartments.
+- The last runtime trace can be inspected without digging through hidden files.
+
+---
+
+### 20.5 Updated protected-behavior note
+
+All Stream G work must preserve the following already-established functionality:
+
+- command-grounded `run_command` safety,
+- additive object-specific confirmation payloads,
+- execution-context envelope generation from deterministic host signals,
+- compartment-safe continuity and mismatch refusal,
+- current scope-aware skill/memory retrieval with fallback,
+- Slice 6 provenance fields and `plan:rewrite` runtime traces,
+- established TradingView/Pine bounded workflows and observation/proof semantics.
+
+No Stream G work should remove or silently weaken those behaviors.
+
+---
+
+### 20.6 Orchestrator summary of the synthesis
+
+The external review is architecturally supportive, but the repo should follow this grounded interpretation:
+
+1. **Validated and already true in code**
+  - deterministic execution context,
+  - command-grounded safety,
+  - compartment continuity,
+  - scoped retrieval,
+  - growing provenance/trace infrastructure.
+
+2. **Valid next improvements to adopt additively**
+  - skill/memory inheritance tiers,
+  - context bridging for explicit domain shifts,
+  - compartment lifecycle cleanup,
+  - explicit read-only command allowlist,
+  - lightweight context-switch UX and trace export.
+
+3. **Not approved as an immediate rewrite direction**
+  - replacing deterministic envelope generation with LLM inference,
+  - abandoning strict compartments,
+  - replacing current weighted scope logic with hard filtering only,
+  - removing already-verified bounded TradingView/Pine behavior in pursuit of generality.
+
+This document remains the source of truth for implementation planning.

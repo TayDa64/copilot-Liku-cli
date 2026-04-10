@@ -458,10 +458,10 @@ test('ai-service gates TradingView follow-up typing on post-key observation chec
   assert(systemAutomationContent.includes('buildPineEditorSafeAuthoringSummary'), 'system-automation should structure Pine Editor safe-authoring inspection summaries');
   assert(systemAutomationContent.includes('buildPineEditorDiagnosticsStructuredSummary'), 'system-automation should structure Pine Editor diagnostics summaries');
   assert(systemAutomationContent.includes("pineEvidenceMode === 'safe-authoring-inspect'"), 'system-automation should attach structured Pine summaries for safe-authoring-inspect readbacks');
-  assert(systemAutomationContent.includes("action?.pineEvidenceMode === 'compile-result'"), 'system-automation should structure compile-result Pine Editor reads');
-  assert(systemAutomationContent.includes("action?.pineEvidenceMode === 'diagnostics'"), 'system-automation should structure diagnostics Pine Editor reads');
-  assert(systemAutomationContent.includes("action?.pineEvidenceMode === 'line-budget'"), 'system-automation should structure line-budget Pine Editor reads');
-  assert(systemAutomationContent.includes("action?.pineEvidenceMode === 'generic-status'"), 'system-automation should structure generic-status Pine Editor reads');
+  assert(systemAutomationContent.includes("effectiveAction?.pineEvidenceMode === 'compile-result'"), 'system-automation should structure compile-result Pine Editor reads');
+  assert(systemAutomationContent.includes("effectiveAction?.pineEvidenceMode === 'diagnostics'"), 'system-automation should structure diagnostics Pine Editor reads');
+  assert(systemAutomationContent.includes("effectiveAction?.pineEvidenceMode === 'line-budget'"), 'system-automation should structure line-budget Pine Editor reads');
+  assert(systemAutomationContent.includes("effectiveAction?.pineEvidenceMode === 'generic-status'"), 'system-automation should structure generic-status Pine Editor reads');
   assert(sessionIntentStateContent.includes('pineAuthoringState'), 'session intent continuity context should expose Pine authoring state');
   assert(sessionIntentStateContent.includes('pineCompileStatus'), 'session intent continuity context should expose Pine compile status');
   assert(sessionIntentStateContent.includes('Visible Pine compiler errors are present'), 'session intent continuity should recommend fixing visible compiler errors first');

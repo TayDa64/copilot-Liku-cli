@@ -41,8 +41,22 @@ function buildRuntimeTraceFixtureEntry(entries, options = {}) {
   const plannedByIndex = new Map();
   const completeByIndex = new Map();
   const proofByIndex = new Map();
+  const rewrites = [];
 
   for (const entry of entries) {
+    if (entry.event === 'plan:rewrite') {
+      rewrites.push({
+        stage: entry.stage || null,
+        rewriter: entry.rewriter || null,
+        category: entry.category || null,
+        reason: entry.reason || null,
+        beforeActionCount: Number.isFinite(Number(entry.beforeActionCount)) ? Number(entry.beforeActionCount) : null,
+        afterActionCount: Number.isFinite(Number(entry.afterActionCount)) ? Number(entry.afterActionCount) : null,
+        contextAuthority: entry.contextAuthority || null
+      });
+      continue;
+    }
+
     const actionIndex = Number.isFinite(Number(entry.actionIndex)) ? Number(entry.actionIndex) : null;
     if (actionIndex === null) continue;
 
@@ -61,6 +75,7 @@ function buildRuntimeTraceFixtureEntry(entries, options = {}) {
 
     if (entry.event === 'action:proof') {
       proofByIndex.set(actionIndex, entry);
+      continue;
     }
   }
 
@@ -146,6 +161,7 @@ function buildRuntimeTraceFixtureEntry(entries, options = {}) {
       filePath: options.tracePath || null
     },
     actions,
+    rewrites,
     proofExpectations
   };
 }

@@ -472,6 +472,22 @@ async function main() {
   assert(stateBackedContinuation.output.includes('SEEN_MESSAGES:["continue"]'), 'state-backed continuation should still send the minimal prompt while execution routing relies on saved continuity');
   assert(/Using saved continuity intent instead of the literal input:/i.test(stateBackedContinuation.output), 'state-backed continuation should explicitly signal saved continuity reuse');
 
+  const explicitBrowserBridge = await runScenarioWithContinuity(['continue by searching this error in browser'], {
+    activeGoal: 'Inspect the active VS Code workspace',
+    currentSubgoal: 'Inspect the active VS Code workspace',
+    continuationReady: true,
+    degradedReason: null,
+    lastTurn: {
+      actionSummary: 'focus_window -> screenshot',
+      nextRecommendedStep: 'Search the browser for the visible error next.'
+    }
+  });
+  assert.strictEqual(explicitBrowserBridge.exitCode, 0, 'explicit browser bridge continuation should exit successfully');
+  assert(explicitBrowserBridge.output.includes('EXECUTE_COUNT:1'), 'explicit browser bridge continuation should still execute emitted actions');
+  assert(explicitBrowserBridge.output.includes('SEEN_MESSAGES:["continue by searching this error in browser"]'), 'explicit browser bridge should keep the literal transition request visible');
+  assert(explicitBrowserBridge.output.includes('PREFLIGHT_USER_MESSAGES:["continue by searching this error in browser"]'), 'explicit browser bridge should preserve the literal transition request for preflight intent');
+  assert(!/Using saved continuity intent instead of the literal input:/i.test(explicitBrowserBridge.output), 'explicit browser bridge should not collapse the transition back into saved continuity intent');
+
   const pineDiagnosticsContinuation = await runScenarioWithContinuity(['continue'], {
     activeGoal: 'Diagnose the visible Pine script errors in TradingView',
     currentSubgoal: 'Inspect the visible Pine diagnostics state',

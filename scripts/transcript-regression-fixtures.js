@@ -138,6 +138,46 @@ function normalizeTraceMeta(traceMeta = {}) {
   };
 }
 
+function normalizeContextAuthority(contextAuthority = {}) {
+  if (!contextAuthority || typeof contextAuthority !== 'object') return null;
+  const summary = contextAuthority.summary && typeof contextAuthority.summary === 'object'
+    ? {
+        compartmentKey: String(contextAuthority.summary.compartmentKey || '').trim() || null,
+        repoName: String(contextAuthority.summary.repoName || '').trim() || null,
+        projectRoot: String(contextAuthority.summary.projectRoot || '').trim() || null,
+        appId: String(contextAuthority.summary.appId || '').trim() || null,
+        processName: String(contextAuthority.summary.processName || '').trim() || null,
+        surfaceClass: String(contextAuthority.summary.surfaceClass || '').trim() || null,
+        interactionMode: String(contextAuthority.summary.interactionMode || '').trim() || null,
+        taskFamily: String(contextAuthority.summary.taskFamily || '').trim() || null,
+        confidence: String(contextAuthority.summary.confidence || '').trim() || null,
+        eligibility: contextAuthority.summary.eligibility && typeof contextAuthority.summary.eligibility === 'object'
+          ? {
+              tradingViewPine: contextAuthority.summary.eligibility.tradingViewPine === true,
+              tradingViewPineReason: String(contextAuthority.summary.eligibility.tradingViewPineReason || '').trim() || null
+            }
+          : null
+      }
+    : null;
+
+  const hash = String(contextAuthority.hash || '').trim() || null;
+  if (!summary && !hash) return null;
+  return { summary, hash };
+}
+
+function normalizeTraceRewrite(rewrite = {}) {
+  if (!rewrite || typeof rewrite !== 'object') return null;
+  return {
+    stage: String(rewrite.stage || '').trim() || null,
+    rewriter: String(rewrite.rewriter || '').trim() || null,
+    category: String(rewrite.category || '').trim() || null,
+    reason: String(rewrite.reason || '').trim() || null,
+    beforeActionCount: Number.isFinite(Number(rewrite.beforeActionCount)) ? Number(rewrite.beforeActionCount) : null,
+    afterActionCount: Number.isFinite(Number(rewrite.afterActionCount)) ? Number(rewrite.afterActionCount) : null,
+    contextAuthority: normalizeContextAuthority(rewrite.contextAuthority)
+  };
+}
+
 function normalizeTraceCheck(check = {}) {
   if (!check || typeof check !== 'object') return null;
   return {
@@ -328,6 +368,9 @@ function normalizeFixtureEntry(name, entry = {}, filePath = null) {
   const actions = Array.isArray(entry.actions)
     ? entry.actions.map(normalizeTraceAction).filter(Boolean)
     : [];
+  const rewrites = Array.isArray(entry.rewrites)
+    ? entry.rewrites.map(normalizeTraceRewrite).filter(Boolean)
+    : [];
 
   return {
     name,
@@ -343,6 +386,7 @@ function normalizeFixtureEntry(name, entry = {}, filePath = null) {
     expectations: Array.isArray(entry.expectations) ? entry.expectations : [],
     traceMeta,
     actions,
+    rewrites,
     proofExpectations: Array.isArray(entry.proofExpectations) ? entry.proofExpectations : [],
     suite: {
       description: String(entry.description || name),

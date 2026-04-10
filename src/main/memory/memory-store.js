@@ -35,6 +35,11 @@ function normalizeArray(values) {
     .filter(Boolean)));
 }
 
+function normalizeScopeTier(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  return ['global', 'domain', 'local'].includes(normalized) ? normalized : null;
+}
+
 function normalizeScope(scope) {
   if (!scope || typeof scope !== 'object') return null;
 
@@ -44,17 +49,20 @@ function normalizeScope(scope) {
   const processNames = normalizeArray(scope.processNames).map((value) => value.toLowerCase());
   const taskFamilies = normalizeArray(scope.taskFamilies).map((value) => value.toLowerCase());
   const compartmentKeys = normalizeArray(scope.compartmentKeys).map((value) => value.toLowerCase());
+  const tier = normalizeScopeTier(scope.tier || scope.scopeTier);
 
   if (!repoNames.length
     && !projectRoots.length
     && !appIds.length
     && !processNames.length
     && !taskFamilies.length
-    && !compartmentKeys.length) {
+    && !compartmentKeys.length
+    && !tier) {
     return null;
   }
 
   return {
+    ...(tier ? { tier } : {}),
     ...(repoNames.length ? { repoNames } : {}),
     ...(projectRoots.length ? { projectRoots } : {}),
     ...(appIds.length ? { appIds } : {}),
@@ -109,9 +117,12 @@ function analyzeNoteScope(scope, selectionContext = {}) {
       score: 0,
       matchedSignals: 0,
       mismatchedSignals: 0,
-      classification: 'unscoped-fallback'
+      classification: 'unscoped-fallback',
+      scopeTier: 'unscoped'
     };
   }
+
+  const scopeTier = normalizeScopeTier(normalizedScope.tier) || 'legacy';
 
   const signals = [
     { evaluation: evaluateScopeSignal(normalizedScope.compartmentKeys, selectionContext.compartmentKey), weight: 6, mismatchPenalty: -4 },
@@ -126,29 +137,54 @@ function analyzeNoteScope(scope, selectionContext = {}) {
   let matchedSignals = 0;
   let mismatchedSignals = 0;
 
+  const matchedMultiplier = scopeTier === 'global'
+    ? 0.35
+    : scopeTier === 'domain'
+      ? 0.8
+      : 1;
+  const mismatchMultiplier = scopeTier === 'global'
+    ? 0
+    : scopeTier === 'domain'
+      ? 0.25
+      : 1;
+
   signals.forEach(({ evaluation, weight, mismatchPenalty }) => {
     if (!evaluation.applicable) return;
     if (evaluation.matched) {
       matchedSignals += 1;
-      score += weight;
+      score += weight * matchedMultiplier;
       return;
     }
     if (evaluation.mismatched) {
       mismatchedSignals += 1;
-      score += mismatchPenalty;
+      score += mismatchPenalty * mismatchMultiplier;
     }
   });
+
+  if (scopeTier === 'global') {
+    score += 1.25;
+  } else if (scopeTier === 'domain' && matchedSignals > 0) {
+    score += 1.5;
+  }
 
   let classification = 'scoped-neutral';
   if (matchedSignals > 0 && mismatchedSignals === 0) classification = 'scoped-match';
   else if (matchedSignals > 0 && mismatchedSignals > 0) classification = 'scoped-mixed';
   else if (mismatchedSignals > 0) classification = 'scoped-mismatch';
 
+  if (scopeTier === 'global') classification = matchedSignals > 0 ? 'global-match' : 'global-fallback';
+  else if (scopeTier === 'domain' && matchedSignals > 0) classification = mismatchedSignals > 0 ? 'domain-mixed' : 'domain-match';
+  else if (scopeTier === 'domain' && mismatchedSignals > 0) classification = 'domain-mismatch';
+  else if (scopeTier === 'local' && classification === 'scoped-match') classification = 'local-match';
+  else if (scopeTier === 'local' && classification === 'scoped-mixed') classification = 'local-mixed';
+  else if (scopeTier === 'local' && classification === 'scoped-mismatch') classification = 'local-mismatch';
+
   return {
     score,
     matchedSignals,
     mismatchedSignals,
-    classification
+    classification,
+    scopeTier
   };
 }
 
@@ -289,8 +325,11 @@ function buildSelectionSummary(selected = [], selectionContext = {}) {
   return {
     selectedCount: selected.length,
     scopedMatchCount: selected.filter((entry) => entry.scopeMatch?.classification === 'scoped-match').length,
-    fallbackCount: selected.filter((entry) => entry.scopeMatch?.classification === 'unscoped-fallback').length,
+    fallbackCount: selected.filter((entry) => ['unscoped-fallback', 'global-fallback'].includes(entry.scopeMatch?.classification)).length,
     mismatchCount: selected.filter((entry) => String(entry.scopeMatch?.classification || '').includes('mismatch')).length,
+    globalTierCount: selected.filter((entry) => entry.scopeMatch?.scopeTier === 'global').length,
+    domainTierCount: selected.filter((entry) => entry.scopeMatch?.scopeTier === 'domain').length,
+    localTierCount: selected.filter((entry) => entry.scopeMatch?.scopeTier === 'local').length,
     scopeContext: {
       repoName: selectionContext.repoName,
       projectRoot: selectionContext.projectRoot,

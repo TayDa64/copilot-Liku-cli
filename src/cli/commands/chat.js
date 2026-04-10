@@ -398,11 +398,12 @@ async function buildContinuationExecutionContext(ai, userInput, fallbackIntent =
   try {
     const sessionState = getSessionIntentState({ cwd: process.cwd() });
     const foreground = await systemAutomation.getForegroundWindowInfo();
+    const preferLiteralTransitionIntent = /\b(browser|edge|chrome|tab|url|website|page|search the web|search online|web search|tradingview|trading view|pine|pine editor|vs code|workspace|repo|repository)\b/i.test(String(userInput || ''));
     return buildExecutionContextEnvelope({
       cwd: process.cwd(),
       foreground: foreground && foreground.success ? foreground : null,
       sessionState,
-      userMessage: fallbackIntent || userInput || ''
+      userMessage: preferLiteralTransitionIntent ? (userInput || fallbackIntent || '') : (fallbackIntent || userInput || '')
     });
   } catch {
     return null;
@@ -413,6 +414,10 @@ function summarizeExplicitReuseIntent(intent) {
   const text = String(intent || '').replace(/\s+/g, ' ').trim();
   if (!text) return '';
   return text.length > 140 ? `${text.slice(0, 137)}...` : text;
+}
+
+function hasExplicitCrossCompartmentTransitionIntent(intent = '') {
+  return /\b(browser|edge|chrome|tab|url|website|page|search the web|search online|web search|tradingview|trading view|pine|pine editor|vs code|workspace|repo|repository)\b/i.test(String(intent || ''));
 }
 
 function normalizePendingTaskText(value, maxLength = 280) {
@@ -1343,8 +1348,11 @@ async function runChatLoop(ai, options) {
       : null;
     const chatContinuity = isContinueLike ? getChatContinuityState({ cwd: process.cwd(), executionContextEnvelope: continuationExecutionContextEnvelope }) : null;
     const pendingRequestedTask = isContinueLike ? getPendingRequestedTask({ cwd: process.cwd(), executionContextEnvelope: continuationExecutionContextEnvelope }) : null;
+    const explicitTransitionIntent = isContinueLike && hasExplicitCrossCompartmentTransitionIntent(line);
     const continuationDecision = isContinueLike
-      ? getContinuationDecision(line, chatContinuity, pendingRequestedTask)
+      ? (explicitTransitionIntent
+        ? { block: false, useContinuityState: false, usePendingRequestedTask: false, effectiveIntent: line, reason: null }
+        : getContinuationDecision(line, chatContinuity, pendingRequestedTask))
       : { block: false, useContinuityState: false, reason: null };
 
     if (continuationDecision.block) {

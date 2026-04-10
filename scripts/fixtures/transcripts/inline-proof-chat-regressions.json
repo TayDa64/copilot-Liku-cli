@@ -51,6 +51,67 @@
       }
     ]
   },
+  "muse-repo-no-tradingview-drift-runtime": {
+    "description": "Sanitized runtime transcript proving MUSE repo work stays grounded in repo/runtime handoff language instead of drifting into TradingView or Pine scaffolding.",
+    "source": {
+      "capturedAt": "2026-04-09T00:00:00.000Z",
+      "origin": "brainstorm040826 Phase 7.1 regression seed"
+    },
+    "transcriptLines": [
+      "Conversation, visual context, browser session state, session intent state, and chat continuity state cleared.",
+      "Current repo: copilot-liku-cli",
+      "> I need to work on MUSE, but this session is still in copilot-liku-cli. Keep us grounded and do not mix repos.",
+      "[copilot:stub]",
+      "Understood. MUSE is a separate repo and the current workspace is still copilot-liku-cli.",
+      "Downstream repo intent: MUSE",
+      "> What should you confirm before doing any implementation work for MUSE? Reply briefly.",
+      "[copilot:stub]",
+      "Before doing implementation work, confirm the MUSE repo/window or workspace is actually active, verify the current cwd or project root, and only continue once the runtime context matches MUSE."
+    ],
+    "notes": [
+      "Targets the reported MUSE drift failure class without requiring a full captured live trace.",
+      "Asserts grounded repo/runtime handoff language while forbidding TradingView and Pine scaffolding signals."
+    ],
+    "expectations": [
+      {
+        "name": "transcript preserves repo-boundary grounding for MUSE work",
+        "scope": "transcript",
+        "include": [
+          { "regex": "Current repo:\\s+copilot-liku-cli", "flags": "i" },
+          { "regex": "Downstream repo intent:\\s+muse", "flags": "i" }
+        ]
+      },
+      {
+        "name": "first assistant turn keeps MUSE separate from the current repo",
+        "turn": 1,
+        "include": [
+          { "regex": "separate repo|different repo", "flags": "i" },
+          { "regex": "copilot-liku-cli", "flags": "i" },
+          { "regex": "muse", "flags": "i" }
+        ],
+        "exclude": [
+          { "regex": "\\b(open|launch|focus|switch|bring)\\b.{0,40}\\btradingview\\b", "flags": "i" },
+          { "regex": "\\bPine Editor\\b", "flags": "i" },
+          { "regex": "```\\s*pine", "flags": "i" },
+          { "regex": "\\b(strategy\\(|study\\()", "flags": "i" }
+        ]
+      },
+      {
+        "name": "follow-up requires grounded repo runtime confirmation instead of domain drift",
+        "turn": 2,
+        "include": [
+          { "regex": "confirm|verify", "flags": "i" },
+          { "regex": "(repo|window|workspace|cwd|project root|runtime context)", "flags": "i" },
+          { "regex": "muse", "flags": "i" }
+        ],
+        "exclude": [
+          { "regex": "\\b(open|launch|focus|bring|switch)\\b.{0,40}\\btradingview\\b", "flags": "i" },
+          { "regex": "\\bPine\\b", "flags": "i" },
+          { "regex": "\\b(edit|patch|implement|change)\\b.{0,60}\\bmuse\\b", "flags": "i" }
+        ]
+      }
+    ]
+  },
   "forgone-feature-suppression-runtime": {
     "description": "Sanitized runtime transcript proving forgone features stay out of scope until explicitly re-enabled.",
     "source": {

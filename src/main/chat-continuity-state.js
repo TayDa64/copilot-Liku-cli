@@ -1,3 +1,5 @@
+const crypto = require('crypto');
+
 function normalizeText(value, maxLength = 240) {
   return String(value || '').replace(/\s+/g, ' ').trim().slice(0, maxLength) || null;
 }
@@ -194,6 +196,90 @@ function normalizeSelectionSummary(summary = null) {
   return normalized;
 }
 
+function buildContextAuthority(executionContext = null) {
+  const summary = normalizeExecutionContextIdentity(executionContext);
+  if (!summary) return null;
+
+  const stableHashInput = {
+    compartmentKey: summary.compartmentKey,
+    repoName: summary.repoName,
+    projectRoot: summary.projectRoot,
+    appId: summary.appId,
+    processName: summary.processName,
+    surfaceClass: summary.surfaceClass,
+    interactionMode: summary.interactionMode,
+    taskFamily: summary.taskFamily,
+    confidence: summary.confidence
+  };
+
+  return {
+    summary,
+    hash: `sha256:${crypto.createHash('sha256').update(JSON.stringify(stableHashInput)).digest('hex')}`
+  };
+}
+
+function normalizeRewriteSources(rewriteSources = []) {
+  if (!Array.isArray(rewriteSources)) return [];
+  return rewriteSources
+    .map((entry) => {
+      if (!entry || typeof entry !== 'object') return null;
+      return {
+        stage: normalizeText(entry.stage, 60),
+        rewriter: normalizeText(entry.rewriter, 120),
+        category: normalizeText(entry.category, 80),
+        reason: normalizeText(entry.reason, 200),
+        beforeActionCount: safeNumber(entry.beforeActionCount),
+        afterActionCount: safeNumber(entry.afterActionCount),
+        beforeActionTypes: normalizeEvidenceList(entry.beforeActionTypes, 60),
+        afterActionTypes: normalizeEvidenceList(entry.afterActionTypes, 60),
+        contextAuthority: entry.contextAuthority && typeof entry.contextAuthority === 'object'
+          ? {
+              summary: normalizeExecutionContextIdentity(entry.contextAuthority.summary || null),
+              hash: normalizeText(entry.contextAuthority.hash, 160)
+            }
+          : null
+      };
+    })
+    .filter((entry) => entry && (entry.rewriter || entry.category || entry.reason || entry.beforeActionCount !== null || entry.afterActionCount !== null))
+    .slice(0, 12);
+}
+
+function buildProofRefs(execResult = {}) {
+  const results = Array.isArray(execResult?.results) ? execResult.results : [];
+  const proofIds = Array.from(new Set(results
+    .map((result) => normalizeText(result?.proof?.proofId, 120))
+    .filter(Boolean))).slice(0, 12);
+
+  const observationRefs = results
+    .map((result, index) => {
+      const observation = result?.proof?.observation || result?.observationCheckpoint || null;
+      if (!observation || typeof observation !== 'object') return null;
+      return {
+        actionIndex: index,
+        classification: normalizeText(observation.classification, 80),
+        verifyKind: normalizeText(observation.verifyKind, 80),
+        verified: observation.verified === true
+      };
+    })
+    .filter(Boolean)
+    .slice(0, 12);
+
+  const runtimeTrace = execResult?.runtimeTrace && typeof execResult.runtimeTrace === 'object'
+    ? {
+        sessionId: normalizeText(execResult.runtimeTrace.sessionId, 120),
+        filePath: normalizeText(execResult.runtimeTrace.filePath, 320)
+      }
+    : null;
+
+  if (!runtimeTrace && proofIds.length === 0 && observationRefs.length === 0) return null;
+
+  return {
+    runtimeTrace,
+    proofIds,
+    observationRefs
+  };
+}
+
 function normalizeActionPlan(actions) {
   if (!Array.isArray(actions)) return [];
   return actions.slice(0, 12).map((action, index) => ({
@@ -362,6 +448,9 @@ function buildChatContinuityTurnRecord({ actionData, execResult, details = {}, l
   const tradingMode = inferTradingMode(execResult, actionResults, details);
   const executionContext = normalizeExecutionContextIdentity(details.executionContextEnvelope || details.executionContext || null);
   const selectionProvenance = execResult?.selectionProvenance || details.selectionProvenance || null;
+  const rewriteSources = normalizeRewriteSources(actionData?.rewriteSources || execResult?.rewriteSources || details.rewriteSources || []);
+  const contextAuthority = buildContextAuthority(details.executionContextEnvelope || details.executionContext || execResult?.selectionProvenance?.executionContext || null);
+  const proofRefs = buildProofRefs(execResult);
 
   return {
     recordedAt: details.recordedAt || new Date().toISOString(),
@@ -370,6 +459,7 @@ function buildChatContinuityTurnRecord({ actionData, execResult, details = {}, l
     executionIntentSource: normalizeText(details.executionIntentSource, 80) || 'literal-user-input',
     executionContext,
     compartmentKey: executionContext?.compartmentKey || null,
+    contextAuthority,
     activeGoal: details.executionIntent || details.userMessage || '',
     currentSubgoal: actionData?.thought || details.executionIntent || details.userMessage || '',
     committedSubgoal: actionData?.thought || details.executionIntent || details.userMessage || '',
@@ -385,6 +475,8 @@ function buildChatContinuityTurnRecord({ actionData, execResult, details = {}, l
       skills: normalizeSelectionSummary(selectionProvenance?.skills?.summary || details.skillRetrievalSummary || null),
       memories: normalizeSelectionSummary(selectionProvenance?.memories?.summary || details.memoryRetrievalSummary || null)
     },
+    rewriteSources,
+    proofRefs,
     verification: {
       status: verificationStatus,
       checks: verificationChecks

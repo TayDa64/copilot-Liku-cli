@@ -7,6 +7,7 @@ const path = require('path');
 
 const {
   formatChatContinuityContext,
+  formatInheritedCompartmentContext,
   formatChatContinuitySummary,
   createSessionIntentStateStore,
   formatSessionIntentContext,
@@ -277,6 +278,311 @@ test('session intent store retrieves pending requested tasks by compartment whil
     userMessage: 'continue browser research'
   });
   assert.strictEqual(store.getPendingRequestedTask({ cwd: repoRoot, executionContextEnvelope: unrelatedEnvelope }), null, 'strict compartment lookup should not fall back to unrelated pending tasks');
+
+  fs.rmSync(tempDir, { recursive: true, force: true });
+});
+
+test('session intent store degrades continuity and pending tasks after a repo switch', () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'liku-session-intent-'));
+  const stateFile = path.join(tempDir, 'session-intent-state.json');
+  const repoA = path.join(tempDir, 'repo-a');
+  const repoB = path.join(tempDir, 'repo-b');
+  fs.mkdirSync(repoA, { recursive: true });
+  fs.mkdirSync(repoB, { recursive: true });
+  fs.writeFileSync(path.join(repoA, 'package.json'), JSON.stringify({ name: 'repo-a', version: '1.0.0' }, null, 2));
+  fs.writeFileSync(path.join(repoB, 'package.json'), JSON.stringify({ name: 'repo-b', version: '1.0.0' }, null, 2));
+
+  const store = createSessionIntentStateStore({ stateFile });
+
+  const repoAEnvelope = buildExecutionContextEnvelope({
+    cwd: repoA,
+    foreground: { processName: 'code', title: 'index.js - Visual Studio Code' },
+    sessionState: store.getState({ cwd: repoA }),
+    userMessage: 'continue inspecting this VS Code workspace'
+  });
+
+  store.recordExecutedTurn({
+    userMessage: 'continue inspecting this VS Code workspace',
+    executionIntent: 'Inspect repo-a in VS Code',
+    executionIntentSource: 'saved-chat-continuity',
+    executionContextEnvelope: repoAEnvelope,
+    committedSubgoal: 'Inspect repo-a in VS Code',
+    actionPlan: [{ type: 'focus_window', processName: 'code' }, { type: 'screenshot' }],
+    success: true,
+    screenshotCaptured: true,
+    observationEvidence: { captureMode: 'window', captureTrusted: true },
+    verification: { status: 'verified' },
+    nextRecommendedStep: 'Continue from repo-a evidence.'
+  }, { cwd: repoA, executionContextEnvelope: repoAEnvelope });
+
+  store.setPendingRequestedTask({
+    userMessage: 'continue',
+    executionIntent: 'Inspect repo-a in VS Code',
+    executionIntentSource: 'saved-chat-continuity',
+    taskSummary: 'Inspect repo-a in VS Code',
+    targetApp: 'code',
+    executionContextEnvelope: repoAEnvelope
+  }, { cwd: repoA, executionContextEnvelope: repoAEnvelope });
+
+  const repoBEnvelope = buildExecutionContextEnvelope({
+    cwd: repoB,
+    foreground: { processName: 'code', title: 'README.md - Visual Studio Code' },
+    sessionState: store.getState({ cwd: repoB }),
+    userMessage: 'continue inspecting this VS Code workspace'
+  });
+
+  const repoBContinuity = store.getChatContinuity({ cwd: repoB, executionContextEnvelope: repoBEnvelope });
+  const repoBPendingTask = store.getPendingRequestedTask({ cwd: repoB, executionContextEnvelope: repoBEnvelope });
+  const repoBState = store.getState({ cwd: repoB, executionContextEnvelope: repoBEnvelope });
+
+  assert.strictEqual(repoBContinuity.activeGoal, null, 'repo switch should degrade unrelated continuity');
+  assert.strictEqual(repoBPendingTask, null, 'repo switch should not reuse pending tasks from another repo');
+  assert.strictEqual(repoBState.currentRepo.repoName, 'repo-b', 'state should re-sync current repo after switching cwd');
+
+  fs.rmSync(tempDir, { recursive: true, force: true });
+});
+
+test('session intent store degrades continuity after an app switch within the same repo', () => {
+  const repoRoot = path.join(__dirname, '..');
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'liku-session-intent-'));
+  const stateFile = path.join(tempDir, 'session-intent-state.json');
+  const store = createSessionIntentStateStore({ stateFile });
+
+  const repoEditorEnvelope = buildExecutionContextEnvelope({
+    cwd: repoRoot,
+    foreground: { processName: 'code', title: 'README.md - Visual Studio Code' },
+    sessionState: store.getState({ cwd: repoRoot }),
+    userMessage: 'continue inspecting this VS Code workspace'
+  });
+
+  store.recordExecutedTurn({
+    userMessage: 'continue inspecting this VS Code workspace',
+    executionIntent: 'Inspect the active VS Code workspace',
+    executionIntentSource: 'saved-chat-continuity',
+    executionContextEnvelope: repoEditorEnvelope,
+    committedSubgoal: 'Inspect the active VS Code workspace',
+    actionPlan: [{ type: 'focus_window', processName: 'code' }, { type: 'screenshot' }],
+    success: true,
+    screenshotCaptured: true,
+    observationEvidence: { captureMode: 'window', captureTrusted: true },
+    verification: { status: 'verified' },
+    nextRecommendedStep: 'Continue from the current workspace state.'
+  }, { cwd: repoRoot, executionContextEnvelope: repoEditorEnvelope });
+
+  const tradingViewEnvelope = buildExecutionContextEnvelope({
+    cwd: repoRoot,
+    foreground: { processName: 'tradingview', title: 'TradingView - LUNR' },
+    sessionState: store.getState({ cwd: repoRoot }),
+    userMessage: 'continue tradingview chart inspection'
+  });
+
+  const switchedContinuity = store.getChatContinuity({ cwd: repoRoot, executionContextEnvelope: tradingViewEnvelope });
+  assert.strictEqual(switchedContinuity.activeGoal, null, 'app switch should not auto-reuse repo-editor continuity');
+
+  fs.rmSync(tempDir, { recursive: true, force: true });
+});
+
+test('session intent store degrades continuity when the foreground-derived compartment changes under the same app', () => {
+  const repoRoot = path.join(__dirname, '..');
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'liku-session-intent-'));
+  const stateFile = path.join(tempDir, 'session-intent-state.json');
+  const store = createSessionIntentStateStore({ stateFile });
+
+  const repoEditorEnvelope = buildExecutionContextEnvelope({
+    cwd: repoRoot,
+    foreground: { processName: 'code', title: 'README.md - Visual Studio Code' },
+    sessionState: store.getState({ cwd: repoRoot }),
+    userMessage: 'continue inspecting this VS Code workspace'
+  });
+
+  store.recordExecutedTurn({
+    userMessage: 'continue inspecting this VS Code workspace',
+    executionIntent: 'Inspect the active VS Code workspace',
+    executionIntentSource: 'saved-chat-continuity',
+    executionContextEnvelope: repoEditorEnvelope,
+    committedSubgoal: 'Inspect the active VS Code workspace',
+    actionPlan: [{ type: 'focus_window', processName: 'code' }, { type: 'screenshot' }],
+    success: true,
+    screenshotCaptured: true,
+    observationEvidence: { captureMode: 'window', captureTrusted: true },
+    verification: { status: 'verified' },
+    nextRecommendedStep: 'Continue from the current workspace state.'
+  }, { cwd: repoRoot, executionContextEnvelope: repoEditorEnvelope });
+
+  const mismatchedEnvelope = buildExecutionContextEnvelope({
+    cwd: repoRoot,
+    foreground: { processName: 'code', title: 'README.md - Visual Studio Code' },
+    sessionState: store.getState({ cwd: repoRoot }),
+    userMessage: 'continue browser research'
+  });
+
+  const mismatchedContinuity = store.getChatContinuity({ cwd: repoRoot, executionContextEnvelope: mismatchedEnvelope });
+  assert.strictEqual(mismatchedContinuity.activeGoal, null, 'foreground-derived compartment mismatch should fail closed');
+
+  fs.rmSync(tempDir, { recursive: true, force: true });
+});
+
+test('session intent state formats read-only inherited context for explicit cross-compartment baton passing', () => {
+  const repoRoot = path.join(__dirname, '..');
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'liku-session-intent-'));
+  const stateFile = path.join(tempDir, 'session-intent-state.json');
+  const store = createSessionIntentStateStore({ stateFile });
+
+  const repoEditorEnvelope = buildExecutionContextEnvelope({
+    cwd: repoRoot,
+    foreground: { processName: 'code', title: 'README.md - Visual Studio Code' },
+    sessionState: store.getState({ cwd: repoRoot }),
+    userMessage: 'continue inspecting this VS Code workspace'
+  });
+
+  store.recordExecutedTurn({
+    userMessage: 'continue inspecting this VS Code workspace',
+    executionIntent: 'Inspect the active VS Code workspace',
+    executionIntentSource: 'saved-chat-continuity',
+    executionContextEnvelope: repoEditorEnvelope,
+    committedSubgoal: 'Inspect the active VS Code workspace',
+    actionPlan: [{ type: 'focus_window', processName: 'code' }, { type: 'screenshot' }],
+    success: true,
+    screenshotCaptured: true,
+    observationEvidence: { captureMode: 'window', captureTrusted: true },
+    verification: { status: 'verified' },
+    nextRecommendedStep: 'Search the browser for the visible error next.'
+  }, { cwd: repoRoot, executionContextEnvelope: repoEditorEnvelope });
+
+  const browserEnvelope = buildExecutionContextEnvelope({
+    cwd: repoRoot,
+    foreground: { processName: 'code', title: 'README.md - Visual Studio Code' },
+    sessionState: store.getState({ cwd: repoRoot }),
+    userMessage: 'continue by searching this error in browser'
+  });
+
+  const inheritedContext = formatInheritedCompartmentContext(store.getState({ cwd: repoRoot }), { executionContextEnvelope: browserEnvelope });
+
+  assert.strictEqual(browserEnvelope.transition.bridgeEligible, true, 'explicit browser handoff should mark the envelope as bridge-eligible');
+  assert.strictEqual(browserEnvelope.transition.previousCompartmentKey, repoEditorEnvelope.compartmentKey);
+  assert(inheritedContext.includes('## Inherited Context from Previous Compartment'));
+  assert(inheritedContext.includes(`sourceCompartment: ${repoEditorEnvelope.compartmentKey}`));
+  assert(inheritedContext.includes('sourceActiveGoal: Inspect the active VS Code workspace'));
+  assert(inheritedContext.includes('sourceContinuationReady: yes'));
+  assert(inheritedContext.includes('sourceNextRecommendedStep: Search the browser for the visible error next.'));
+  assert(inheritedContext.includes('read-only baton pass'));
+
+  fs.rmSync(tempDir, { recursive: true, force: true });
+});
+
+test('session intent state bridges browser continuity into an explicit TradingView handoff without merging compartments', () => {
+  const repoRoot = path.join(__dirname, '..');
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'liku-session-intent-'));
+  const stateFile = path.join(tempDir, 'session-intent-state.json');
+  const store = createSessionIntentStateStore({ stateFile });
+
+  const browserEnvelope = buildExecutionContextEnvelope({
+    cwd: repoRoot,
+    foreground: { processName: 'chrome', title: 'Search results - Google Chrome' },
+    sessionState: store.getState({ cwd: repoRoot }),
+    userMessage: 'continue browser research for this repo issue'
+  });
+
+  store.recordExecutedTurn({
+    userMessage: 'continue browser research for this repo issue',
+    executionIntent: 'Research the visible repo issue in the browser',
+    executionIntentSource: 'saved-chat-continuity',
+    executionContextEnvelope: browserEnvelope,
+    committedSubgoal: 'Research the visible repo issue in the browser',
+    actionPlan: [{ type: 'focus_window', processName: 'chrome' }, { type: 'get_text' }],
+    success: true,
+    screenshotCaptured: true,
+    observationEvidence: { captureMode: 'window', captureTrusted: true },
+    verification: { status: 'verified' },
+    nextRecommendedStep: 'Open TradingView and compare the chart against the researched catalyst.'
+  }, { cwd: repoRoot, executionContextEnvelope: browserEnvelope });
+
+  const tradingViewEnvelope = buildExecutionContextEnvelope({
+    cwd: repoRoot,
+    foreground: { processName: 'chrome', title: 'Search results - Google Chrome' },
+    sessionState: store.getState({ cwd: repoRoot }),
+    userMessage: 'switch to TradingView and inspect the LUNR chart now'
+  });
+
+  const inheritedContext = formatInheritedCompartmentContext(store.getState({ cwd: repoRoot }), { executionContextEnvelope: tradingViewEnvelope });
+  const currentCompartmentContinuity = store.getChatContinuity({ cwd: repoRoot, executionContextEnvelope: tradingViewEnvelope });
+
+  assert.strictEqual(tradingViewEnvelope.transition.bridgeEligible, true, 'explicit TradingView handoff should mark the envelope as bridge-eligible');
+  assert.strictEqual(tradingViewEnvelope.transition.previousCompartmentKey, browserEnvelope.compartmentKey);
+  assert.strictEqual(currentCompartmentContinuity.activeGoal, null, 'TradingView compartment should still start fresh instead of merging browser continuity');
+  assert(inheritedContext.includes(`sourceCompartment: ${browserEnvelope.compartmentKey}`));
+  assert(inheritedContext.includes('sourceActiveGoal: Research the visible repo issue in the browser'));
+  assert(inheritedContext.includes('sourceNextRecommendedStep: Open TradingView and compare the chart against the researched catalyst.'));
+
+  fs.rmSync(tempDir, { recursive: true, force: true });
+});
+
+test('session intent store persists Slice 6 context authority rewrite sources and proof refs', () => {
+  const repoRoot = path.join(__dirname, '..');
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'liku-session-intent-'));
+  const stateFile = path.join(tempDir, 'session-intent-state.json');
+  const store = createSessionIntentStateStore({ stateFile });
+
+  const repoEditorEnvelope = buildExecutionContextEnvelope({
+    cwd: repoRoot,
+    foreground: { processName: 'code', title: 'README.md - Visual Studio Code' },
+    sessionState: store.getState({ cwd: repoRoot }),
+    userMessage: 'open https://example.com in edge from this workspace'
+  });
+
+  const recorded = store.recordExecutedTurn({
+    userMessage: 'open https://example.com in edge from this workspace',
+    executionIntent: 'Open https://example.com in Edge',
+    executionIntentSource: 'literal-user-input',
+    executionContextEnvelope: repoEditorEnvelope,
+    committedSubgoal: 'Open https://example.com in Edge',
+    actionPlan: [{ type: 'wait' }],
+    success: true,
+    contextAuthority: {
+      summary: {
+        compartmentKey: repoEditorEnvelope.compartmentKey,
+        repoName: 'copilot-Liku-cli',
+        projectRoot: repoRoot,
+        appId: 'code',
+        processName: 'code',
+        surfaceClass: 'unknown',
+        interactionMode: 'unknown',
+        taskFamily: 'repo-editor',
+        confidence: 'high'
+      },
+      hash: 'sha256:test-slice6-context'
+    },
+    rewriteSources: [{
+      stage: 'preflight',
+      rewriter: 'buildBrowserOpenUrlActions',
+      category: 'deterministic-browser-open-url',
+      reason: 'expanded low-signal browser URL request into deterministic browser navigation flow',
+      beforeActionCount: 1,
+      afterActionCount: 7,
+      beforeActionTypes: ['wait'],
+      afterActionTypes: ['bring_window_to_front', 'wait', 'key', 'wait', 'type', 'key', 'wait'],
+      contextAuthority: {
+        summary: { compartmentKey: repoEditorEnvelope.compartmentKey, repoName: 'copilot-Liku-cli', appId: 'code', taskFamily: 'repo-editor' },
+        hash: 'sha256:test-slice6-context'
+      }
+    }],
+    proofRefs: {
+      runtimeTrace: { sessionId: 'runtime-slice6', filePath: 'C:/tmp/runtime-slice6.jsonl' },
+      proofIds: ['proof-slice6'],
+      observationRefs: [{ actionIndex: 0, classification: 'panel-open', verifyKind: 'panel-open', verified: true }]
+    },
+    results: [{ success: true, action: 'wait', message: 'ok' }],
+    nextRecommendedStep: 'Confirm the page loaded in Edge.'
+  }, { cwd: repoRoot, executionContextEnvelope: repoEditorEnvelope });
+
+  const persisted = store.getChatContinuity({ cwd: repoRoot, executionContextEnvelope: repoEditorEnvelope });
+
+  assert.strictEqual(recorded.chatContinuity.lastTurn.contextAuthority.hash, 'sha256:test-slice6-context');
+  assert.strictEqual(persisted.lastTurn.contextAuthority.hash, 'sha256:test-slice6-context');
+  assert.strictEqual(persisted.lastTurn.rewriteSources.length, 1);
+  assert.strictEqual(persisted.lastTurn.rewriteSources[0].rewriter, 'buildBrowserOpenUrlActions');
+  assert.strictEqual(persisted.lastTurn.proofRefs.runtimeTrace.sessionId, 'runtime-slice6');
+  assert.deepStrictEqual(persisted.lastTurn.proofRefs.proofIds, ['proof-slice6']);
 
   fs.rmSync(tempDir, { recursive: true, force: true });
 });

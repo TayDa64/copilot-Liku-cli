@@ -1,4 +1,88 @@
 {
+  "runtime-proof-confirmation-command-safety": {
+    "description": "Fixture-backed confirmation specificity regression for benign prose containing clear versus a real destructive command.",
+    "source": {
+      "traceKind": "runtime-proof",
+      "tracePath": "runtime://generated/runtime-proof-confirmation-command-safety.jsonl",
+      "traceSessionId": "runtime-proof-confirmation-command-safety-session",
+      "capturedAt": "2026-04-09T00:00:00.000Z",
+      "origin": "brainstorm040826 milestone 7.2 regression seed"
+    },
+    "transcriptLines": [],
+    "prompts": [],
+    "assistantTurns": [],
+    "observedHeaders": {
+      "runtimeModels": [],
+      "requestedModels": [],
+      "providers": []
+    },
+    "notes": [
+      "This fixture is consumed by scripts/test-ai-service-proof-trace.js as data-driven confirmation-safety proof coverage.",
+      "It proves that benign prose mentioning clear does not escalate a harmless run_command while destructive commands still emit object-specific confirmation payloads."
+    ],
+    "expectations": [],
+    "confirmationCases": [
+      {
+        "name": "benign clear prose stays command-grounded for harmless run_command",
+        "action": {
+          "type": "run_command",
+          "command": "cd c:\\dev\\muse-ai && dir"
+        },
+        "targetInfo": {
+          "userMessage": "clear the confusion for me and show the repo contents",
+          "cwd": "c:\\dev\\muse-ai"
+        },
+        "expected": {
+          "riskLevel": "medium",
+          "requiresConfirmation": false,
+          "objectType": "command",
+          "objectLabelIncludes": [
+            "cd c:\\dev\\muse-ai && dir"
+          ],
+          "repoPath": "c:\\dev\\muse-ai",
+          "promptAbsent": true,
+          "warningsExclude": [
+            "Detected risky keyword: clear",
+            "Run delete command"
+          ]
+        }
+      },
+      {
+        "name": "destructive command requires object-specific confirmation",
+        "action": {
+          "type": "run_command",
+          "command": "Remove-Item -Recurse -Force .\\tmp"
+        },
+        "targetInfo": {
+          "userMessage": "clear the temp directory if needed",
+          "cwd": "c:\\dev\\muse-ai"
+        },
+        "expected": {
+          "riskLevel": "critical",
+          "requiresConfirmation": true,
+          "objectType": "command",
+          "objectLabelIncludes": [
+            "Remove-Item -Recurse -Force .\\tmp"
+          ],
+          "repoPath": "c:\\dev\\muse-ai",
+          "expectedProofIncludes": [
+            "Inspect shell output for c:\\dev\\muse-ai"
+          ],
+          "warningsInclude": [
+            "Run delete command in repo c:\\dev\\muse-ai"
+          ],
+          "promptIncludes": [
+            "Confirmation required:",
+            "Run delete command in repo c:\\dev\\muse-ai",
+            "Expected proof: Inspect shell output for c:\\dev\\muse-ai"
+          ],
+          "promptExcludes": [
+            "Detected risky keyword: clear"
+          ]
+        }
+      }
+    ]
+  },
   "runtime-proof-panel-open": {
     "description": "Runtime proof regression for an inspect-grounded click that opens the Pine Editor surface.",
     "source": {

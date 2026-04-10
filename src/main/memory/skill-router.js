@@ -49,6 +49,11 @@ function normalizeArray(values) {
     .filter(Boolean)));
 }
 
+function normalizeScopeTier(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  return ['global', 'domain', 'local'].includes(normalized) ? normalized : null;
+}
+
 function normalizeScope(scope) {
   if (!scope || typeof scope !== 'object') return null;
   const processNames = normalizeArray(scope.processNames).map((value) => value.toLowerCase());
@@ -60,6 +65,7 @@ function normalizeScope(scope) {
   const taskFamilies = normalizeArray(scope.taskFamilies).map((value) => value.toLowerCase());
   const compartmentKeys = normalizeArray(scope.compartmentKeys).map((value) => value.toLowerCase());
   const kind = scope.kind ? String(scope.kind).trim().toLowerCase() : null;
+  const tier = normalizeScopeTier(scope.tier || scope.scopeTier);
   if (!processNames.length
     && !windowTitles.length
     && !domains.length
@@ -68,8 +74,10 @@ function normalizeScope(scope) {
     && !appIds.length
     && !taskFamilies.length
     && !compartmentKeys.length
-    && !kind) return null;
+    && !kind
+    && !tier) return null;
   return {
+    ...(tier ? { tier } : {}),
     ...(kind ? { kind } : {}),
     ...(processNames.length ? { processNames } : {}),
     ...(windowTitles.length ? { windowTitles } : {}),
@@ -183,9 +191,12 @@ function analyzeScopeMatch(entry, options = {}) {
       matchedSignals: 0,
       mismatchedSignals: 0,
       fallbackEligible: true,
-      classification: 'unscoped-fallback'
+      classification: 'unscoped-fallback',
+      scopeTier: 'unscoped'
     };
   }
+
+  const scopeTier = normalizeScopeTier(scope.tier) || 'legacy';
 
   const context = normalizeScopeContext(options);
   const evaluations = [
@@ -259,32 +270,57 @@ function analyzeScopeMatch(entry, options = {}) {
   let mismatchedSignals = 0;
   let constrainedSignals = 0;
 
+  const matchedMultiplier = scopeTier === 'global'
+    ? 0.35
+    : scopeTier === 'domain'
+      ? 0.8
+      : 1;
+  const mismatchMultiplier = scopeTier === 'global'
+    ? 0
+    : scopeTier === 'domain'
+      ? 0.25
+      : 1;
+
   evaluations.forEach(({ weight, mismatchPenalty, evaluation }) => {
     if (!evaluation.applicable) return;
     constrainedSignals += 1;
     if (evaluation.matched) {
       matchedSignals += 1;
-      score += weight;
+      score += weight * matchedMultiplier;
       return;
     }
     if (evaluation.mismatched) {
       mismatchedSignals += 1;
-      score += mismatchPenalty;
+      score += mismatchPenalty * mismatchMultiplier;
     }
   });
+
+  if (scopeTier === 'global') {
+    score += 1.25;
+  } else if (scopeTier === 'domain' && matchedSignals > 0) {
+    score += 1.5;
+  }
 
   let classification = 'scoped-neutral';
   if (matchedSignals > 0 && mismatchedSignals === 0) classification = 'scoped-match';
   else if (matchedSignals > 0 && mismatchedSignals > 0) classification = 'scoped-mixed';
   else if (mismatchedSignals > 0) classification = 'scoped-mismatch';
 
+  if (scopeTier === 'global') classification = matchedSignals > 0 ? 'global-match' : 'global-fallback';
+  else if (scopeTier === 'domain' && matchedSignals > 0) classification = mismatchedSignals > 0 ? 'domain-mixed' : 'domain-match';
+  else if (scopeTier === 'domain' && mismatchedSignals > 0) classification = 'domain-mismatch';
+  else if (scopeTier === 'local' && classification === 'scoped-match') classification = 'local-match';
+  else if (scopeTier === 'local' && classification === 'scoped-mixed') classification = 'local-mixed';
+  else if (scopeTier === 'local' && classification === 'scoped-mismatch') classification = 'local-mismatch';
+
   return {
     score,
     matchedSignals,
     mismatchedSignals,
     constrainedSignals,
-    fallbackEligible: matchedSignals === 0,
-    classification
+    fallbackEligible: matchedSignals === 0 || scopeTier === 'global',
+    classification,
+    scopeTier
   };
 }
 
@@ -360,6 +396,7 @@ function extractProcedureHeading(content = '') {
 function buildScopeSignature(scope) {
   const normalizedScope = normalizeScope(scope);
   if (!normalizedScope) return '';
+  const tierPart = normalizedScope.tier || '';
   const processPart = (normalizedScope.processNames || []).join('|');
   const titlePart = (normalizedScope.windowTitles || []).map((value) => value.toLowerCase()).join('|');
   const domainPart = (normalizedScope.domains || []).join('|');
@@ -369,7 +406,7 @@ function buildScopeSignature(scope) {
   const taskFamilyPart = (normalizedScope.taskFamilies || []).join('|');
   const compartmentPart = (normalizedScope.compartmentKeys || []).join('|');
   const kindPart = normalizedScope.kind || '';
-  return [processPart, titlePart, domainPart, repoPart, rootPart, appPart, taskFamilyPart, compartmentPart, kindPart].join('::');
+  return [tierPart, processPart, titlePart, domainPart, repoPart, rootPart, appPart, taskFamilyPart, compartmentPart, kindPart].join('::');
 }
 
 function buildSkillFamilySignature({ keywords = [], tags = [], content = '', verification = '' } = {}) {
@@ -412,6 +449,19 @@ function scoreVariantSpecificity(entry, options = {}) {
   if (matchedSignals >= 2) score += 2;
   if (matchedSignals >= 3) score += 1;
   return { score, matchedSignals };
+}
+
+function getScopePriority(scopeMatch = {}) {
+  const matchedSignals = Number(scopeMatch?.matchedSignals || 0);
+  const mismatchedSignals = Number(scopeMatch?.mismatchedSignals || 0);
+  const scopeTier = String(scopeMatch?.scopeTier || 'legacy').toLowerCase();
+
+  let priority = matchedSignals;
+  if (scopeTier === 'domain' && matchedSignals > 0) priority += 2;
+  if (scopeTier === 'local' && matchedSignals > 0 && mismatchedSignals === 0) priority += 1.5;
+  if (scopeTier === 'global') priority += 0.25;
+  if (mismatchedSignals > 0) priority -= Math.min(1.5, mismatchedSignals * 0.5);
+  return priority;
 }
 
 function getMatchedScopeSignals(entry, options = {}) {
@@ -615,6 +665,7 @@ function getRelevantSkillsSelection(userMessage, options = {}) {
       const variantSpecificity = scoreVariantSpecificity(entry, scopeContext);
       const variantSpecificityScore = variantSpecificity.score;
       const matchedScopeSignals = variantSpecificity.matchedSignals;
+      const scopePriority = getScopePriority(scopeMatch);
       const score = keywordScore + semanticScore + scopeScore + variantSpecificityScore;
       return {
         id,
@@ -623,6 +674,7 @@ function getRelevantSkillsSelection(userMessage, options = {}) {
         keywordScore,
         semanticScore,
         scopeScore,
+        scopePriority,
         scopeMatch,
         variantSpecificityScore,
         matchedScopeSignals
@@ -630,7 +682,7 @@ function getRelevantSkillsSelection(userMessage, options = {}) {
     })
     .filter((value) => value && value.score > 0)
     .sort((a, b) =>
-      (b.matchedScopeSignals - a.matchedScopeSignals)
+      (b.scopePriority - a.scopePriority)
       || (b.score - a.score)
       || ((a.scopeMatch?.mismatchedSignals || 0) - (b.scopeMatch?.mismatchedSignals || 0))
       || (b.variantSpecificityScore - a.variantSpecificityScore)
@@ -670,8 +722,11 @@ function getRelevantSkillsSelection(userMessage, options = {}) {
 
   const selectedMatches = scored.slice(0, ids.length);
   const scopedMatchCount = selectedMatches.filter((match) => match.scopeMatch?.classification === 'scoped-match').length;
-  const fallbackCount = selectedMatches.filter((match) => match.scopeMatch?.classification === 'unscoped-fallback').length;
+  const fallbackCount = selectedMatches.filter((match) => ['unscoped-fallback', 'global-fallback'].includes(match.scopeMatch?.classification)).length;
   const mismatchCount = selectedMatches.filter((match) => String(match.scopeMatch?.classification || '').includes('mismatch')).length;
+  const globalTierCount = selectedMatches.filter((match) => match.scopeMatch?.scopeTier === 'global').length;
+  const domainTierCount = selectedMatches.filter((match) => match.scopeMatch?.scopeTier === 'domain').length;
+  const localTierCount = selectedMatches.filter((match) => match.scopeMatch?.scopeTier === 'local').length;
 
   return {
     text: sections.length ? `\n--- Relevant Skills ---\n${sections.join('\n\n')}\n--- End Skills ---\n` : '',
@@ -682,6 +737,9 @@ function getRelevantSkillsSelection(userMessage, options = {}) {
       scopedMatchCount,
       fallbackCount,
       mismatchCount,
+      globalTierCount,
+      domainTierCount,
+      localTierCount,
       scopeContext: {
         repoName: scopeContext.repoName,
         projectRoot: scopeContext.projectRoot,

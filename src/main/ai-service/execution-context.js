@@ -31,6 +31,51 @@ function detectTaskFamily(userMessage = '') {
   return 'general';
 }
 
+function parseCompartmentKey(compartmentKey = '') {
+  const parts = String(compartmentKey || '').split('::');
+  return {
+    raw: String(compartmentKey || '').trim() || null,
+    repoName: parts[0] || null,
+    appId: parts[1] || null,
+    surfaceClass: parts[2] || null,
+    taskFamily: parts[3] || null
+  };
+}
+
+function detectExplicitDomainSignals(userMessage = '') {
+  const text = normalizeLower(userMessage);
+  return {
+    browser: /\b(browser|edge|chrome|tab|url|website|page|search the web|search online|web search)\b/.test(text),
+    tradingview: /\btradingview|trading view|chart|watchlist|indicator|drawing|paper trading\b/.test(text),
+    pine: /\b(pine|pine editor|pine script|pine logs|pine profiler|version history)\b/.test(text),
+    repoEditor: /\b(vs code|workspace|repo|repository|codebase|terminal|shell|npm|node|test|lint|tsc|file)\b/.test(text)
+  };
+}
+
+function buildTransitionMetadata({ previousCompartmentKey, compartmentKey, appId, taskFamily, userMessage }) {
+  const previous = parseCompartmentKey(previousCompartmentKey);
+  const current = parseCompartmentKey(compartmentKey);
+  const explicitSignals = detectExplicitDomainSignals(userMessage);
+  const explicitDomainRequested = Object.values(explicitSignals).some(Boolean);
+  const taskFamilyChanged = !!(previous.taskFamily && taskFamily && previous.taskFamily !== taskFamily);
+  const appChanged = !!(previous.appId && appId && previous.appId !== appId);
+  const explicit = !!(previous.raw && current.raw && previous.raw !== current.raw && explicitDomainRequested && (taskFamilyChanged || appChanged));
+
+  return {
+    explicit,
+    bridgeEligible: explicit,
+    reason: explicit
+      ? (taskFamilyChanged
+        ? `explicit-task-family-shift:${previous.taskFamily}->${taskFamily}`
+        : `explicit-app-shift:${previous.appId}->${appId}`)
+      : null,
+    previousCompartmentKey: previous.raw,
+    previousAppId: previous.appId,
+    previousTaskFamily: previous.taskFamily,
+    signals: explicitSignals
+  };
+}
+
 function buildCompartmentKey({ repoName, appId, surfaceClass, taskFamily }) {
   return [repoName || 'unknown-repo', appId || 'unknown-app', surfaceClass || 'unknown-surface', taskFamily || 'general']
     .map((value) => normalizeLower(value).replace(/[^a-z0-9]+/g, '-'))
@@ -78,6 +123,8 @@ function buildExecutionContextEnvelope(options = {}) {
     || overlays.includes('tradingview')
     || /\btradingview|trading view\b/i.test(windowTitle);
   const taskFamily = detectTaskFamily(userMessage);
+  const previousCompartmentKey = normalizeLower(sessionState?.activeCompartmentKey || '') || null;
+  const compartmentKey = buildCompartmentKey({ repoName, appId, surfaceClass, taskFamily });
   const continuationReady = parseContinuationReady(chatContinuityContext, sessionState);
   const tradingViewPineEligible = explicitTradingViewPineRequest || foregroundTradingView;
   const ambiguityFlags = buildAmbiguityFlags({
@@ -91,6 +138,14 @@ function buildExecutionContextEnvelope(options = {}) {
   let confidence = 'high';
   if (ambiguityFlags.length >= 2) confidence = 'low';
   else if (ambiguityFlags.length === 1) confidence = 'medium';
+
+  const transition = buildTransitionMetadata({
+    previousCompartmentKey,
+    compartmentKey,
+    appId,
+    taskFamily,
+    userMessage
+  });
 
   return {
     version: 1,
@@ -111,17 +166,20 @@ function buildExecutionContextEnvelope(options = {}) {
     continuity: {
       continuationReady
     },
-    compartmentKey: buildCompartmentKey({ repoName, appId, surfaceClass, taskFamily }),
+    compartmentKey,
     confidence,
     ambiguityFlags,
     signals: {
       explicitTradingViewRequest,
       explicitPineRequest,
       explicitTradingViewPineRequest,
+      explicitBrowserRequest: transition.signals.browser,
+      explicitRepoEditorRequest: transition.signals.repoEditor,
       foregroundTradingView,
       hasSessionIntentContext: !!String(sessionIntentContext || '').trim(),
       hasChatContinuityContext: !!String(chatContinuityContext || '').trim()
     },
+    transition,
     eligibility: {
       tradingViewPine: tradingViewPineEligible,
       tradingViewPineReason: explicitTradingViewPineRequest
@@ -138,6 +196,7 @@ function formatExecutionContextEnvelope(envelope = {}) {
 
   const lines = [
     '## Execution Context Envelope',
+    '- authority: host-generated deterministic repo/window signals; consume this envelope as authoritative context.',
     `- repo: ${envelope.repo?.name || 'unknown-repo'}`,
     `- cwd: ${envelope.cwd || 'unknown'}`,
     `- projectRoot: ${envelope.repo?.projectRoot || 'unknown'}`,
@@ -156,6 +215,9 @@ function formatExecutionContextEnvelope(envelope = {}) {
   }
   if (typeof envelope.continuity?.continuationReady === 'boolean') {
     lines.push(`- continuationReady: ${envelope.continuity.continuationReady ? 'yes' : 'no'}`);
+  }
+  if (envelope.transition?.bridgeEligible) {
+    lines.push(`- bridgeFrom: ${envelope.transition.previousCompartmentKey || 'unknown'} (${envelope.transition.reason || 'explicit-cross-compartment-shift'})`);
   }
   if (Array.isArray(envelope.ambiguityFlags) && envelope.ambiguityFlags.length > 0) {
     lines.push(`- ambiguityFlags: ${envelope.ambiguityFlags.join(', ')}`);

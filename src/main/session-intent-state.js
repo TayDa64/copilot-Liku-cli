@@ -330,6 +330,64 @@ function normalizeRetrievalSummary(summary = null) {
   return normalized;
 }
 
+function normalizeContextAuthority(contextAuthority = null) {
+  if (!contextAuthority || typeof contextAuthority !== 'object') return null;
+
+  const normalized = {
+    summary: normalizeExecutionContextIdentity(contextAuthority.summary || contextAuthority.executionContext || null),
+    hash: normalizeText(contextAuthority.hash, 160)
+  };
+
+  if (!normalized.summary && !normalized.hash) return null;
+  return normalized;
+}
+
+function normalizeRewriteSources(rewriteSources = []) {
+  if (!Array.isArray(rewriteSources)) return [];
+  return rewriteSources
+    .map((entry) => {
+      if (!entry || typeof entry !== 'object') return null;
+      return {
+        stage: normalizeText(entry.stage, 60),
+        rewriter: normalizeText(entry.rewriter, 120),
+        category: normalizeText(entry.category, 80),
+        reason: normalizeText(entry.reason, 200),
+        beforeActionCount: Number.isFinite(Number(entry.beforeActionCount)) ? Number(entry.beforeActionCount) : null,
+        afterActionCount: Number.isFinite(Number(entry.afterActionCount)) ? Number(entry.afterActionCount) : null,
+        beforeActionTypes: normalizeIdList(entry.beforeActionTypes, 12, 60),
+        afterActionTypes: normalizeIdList(entry.afterActionTypes, 12, 60),
+        contextAuthority: normalizeContextAuthority(entry.contextAuthority)
+      };
+    })
+    .filter((entry) => entry && (entry.rewriter || entry.category || entry.reason || entry.beforeActionCount !== null || entry.afterActionCount !== null))
+    .slice(0, 12);
+}
+
+function normalizeProofRefs(proofRefs = null) {
+  if (!proofRefs || typeof proofRefs !== 'object') return null;
+
+  const normalized = {
+    runtimeTrace: proofRefs.runtimeTrace && typeof proofRefs.runtimeTrace === 'object'
+      ? {
+          sessionId: normalizeText(proofRefs.runtimeTrace.sessionId, 120),
+          filePath: normalizeText(proofRefs.runtimeTrace.filePath, 320)
+        }
+      : null,
+    proofIds: normalizeIdList(proofRefs.proofIds, 12, 120),
+    observationRefs: Array.isArray(proofRefs.observationRefs)
+      ? proofRefs.observationRefs.map((entry) => ({
+          actionIndex: Number.isFinite(Number(entry?.actionIndex)) ? Number(entry.actionIndex) : null,
+          classification: normalizeText(entry?.classification, 80),
+          verifyKind: normalizeText(entry?.verifyKind, 80),
+          verified: entry?.verified === true
+        })).filter((entry) => entry.classification || entry.verifyKind || entry.actionIndex !== null)
+      : []
+  };
+
+  if (!normalized.runtimeTrace && normalized.proofIds.length === 0 && normalized.observationRefs.length === 0) return null;
+  return normalized;
+}
+
 function normalizeTradingMode(tradingMode) {
   if (!tradingMode) return null;
   if (typeof tradingMode === 'string') {
@@ -855,6 +913,7 @@ function normalizeTurnRecord(turnRecord = {}, previousContinuity = defaultChatCo
         || turnRecord.executionContext?.compartmentKey
         || turnRecord.executionContextEnvelope?.compartmentKey
     ),
+    contextAuthority: normalizeContextAuthority(turnRecord.contextAuthority),
     committedSubgoal: currentSubgoal,
     thought: normalizeText(turnRecord.thought, 240),
     actionTypes,
@@ -871,6 +930,8 @@ function normalizeTurnRecord(turnRecord = {}, previousContinuity = defaultChatCo
       skills: normalizeRetrievalSummary(turnRecord?.retrievalSummary?.skills),
       memories: normalizeRetrievalSummary(turnRecord?.retrievalSummary?.memories)
     },
+    rewriteSources: normalizeRewriteSources(turnRecord.rewriteSources),
+    proofRefs: normalizeProofRefs(turnRecord.proofRefs),
     verificationStatus,
     verificationChecks,
     observationEvidence,
@@ -1284,6 +1345,55 @@ function formatChatContinuityContext(state, options = {}) {
   return lines.join('\n').trim();
 }
 
+function formatInheritedCompartmentContext(state, options = {}) {
+  const currentCompartmentKey = normalizeCompartmentKey(
+    options.compartmentKey
+      || options.executionContextEnvelope?.compartmentKey
+  );
+  const previousCompartmentKey = normalizeCompartmentKey(
+    options.previousCompartmentKey
+      || options.executionContextEnvelope?.transition?.previousCompartmentKey
+      || state?.activeCompartmentKey
+  );
+
+  if (!previousCompartmentKey || previousCompartmentKey === currentCompartmentKey) return '';
+
+  const inheritedContinuity = state?.chatContinuityByCompartment?.[previousCompartmentKey] || null;
+  const inheritedTask = state?.pendingRequestedTaskByCompartment?.[previousCompartmentKey] || null;
+  const hasContinuity = hasMeaningfulChatContinuity(inheritedContinuity);
+  const taskSummary = normalizeText(inheritedTask?.taskSummary, 240);
+
+  if (!hasContinuity && !taskSummary) return '';
+
+  const lines = [
+    '## Inherited Context from Previous Compartment',
+    `- sourceCompartment: ${previousCompartmentKey}`,
+    '- mode: read-only baton pass; do not merge this continuity into the current compartment without fresh evidence.'
+  ];
+
+  if (options.executionContextEnvelope?.transition?.reason) {
+    lines.push(`- bridgeReason: ${options.executionContextEnvelope.transition.reason}`);
+  }
+
+  if (hasContinuity) {
+    if (inheritedContinuity.activeGoal) lines.push(`- sourceActiveGoal: ${inheritedContinuity.activeGoal}`);
+    if (inheritedContinuity.currentSubgoal) lines.push(`- sourceCurrentSubgoal: ${inheritedContinuity.currentSubgoal}`);
+    if (inheritedContinuity.freshnessState) lines.push(`- sourceContinuityFreshness: ${inheritedContinuity.freshnessState}`);
+    lines.push(`- sourceContinuationReady: ${inheritedContinuity.continuationReady ? 'yes' : 'no'}`);
+    if (inheritedContinuity.degradedReason) lines.push(`- sourceDegradedReason: ${inheritedContinuity.degradedReason}`);
+    if (inheritedContinuity.lastTurn?.actionSummary) lines.push(`- sourceLastActions: ${inheritedContinuity.lastTurn.actionSummary}`);
+    if (inheritedContinuity.lastTurn?.verificationStatus) lines.push(`- sourceVerificationStatus: ${inheritedContinuity.lastTurn.verificationStatus}`);
+    if (inheritedContinuity.lastTurn?.nextRecommendedStep) lines.push(`- sourceNextRecommendedStep: ${inheritedContinuity.lastTurn.nextRecommendedStep}`);
+  }
+
+  if (taskSummary) {
+    lines.push(`- sourcePendingTask: ${taskSummary}`);
+  }
+
+  lines.push('- Rule: Use this inherited context only because the user explicitly invoked a cross-compartment transition in this turn.');
+  return lines.join('\n').trim();
+}
+
 function normalizePendingRequestedTask(task = {}) {
   if (!task || typeof task !== 'object') return null;
 
@@ -1587,6 +1697,7 @@ module.exports = {
   SESSION_INTENT_SCHEMA_VERSION,
   createSessionIntentStateStore,
   formatChatContinuityContext,
+  formatInheritedCompartmentContext,
   formatChatContinuitySummary,
   formatSessionIntentContext,
   formatSessionIntentSummary,

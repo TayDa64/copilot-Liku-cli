@@ -10,6 +10,7 @@ const {
   formatExecutionContextEnvelope,
   isTradingViewPineContextEligible
 } = require('./execution-context');
+const { formatInheritedCompartmentContext } = require('../session-intent-state');
 const { TRADINGVIEW_PINE_PROMPT_OVERLAY } = require('./system-prompt');
 
 function classifyActiveAppCapability(options) {
@@ -351,6 +352,15 @@ function createMessageBuilder(dependencies) {
       const executionContextBlock = formatExecutionContextEnvelope(executionContextEnvelope);
       if (executionContextBlock) {
         messages.push({ role: 'system', content: executionContextBlock });
+      }
+    } catch {}
+
+    try {
+      const inheritedContextBlock = executionContextEnvelope?.transition?.bridgeEligible
+        ? formatInheritedCompartmentContext(sessionState, { executionContextEnvelope })
+        : '';
+      if (inheritedContextBlock) {
+        messages.push({ role: 'system', content: inheritedContextBlock });
       }
     } catch {}
 

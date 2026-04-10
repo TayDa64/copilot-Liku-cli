@@ -8,6 +8,7 @@
 
 const https = require('https');
 const http = require('http');
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -233,6 +234,129 @@ function summarizeSelectionProvenanceForTrace(selectionProvenance = null) {
     skillSummary: cloneSerializable(selectionProvenance.skills?.summary || null),
     memorySummary: cloneSerializable(selectionProvenance.memories?.summary || null),
     executionContext: cloneSerializable(selectionProvenance.executionContext || null)
+  };
+}
+
+function summarizeExecutionContextAuthority(executionContextEnvelope = null) {
+  if (!executionContextEnvelope || typeof executionContextEnvelope !== 'object') return null;
+
+  const summary = {
+    compartmentKey: String(executionContextEnvelope.compartmentKey || '').trim() || null,
+    repoName: String(executionContextEnvelope.repo?.name || '').trim() || null,
+    projectRoot: String(executionContextEnvelope.repo?.projectRoot || '').trim() || null,
+    appId: String(executionContextEnvelope.foreground?.appId || '').trim() || null,
+    processName: String(executionContextEnvelope.foreground?.processName || '').trim() || null,
+    surfaceClass: String(executionContextEnvelope.foreground?.surfaceClass || '').trim() || null,
+    interactionMode: String(executionContextEnvelope.foreground?.interactionMode || '').trim() || null,
+    taskFamily: String(executionContextEnvelope.taskFamily || '').trim() || null,
+    confidence: String(executionContextEnvelope.confidence || '').trim() || null,
+    eligibility: executionContextEnvelope.eligibility && typeof executionContextEnvelope.eligibility === 'object'
+      ? {
+          tradingViewPine: executionContextEnvelope.eligibility.tradingViewPine === true,
+          tradingViewPineReason: String(executionContextEnvelope.eligibility.tradingViewPineReason || '').trim() || null
+        }
+      : null
+  };
+
+  if (!summary.compartmentKey
+    && !summary.repoName
+    && !summary.projectRoot
+    && !summary.appId
+    && !summary.processName
+    && !summary.surfaceClass
+    && !summary.interactionMode
+    && !summary.taskFamily
+    && !summary.confidence
+    && !summary.eligibility) {
+    return null;
+  }
+
+  return summary;
+}
+
+function buildContextAuthority(executionContextEnvelope = null) {
+  const summary = summarizeExecutionContextAuthority(executionContextEnvelope);
+  if (!summary) return null;
+
+  const stableHashInput = {
+    compartmentKey: summary.compartmentKey,
+    repoName: summary.repoName,
+    projectRoot: summary.projectRoot,
+    appId: summary.appId,
+    processName: summary.processName,
+    surfaceClass: summary.surfaceClass,
+    interactionMode: summary.interactionMode,
+    taskFamily: summary.taskFamily,
+    confidence: summary.confidence,
+    eligibility: summary.eligibility
+  };
+
+  return {
+    summary,
+    hash: `sha256:${crypto.createHash('sha256').update(JSON.stringify(stableHashInput)).digest('hex')}`
+  };
+}
+
+function summarizeActionTypes(actions = []) {
+  if (!Array.isArray(actions)) return [];
+  return actions
+    .map((action) => String(action?.type || '').trim())
+    .filter(Boolean)
+    .slice(0, 20);
+}
+
+function normalizeRewriteSourceForTrace(entry = {}) {
+  if (!entry || typeof entry !== 'object') return null;
+  return {
+    stage: String(entry.stage || '').trim() || null,
+    rewriter: String(entry.rewriter || '').trim() || null,
+    category: String(entry.category || '').trim() || null,
+    reason: String(entry.reason || '').trim() || null,
+    beforeActionCount: Number.isFinite(Number(entry.beforeActionCount)) ? Number(entry.beforeActionCount) : null,
+    afterActionCount: Number.isFinite(Number(entry.afterActionCount)) ? Number(entry.afterActionCount) : null,
+    beforeActionTypes: summarizeActionTypes(entry.beforeActionTypes || entry.beforeActions || []),
+    afterActionTypes: summarizeActionTypes(entry.afterActionTypes || entry.afterActions || []),
+    contextAuthority: cloneSerializable(entry.contextAuthority || null)
+  };
+}
+
+function summarizeRewriteSourcesForTrace(entries = []) {
+  if (!Array.isArray(entries)) return [];
+  return entries
+    .map((entry) => normalizeRewriteSourceForTrace(entry))
+    .filter(Boolean)
+    .slice(0, 12);
+}
+
+function collectProofReferences(results = [], runtimeTrace = null) {
+  const proofIds = [];
+  const observationRefs = [];
+
+  if (Array.isArray(results)) {
+    results.forEach((result, index) => {
+      const proofId = String(result?.proof?.proofId || '').trim();
+      if (proofId) proofIds.push(proofId);
+
+      const observation = result?.proof?.observation || result?.observationCheckpoint || null;
+      if (!observation || typeof observation !== 'object') return;
+      observationRefs.push({
+        actionIndex: Number.isFinite(Number(index)) ? index : null,
+        classification: String(observation.classification || '').trim() || null,
+        verifyKind: String(observation.verifyKind || '').trim() || null,
+        verified: observation.verified === true
+      });
+    });
+  }
+
+  return {
+    runtimeTrace: runtimeTrace && typeof runtimeTrace === 'object'
+      ? {
+          sessionId: String(runtimeTrace.sessionId || '').trim() || null,
+          filePath: String(runtimeTrace.filePath || '').trim() || null
+        }
+      : null,
+    proofIds: Array.from(new Set(proofIds)).slice(0, 12),
+    observationRefs: observationRefs.slice(0, 12)
   };
 }
 
@@ -3361,12 +3485,19 @@ function preflightActions(actionData, options = {}) {
   if (!actionData || !Array.isArray(actionData.actions)) return actionData;
   const userMessage = typeof options.userMessage === 'string' ? options.userMessage : '';
   const normalized = actionData.actions.map(normalizeActionForReliability);
+  const rewriteJournal = [];
   const rewritten = rewriteActionsForReliability(normalized, {
     ...options,
+    rewriteJournal,
     userMessage
   });
-  if (rewritten === actionData.actions) return actionData;
-  return { ...actionData, actions: rewritten, _rewrittenForReliability: true };
+  if (rewritten === actionData.actions && rewriteJournal.length === 0) return actionData;
+  return {
+    ...actionData,
+    actions: rewritten,
+    _rewrittenForReliability: true,
+    rewriteSources: rewriteJournal.length ? rewriteJournal : (Array.isArray(actionData.rewriteSources) ? actionData.rewriteSources : [])
+  };
 }
 
 function normalizeActionForReliability(action) {
@@ -4454,23 +4585,44 @@ function rewriteActionsForReliability(actions, context = {}) {
     } catch {}
   }
 
+  const contextAuthority = buildContextAuthority(executionContextEnvelope);
+  const registerRewrite = (rewriter, category, reason, beforeActions, afterActions) => {
+    if (!Array.isArray(context.rewriteJournal)) return;
+    context.rewriteJournal.push({
+      stage: 'preflight',
+      rewriter,
+      category,
+      reason,
+      changed: true,
+      beforeActionCount: Array.isArray(beforeActions) ? beforeActions.length : null,
+      afterActionCount: Array.isArray(afterActions) ? afterActions.length : null,
+      beforeActionTypes: summarizeActionTypes(beforeActions),
+      afterActionTypes: summarizeActionTypes(afterActions),
+      contextAuthority
+    });
+  };
+
   const tradingViewTimeframeRewrite = maybeRewriteTradingViewTimeframeWorkflow(actions, { userMessage });
   if (tradingViewTimeframeRewrite) {
+    registerRewrite('maybeRewriteTradingViewTimeframeWorkflow', 'tradingview-timeframe', 'matched TradingView timeframe reliability workflow', actions, tradingViewTimeframeRewrite);
     return tradingViewTimeframeRewrite;
   }
 
   const tradingViewSymbolRewrite = maybeRewriteTradingViewSymbolWorkflow(actions, { userMessage });
   if (tradingViewSymbolRewrite) {
+    registerRewrite('maybeRewriteTradingViewSymbolWorkflow', 'tradingview-symbol', 'matched TradingView symbol reliability workflow', actions, tradingViewSymbolRewrite);
     return tradingViewSymbolRewrite;
   }
 
   const tradingViewWatchlistRewrite = maybeRewriteTradingViewWatchlistWorkflow(actions, { userMessage });
   if (tradingViewWatchlistRewrite) {
+    registerRewrite('maybeRewriteTradingViewWatchlistWorkflow', 'tradingview-watchlist', 'matched TradingView watchlist reliability workflow', actions, tradingViewWatchlistRewrite);
     return tradingViewWatchlistRewrite;
   }
 
   const tradingViewDrawingRewrite = maybeRewriteTradingViewDrawingWorkflow(actions, { userMessage });
   if (tradingViewDrawingRewrite) {
+    registerRewrite('maybeRewriteTradingViewDrawingWorkflow', 'tradingview-drawing', 'matched TradingView drawing reliability workflow', actions, tradingViewDrawingRewrite);
     return tradingViewDrawingRewrite;
   }
 
@@ -4480,36 +4632,46 @@ function rewriteActionsForReliability(actions, context = {}) {
     userMessage
   });
   if (tradingViewPineRewrite) {
+    registerRewrite('maybeRewriteTradingViewPineWorkflow', 'tradingview-pine', 'matched TradingView Pine reliability workflow', actions, tradingViewPineRewrite);
     return tradingViewPineRewrite;
   }
 
   const tradingViewPaperRewrite = maybeRewriteTradingViewPaperWorkflow(actions, { userMessage });
   if (tradingViewPaperRewrite) {
+    registerRewrite('maybeRewriteTradingViewPaperWorkflow', 'tradingview-paper', 'matched TradingView Paper Trading reliability workflow', actions, tradingViewPaperRewrite);
     return tradingViewPaperRewrite;
   }
 
   const tradingViewDomRewrite = maybeRewriteTradingViewDomWorkflow(actions, { userMessage });
   if (tradingViewDomRewrite) {
+    registerRewrite('maybeRewriteTradingViewDomWorkflow', 'tradingview-dom', 'matched TradingView DOM reliability workflow', actions, tradingViewDomRewrite);
     return tradingViewDomRewrite;
   }
 
   const tradingViewIndicatorRewrite = maybeRewriteTradingViewIndicatorWorkflow(actions, { userMessage });
   if (tradingViewIndicatorRewrite) {
+    registerRewrite('maybeRewriteTradingViewIndicatorWorkflow', 'tradingview-indicator', 'matched TradingView indicator reliability workflow', actions, tradingViewIndicatorRewrite);
     return tradingViewIndicatorRewrite;
   }
 
   const tradingViewAlertRewrite = maybeRewriteTradingViewAlertWorkflow(actions, { userMessage });
   if (tradingViewAlertRewrite) {
+    registerRewrite('maybeRewriteTradingViewAlertWorkflow', 'tradingview-alert', 'matched TradingView alert reliability workflow', actions, tradingViewAlertRewrite);
     return tradingViewAlertRewrite;
   }
 
   // ── Redundant-search elimination ──────────────────────────────
   // If the plan contains a Google search URL followed by direct URL navigation,
   // the search is redundant — strip it and go straight to the destination.
-  actions = eliminateRedundantSearch(actions);
+  const searchEliminated = eliminateRedundantSearch(actions);
+  if (searchEliminated !== actions) {
+    registerRewrite('eliminateRedundantSearch', 'browser-direct-navigation', 'removed redundant search detour before direct navigation', actions, searchEliminated);
+    actions = searchEliminated;
+  }
 
   const recoveryFallback = maybeBuildBrowserRecoverySearchFallback(actions, userMessage);
   if (recoveryFallback) {
+    registerRewrite('maybeBuildBrowserRecoverySearchFallback', 'browser-recovery-search', 'added browser recovery search fallback for repeated navigation drift', actions, recoveryFallback);
     return recoveryFallback;
   }
 
@@ -4520,6 +4682,7 @@ function rewriteActionsForReliability(actions, context = {}) {
       lastStrategy: strategySelection.strategyId || 'non-visual',
       lastUserIntent: userMessage.trim().slice(0, 300)
     });
+    registerRewrite('applyNonVisualWebStrategies', strategySelection.strategyId || 'non-visual-web', 'selected deterministic non-visual web strategy', actions, strategySelection.actions);
     return strategySelection.actions;
   }
 
@@ -4540,13 +4703,19 @@ function rewriteActionsForReliability(actions, context = {}) {
       lastStrategy: 'rewrite-simple-browser-to-explicit-browser',
       lastUserIntent: userMessage.trim().slice(0, 300)
     });
-    return buildBrowserOpenUrlActions(browserTarget, requestedUrl);
+    const rewritten = buildBrowserOpenUrlActions(browserTarget, requestedUrl);
+    registerRewrite('buildBrowserOpenUrlActions', 'explicit-browser-open-url', 'rewrote VS Code simple-browser detour to an explicit browser URL flow', actions, rewritten);
+    return rewritten;
   }
 
   // If the AI is already using the Simple Browser command palette flow, keep it,
   // but ensure we focus VS Code first (models often forget this).
   if (alreadySimpleBrowser) {
-    return prependVsCodeFocusIfMissing(actions);
+    const rewritten = prependVsCodeFocusIfMissing(actions);
+    if (rewritten !== actions) {
+      registerRewrite('prependVsCodeFocusIfMissing', 'vscode-focus', 'prepended VS Code focus before integrated browser keyboard flow', actions, rewritten);
+    }
+    return rewritten;
   }
 
   // Intent-aware rewrite: if the USER asked to open a URL in VS Code integrated browser,
@@ -4564,11 +4733,13 @@ function rewriteActionsForReliability(actions, context = {}) {
         lastStrategy: 'deterministic-youtube-search-no-url',
         lastUserIntent: userMessage.trim().slice(0, 300)
       });
-      return buildBrowserOpenUrlActions(
+      const rewritten = buildBrowserOpenUrlActions(
         youtubeSearchIntent.browser,
         youtubeSearchIntent.url,
         { searchQuery: youtubeSearchIntent.query }
       );
+      registerRewrite('buildBrowserOpenUrlActions', 'deterministic-youtube-search-no-url', 'expanded low-signal YouTube search intent into deterministic browser navigation', actions, rewritten);
+      return rewritten;
     }
   }
 
@@ -4601,7 +4772,9 @@ function rewriteActionsForReliability(actions, context = {}) {
     });
     if (onlyRunCommands && hasNonDiscoveryCommand) {
       console.log(`[AI-SERVICE] Rewriting run_command app launch to Start menu approach for "${requestedAppName}"`);
-      return buildOpenApplicationActions(requestedAppName);
+      const rewritten = buildOpenApplicationActions(requestedAppName);
+      registerRewrite('buildOpenApplicationActions', 'app-launch-start-menu', 'replaced run_command app launch with deterministic Start menu app-opening flow', actions, rewritten);
+      return rewritten;
     }
 
     const lowSignalTypes = new Set(['bring_window_to_front', 'focus_window', 'key', 'type', 'wait', 'screenshot']);
@@ -4613,13 +4786,19 @@ function rewriteActionsForReliability(actions, context = {}) {
     const hasLaunchEnter = actions.some((a) => a?.type === 'key' && /^enter$/i.test(String(a.key || '').trim()));
     const incompleteLaunchPlan = !hasSearchType || !hasLaunchEnter;
     if ((screenshotFirst || longPlan || tinyPlan || incompleteLaunchPlan) && lowSignal) {
-      return buildOpenApplicationActions(requestedAppName);
+      const rewritten = buildOpenApplicationActions(requestedAppName);
+      registerRewrite('buildOpenApplicationActions', 'app-launch-start-menu', 'rewrote low-signal app launch plan to deterministic Start menu flow', actions, rewritten);
+      return rewritten;
     }
   }
 
   if (explicitBrowser?.browser && explicitBrowser.browser !== 'vscode') {
     // If the model is going to use keyboard input for a specific browser, ensure focus.
-    actions = prependBrowserFocusIfMissing(actions, explicitBrowser);
+    const rewritten = prependBrowserFocusIfMissing(actions, explicitBrowser);
+    if (rewritten !== actions) {
+      registerRewrite('prependBrowserFocusIfMissing', 'browser-focus', 'prepended browser focus before keyboard-based browser interaction', actions, rewritten);
+      actions = rewritten;
+    }
   }
 
   // If the user explicitly asked for a browser + URL, prefer a deterministic
@@ -4635,7 +4814,9 @@ function rewriteActionsForReliability(actions, context = {}) {
         lastStrategy: 'deterministic-browser-open-url',
         lastUserIntent: userMessage.trim().slice(0, 300)
       });
-      return buildBrowserOpenUrlActions(explicitBrowser, requestedUrl, { searchQuery });
+      const rewritten = buildBrowserOpenUrlActions(explicitBrowser, requestedUrl, { searchQuery });
+      registerRewrite('buildBrowserOpenUrlActions', 'deterministic-browser-open-url', 'expanded low-signal browser URL request into deterministic browser navigation flow', actions, rewritten);
+      return rewritten;
     }
   }
 
@@ -4657,7 +4838,9 @@ function rewriteActionsForReliability(actions, context = {}) {
         lastStrategy: 'deterministic-vscode-simple-browser',
         lastUserIntent: userMessage.trim().slice(0, 300)
       });
-      return buildVsCodeSimpleBrowserOpenUrlActions(requestedUrl);
+      const rewritten = buildVsCodeSimpleBrowserOpenUrlActions(requestedUrl);
+      registerRewrite('buildVsCodeSimpleBrowserOpenUrlActions', 'deterministic-vscode-simple-browser', 'expanded low-signal VS Code integrated browser request into deterministic Simple Browser flow', actions, rewritten);
+      return rewritten;
     }
   }
 
@@ -4684,7 +4867,7 @@ function rewriteActionsForReliability(actions, context = {}) {
     });
     // Rewrite to a keyboard-only VS Code Simple Browser flow.
     // This avoids UIA element discovery (webviews are often not exposed) and avoids screenshots.
-    return [
+    const rewritten = [
       {
         type: 'bring_window_to_front',
         title: 'Visual Studio Code',
@@ -4702,6 +4885,8 @@ function rewriteActionsForReliability(actions, context = {}) {
       { type: 'key', key: 'enter', reason: 'Navigate' },
       { type: 'wait', ms: 3000 }
     ];
+    registerRewrite('buildVsCodeSimpleBrowserOpenUrlActions', 'rewrite-preview-to-simple-browser', 'rewrote Browser Preview detour to deterministic VS Code Simple Browser flow', actions, rewritten);
+    return rewritten;
   }
 
   return actions;
@@ -6504,6 +6689,7 @@ function buildRuntimeTraceLogForExecution(mode, actionPlan, options = {}) {
         userMessage: options.userMessage || null,
         actionCount: Array.isArray(actionPlan?.actions) ? actionPlan.actions.length : 0,
         pendingActionId: options.pendingActionId || null,
+        rewriteCount: Array.isArray(actionPlan?.rewriteSources) ? actionPlan.rewriteSources.length : 0,
         selection
       }
     });
@@ -7014,9 +7200,13 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
     thought: actionData.thought || null,
     verification: actionData.verification || null,
     selection: summarizeSelectionProvenanceForTrace(selectionProvenance),
+    rewrites: summarizeRewriteSourcesForTrace(actionData.rewriteSources || []),
     actions: Array.isArray(actionData.actions)
       ? actionData.actions.slice(0, 50).map(summarizeActionForTrace)
       : []
+  });
+  (Array.isArray(actionData.rewriteSources) ? actionData.rewriteSources : []).forEach((rewrite) => {
+    appendRuntimeTraceEvent(runtimeTraceLog, 'plan:rewrite', normalizeRewriteSourceForTrace(rewrite));
   });
 
   for (let i = 0; i < actionData.actions.length; i++) {
@@ -7882,6 +8072,7 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
     pendingActionId: pendingConfirmation ? getPendingAction()?.actionId : null,
     approvalPauseCapture: pendingConfirmation ? getPendingAction()?.approvalPauseCapture || null : null,
     reflectionApplied,
+    rewriteSources: Array.isArray(actionData.rewriteSources) ? cloneSerializable(actionData.rewriteSources) : [],
     selectionProvenance,
     runtimeTrace: runtimeTraceLog
       ? {
@@ -7933,14 +8124,19 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
   // if the remaining actions include brittle UIA clicks or screenshot detours.
   if (Array.isArray(pending.remainingActions) && pending.remainingActions.length > 0) {
     const original = pending.remainingActions;
+    const rewriteJournal = [];
     pending.remainingActions = rewriteActionsForReliability(pending.remainingActions, {
       userMessage,
       executionContextEnvelope: pending.executionContextEnvelope || options.executionContextEnvelope || null,
       cwd: process.cwd(),
-      sessionState: getSessionIntentState({ cwd: process.cwd() })
+      sessionState: getSessionIntentState({ cwd: process.cwd() }),
+      rewriteJournal
     });
     if (pending.remainingActions !== original) {
       console.log('[AI-SERVICE] (resume) Actions rewritten for reliability');
+    }
+    if (rewriteJournal.length > 0) {
+      pending.rewriteSources = rewriteJournal;
     }
   }
   
@@ -7972,7 +8168,11 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
     thought: pending.thought || null,
     verification: pending.verification || null,
     selection: summarizeSelectionProvenanceForTrace(selectionProvenance),
+    rewrites: summarizeRewriteSourcesForTrace(pending.rewriteSources || []),
     actions: actionsToResume.slice(0, 50).map(summarizeActionForTrace)
+  });
+  (Array.isArray(pending.rewriteSources) ? pending.rewriteSources : []).forEach((rewrite) => {
+    appendRuntimeTraceEvent(runtimeTraceLog, 'plan:rewrite', normalizeRewriteSourceForTrace(rewrite));
   });
   
   // Execute the confirmed action and remaining actions
@@ -8407,6 +8607,7 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
     postVerification,
     postVerificationFailed: !!(postVerification.applicable && !postVerification.verified),
     userConfirmed: true,
+    rewriteSources: Array.isArray(pending.rewriteSources) ? cloneSerializable(pending.rewriteSources) : [],
     selectionProvenance,
     runtimeTrace: runtimeTraceLog
       ? {

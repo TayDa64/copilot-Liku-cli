@@ -1,9 +1,34 @@
 #!/usr/bin/env node
 
 const assert = require('assert');
+const fs = require('fs');
 const path = require('path');
 
 const aiService = require(path.join(__dirname, '..', 'src', 'main', 'ai-service.js'));
+
+function readRuntimeProofFixture(name) {
+  const fixturesPath = path.join(__dirname, 'fixtures', 'transcripts', 'runtime-proof-regressions.json');
+  const bundle = JSON.parse(fs.readFileSync(fixturesPath, 'utf8'));
+  return bundle[name] || null;
+}
+
+function assertTextIncludesAll(text, fragments, messagePrefix) {
+  for (const fragment of fragments || []) {
+    assert(
+      String(text || '').includes(fragment),
+      `${messagePrefix}: expected to include ${JSON.stringify(fragment)}, got ${JSON.stringify(text)}`
+    );
+  }
+}
+
+function assertTextExcludesAll(text, fragments, messagePrefix) {
+  for (const fragment of fragments || []) {
+    assert(
+      !String(text || '').includes(fragment),
+      `${messagePrefix}: expected to exclude ${JSON.stringify(fragment)}, got ${JSON.stringify(text)}`
+    );
+  }
+}
 
 async function test(name, fn) {
   try {
@@ -34,6 +59,42 @@ async function withPatchedSystemAutomation(overrides, fn) {
 }
 
 async function main() {
+  await test('fixture-backed confirmation safety proof names the object and distinguishes benign clear prose from destructive commands', async () => {
+    const fixture = readRuntimeProofFixture('runtime-proof-confirmation-command-safety');
+    assert(fixture, 'expected runtime-proof-confirmation-command-safety fixture');
+    assert(Array.isArray(fixture.confirmationCases), 'confirmation fixture should define confirmationCases');
+    assert.strictEqual(fixture.confirmationCases.length, 2, 'expected benign and destructive confirmation cases');
+
+    for (const testCase of fixture.confirmationCases) {
+      const result = aiService.analyzeActionSafety(testCase.action, testCase.targetInfo || {});
+      const expected = testCase.expected || {};
+      const warningsText = Array.isArray(result.warnings) ? result.warnings.join('\n') : '';
+      const objectLabel = String(result.confirmationContext?.objectLabel || '');
+      const expectedProof = String(result.confirmationContext?.expectedProof || '');
+      const prompt = String(result.confirmationPrompt || '');
+
+      assert.strictEqual(
+        String(result.riskLevel || '').toLowerCase(),
+        String(expected.riskLevel || '').toLowerCase(),
+        `${testCase.name}: riskLevel mismatch`
+      );
+      assert.strictEqual(result.requiresConfirmation, expected.requiresConfirmation, `${testCase.name}: requiresConfirmation mismatch`);
+      assert.strictEqual(result.confirmationContext?.objectType, expected.objectType, `${testCase.name}: objectType mismatch`);
+      assert.strictEqual(result.confirmationContext?.repoPath, expected.repoPath, `${testCase.name}: repoPath mismatch`);
+      assertTextIncludesAll(objectLabel, expected.objectLabelIncludes, `${testCase.name}: objectLabel`);
+
+      if (expected.promptAbsent) {
+        assert.strictEqual(prompt, '', `${testCase.name}: expected no confirmation prompt`);
+      }
+
+      assertTextIncludesAll(expectedProof, expected.expectedProofIncludes, `${testCase.name}: expectedProof`);
+      assertTextIncludesAll(warningsText, expected.warningsInclude, `${testCase.name}: warnings`);
+      assertTextExcludesAll(warningsText, expected.warningsExclude, `${testCase.name}: warnings`);
+      assertTextIncludesAll(prompt, expected.promptIncludes, `${testCase.name}: confirmationPrompt`);
+      assertTextExcludesAll(prompt, expected.promptExcludes, `${testCase.name}: confirmationPrompt`);
+    }
+  });
+
   await test('executeActions upgrades proof with observation checkpoint and emits runtime proof trace', async () => {
     const traceEvents = [];
     const runtimeTraceLog = {
@@ -211,6 +272,68 @@ async function main() {
       assert.strictEqual(proofEvent.proof.level, 3);
       assert.strictEqual(proofEvent.proof.levelName, 'domain-verified');
       assert(proofEvent.proof.checks.some((check) => check.kind === 'domain-verification' && check.status === 'pass'));
+    });
+  });
+
+  await test('executeActions emits rewrite provenance when reliability preflight rewrites a low-signal browser plan', async () => {
+    const traceEvents = [];
+    const runtimeTraceLog = {
+      sessionId: 'runtime-rewrite-session',
+      filePath: 'C:/tmp/runtime-rewrite-session.jsonl',
+      append(event, data) {
+        traceEvents.push({ event, ...data });
+      },
+      close(summary) {
+        traceEvents.push({ event: 'runtime:session:end', summary });
+      }
+    };
+
+    aiService.setUIWatcher(null);
+
+    await withPatchedSystemAutomation({
+      focusWindow: async () => ({ success: true }),
+      executeAction: async (action) => ({ success: true, action: action?.type || 'unknown', message: 'ok' }),
+      getRunningProcessesByNames: async () => [],
+      getForegroundWindowInfo: async () => ({
+        success: true,
+        hwnd: 440001,
+        title: 'Example Domain - Microsoft Edge',
+        processName: 'msedge',
+        windowKind: 'main'
+      })
+    }, async () => {
+      const execResult = await aiService.executeActions({
+        thought: 'Open the requested URL in Edge',
+        verification: 'The page should load in Edge',
+        actions: [
+          { type: 'wait', ms: 10 }
+        ]
+      }, null, null, {
+        userMessage: 'open https://example.com in edge',
+        runtimeTraceLog,
+        actionExecutor: async (action) => ({
+          success: true,
+          action: action.type,
+          message: 'ok'
+        })
+      });
+
+      assert(execResult.runtimeTrace, 'executeActions should still surface runtime trace metadata for rewritten plans');
+      assert(Array.isArray(execResult.rewriteSources), 'executeActions should return rewriteSources');
+      assert(execResult.rewriteSources.length >= 1, 'rewriteSources should record the applied rewrite');
+      assert.strictEqual(execResult.rewriteSources[0].rewriter, 'buildBrowserOpenUrlActions');
+
+      const rewriteEvent = traceEvents.find((entry) => entry.event === 'plan:rewrite');
+      assert(rewriteEvent, 'runtime trace should record rewrite provenance events');
+      assert.strictEqual(rewriteEvent.rewriter, 'buildBrowserOpenUrlActions');
+      assert.strictEqual(rewriteEvent.category, 'deterministic-browser-open-url');
+      assert(rewriteEvent.contextAuthority, 'rewrite event should include context authority');
+      assert(rewriteEvent.contextAuthority.hash, 'rewrite event should include a stable context hash');
+
+      const planEvent = traceEvents.find((entry) => entry.event === 'action:plan');
+      assert(planEvent, 'runtime trace should still record action:plan');
+      assert(Array.isArray(planEvent.rewrites), 'action:plan should summarize rewrite provenance');
+      assert.strictEqual(planEvent.rewrites[0].rewriter, 'buildBrowserOpenUrlActions');
     });
   });
 }

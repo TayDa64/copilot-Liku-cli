@@ -95,11 +95,14 @@ test('fixture bundle loader materializes JSON fixture entries', () => {
 
 test('fixture runner evaluates checked-in transcript fixtures', () => {
   const fixtures = loadTranscriptFixtures(path.join(__dirname, 'fixtures', 'transcripts'));
-  const selected = filterFixtures(fixtures, { fixture: 'repo-boundary-clarification-runtime' });
-  assert.strictEqual(selected.length, 1, 'expected checked-in repo-boundary transcript fixture');
+  const selected = fixtures.filter((fixture) => [
+    'repo-boundary-clarification-runtime',
+    'muse-repo-no-tradingview-drift-runtime'
+  ].includes(fixture.name));
+  assert.strictEqual(selected.length, 2, 'expected checked-in repo-boundary and MUSE anti-drift transcript fixtures');
   const results = evaluateFixtureCases(selected);
-  assert.strictEqual(results.length, 1);
-  assert.strictEqual(results[0].passed, true);
+  assert.strictEqual(results.length, 2);
+  assert(results.every((result) => result.passed), 'expected checked-in repo-boundary transcript fixtures to pass');
 });
 
 test('runtime trace fixtures preserve domain proof expectations and pass the combined runner', () => {
@@ -114,6 +117,28 @@ test('runtime trace fixtures preserve domain proof expectations and pass the com
       },
       {
         ts: '2026-04-05T22:41:10.050Z',
+        session: 'runtime-proof-session',
+        event: 'plan:rewrite',
+        stage: 'preflight',
+        rewriter: 'maybeRewriteTradingViewTimeframeWorkflow',
+        category: 'tradingview-timeframe',
+        reason: 'matched TradingView timeframe reliability workflow',
+        beforeActionCount: 1,
+        afterActionCount: 4,
+        contextAuthority: {
+          summary: {
+            compartmentKey: 'copilot-liku-cli::tradingview::chart::tradingview',
+            repoName: 'copilot-liku-cli',
+            appId: 'tradingview',
+            surfaceClass: 'chart',
+            taskFamily: 'tradingview',
+            confidence: 'high'
+          },
+          hash: 'sha256:test-context-hash'
+        }
+      },
+      {
+        ts: '2026-04-05T22:41:10.060Z',
         session: 'runtime-proof-session',
         event: 'action:planned',
         actionIndex: 0,
@@ -166,6 +191,8 @@ test('runtime trace fixtures preserve domain proof expectations and pass the com
 
     assert.strictEqual(entry.traceMeta.sessionId, 'runtime-proof-session');
     assert.strictEqual(entry.actions.length, 1);
+    assert.strictEqual(entry.rewrites.length, 1);
+    assert.strictEqual(entry.rewrites[0].rewriter, 'maybeRewriteTradingViewTimeframeWorkflow');
     assert.strictEqual(entry.proofExpectations.length, 1);
     assert.strictEqual(entry.proofExpectations[0].minProofLevel, 3);
     assert.strictEqual(entry.proofExpectations[0].verifyKind, 'timeframe-updated');
@@ -178,6 +205,8 @@ test('runtime trace fixtures preserve domain proof expectations and pass the com
     const fixtures = loadTranscriptFixtures(tempDir);
     assert.strictEqual(fixtures.length, 1);
     assert.strictEqual(fixtures[0].suite.proofExpectations.length, 1);
+    assert.strictEqual(fixtures[0].rewrites.length, 1);
+    assert.strictEqual(fixtures[0].rewrites[0].contextAuthority.hash, 'sha256:test-context-hash');
 
     const proofEvaluation = evaluateProofExpectations(fixtures[0]);
     assert.strictEqual(proofEvaluation.passed, true);
