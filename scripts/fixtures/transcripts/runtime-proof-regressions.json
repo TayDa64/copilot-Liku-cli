@@ -33,7 +33,7 @@
           "cwd": "c:\\dev\\muse-ai"
         },
         "expected": {
-          "riskLevel": "medium",
+          "riskLevel": "low",
           "requiresConfirmation": false,
           "objectType": "command",
           "objectLabelIncludes": [

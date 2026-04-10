@@ -420,6 +420,47 @@ function hasExplicitCrossCompartmentTransitionIntent(intent = '') {
   return /\b(browser|edge|chrome|tab|url|website|page|search the web|search online|web search|tradingview|trading view|pine|pine editor|vs code|workspace|repo|repository)\b/i.test(String(intent || ''));
 }
 
+function humanizeCompartmentSegment(value = '') {
+  const normalized = String(value || '').trim();
+  if (!normalized) return 'unknown';
+  return normalized
+    .replace(/[-_]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function summarizeCompartmentForNotice(compartmentKey = '') {
+  const parts = String(compartmentKey || '').split('::');
+  const repoName = humanizeCompartmentSegment(parts[0] || 'unknown-repo');
+  const appName = humanizeCompartmentSegment(parts[1] || 'unknown-app');
+  const taskFamily = humanizeCompartmentSegment(parts[3] || 'general');
+  return `${repoName} -> ${appName} -> ${taskFamily}`;
+}
+
+function buildContextSwitchNotice(executionContextEnvelope = null) {
+  const transition = executionContextEnvelope?.transition || null;
+  const currentCompartmentKey = String(executionContextEnvelope?.compartmentKey || '').trim();
+  const previousCompartmentKey = String(transition?.previousCompartmentKey || '').trim();
+
+  if (!transition?.bridgeEligible || !currentCompartmentKey || !previousCompartmentKey || previousCompartmentKey === currentCompartmentKey) {
+    return null;
+  }
+
+  return {
+    signature: `${previousCompartmentKey}=>${currentCompartmentKey}`,
+    message: `Context switch: parking saved continuity from ${summarizeCompartmentForNotice(previousCompartmentKey)} and starting fresh in ${summarizeCompartmentForNotice(currentCompartmentKey)}. Read-only bridge context remains available for this turn.`
+  };
+}
+
+function announceRuntimeTraceAvailability(ai, execResult, lastAnnouncedSessionId = null) {
+  const runtimeTraceSummary = execResult?.runtimeTraceSummary
+    || (typeof ai?.getLastRuntimeTraceSummary === 'function' ? ai.getLastRuntimeTraceSummary() : null);
+  const sessionId = String(runtimeTraceSummary?.sessionId || execResult?.runtimeTrace?.sessionId || '').trim();
+  if (!sessionId || sessionId === lastAnnouncedSessionId) return lastAnnouncedSessionId;
+  info(`Runtime trace ready: use /trace${sessionId ? ` (${sessionId})` : ''}.`);
+  return sessionId;
+}
+
 function normalizePendingTaskText(value, maxLength = 280) {
   const text = String(value || '').replace(/\s+/g, ' ').trim();
   if (!text) return null;
@@ -1026,6 +1067,7 @@ ${highlight('In-chat commands:')}
   /help       Show AI-service help
   /status     Show auth/provider/model status
   /state      Show or clear session intent constraints
+  /trace      Show or export the last runtime trace
   /login      Authenticate with GitHub Copilot
   /model      Interactive model picker (↑/↓ + Enter) or set directly (e.g. /model gpt-4o)
   /sequence   Toggle guided step-by-step execution (on by default)
@@ -1306,6 +1348,8 @@ async function runChatLoop(ai, options) {
   let popupRecipesEnabled = false;
 
   let lastNonTrivialUserMessage = '';
+  let lastContextSwitchNoticeSignature = null;
+  let lastAnnouncedRuntimeTraceSessionId = null;
 
   const scriptedInputs = Array.isArray(options.scriptedInputs) ? [...options.scriptedInputs] : null;
   let rl = scriptedInputs ? null : createReadline();
@@ -1355,6 +1399,14 @@ async function runChatLoop(ai, options) {
         : getContinuationDecision(line, chatContinuity, pendingRequestedTask))
       : { block: false, useContinuityState: false, reason: null };
 
+    const contextSwitchNotice = explicitTransitionIntent
+      ? buildContextSwitchNotice(continuationExecutionContextEnvelope)
+      : null;
+    if (contextSwitchNotice && contextSwitchNotice.signature !== lastContextSwitchNoticeSignature) {
+      info(contextSwitchNotice.message);
+      lastContextSwitchNoticeSignature = contextSwitchNotice.signature;
+    }
+
     if (continuationDecision.block) {
       warn(continuationDecision.reason);
       continue;
@@ -1390,6 +1442,40 @@ async function runChatLoop(ai, options) {
       const lower = line.trim().toLowerCase();
       if (lower === '/vision on') includeVisualNext = true;
       if (lower === '/vision off') includeVisualNext = false;
+
+      if (lower === '/trace' || lower.startsWith('/trace ')) {
+        const traceArgs = line.trim().slice('/trace'.length).trim();
+        const exportMatch = traceArgs.match(/^export(?:\s+(.+))?$/i);
+
+        if (!traceArgs || /^summary$/i.test(traceArgs)) {
+          const traceText = typeof ai.formatLastRuntimeTraceSummary === 'function'
+            ? ai.formatLastRuntimeTraceSummary()
+            : '';
+          if (!traceText) {
+            info('No runtime trace recorded yet in this chat session.');
+          } else {
+            printTranscriptBlock(['', dim('[runtime-trace]'), traceText, '']);
+          }
+          continue;
+        }
+
+        if (exportMatch) {
+          try {
+            if (typeof ai.exportLastRuntimeTrace !== 'function') {
+              warn('Runtime trace export is unavailable in this mode.');
+            } else {
+              const exported = ai.exportLastRuntimeTrace(exportMatch[1] || null);
+              success(`Exported last runtime trace to ${exported.filePath}`);
+            }
+          } catch (traceError) {
+            error(traceError.message || 'Could not export runtime trace.');
+          }
+          continue;
+        }
+
+        warn('Unknown /trace command. Use /trace or /trace export [path].');
+        continue;
+      }
 
       if (lower === '/sequence' || lower.startsWith('/sequence ')) {
         const parts = lower.split(/\s+/).filter(Boolean);
@@ -1818,6 +1904,8 @@ async function runChatLoop(ai, options) {
       continue;
     }
 
+    lastAnnouncedRuntimeTraceSessionId = announceRuntimeTraceAvailability(ai, execResult, lastAnnouncedRuntimeTraceSessionId);
+
     if (execResult?.postVerificationFailed) {
       warn(execResult.error || 'Post-action verification could not confirm target after retries.');
       const fg = execResult?.postVerification?.foreground;
@@ -2011,6 +2099,8 @@ async function runChatLoop(ai, options) {
         );
 
         if (contExecResult?.cancelled) break;
+
+        lastAnnouncedRuntimeTraceSessionId = announceRuntimeTraceAvailability(ai, contExecResult, lastAnnouncedRuntimeTraceSessionId);
 
         if (!contExecResult?.success) {
           error(contExecResult?.error || 'Continuation actions failed');

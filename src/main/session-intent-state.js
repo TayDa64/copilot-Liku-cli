@@ -10,6 +10,9 @@ const SESSION_INTENT_FILE = path.join(LIKU_HOME, 'session-intent-state.json');
 const CONTINUITY_FRESH_MS = 90 * 1000;
 const CONTINUITY_UI_WATCHER_FRESH_MS = 3 * 60 * 1000;
 const CONTINUITY_RECOVERABLE_MS = 15 * 60 * 1000;
+const ACCESS_TIMESTAMP_DEBOUNCE_MS = 60 * 1000;
+const STALE_PENDING_REQUEST_MS = 12 * 60 * 60 * 1000;
+const LONG_UNUSED_COMPARTMENT_MS = 14 * 24 * 60 * 60 * 1000;
 
 function defaultChatContinuity() {
   return {
@@ -30,6 +33,11 @@ function defaultChatContinuity() {
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+function parseTimestampMs(value) {
+  const parsed = Date.parse(String(value || '').trim());
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function defaultState() {
@@ -340,6 +348,10 @@ function normalizeContextAuthority(contextAuthority = null) {
 
   if (!normalized.summary && !normalized.hash) return null;
   return normalized;
+}
+
+function normalizeAccessTimestamp(value, fallbackValue = null) {
+  return normalizeText(value, 60) || normalizeText(fallbackValue, 60) || null;
 }
 
 function normalizeRewriteSources(rewriteSources = []) {
@@ -760,6 +772,7 @@ function hydrateChatContinuity(continuity = defaultChatContinuity()) {
         || base.lastTurn?.compartmentKey
         || base.lastTurn?.executionContext?.compartmentKey
     ),
+    lastAccessedAt: normalizeAccessTimestamp(base.lastAccessedAt, base.lastTurn?.recordedAt),
     continuationReady: base.continuationReady === true && freshness.freshnessState !== 'stale-recoverable' && freshness.freshnessState !== 'expired',
     degradedReason: baseDegradedReason || (freshnessBlocksContinuation ? freshness.freshnessReason : null)
   };
@@ -913,6 +926,7 @@ function normalizeTurnRecord(turnRecord = {}, previousContinuity = defaultChatCo
         || turnRecord.executionContext?.compartmentKey
         || turnRecord.executionContextEnvelope?.compartmentKey
     ),
+    lastAccessedAt: normalizeAccessTimestamp(turnRecord.lastAccessedAt, turnRecord.recordedAt),
     contextAuthority: normalizeContextAuthority(turnRecord.contextAuthority),
     committedSubgoal: currentSubgoal,
     thought: normalizeText(turnRecord.thought, 240),
@@ -1408,6 +1422,7 @@ function normalizePendingRequestedTask(task = {}) {
 
   return {
     recordedAt: normalizeText(task.recordedAt, 60) || nowIso(),
+    lastAccessedAt: normalizeAccessTimestamp(task.lastAccessedAt, task.recordedAt),
     userMessage: normalizeText(task.userMessage, 280),
     executionIntent: normalizeText(task.executionIntent, 280),
     executionIntentSource: normalizeText(task.executionIntentSource, 80) || 'literal-user-input',
@@ -1432,8 +1447,178 @@ function normalizePendingRequestedTask(task = {}) {
   };
 }
 
+function shouldRefreshAccessTimestamp(currentValue, nowMs) {
+  const currentMs = parseTimestampMs(currentValue);
+  if (currentMs === null) return true;
+  return (nowMs - currentMs) >= ACCESS_TIMESTAMP_DEBOUNCE_MS;
+}
+
+function touchContinuityAccessTimestamp(continuity = null, timestamp = nowIso()) {
+  if (!continuity || typeof continuity !== 'object') return { value: continuity, changed: false };
+  const nowMs = parseTimestampMs(timestamp) || Date.now();
+  if (!shouldRefreshAccessTimestamp(continuity.lastAccessedAt || continuity.lastTurn?.recordedAt, nowMs)) {
+    return { value: continuity, changed: false };
+  }
+
+  return {
+    value: {
+      ...continuity,
+      lastAccessedAt: timestamp
+    },
+    changed: true
+  };
+}
+
+function touchPendingTaskAccessTimestamp(task = null, timestamp = nowIso()) {
+  if (!task || typeof task !== 'object') return { value: task, changed: false };
+  const nowMs = parseTimestampMs(timestamp) || Date.now();
+  if (!shouldRefreshAccessTimestamp(task.lastAccessedAt || task.recordedAt, nowMs)) {
+    return { value: task, changed: false };
+  }
+
+  return {
+    value: {
+      ...task,
+      lastAccessedAt: timestamp
+    },
+    changed: true
+  };
+}
+
+function deriveCompartmentLifecycleScope(compartmentKey, continuity = {}) {
+  const executionContext = continuity?.lastTurn?.executionContext || null;
+  const scope = {
+    tier: 'local'
+  };
+
+  const repoName = normalizeText(executionContext?.repoName, 120);
+  const projectRoot = normalizeText(executionContext?.projectRoot, 260);
+  const appId = normalizeText(executionContext?.appId, 80);
+  const processName = normalizeText(executionContext?.processName, 80);
+  const taskFamily = normalizeText(executionContext?.taskFamily, 80);
+  const normalizedCompartmentKey = normalizeCompartmentKey(compartmentKey);
+
+  if (repoName) scope.repoNames = [repoName];
+  if (projectRoot) scope.projectRoots = [projectRoot];
+  if (appId) scope.appIds = [appId];
+  if (processName) scope.processNames = [processName];
+  if (taskFamily) scope.taskFamilies = [taskFamily];
+  if (normalizedCompartmentKey) scope.compartmentKeys = [normalizedCompartmentKey];
+
+  return scope;
+}
+
+function buildLifecycleMemoryNote(compartmentKey, continuity = {}, timestamp = nowIso()) {
+  if (!hasMeaningfulChatContinuity(continuity)) return null;
+
+  const lastTurn = continuity?.lastTurn || null;
+  const executionContext = lastTurn?.executionContext || {};
+  const headingParts = [
+    normalizeText(executionContext.repoName, 120),
+    normalizeText(executionContext.appId, 80),
+    normalizeText(executionContext.taskFamily, 80)
+  ].filter(Boolean);
+  const heading = headingParts.length > 0
+    ? headingParts.join(' / ')
+    : (normalizeCompartmentKey(compartmentKey) || 'unknown compartment');
+
+  const contentLines = [
+    `Compartment lifecycle snapshot: ${heading}`
+  ];
+
+  if (continuity.activeGoal) contentLines.push(`Active goal: ${continuity.activeGoal}`);
+  if (continuity.currentSubgoal) contentLines.push(`Current subgoal: ${continuity.currentSubgoal}`);
+  if (lastTurn?.actionSummary) contentLines.push(`Last actions: ${lastTurn.actionSummary}`);
+  if (lastTurn?.verificationStatus) contentLines.push(`Verification: ${lastTurn.verificationStatus}`);
+  if (lastTurn?.nextRecommendedStep) contentLines.push(`Next recommended step: ${lastTurn.nextRecommendedStep}`);
+  if (continuity.degradedReason) contentLines.push(`Caution: ${continuity.degradedReason}`);
+  if (continuity.freshnessState) contentLines.push(`Freshness at cleanup: ${continuity.freshnessState}`);
+
+  return {
+    type: 'episodic',
+    content: contentLines.join('\n'),
+    context: 'Stale compartment continuity compressed during lifecycle cleanup.',
+    keywords: [
+      normalizeText(executionContext.repoName, 80),
+      normalizeText(executionContext.appId, 80),
+      normalizeText(executionContext.taskFamily, 80),
+      'compartment',
+      'cleanup'
+    ].filter(Boolean),
+    tags: ['session-intent-cleanup', 'compartment-lifecycle', 'episodic'],
+    scope: deriveCompartmentLifecycleScope(compartmentKey, continuity),
+    source: {
+      kind: 'session-intent-cleanup',
+      recordedAt: timestamp,
+      compartmentKey: normalizeCompartmentKey(compartmentKey),
+      reason: 'long-unused-compartment'
+    }
+  };
+}
+
+function cleanupLifecycleState(state, options = {}) {
+  const nowProvider = typeof options.nowProvider === 'function' ? options.nowProvider : () => new Date();
+  const addMemoryNote = typeof options.addMemoryNote === 'function' ? options.addMemoryNote : null;
+  const now = nowProvider();
+  const nowMs = now instanceof Date ? now.getTime() : Date.now();
+  const timestamp = now instanceof Date ? now.toISOString() : nowIso();
+
+  let changed = false;
+  const nextState = {
+    ...state,
+    chatContinuityByCompartment: { ...(state?.chatContinuityByCompartment || {}) },
+    pendingRequestedTaskByCompartment: { ...(state?.pendingRequestedTaskByCompartment || {}) }
+  };
+
+  for (const [compartmentKey, task] of Object.entries(nextState.pendingRequestedTaskByCompartment)) {
+    const accessMs = parseTimestampMs(task?.lastAccessedAt || task?.recordedAt);
+    if (accessMs === null) continue;
+    if ((nowMs - accessMs) <= STALE_PENDING_REQUEST_MS) continue;
+    delete nextState.pendingRequestedTaskByCompartment[compartmentKey];
+    changed = true;
+  }
+
+  for (const [compartmentKey, continuity] of Object.entries(nextState.chatContinuityByCompartment)) {
+    const accessMs = parseTimestampMs(continuity?.lastAccessedAt || continuity?.lastTurn?.recordedAt);
+    if (accessMs === null) continue;
+    if ((nowMs - accessMs) <= LONG_UNUSED_COMPARTMENT_MS) continue;
+
+    const note = buildLifecycleMemoryNote(compartmentKey, continuity, timestamp);
+    if (note && addMemoryNote) {
+      try {
+        addMemoryNote(note);
+      } catch {}
+    }
+
+    delete nextState.chatContinuityByCompartment[compartmentKey];
+    delete nextState.pendingRequestedTaskByCompartment[compartmentKey];
+    changed = true;
+  }
+
+  if (changed && normalizeCompartmentKey(nextState.activeCompartmentKey)) {
+    const activeKey = normalizeCompartmentKey(nextState.activeCompartmentKey);
+    const hasActiveContinuity = !!nextState.chatContinuityByCompartment[activeKey];
+    const hasActivePendingTask = !!nextState.pendingRequestedTaskByCompartment[activeKey];
+    if (!hasActiveContinuity && !hasActivePendingTask) {
+      nextState.activeCompartmentKey = null;
+    }
+  }
+
+  return { state: nextState, changed };
+}
+
 function createSessionIntentStateStore(options = {}) {
   const stateFile = options.stateFile || SESSION_INTENT_FILE;
+  const addMemoryNote = typeof options.addMemoryNote === 'function'
+    ? options.addMemoryNote
+    : (() => {
+        try {
+          return require('./memory/memory-store').addNote;
+        } catch {
+          return null;
+        }
+      })();
+  const nowProvider = typeof options.nowProvider === 'function' ? options.nowProvider : () => new Date();
   let cachedState = null;
 
   function loadState() {
@@ -1447,6 +1632,12 @@ function createSessionIntentStateStore(options = {}) {
     if (!Array.isArray(cachedState.explicitCorrections)) cachedState.explicitCorrections = [];
     cachedState.chatContinuity = hydrateChatContinuity(cachedState.chatContinuity || defaultChatContinuity());
     cachedState = migrateLegacyCompartmentState(cachedState);
+    const cleaned = cleanupLifecycleState(cachedState, { addMemoryNote, nowProvider });
+    cachedState = cleaned.state;
+    if (cleaned.changed) {
+      ensureParentDir(stateFile);
+      fs.writeFileSync(stateFile, JSON.stringify(cachedState, null, 2));
+    }
     return cachedState;
   }
 
@@ -1523,6 +1714,29 @@ function createSessionIntentStateStore(options = {}) {
       return saveState(state);
     }
     const selection = resolveSelectedCompartmentKey(state, options);
+    const timestamp = nowProvider().toISOString();
+    let changed = false;
+
+    if (selection.compartmentKey && state.chatContinuityByCompartment?.[selection.compartmentKey]) {
+      const touched = touchContinuityAccessTimestamp(state.chatContinuityByCompartment[selection.compartmentKey], timestamp);
+      if (touched.changed) {
+        state.chatContinuityByCompartment[selection.compartmentKey] = touched.value;
+        changed = true;
+      }
+    }
+
+    if (selection.compartmentKey && state.pendingRequestedTaskByCompartment?.[selection.compartmentKey]) {
+      const touched = touchPendingTaskAccessTimestamp(state.pendingRequestedTaskByCompartment[selection.compartmentKey], timestamp);
+      if (touched.changed) {
+        state.pendingRequestedTaskByCompartment[selection.compartmentKey] = touched.value;
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      return saveState(state);
+    }
+
     return mirrorStateToCompartment(state, selection.compartmentKey, { strict: selection.strict });
   }
 
@@ -1559,6 +1773,7 @@ function createSessionIntentStateStore(options = {}) {
     if (normalizedTask && compartmentKey) {
       state.pendingRequestedTaskByCompartment[compartmentKey] = {
         ...normalizedTask,
+        lastAccessedAt: normalizeAccessTimestamp(normalizedTask.lastAccessedAt, normalizedTask.recordedAt),
         compartmentKey: normalizedTask.compartmentKey || compartmentKey
       };
       state.activeCompartmentKey = compartmentKey;
@@ -1660,6 +1875,7 @@ function createSessionIntentStateStore(options = {}) {
     if (compartmentKey) {
       state.chatContinuityByCompartment[compartmentKey] = {
         ...normalizedContinuity,
+        lastAccessedAt: normalizeAccessTimestamp(normalizedContinuity.lastAccessedAt, normalizedContinuity.lastTurn?.recordedAt),
         compartmentKey
       };
       state.activeCompartmentKey = compartmentKey;

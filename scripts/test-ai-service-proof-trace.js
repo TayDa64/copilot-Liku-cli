@@ -2,6 +2,7 @@
 
 const assert = require('assert');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 
 const aiService = require(path.join(__dirname, '..', 'src', 'main', 'ai-service.js'));
@@ -335,6 +336,110 @@ async function main() {
       assert(Array.isArray(planEvent.rewrites), 'action:plan should summarize rewrite provenance');
       assert.strictEqual(planEvent.rewrites[0].rewriter, 'buildBrowserOpenUrlActions');
     });
+  });
+
+  await test('executeActions records a lightweight last runtime trace summary and exports it on demand', async () => {
+    const traceFile = path.join(os.tmpdir(), `liku-runtime-trace-source-${Date.now()}.jsonl`);
+    const exportFile = path.join(os.tmpdir(), `liku-runtime-trace-export-${Date.now()}.jsonl`);
+    const traceEvents = [];
+    const runtimeTraceLog = {
+      sessionId: 'runtime-export-session',
+      filePath: traceFile,
+      append(event, data) {
+        const entry = { event, ...data };
+        traceEvents.push(entry);
+        fs.appendFileSync(traceFile, `${JSON.stringify(entry)}\n`, 'utf8');
+      },
+      close(summary) {
+        const entry = { event: 'runtime:session:end', summary };
+        traceEvents.push(entry);
+        fs.appendFileSync(traceFile, `${JSON.stringify(entry)}\n`, 'utf8');
+      }
+    };
+
+    aiService.setUIWatcher(null);
+
+    try {
+      await withPatchedSystemAutomation({
+        focusWindow: async () => ({ success: true }),
+        executeAction: async (action) => ({ success: true, action: action?.type || 'unknown', message: 'ok' }),
+        getRunningProcessesByNames: async () => [],
+        getForegroundWindowInfo: async () => ({
+          success: true,
+          hwnd: 330552,
+          title: 'Example Repo - VS Code',
+          processName: 'code',
+          windowKind: 'main'
+        })
+      }, async () => {
+        const execResult = await aiService.executeActions({
+          thought: 'Inspect the repo workspace',
+          verification: 'Repo listing should be available',
+          actions: [{
+            type: 'run_command',
+            command: 'cd c:\\dev\\copilot-Liku-cli && dir',
+            shell: 'powershell',
+            reason: 'Inspect the repo workspace'
+          }]
+        }, null, null, {
+          userMessage: 'inspect the current repo workspace',
+          runtimeTraceLog,
+          executionContextEnvelope: {
+            compartmentKey: 'copilot-liku-cli::code::unknown::repo-editor',
+            repo: { name: 'copilot-liku-cli', projectRoot: 'c:\\dev\\copilot-Liku-cli' },
+            foreground: { appId: 'code', processName: 'code', surfaceClass: 'unknown', interactionMode: 'unknown' },
+            taskFamily: 'repo-editor',
+            confidence: 'high',
+            eligibility: { tradingViewPine: false, tradingViewPineReason: 'not-eligible' }
+          },
+          selectionProvenance: {
+            skills: { ids: ['skill-repo-inspection'], summary: { selectedCount: 1 } },
+            memories: { ids: ['note-repo-inspection'], summary: { selectedCount: 1 } },
+            executionContext: { compartmentKey: 'copilot-liku-cli::code::unknown::repo-editor' }
+          },
+          actionExecutor: async (action) => ({
+            success: true,
+            action: action.type,
+            message: 'workspace inspected',
+            proof: {
+              proofId: 'proof-runtime-export',
+              actionType: action.type,
+              level: 1,
+              levelName: 'target-grounded',
+              status: 'verified',
+              checks: [],
+              limitations: []
+            }
+          })
+        });
+
+        assert.strictEqual(execResult.success, true);
+        assert(execResult.runtimeTraceSummary, 'executeActions should surface a lightweight runtimeTraceSummary');
+
+        const summary = aiService.getLastRuntimeTraceSummary();
+        assert(summary, 'ai-service should retain the latest runtime trace summary');
+        assert.strictEqual(summary.sessionId, 'runtime-export-session');
+        assert.strictEqual(summary.actionCount, 1);
+        assert.strictEqual(summary.success, true);
+        assert.strictEqual(summary.contextAuthority?.compartmentKey, 'copilot-liku-cli::code::unknown::repo-editor');
+
+        const formatted = aiService.formatLastRuntimeTraceSummary();
+        assert(formatted.includes('Last runtime trace'), 'formatted trace summary should include a header');
+        assert(formatted.includes('runtime-export-session'), 'formatted trace summary should include the session id');
+        assert(formatted.includes(traceFile), 'formatted trace summary should include the source trace file path');
+
+        const exported = aiService.exportLastRuntimeTrace(exportFile);
+        assert.strictEqual(exported.sessionId, 'runtime-export-session');
+        assert.strictEqual(exported.filePath, exportFile);
+        assert(fs.existsSync(exportFile), 'exportLastRuntimeTrace should copy the trace to the requested destination');
+
+        const exportedText = fs.readFileSync(exportFile, 'utf8');
+        assert(exportedText.includes('runtime:session:end'), 'exported runtime trace should preserve the closing session summary entry');
+      });
+    } finally {
+      try { fs.unlinkSync(traceFile); } catch {}
+      try { fs.unlinkSync(exportFile); } catch {}
+    }
   });
 }
 

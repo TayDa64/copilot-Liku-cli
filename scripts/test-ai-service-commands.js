@@ -5,6 +5,7 @@ const path = require('path');
 
 const { createCommandHandler } = require(path.join(__dirname, '..', 'src', 'main', 'ai-service', 'commands.js'));
 const { createSlashCommandHelpers } = require(path.join(__dirname, '..', 'src', 'main', 'ai-service', 'slash-command-helpers.js'));
+const aiService = require(path.join(__dirname, '..', 'src', 'main', 'ai-service.js'));
 
 function test(name, fn) {
   try {
@@ -276,4 +277,29 @@ test('status command preserves status text shape', () => {
   assert.ok(result.message.includes('Runtime endpoint: api.githubcopilot.com'));
   assert.ok(result.message.includes('History: 7 messages'));
   assert.ok(result.message.includes('Visual: 2 captures'));
+});
+
+test('run_command safety keeps read-only inspection commands low-risk', () => {
+  const inspection = aiService.analyzeActionSafety({
+    type: 'run_command',
+    command: 'cd c:\\dev\\copilot-Liku-cli && dir | Select-Object -First 5',
+    reason: 'Inspect the workspace contents'
+  }, {
+    userMessage: 'delete any doubt and just inspect the workspace structure'
+  });
+
+  assert.strictEqual(inspection.riskLevel, aiService.ActionRiskLevel.LOW);
+  assert.strictEqual(inspection.requiresConfirmation, false);
+  assert.ok((inspection.warnings || []).some((warning) => /read-only inspection command/i.test(String(warning || ''))));
+
+  const destructive = aiService.analyzeActionSafety({
+    type: 'run_command',
+    command: 'Remove-Item -Recurse -Force .\\logs',
+    reason: 'Delete generated logs'
+  }, {
+    userMessage: 'just inspect the repo'
+  });
+
+  assert.strictEqual(destructive.riskLevel, aiService.ActionRiskLevel.CRITICAL);
+  assert.strictEqual(destructive.requiresConfirmation, true);
 });

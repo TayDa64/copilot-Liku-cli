@@ -26,6 +26,8 @@ let lastRecordedTurn = null;
 let preflightUserMessages = [];
 const failFirstPineExecution = process.env.__FAIL_FIRST_PINE_EXECUTION__ === '1';
 let failedFirstPineExecution = false;
+let lastRuntimeTraceSummary = null;
+let traceExports = [];
 
 function isScreenLikeCaptureMode(captureMode) {
   const normalized = String(captureMode || '').trim().toLowerCase();
@@ -249,6 +251,10 @@ const aiStub = {
   executeActions: async (actionData) => {
     executeCount++;
     const actions = Array.isArray(actionData?.actions) ? actionData.actions : [];
+    const runtimeTrace = {
+      sessionId: 'runtime-stub-' + executeCount,
+      filePath: 'C:/tmp/runtime-stub-' + executeCount + '.jsonl'
+    };
     const isTradingViewPineWorkflow = actions.some((action) =>
       String(action?.verify?.target || '').toLowerCase() === 'pine-editor'
       || String(action?.tradingViewShortcut?.id || '').toLowerCase() === 'open-pine-editor'
@@ -257,6 +263,15 @@ const aiStub = {
     );
     if (failFirstPineExecution && !failedFirstPineExecution && isTradingViewPineWorkflow) {
       failedFirstPineExecution = true;
+      lastRuntimeTraceSummary = {
+        sessionId: runtimeTrace.sessionId,
+        filePath: runtimeTrace.filePath,
+        mode: 'execute',
+        success: false,
+        error: 'Element not found',
+        actionCount: actions.length,
+        observationCheckpointCount: 0
+      };
       return {
         success: false,
         error: 'Element not found',
@@ -264,16 +279,56 @@ const aiStub = {
           { index: 6, action: 'key', success: false, error: 'Element not found' }
         ],
         screenshotCaptured: false,
-        postVerification: { verified: false }
+        postVerification: { verified: false },
+        runtimeTrace,
+        runtimeTraceSummary: lastRuntimeTraceSummary
       };
     }
-    return { success: true, results: [], screenshotCaptured: false, postVerification: { verified: true } };
+    lastRuntimeTraceSummary = {
+      sessionId: runtimeTrace.sessionId,
+      filePath: runtimeTrace.filePath,
+      mode: 'execute',
+      success: true,
+      error: null,
+      actionCount: actions.length,
+      observationCheckpointCount: 0
+    };
+    return {
+      success: true,
+      results: [],
+      screenshotCaptured: false,
+      postVerification: { verified: true },
+      runtimeTrace,
+      runtimeTraceSummary: lastRuntimeTraceSummary
+    };
   },
   getLatestVisualContext: () => {
     if (!Array.isArray(scriptedVisualStates) || scriptedVisualStates.length === 0) return null;
     return scriptedVisualStates[Math.max(0, executeCount - 1)] || scriptedVisualStates[scriptedVisualStates.length - 1] || null;
   },
-  parsePreferenceCorrection: async () => ({ success: false, error: 'not needed' })
+  parsePreferenceCorrection: async () => ({ success: false, error: 'not needed' }),
+  getLastRuntimeTraceSummary: () => lastRuntimeTraceSummary,
+  formatLastRuntimeTraceSummary: () => {
+    if (!lastRuntimeTraceSummary) return '';
+    return [
+      'Last runtime trace',
+      '- sessionId: ' + lastRuntimeTraceSummary.sessionId,
+      '- mode: ' + lastRuntimeTraceSummary.mode,
+      '- outcome: ' + (lastRuntimeTraceSummary.success ? 'success' : 'failed'),
+      '- actionCount: ' + lastRuntimeTraceSummary.actionCount,
+      '- traceFile: ' + lastRuntimeTraceSummary.filePath
+    ].join('\\n');
+  },
+  exportLastRuntimeTrace: (destinationPath = null) => {
+    if (!lastRuntimeTraceSummary) throw new Error('No runtime trace recorded yet in this chat session.');
+    const resolved = require('path').resolve(process.cwd(), String(destinationPath || ('liku-runtime-trace-' + lastRuntimeTraceSummary.sessionId + '.jsonl')).trim());
+    traceExports.push(resolved);
+    return {
+      sessionId: lastRuntimeTraceSummary.sessionId,
+      sourcePath: lastRuntimeTraceSummary.filePath,
+      filePath: resolved
+    };
+  }
 };
 
 aiStub.addVisualContext = (entry) => {
@@ -335,7 +390,8 @@ const sessionIntentStateStub = {
   getChatContinuityState: () => continuityState,
   getSessionIntentState: () => ({
     chatContinuity: continuityState,
-    pendingRequestedTask
+    pendingRequestedTask,
+    activeCompartmentKey: continuityState?.compartmentKey || null
   }),
   getPendingRequestedTask: () => pendingRequestedTask,
   recordChatContinuityTurn: (turnRecord) => {
@@ -374,6 +430,7 @@ Module._load = function(request, parent, isMain) {
   console.log('RECORDED_CONTINUITY:' + JSON.stringify(continuityState));
   console.log('LAST_TURN:' + JSON.stringify(lastRecordedTurn));
   console.log('VISUAL_CONTEXTS:' + JSON.stringify(visualContexts));
+  console.log('TRACE_EXPORTS:' + JSON.stringify(traceExports));
   process.exit(result && result.success === false ? 1 : 0);
 })().catch((error) => {
   console.error(error.stack || error.message);
@@ -473,6 +530,7 @@ async function main() {
   assert(/Using saved continuity intent instead of the literal input:/i.test(stateBackedContinuation.output), 'state-backed continuation should explicitly signal saved continuity reuse');
 
   const explicitBrowserBridge = await runScenarioWithContinuity(['continue by searching this error in browser'], {
+    compartmentKey: 'copilot-liku-cli::code::unknown::repo-editor',
     activeGoal: 'Inspect the active VS Code workspace',
     currentSubgoal: 'Inspect the active VS Code workspace',
     continuationReady: true,
@@ -487,6 +545,18 @@ async function main() {
   assert(explicitBrowserBridge.output.includes('SEEN_MESSAGES:["continue by searching this error in browser"]'), 'explicit browser bridge should keep the literal transition request visible');
   assert(explicitBrowserBridge.output.includes('PREFLIGHT_USER_MESSAGES:["continue by searching this error in browser"]'), 'explicit browser bridge should preserve the literal transition request for preflight intent');
   assert(!/Using saved continuity intent instead of the literal input:/i.test(explicitBrowserBridge.output), 'explicit browser bridge should not collapse the transition back into saved continuity intent');
+  assert(/Context switch: parking saved continuity from/i.test(explicitBrowserBridge.output), 'explicit browser bridge should surface a lightweight context-switch notice');
+
+  const runtimeTraceCommandFlow = await runScenario([
+    'help me make a confident synthesis of ticker LUNR in tradingview',
+    '/trace',
+    '/trace export last-trace.jsonl'
+  ]);
+  assert.strictEqual(runtimeTraceCommandFlow.exitCode, 0, 'runtime trace command flow should exit successfully');
+  assert(/Runtime trace ready: use \/trace/i.test(runtimeTraceCommandFlow.output), 'runtime trace command flow should announce trace availability after execution');
+  assert(/Last runtime trace/i.test(runtimeTraceCommandFlow.output), 'runtime trace command flow should print a compact trace summary');
+  assert(/Exported last runtime trace to/i.test(runtimeTraceCommandFlow.output), 'runtime trace command flow should support exporting the last trace');
+  assert(/TRACE_EXPORTS:\[.*last-trace\.jsonl/i.test(runtimeTraceCommandFlow.output), 'runtime trace command flow should resolve an export destination for the last trace');
 
   const pineDiagnosticsContinuation = await runScenarioWithContinuity(['continue'], {
     activeGoal: 'Diagnose the visible Pine script errors in TradingView',

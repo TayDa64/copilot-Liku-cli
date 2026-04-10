@@ -202,6 +202,8 @@ let lastSelectionProvenance = {
   selectedAt: 0
 };
 
+let lastRuntimeTraceSummary = null;
+
 function cloneSerializable(value) {
   if (value === null || value === undefined) return value ?? null;
   try {
@@ -357,6 +359,129 @@ function collectProofReferences(results = [], runtimeTrace = null) {
       : null,
     proofIds: Array.from(new Set(proofIds)).slice(0, 12),
     observationRefs: observationRefs.slice(0, 12)
+  };
+}
+
+function recordLastRuntimeTraceSummary(summary = null) {
+  lastRuntimeTraceSummary = cloneSerializable(summary || null);
+}
+
+function buildLastRuntimeTraceSummary({
+  traceLog = null,
+  mode = 'execute',
+  thought = null,
+  verification = null,
+  success = false,
+  error = null,
+  actionCount = 0,
+  observationCheckpointCount = 0,
+  pendingConfirmation = false,
+  screenshotRequested = false,
+  rewriteSources = [],
+  selectionProvenance = null,
+  executionContextEnvelope = null,
+  pendingActionId = null
+} = {}) {
+  if (!traceLog || typeof traceLog !== 'object') return null;
+
+  const traceSelection = summarizeSelectionProvenanceForTrace(selectionProvenance);
+  const contextAuthority = summarizeExecutionContextAuthority(executionContextEnvelope);
+
+  return {
+    recordedAt: new Date().toISOString(),
+    mode: String(mode || 'execute').trim() || 'execute',
+    sessionId: String(traceLog.sessionId || '').trim() || null,
+    filePath: String(traceLog.filePath || '').trim() || null,
+    thought: String(thought || '').trim() || null,
+    verification: String(verification || '').trim() || null,
+    success: success === true,
+    pendingConfirmation: pendingConfirmation === true,
+    error: String(error || '').trim() || null,
+    actionCount: Number.isFinite(Number(actionCount)) ? Number(actionCount) : 0,
+    observationCheckpointCount: Number.isFinite(Number(observationCheckpointCount)) ? Number(observationCheckpointCount) : 0,
+    screenshotRequested: screenshotRequested === true,
+    rewriteCount: Array.isArray(rewriteSources) ? rewriteSources.length : 0,
+    pendingActionId: String(pendingActionId || '').trim() || null,
+    selection: traceSelection
+      ? {
+          selectedSkillIds: Array.isArray(traceSelection.selectedSkillIds) ? traceSelection.selectedSkillIds.slice(0, 8) : [],
+          selectedMemoryIds: Array.isArray(traceSelection.selectedMemoryIds) ? traceSelection.selectedMemoryIds.slice(0, 8) : []
+        }
+      : { selectedSkillIds: [], selectedMemoryIds: [] },
+    contextAuthority
+  };
+}
+
+function getLastRuntimeTraceSummary() {
+  return cloneSerializable(lastRuntimeTraceSummary);
+}
+
+function formatLastRuntimeTraceSummary(summary = null) {
+  const traceSummary = cloneSerializable(summary || lastRuntimeTraceSummary || null);
+  if (!traceSummary || typeof traceSummary !== 'object') return '';
+
+  const outcome = traceSummary.pendingConfirmation
+    ? 'pending-confirmation'
+    : traceSummary.success
+      ? 'success'
+      : 'failed';
+
+  const lines = [
+    'Last runtime trace',
+    `- sessionId: ${traceSummary.sessionId || 'unknown'}`,
+    `- mode: ${traceSummary.mode || 'unknown'}`,
+    `- outcome: ${outcome}`,
+    `- actionCount: ${Number.isFinite(Number(traceSummary.actionCount)) ? Number(traceSummary.actionCount) : 0}`,
+    `- observationCheckpoints: ${Number.isFinite(Number(traceSummary.observationCheckpointCount)) ? Number(traceSummary.observationCheckpointCount) : 0}`,
+    `- traceFile: ${traceSummary.filePath || 'unavailable'}`
+  ];
+
+  if (traceSummary.contextAuthority?.compartmentKey) {
+    lines.push(`- compartmentKey: ${traceSummary.contextAuthority.compartmentKey}`);
+  }
+  if (traceSummary.contextAuthority?.taskFamily) {
+    lines.push(`- taskFamily: ${traceSummary.contextAuthority.taskFamily}`);
+  }
+  if (traceSummary.rewriteCount) {
+    lines.push(`- rewrites: ${traceSummary.rewriteCount}`);
+  }
+  if (Array.isArray(traceSummary.selection?.selectedSkillIds) && traceSummary.selection.selectedSkillIds.length > 0) {
+    lines.push(`- selectedSkills: ${traceSummary.selection.selectedSkillIds.join(', ')}`);
+  }
+  if (Array.isArray(traceSummary.selection?.selectedMemoryIds) && traceSummary.selection.selectedMemoryIds.length > 0) {
+    lines.push(`- selectedMemories: ${traceSummary.selection.selectedMemoryIds.join(', ')}`);
+  }
+  if (traceSummary.error) {
+    lines.push(`- error: ${traceSummary.error}`);
+  }
+
+  return lines.join('\n');
+}
+
+function exportLastRuntimeTrace(destinationPath = null) {
+  const traceSummary = getLastRuntimeTraceSummary();
+  if (!traceSummary?.filePath) {
+    throw new Error('No runtime trace recorded yet. Run an action sequence first.');
+  }
+  if (!fs.existsSync(traceSummary.filePath)) {
+    throw new Error(`Runtime trace file is unavailable: ${traceSummary.filePath}`);
+  }
+
+  const safeSessionId = String(traceSummary.sessionId || 'latest-runtime-trace').replace(/[^a-zA-Z0-9._-]+/g, '-');
+  const requestedDestination = String(destinationPath || '').trim();
+  const resolvedDestination = requestedDestination
+    ? path.resolve(process.cwd(), requestedDestination)
+    : path.join(process.cwd(), `liku-runtime-trace-${safeSessionId}.jsonl`);
+
+  if (path.resolve(traceSummary.filePath) !== resolvedDestination) {
+    fs.mkdirSync(path.dirname(resolvedDestination), { recursive: true });
+    fs.copyFileSync(traceSummary.filePath, resolvedDestination);
+  }
+
+  return {
+    sessionId: traceSummary.sessionId,
+    sourcePath: traceSummary.filePath,
+    filePath: resolvedDestination
   };
 }
 
@@ -2699,6 +2824,21 @@ const SAFE_PATTERNS = [
   /\b(help|info|about|settings|preferences)\b/i
 ];
 
+const READ_ONLY_RUN_COMMAND_REDIRECTION_PATTERN = /(?:^|\s)(?:\d?>>?|>>?)\s*\S/i;
+
+const READ_ONLY_RUN_COMMAND_SEGMENT_PATTERNS = [
+  /^(?:cd|chdir|pushd|popd|push-location|pop-location|set-location)\b/i,
+  /^(?:pwd|get-location)\b/i,
+  /^(?:dir|ls|get-childitem|get-item|resolve-path|test-path)\b/i,
+  /^(?:type|cat|get-content)\b/i,
+  /^(?:echo|write-output|printf)\b/i,
+  /^(?:where(?:\.exe)?|which|whoami|get-process|ps|tasklist)\b/i,
+  /^(?:findstr|grep|select-string|where-object|select-object|sort-object|measure-object|format-table|convertfrom-json|out-string)\b/i,
+  /^git\s+(?:status|diff|log|branch(?:\s+--show-current)?|remote|rev-parse|show|ls-files|config(?:\s+--(?:get|get-all|list))?)\b/i,
+  /^npm\s+(?:view|config\s+get)\b/i,
+  /^(?:node|npm|pnpm|yarn|python|python3)\s+(?:-v|--version)\b/i
+];
+
 /**
  * Pending action awaiting user confirmation
  */
@@ -3086,6 +3226,30 @@ function buildActionSafetyKeywordContext(action, targetInfo = {}) {
   ].join(' ');
 }
 
+function isReadOnlyRunCommand(command = '') {
+  const raw = String(command || '').trim();
+  if (!raw) return false;
+  if (READ_ONLY_RUN_COMMAND_REDIRECTION_PATTERN.test(raw)) return false;
+
+  const segments = raw
+    .split(/&&|;|\r?\n|\|(?!\|)/)
+    .map((segment) => String(segment || '').trim())
+    .filter(Boolean);
+
+  if (segments.length === 0) return false;
+
+  return segments.every((segment) => {
+    const normalized = segment
+      .replace(/^@(?!\w)/, '')
+      .replace(/^&\s*/, '')
+      .replace(/^\((.*)\)$/s, '$1')
+      .trim();
+
+    if (!normalized) return false;
+    return READ_ONLY_RUN_COMMAND_SEGMENT_PATTERNS.some((pattern) => pattern.test(normalized));
+  });
+}
+
 /**
  * Analyze the safety/risk level of an action
  * @param {Object} action - The action to analyze
@@ -3114,6 +3278,8 @@ function analyzeActionSafety(action, targetInfo = {}) {
     confirmationPrompt: null,
     timestamp: Date.now()
   };
+  const isReadOnlyInspectionCommand = String(action?.type || '').trim().toLowerCase() === 'run_command'
+    && isReadOnlyRunCommand(action?.command || '');
   
   // Check action type base risk
   switch (action.type) {
@@ -3223,6 +3389,9 @@ function analyzeActionSafety(action, targetInfo = {}) {
         result.riskLevel = ActionRiskLevel.HIGH;
         result.warnings.push('Command may delete files');
         result.requiresConfirmation = true;
+      } else if (isReadOnlyInspectionCommand) {
+        result.riskLevel = ActionRiskLevel.LOW;
+        result.warnings.push('Read-only inspection command');
       } else {
         result.riskLevel = ActionRiskLevel.MEDIUM;
       }
@@ -3260,6 +3429,9 @@ function analyzeActionSafety(action, targetInfo = {}) {
   for (const pattern of DANGER_PATTERNS) {
     if (pattern.test(riskTextToCheck)) {
       const matchedKeyword = String(riskTextToCheck.match(pattern)?.[0] || '');
+      if (isReadOnlyInspectionCommand) {
+        continue;
+      }
       if (benignPineStarterResetIntent && /\b(delete|remove|erase|destroy|clear|reset|format)\b/i.test(matchedKeyword)) {
         continue;
       }
@@ -8057,6 +8229,25 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
     reflectionApplied: reflectionApplied?.applied === true
   });
 
+  const runtimeTraceSummary = buildLastRuntimeTraceSummary({
+    traceLog: runtimeTraceLog,
+    mode: 'execute',
+    thought: actionData.thought,
+    verification: actionData.verification,
+    success,
+    error,
+    actionCount: Array.isArray(actionData.actions) ? actionData.actions.length : 0,
+    observationCheckpointCount: observationCheckpoints.length,
+    pendingConfirmation,
+    screenshotRequested,
+    rewriteSources: actionData.rewriteSources || [],
+    selectionProvenance,
+    executionContextEnvelope
+  });
+  if (runtimeTraceSummary) {
+    recordLastRuntimeTraceSummary(runtimeTraceSummary);
+  }
+
   return {
     success,
     thought: actionData.thought,
@@ -8080,6 +8271,7 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
           filePath: runtimeTraceLog.filePath || null
         }
       : null,
+    runtimeTraceSummary,
     pendingCompartmentKey: pendingConfirmation ? getPendingAction()?.executionContextEnvelope?.compartmentKey || null : null
   };
 }
@@ -8594,6 +8786,26 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
     pendingActionId: pending.actionId || null,
     screenshotRequested
   });
+
+  const runtimeTraceSummary = buildLastRuntimeTraceSummary({
+    traceLog: runtimeTraceLog,
+    mode: 'resume',
+    thought: pending.thought,
+    verification: pending.verification,
+    success,
+    error,
+    actionCount: actionsToResume.length,
+    observationCheckpointCount: observationCheckpoints.length,
+    pendingConfirmation: false,
+    screenshotRequested,
+    rewriteSources: pending.rewriteSources || [],
+    selectionProvenance,
+    executionContextEnvelope: pending.executionContextEnvelope || null,
+    pendingActionId: pending.actionId || null
+  });
+  if (runtimeTraceSummary) {
+    recordLastRuntimeTraceSummary(runtimeTraceSummary);
+  }
   
   return {
     success,
@@ -8614,7 +8826,8 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
           sessionId: runtimeTraceLog.sessionId || null,
           filePath: runtimeTraceLog.filePath || null
         }
-      : null
+      : null,
+    runtimeTraceSummary
   };
 }
 
@@ -8732,6 +8945,9 @@ module.exports = {
   confirmPendingAction,
   rejectPendingAction,
   resumeAfterConfirmation,
+  getLastRuntimeTraceSummary,
+  formatLastRuntimeTraceSummary,
+  exportLastRuntimeTrace,
   // UI awareness
   setUIWatcher,
   getUIWatcher,

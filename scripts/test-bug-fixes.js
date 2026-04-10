@@ -618,11 +618,12 @@ test('ai-service keeps run_command risk grounded in the command when Pine prose 
     userMessage: pineClearProse
   });
 
-  assertEqual(benign.riskLevel, aiService.ActionRiskLevel.MEDIUM, 'benign run_command actions should not escalate just because Pine prose mentions clear');
+  assertEqual(benign.riskLevel, aiService.ActionRiskLevel.LOW, 'benign read-only run_command actions should stay low-risk even when Pine prose mentions clear');
   assertEqual(benign.requiresConfirmation, false, 'benign run_command actions should not require confirmation due to unrelated Pine clear prose');
   assertEqual(benign.confirmationContext?.repoPath, 'c:\\dev\\muse-ai', 'benign run_command actions should still infer repo context for explanation');
   assert(/repo c:\\dev\\muse-ai/i.test(String(benign.description || '')), 'benign run_command descriptions should name the concrete repo context');
   assert(!(benign.warnings || []).some((warning) => /Detected risky keyword: clear/i.test(String(warning || ''))), 'benign run_command actions should not inherit clear warnings from unrelated user prose');
+  assert((benign.warnings || []).some((warning) => /read-only inspection command/i.test(String(warning || ''))), 'benign read-only run_command actions should explain why they were downgraded');
 
   const destructive = aiService.analyzeActionSafety({
     type: 'run_command',
@@ -637,6 +638,47 @@ test('ai-service keeps run_command risk grounded in the command when Pine prose 
   assertEqual(destructive.requiresConfirmation, true, 'destructive commands should still require confirmation');
   assert((destructive.warnings || []).some((warning) => /Potentially destructive command/i.test(String(warning || ''))), 'destructive commands should preserve the command-grounded warning');
   assert(/run delete command in repo c:\\dev\\muse-ai/i.test(String(destructive.confirmationPrompt || '')), 'destructive command confirmation text should name the concrete repo instead of a bare keyword');
+});
+
+test('ai-service classifies common inspection commands as low-risk read-only commands', () => {
+  const aiServicePath = path.join(__dirname, '..', 'src', 'main', 'ai-service.js');
+  const aiService = require(aiServicePath);
+
+  const readOnly = aiService.analyzeActionSafety({
+    type: 'run_command',
+    command: 'npm view copilot-liku-cli --json | ConvertFrom-Json | Select-Object -ExpandProperty bin',
+    reason: 'Inspect the published npm bin metadata'
+  }, {
+    userMessage: 'clear out any confusion and inspect the published package metadata only'
+  });
+
+  assertEqual(readOnly.riskLevel, aiService.ActionRiskLevel.LOW, 'common inspection commands should downgrade to LOW risk');
+  assertEqual(readOnly.requiresConfirmation, false, 'common inspection commands should not require confirmation');
+  assert((readOnly.warnings || []).some((warning) => /read-only inspection command/i.test(String(warning || ''))), 'common inspection commands should explain that they are read-only');
+  assert(!(readOnly.warnings || []).some((warning) => /detected risky keyword: clear/i.test(String(warning || ''))), 'common inspection commands should ignore unrelated dangerous prose');
+
+  const formatTable = aiService.analyzeActionSafety({
+    type: 'run_command',
+    command: 'Get-Process | Format-Table Name, CPU',
+    reason: 'Inspect running processes in a table'
+  }, {
+    userMessage: 'format the output for readability only'
+  });
+
+  assertEqual(formatTable.riskLevel, aiService.ActionRiskLevel.LOW, 'Format-Table inspection commands should stay low-risk');
+  assertEqual(formatTable.requiresConfirmation, false, 'Format-Table inspection commands should not require confirmation');
+  assert(!(formatTable.warnings || []).some((warning) => /run delete command|detected risky keyword: format/i.test(String(warning || ''))), 'Format-Table inspection commands should not trip destructive keyword warnings');
+
+  const redirected = aiService.analyzeActionSafety({
+    type: 'run_command',
+    command: 'git status > status.txt',
+    reason: 'Persist git status to a file'
+  }, {
+    userMessage: 'inspect the repo state'
+  });
+
+  assertEqual(redirected.riskLevel, aiService.ActionRiskLevel.MEDIUM, 'redirection should prevent the read-only allowlist from applying');
+  assertEqual(redirected.requiresConfirmation, false, 'redirection alone should not escalate to confirmation-required without destructive content');
 });
 
 test('pending action storage preserves enriched confirmation context', () => {

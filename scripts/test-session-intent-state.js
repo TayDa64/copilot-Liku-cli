@@ -587,6 +587,208 @@ test('session intent store persists Slice 6 context authority rewrite sources an
   fs.rmSync(tempDir, { recursive: true, force: true });
 });
 
+test('session intent store records and refreshes compartment access timestamps', () => {
+  const repoRoot = path.join(__dirname, '..');
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'liku-session-intent-'));
+  const stateFile = path.join(tempDir, 'session-intent-state.json');
+  let currentNow = new Date('2026-04-10T12:00:00.000Z');
+  const store = createSessionIntentStateStore({
+    stateFile,
+    nowProvider: () => currentNow,
+    addMemoryNote: () => null
+  });
+
+  const repoEditorEnvelope = buildExecutionContextEnvelope({
+    cwd: repoRoot,
+    foreground: { processName: 'code', title: 'README.md - Visual Studio Code' },
+    sessionState: store.getState({ cwd: repoRoot }),
+    userMessage: 'continue inspecting this VS Code workspace'
+  });
+
+  store.recordExecutedTurn({
+    recordedAt: currentNow.toISOString(),
+    userMessage: 'continue inspecting this VS Code workspace',
+    executionIntent: 'Inspect the active VS Code workspace',
+    executionIntentSource: 'saved-chat-continuity',
+    executionContextEnvelope: repoEditorEnvelope,
+    committedSubgoal: 'Inspect the active VS Code workspace',
+    actionPlan: [{ type: 'focus_window', processName: 'code' }, { type: 'screenshot' }],
+    success: true,
+    screenshotCaptured: true,
+    observationEvidence: { captureMode: 'window', captureTrusted: true },
+    verification: { status: 'verified' },
+    nextRecommendedStep: 'Continue from the current workspace state.'
+  }, { cwd: repoRoot, executionContextEnvelope: repoEditorEnvelope });
+
+  store.setPendingRequestedTask({
+    recordedAt: currentNow.toISOString(),
+    userMessage: 'continue',
+    executionIntent: 'Inspect the active VS Code workspace',
+    executionIntentSource: 'saved-chat-continuity',
+    taskSummary: 'Inspect the active VS Code workspace',
+    targetApp: 'code',
+    executionContextEnvelope: repoEditorEnvelope
+  }, { cwd: repoRoot, executionContextEnvelope: repoEditorEnvelope });
+
+  const seededState = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+  const seededContinuityAccess = seededState.chatContinuityByCompartment[repoEditorEnvelope.compartmentKey].lastAccessedAt;
+  const seededPendingAccess = seededState.pendingRequestedTaskByCompartment[repoEditorEnvelope.compartmentKey].lastAccessedAt;
+  assert.strictEqual(seededContinuityAccess, currentNow.toISOString());
+  assert.strictEqual(seededPendingAccess, currentNow.toISOString());
+
+  currentNow = new Date('2026-04-10T12:03:00.000Z');
+  const refreshed = store.getState({ cwd: repoRoot, executionContextEnvelope: repoEditorEnvelope });
+
+  assert.strictEqual(refreshed.chatContinuity.lastAccessedAt, currentNow.toISOString());
+  assert.strictEqual(refreshed.pendingRequestedTask.lastAccessedAt, currentNow.toISOString());
+
+  fs.rmSync(tempDir, { recursive: true, force: true });
+});
+
+test('session intent store startup cleanup removes stale pending tasks and long-unused compartment state while keeping recent workflows', () => {
+  const repoRoot = path.join(__dirname, '..');
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'liku-session-intent-'));
+  const stateFile = path.join(tempDir, 'session-intent-state.json');
+  const staleMemoryNotes = [];
+  const seedStore = createSessionIntentStateStore({
+    stateFile,
+    nowProvider: () => new Date('2026-04-10T12:00:00.000Z'),
+    addMemoryNote: (note) => staleMemoryNotes.push(note)
+  });
+
+  const oldBrowserEnvelope = buildExecutionContextEnvelope({
+    cwd: repoRoot,
+    foreground: { processName: 'chrome', title: 'Issue search - Google Chrome' },
+    sessionState: seedStore.getState({ cwd: repoRoot }),
+    userMessage: 'continue browser research for this repo issue'
+  });
+  const recentRepoEnvelope = buildExecutionContextEnvelope({
+    cwd: repoRoot,
+    foreground: { processName: 'code', title: 'README.md - Visual Studio Code' },
+    sessionState: seedStore.getState({ cwd: repoRoot }),
+    userMessage: 'continue inspecting this VS Code workspace'
+  });
+
+  seedStore.recordExecutedTurn({
+    recordedAt: '2026-03-01T09:00:00.000Z',
+    lastAccessedAt: '2026-03-01T09:00:00.000Z',
+    userMessage: 'continue browser research for this repo issue',
+    executionIntent: 'Research the visible repo issue in the browser',
+    executionIntentSource: 'saved-chat-continuity',
+    executionContextEnvelope: oldBrowserEnvelope,
+    committedSubgoal: 'Research the visible repo issue in the browser',
+    actionPlan: [{ type: 'focus_window', processName: 'chrome' }, { type: 'get_text' }],
+    success: true,
+    screenshotCaptured: true,
+    observationEvidence: { captureMode: 'window', captureTrusted: true },
+    verification: { status: 'verified' },
+    nextRecommendedStep: 'Open TradingView and compare the chart against the researched catalyst.'
+  }, { cwd: repoRoot, executionContextEnvelope: oldBrowserEnvelope });
+
+  seedStore.setPendingRequestedTask({
+    recordedAt: '2026-03-01T09:00:00.000Z',
+    lastAccessedAt: '2026-03-01T09:00:00.000Z',
+    userMessage: 'continue browser research',
+    executionIntent: 'Research the visible repo issue in the browser',
+    executionIntentSource: 'saved-pending-requested-task',
+    taskSummary: 'Research the visible repo issue in the browser',
+    targetApp: 'chrome',
+    executionContextEnvelope: oldBrowserEnvelope
+  }, { cwd: repoRoot, executionContextEnvelope: oldBrowserEnvelope });
+
+  seedStore.recordExecutedTurn({
+    recordedAt: '2026-04-10T11:55:00.000Z',
+    lastAccessedAt: '2026-04-10T11:55:00.000Z',
+    userMessage: 'continue inspecting this VS Code workspace',
+    executionIntent: 'Inspect the active VS Code workspace',
+    executionIntentSource: 'saved-chat-continuity',
+    executionContextEnvelope: recentRepoEnvelope,
+    committedSubgoal: 'Inspect the active VS Code workspace',
+    actionPlan: [{ type: 'focus_window', processName: 'code' }, { type: 'screenshot' }],
+    success: true,
+    screenshotCaptured: true,
+    observationEvidence: { captureMode: 'window', captureTrusted: true },
+    verification: { status: 'verified' },
+    nextRecommendedStep: 'Continue from the current workspace state.'
+  }, { cwd: repoRoot, executionContextEnvelope: recentRepoEnvelope });
+
+  seedStore.setPendingRequestedTask({
+    recordedAt: '2026-04-10T11:55:00.000Z',
+    lastAccessedAt: '2026-04-10T11:55:00.000Z',
+    userMessage: 'continue',
+    executionIntent: 'Inspect the active VS Code workspace',
+    executionIntentSource: 'saved-chat-continuity',
+    taskSummary: 'Inspect the active VS Code workspace',
+    targetApp: 'code',
+    executionContextEnvelope: recentRepoEnvelope
+  }, { cwd: repoRoot, executionContextEnvelope: recentRepoEnvelope });
+
+  const restartStore = createSessionIntentStateStore({
+    stateFile,
+    nowProvider: () => new Date('2026-04-10T12:00:00.000Z'),
+    addMemoryNote: (note) => staleMemoryNotes.push(note)
+  });
+  const cleanedState = restartStore.getState({ cwd: repoRoot, executionContextEnvelope: recentRepoEnvelope });
+
+  assert.strictEqual(cleanedState.chatContinuityByCompartment[oldBrowserEnvelope.compartmentKey], undefined, 'long-unused continuity should be removed on startup cleanup');
+  assert.strictEqual(cleanedState.pendingRequestedTaskByCompartment[oldBrowserEnvelope.compartmentKey], undefined, 'stale pending task should be removed on startup cleanup');
+  assert.ok(cleanedState.chatContinuityByCompartment[recentRepoEnvelope.compartmentKey], 'recent continuity should remain intact');
+  assert.ok(cleanedState.pendingRequestedTaskByCompartment[recentRepoEnvelope.compartmentKey], 'recent pending task should remain intact');
+
+  fs.rmSync(tempDir, { recursive: true, force: true });
+});
+
+test('session intent store compresses long-unused compartment continuity into episodic memory before deletion', () => {
+  const repoRoot = path.join(__dirname, '..');
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'liku-session-intent-'));
+  const stateFile = path.join(tempDir, 'session-intent-state.json');
+  const compressedNotes = [];
+  const seedStore = createSessionIntentStateStore({
+    stateFile,
+    nowProvider: () => new Date('2026-04-10T12:00:00.000Z'),
+    addMemoryNote: (note) => compressedNotes.push(note)
+  });
+
+  const browserEnvelope = buildExecutionContextEnvelope({
+    cwd: repoRoot,
+    foreground: { processName: 'chrome', title: 'Issue search - Google Chrome' },
+    sessionState: seedStore.getState({ cwd: repoRoot }),
+    userMessage: 'continue browser research for this repo issue'
+  });
+
+  seedStore.recordExecutedTurn({
+    recordedAt: '2026-03-01T09:00:00.000Z',
+    lastAccessedAt: '2026-03-01T09:00:00.000Z',
+    userMessage: 'continue browser research for this repo issue',
+    executionIntent: 'Research the visible repo issue in the browser',
+    executionIntentSource: 'saved-chat-continuity',
+    executionContextEnvelope: browserEnvelope,
+    committedSubgoal: 'Research the visible repo issue in the browser',
+    actionPlan: [{ type: 'focus_window', processName: 'chrome' }, { type: 'get_text' }],
+    success: true,
+    screenshotCaptured: true,
+    observationEvidence: { captureMode: 'window', captureTrusted: true },
+    verification: { status: 'verified' },
+    nextRecommendedStep: 'Open TradingView and compare the chart against the researched catalyst.'
+  }, { cwd: repoRoot, executionContextEnvelope: browserEnvelope });
+
+  const restartStore = createSessionIntentStateStore({
+    stateFile,
+    nowProvider: () => new Date('2026-04-10T12:00:00.000Z'),
+    addMemoryNote: (note) => compressedNotes.push(note)
+  });
+  const cleanedState = restartStore.getState({ cwd: repoRoot });
+
+  assert.strictEqual(cleanedState.chatContinuityByCompartment[browserEnvelope.compartmentKey], undefined, 'expired continuity should be deleted after compression');
+  assert.strictEqual(compressedNotes.length, 1, 'cleanup should emit one episodic memory note for the deleted compartment');
+  assert.strictEqual(compressedNotes[0].type, 'episodic');
+  assert.ok(compressedNotes[0].content.includes('Research the visible repo issue in the browser'));
+  assert.strictEqual(compressedNotes[0].source.kind, 'session-intent-cleanup');
+  assert.strictEqual(compressedNotes[0].source.reason, 'long-unused-compartment');
+
+  fs.rmSync(tempDir, { recursive: true, force: true });
+});
+
 test('session intent store persists resumable blocked Pine pending task metadata', () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'liku-session-intent-'));
   const stateFile = path.join(tempDir, 'session-intent-state.json');

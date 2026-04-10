@@ -1336,9 +1336,9 @@ This review should become a **new additive stream**, not a rewrite of slices 1â€
 Keep the execution context deterministic while reducing unnecessary repeated repo-identity work.
 
 **Tasks**
-- [ ] Add session-local caching for stable project identity signals derived from `cwd` / repo root.
-- [ ] Keep foreground/window/app state dynamic.
-- [ ] Explicitly document that the LLM consumes but does not generate the execution context envelope.
+- [x] Add session-local caching for stable project identity signals derived from `cwd` / repo root.
+- [x] Keep foreground/window/app state dynamic.
+- [x] Explicitly document that the LLM consumes but does not generate the execution context envelope.
 
 **Files**
 - `src/shared/project-identity.js`
@@ -1398,9 +1398,9 @@ Prevent future memory starvation without weakening scoped routing.
 Prevent long-term state-file bloat without weakening current continuity semantics.
 
 **Tasks**
-- [ ] Record access timestamps for compartment entries.
-- [ ] Add startup cleanup for stale pending actions and long-unused compartment state.
-- [ ] Prefer compressing stale continuity into episodic memory before full deletion where appropriate.
+- [x] Record access timestamps for compartment entries.
+- [x] Add startup cleanup for stale pending actions and long-unused compartment state.
+- [x] Prefer compressing stale continuity into episodic memory before full deletion where appropriate.
 
 **Files**
 - `src/main/session-intent-state.js`
@@ -1418,9 +1418,9 @@ Prevent long-term state-file bloat without weakening current continuity semantic
 Reduce confirmation fatigue while preserving command-grounded safety.
 
 **Tasks**
-- [ ] Add a first-class read-only shell allowlist for common inspection commands.
-- [ ] Keep destructive and privilege-elevating detection unchanged.
-- [ ] Prove that benign inspection commands remain low-risk even when the surrounding prose contains dangerous verbs.
+- [x] Add a first-class read-only shell allowlist for common inspection commands.
+- [x] Keep destructive and privilege-elevating detection unchanged.
+- [x] Prove that benign inspection commands remain low-risk even when the surrounding prose contains dangerous verbs.
 
 **Files**
 - `src/main/ai-service.js`
@@ -1439,9 +1439,9 @@ Reduce confirmation fatigue while preserving command-grounded safety.
 Make context isolation visible as a feature rather than a perceived memory bug.
 
 **Tasks**
-- [ ] Surface lightweight context-switch notices in the CLI when Liku parks old continuity and starts fresh in a new compartment.
-- [ ] Add a small operator-facing runtime trace summary/export path for the last execution.
-- [ ] Keep the UX lightweight and non-spammy.
+- [x] Surface lightweight context-switch notices in the CLI when Liku parks old continuity and starts fresh in a new compartment.
+- [x] Add a small operator-facing runtime trace summary/export path for the last execution.
+- [x] Keep the UX lightweight and non-spammy.
 
 **Files**
 - `src/cli/commands/chat.js`
