@@ -150,6 +150,12 @@ const {
   createTradingViewPineAuthoringHelpers
 } = require('./tradingview/pine-authoring');
 const {
+  createTradingViewPineResumeHelpers
+} = require('./tradingview/pine-resume');
+const {
+  createTradingViewPineRecoveryHelpers
+} = require('./tradingview/pine-recovery');
+const {
   clearSemanticDOMSnapshot,
   getSemanticDOMContextText,
   getUIWatcher,
@@ -1664,6 +1670,7 @@ function looksLikeAutomationRequest(text) {
 
 const {
   isIncompleteTradingViewPineAuthoringPlan,
+  isTradingViewPineAuthoringRequest,
   buildTradingViewPineAuthoringSystemContract,
   extractPineScriptFromModelResponse,
   normalizeGeneratedPineScript,
@@ -1676,6 +1683,14 @@ const {
   maybeBuildRecoveredTradingViewPineActionResponse
 } = createTradingViewPineAuthoringHelpers({
   rewriteActionsForReliability
+});
+
+const {
+  buildPendingTradingViewPineConfirmationState,
+  buildTradingViewPineResumeExecutionPlan,
+  isResumeActionUserConfirmed
+} = createTradingViewPineResumeHelpers({
+  buildTradingViewPineResumePrerequisites
 });
 
 /**
@@ -1697,6 +1712,25 @@ const providerOrchestrator = createProviderOrchestrator({
   modelRegistry,
   providerFallbackOrder: PROVIDER_FALLBACK_ORDER,
   resolveCopilotModelKey
+});
+
+const {
+  maybeRecoverTradingViewPinePlanFromGeneratedCode
+} = createTradingViewPineRecoveryHelpers({
+  providerOrchestrator,
+  containsPineScriptPayloadText,
+  buildPineScriptState,
+  persistPineScriptState,
+  extractPineScriptFromModelResponse,
+  normalizeGeneratedPineScript,
+  buildPineClipboardPreparationCommand,
+  isTradingViewPineAuthoringRequest,
+  buildTradingViewPineCodeGenerationPrompt,
+  buildTradingViewPineCodeGenerationRetryPrompt,
+  buildTradingViewPineCodeValidationRetryPrompt,
+  maybeBuildRecoveredTradingViewPineActionResponse,
+  pineRecoveryDebugLog,
+  getCwd: () => process.cwd()
 });
 
 async function sendMessage(userMessage, options = {}) {
@@ -1989,117 +2023,22 @@ async function sendMessage(userMessage, options = {}) {
     ) {
       let recoveredPinePlan = maybeBuildRecoveredTradingViewPineActionResponse(parseActions(response), enhancedMessage);
       if (!recoveredPinePlan?.message && isTradingViewPineAuthoringRequest(enhancedMessage)) {
-        const pineCodePrompt = buildTradingViewPineCodeGenerationPrompt(enhancedMessage);
-        if (pineCodePrompt) {
-          try {
-            pineRecoveryDebugLog('[AI][PINE-RECOVERY] Starting code-only recovery for TradingView Pine request');
-            pineRecoveryDebugLog('[AI][PINE-RECOVERY] Code prompt:', pineCodePrompt);
-            const requestPineCode = async (promptText) => {
-              if (!promptText) return '';
-              pineRecoveryDebugLog('[AI][PINE-RECOVERY] Requesting Pine code with prompt:', promptText);
-              const codeRaw = await providerOrchestrator.callProvider('copilot', [
-                {
-                  role: 'system',
-                  content: 'TRADINGVIEW PINE CODE-ONLY MODE: Return only Pine Script source text. Do not emit tool calls, JSON, or prose.'
-                },
-                {
-                  role: 'user',
-                  content: promptText
-                }
-              ], effectiveModel);
-              const codeContent = (codeRaw && typeof codeRaw === 'object' && typeof codeRaw.content === 'string')
-                ? codeRaw.content
-                : codeRaw;
-              pineRecoveryDebugLog('[AI][PINE-RECOVERY] Raw Pine code response:', String(codeContent || ''));
-              const extracted = extractPineScriptFromModelResponse(codeContent);
-              const normalized = normalizeGeneratedPineScript(extracted);
-              pineRecoveryDebugLog('[AI][PINE-RECOVERY] Extracted Pine snippet:', extracted);
-              pineRecoveryDebugLog('[AI][PINE-RECOVERY] Normalized Pine snippet:', normalized);
-              pineRecoveryDebugLog('[AI][PINE-RECOVERY] Contains Pine payload:', containsPineScriptPayloadText(normalized));
-              return normalized;
-            };
-
-            let pineScript = '';
-            let pineState = null;
-
-            const recoveryPrompts = [
-              pineCodePrompt,
-              buildTradingViewPineCodeGenerationRetryPrompt(enhancedMessage)
-            ].filter(Boolean);
-
-            for (let attempt = 0; attempt < 3; attempt++) {
-              const promptText = recoveryPrompts[attempt]
-                || buildTradingViewPineCodeValidationRetryPrompt(enhancedMessage, pineState?.validation);
-              if (!promptText) break;
-
-              pineScript = await requestPineCode(promptText);
-              pineState = buildPineScriptState({
-                source: pineScript,
-                intent: enhancedMessage,
-                origin: 'generated-recovery',
-                targetApp: 'tradingview'
-              });
-
-              pineRecoveryDebugLog('[AI][PINE-RECOVERY] Local Pine validation:', JSON.stringify(pineState.validation || null));
-
-              if (!containsPineScriptPayloadText(pineScript)) {
-                pineRecoveryDebugLog('[AI][PINE-RECOVERY] Generated draft did not contain substantive Pine payload.');
-                continue;
-              }
-
-              if (pineState?.validation?.valid) {
-                break;
-              }
-
-              pineRecoveryDebugLog('[AI][PINE-RECOVERY] Generated Pine failed local validation. Retrying with validation-aware prompt.');
-            }
-
-            const persistedPineState = pineState?.validation?.valid
-              ? persistPineScriptState(pineState, { cwd: process.cwd() })
-              : null;
-            const clipboardCommand = pineState?.validation?.valid
-              ? buildPineClipboardPreparationCommand(pineState.normalizedSource)
-              : '';
-            pineRecoveryDebugLog('[AI][PINE-RECOVERY] Clipboard command synthesized:', clipboardCommand);
-            if (clipboardCommand && containsPineScriptPayloadText(pineScript) && pineState?.validation?.valid) {
-              recoveredPinePlan = maybeBuildRecoveredTradingViewPineActionResponse({
-                thought: 'Create and apply the requested TradingView Pine script',
-                actions: [
-                  {
-                    type: 'run_command',
-                    shell: 'powershell',
-                    command: clipboardCommand,
-                    reason: 'Copy the prepared Pine script to the clipboard',
-                    pineCanonicalState: {
-                      id: pineState.id,
-                      scriptTitle: pineState.scriptTitle,
-                      sourceHash: pineState.sourceHash,
-                      origin: pineState.origin,
-                      validation: pineState.validation,
-                      sourcePath: persistedPineState?.sourcePath || null,
-                      metadataPath: persistedPineState?.metadataPath || null
-                    }
-                  }
-                ],
-                verification: 'TradingView should show the Pine Editor workflow, fresh indicator path, and visible compile/apply result.'
-              }, enhancedMessage);
-              pineRecoveryDebugLog('[AI][PINE-RECOVERY] Local Pine workflow recovery status:', !!recoveredPinePlan?.message);
-              if (recoveredPinePlan?.message) {
-                routingNoteOverride = 'locally synthesized TradingView Pine workflow from generated Pine code';
-                routingOverride = { mode: 'recovered-tradingview-pine-plan' };
-              }
-            } else {
-              const validationSummary = pineState?.validation?.valid === false
-                ? ` Validation issues: ${(pineState.validation.issues || []).map((issue) => issue.message).filter(Boolean).join(' | ')}`
-                : '';
-              pineRecoveryDebugLog('[AI][PINE-RECOVERY] Pine recovery could not synthesize a clipboard workflow from generated code.');
-              if (validationSummary) {
-                pineRecoveryDebugLog(`[AI][PINE-RECOVERY]${validationSummary}`);
-              }
-            }
-          } catch (e) {
-            console.warn('[AI] Pine code generation recovery failed:', e.message);
+        try {
+          const pineRecovery = await maybeRecoverTradingViewPinePlanFromGeneratedCode({
+            enhancedMessage,
+            effectiveModel
+          });
+          if (pineRecovery?.recoveredPinePlan) {
+            recoveredPinePlan = pineRecovery.recoveredPinePlan;
           }
+          if (pineRecovery?.routingNoteOverride) {
+            routingNoteOverride = pineRecovery.routingNoteOverride;
+          }
+          if (pineRecovery?.routingOverride) {
+            routingOverride = pineRecovery.routingOverride;
+          }
+        } catch (e) {
+          console.warn('[AI] Pine code generation recovery failed:', e.message);
         }
       }
       if (!recoveredPinePlan?.message) {
@@ -6957,26 +6896,19 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
         }
       }
       
-      const resumePrerequisites = buildTradingViewPineResumePrerequisites(actionData.actions, i, {
-        lastTargetWindowProfile
-      });
-
       // Store as pending action
-      setPendingAction({
-        ...safety,
+      setPendingAction(buildPendingTradingViewPineConfirmationState({
+        safety,
+        actionData,
         actionIndex: i,
-        remainingActions: actionData.actions.slice(i),
-        completedResults: [...results],
-        thought: actionData.thought,
-        verification: actionData.verification,
+        results,
         userMessage: options.userMessage || actionData.userMessage || '',
         lastTargetWindowHandle,
         lastTargetWindowProfile,
         executionContextEnvelope: executionContextEnvelope || null,
         selectionProvenance,
-        resumePrerequisites,
         approvalPauseCapture
-      });
+      }));
       
       // Notify via callback
       if (onRequireConfirmation) {
@@ -7788,7 +7720,7 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
 
   // Apply the same reliability rewrites on resume, so we don't get stuck
   // if the remaining actions include brittle UIA clicks or screenshot detours.
-  if (Array.isArray(pending.remainingActions) && pending.remainingActions.length > 0) {
+  if (!pending.managedByTradingViewPineResume && Array.isArray(pending.remainingActions) && pending.remainingActions.length > 0) {
     const original = pending.remainingActions;
     const rewriteJournal = [];
     pending.remainingActions = rewriteActionsForReliability(pending.remainingActions, {
@@ -7816,10 +7748,9 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
   let requirePreInputRefocus = false;
   let postVerification = { applicable: false, verified: true, healed: false, attempts: 0 };
   const observationCheckpoints = [];
-  const resumePrerequisites = Array.isArray(pending.resumePrerequisites)
-    ? pending.resumePrerequisites.filter((action) => action && typeof action === 'object')
-    : [];
-  const actionsToResume = resumePrerequisites.concat(Array.isArray(pending.remainingActions) ? pending.remainingActions : []);
+  const resumePlan = buildTradingViewPineResumeExecutionPlan(pending);
+  const resumePrerequisites = resumePlan.resumePrerequisites;
+  const actionsToResume = resumePlan.actionsToResume;
   const runtimeTraceLog = buildRuntimeTraceLogForExecution('resume', {
     thought: pending.thought,
     verification: pending.verification,
@@ -7906,7 +7837,7 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
         action: action.type,
         error: resumeSafety.blockReason || 'Action blocked by advisory-only safety rail',
         reason: action.reason || '',
-        userConfirmed: resumePrerequisites.length === 0 && i === 0,
+        userConfirmed: isResumeActionUserConfirmed(resumePlan, i),
         safety: resumeSafety,
         blockedByPolicy: true
       };
@@ -7925,7 +7856,7 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
           action: action.type,
           error: prevalidation.error,
           reason: action.reason || '',
-          userConfirmed: resumePrerequisites.length === 0 && i === 0
+          userConfirmed: isResumeActionUserConfirmed(resumePlan, i)
         };
         results.push(blockedResult);
         if (onAction) {
@@ -7957,7 +7888,7 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
         action: action.type,
         error: buildMissingFocusLockTargetMessage(action),
         reason: action.reason || '',
-        userConfirmed: resumePrerequisites.length === 0 && i === 0,
+        userConfirmed: isResumeActionUserConfirmed(resumePlan, i),
         blockedByFocusLock: true,
         focusVerification: {
           applicable: false,
@@ -7997,7 +7928,7 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
           action: action.type,
           error: buildFocusLockFailureMessage(action, focusLock.verification),
           reason: action.reason || '',
-          userConfirmed: resumePrerequisites.length === 0 && i === 0,
+          userConfirmed: isResumeActionUserConfirmed(resumePlan, i),
           blockedByFocusLock: true,
           focusVerification: focusLock.verification
         };
@@ -8016,7 +7947,7 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
       if (smart.handled) {
         const smartResult = smart.result;
         smartResult.reason = action.reason || '';
-        smartResult.userConfirmed = resumePrerequisites.length === 0 && i === 0;
+        smartResult.userConfirmed = isResumeActionUserConfirmed(resumePlan, i);
         results.push(smartResult);
         if (onAction) onAction(smartResult, pending.actionIndex + i, pending.actionIndex + actionsToResume.length);
         if (!smartResult.success && !action.continue_on_error) break;
@@ -8056,7 +7987,7 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
         action: effectiveAction.type,
         error: quickSearchPreflight.error || 'Quick-search input empty-state proof failed before typing',
         reason: action.reason || '',
-        userConfirmed: resumePrerequisites.length === 0 && i === 0,
+        userConfirmed: isResumeActionUserConfirmed(resumePlan, i),
         quickSearchPreflight
       };
       results.push(failedResult);
@@ -8091,7 +8022,7 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
 
     const result = await (actionExecutor ? actionExecutor(effectiveAction) : systemAutomation.executeAction(effectiveAction));
     result.reason = action.reason || '';
-    result.userConfirmed = resumePrerequisites.length === 0 && i === 0;
+    result.userConfirmed = isResumeActionUserConfirmed(resumePlan, i);
     if (quickSearchPreflight?.applicable) {
       result.quickSearchPreflight = quickSearchPreflight;
     }

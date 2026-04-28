@@ -521,6 +521,8 @@ test('ai-service gates TradingView follow-up typing on post-key observation chec
   const tradingViewRegistryBootstrapPath = path.join(__dirname, '..', 'src', 'main', 'tradingview', 'registry-bootstrap.js');
   const tradingViewRewriteRunnerPath = path.join(__dirname, '..', 'src', 'main', 'tradingview', 'rewrite-runner.js');
   const tradingViewPineAuthoringPath = path.join(__dirname, '..', 'src', 'main', 'tradingview', 'pine-authoring.js');
+  const tradingViewPineResumePath = path.join(__dirname, '..', 'src', 'main', 'tradingview', 'pine-resume.js');
+  const tradingViewPineRecoveryPath = path.join(__dirname, '..', 'src', 'main', 'tradingview', 'pine-recovery.js');
   const tradingViewVerificationPath = path.join(__dirname, '..', 'src', 'main', 'tradingview', 'verification.js');
   const tradingViewIndicatorPath = path.join(__dirname, '..', 'src', 'main', 'tradingview', 'indicator-workflows.js');
   const tradingViewAlertPath = path.join(__dirname, '..', 'src', 'main', 'tradingview', 'alert-workflows.js');
@@ -544,6 +546,8 @@ test('ai-service gates TradingView follow-up typing on post-key observation chec
   const tradingViewRegistryBootstrapContent = fs.readFileSync(tradingViewRegistryBootstrapPath, 'utf8');
   const tradingViewRewriteRunnerContent = fs.readFileSync(tradingViewRewriteRunnerPath, 'utf8');
   const tradingViewPineAuthoringContent = fs.readFileSync(tradingViewPineAuthoringPath, 'utf8');
+  const tradingViewPineResumeContent = fs.readFileSync(tradingViewPineResumePath, 'utf8');
+  const tradingViewPineRecoveryContent = fs.readFileSync(tradingViewPineRecoveryPath, 'utf8');
   const tradingViewVerificationContent = fs.readFileSync(tradingViewVerificationPath, 'utf8');
   const tradingViewIndicatorContent = fs.readFileSync(tradingViewIndicatorPath, 'utf8');
   const tradingViewAlertContent = fs.readFileSync(tradingViewAlertPath, 'utf8');
@@ -571,6 +575,8 @@ test('ai-service gates TradingView follow-up typing on post-key observation chec
   assert(aiServiceContent.includes("require('./tradingview/registry-bootstrap')"), 'ai-service should consume the extracted TradingView registry bootstrap module');
   assert(aiServiceContent.includes("require('./tradingview/rewrite-runner')"), 'ai-service should consume the extracted TradingView rewrite runner module');
   assert(aiServiceContent.includes("require('./tradingview/pine-authoring')"), 'ai-service should consume the extracted TradingView Pine authoring module');
+  assert(aiServiceContent.includes("require('./tradingview/pine-resume')"), 'ai-service should consume the extracted TradingView Pine resume module');
+  assert(aiServiceContent.includes("require('./tradingview/pine-recovery')"), 'ai-service should consume the extracted TradingView Pine recovery module');
   assert(aiServiceContent.includes('LIKU_USE_TOOL_REGISTRY_REWRITES'), 'ai-service should guard the registry path behind an explicit feature flag');
   assert(aiServiceContent.includes('LIKU_USE_TOOL_REGISTRY_RISKS'), 'ai-service should guard the risk registry path behind an explicit feature flag');
   assert(rewriteRegistryContent.includes('registerToolRewrites'), 'Rewrite registry module should support tool rewrite registration');
@@ -584,6 +590,12 @@ test('ai-service gates TradingView follow-up typing on post-key observation chec
   assert(tradingViewPineAuthoringContent.includes('createTradingViewPineAuthoringHelpers'), 'TradingView Pine authoring module should expose a helper factory');
   assert(tradingViewPineAuthoringContent.includes('buildTradingViewPineAuthoringSystemContract'), 'TradingView Pine authoring module should own the Pine contract guidance');
   assert(tradingViewPineAuthoringContent.includes('maybeBuildRecoveredTradingViewPineActionResponse'), 'TradingView Pine authoring module should own Pine plan recovery helpers');
+  assert(tradingViewPineResumeContent.includes('createTradingViewPineResumeHelpers'), 'TradingView Pine resume module should expose a helper factory');
+  assert(tradingViewPineResumeContent.includes('buildPendingTradingViewPineConfirmationState'), 'TradingView Pine resume module should own pending confirmation state shaping');
+  assert(tradingViewPineResumeContent.includes('buildTradingViewPineResumeExecutionPlan'), 'TradingView Pine resume module should own resumed action-plan shaping');
+  assert(tradingViewPineRecoveryContent.includes('createTradingViewPineRecoveryHelpers'), 'TradingView Pine recovery module should expose a helper factory');
+  assert(tradingViewPineRecoveryContent.includes('maybeRecoverTradingViewPinePlanFromGeneratedCode'), 'TradingView Pine recovery module should own canonical-state recovery orchestration');
+  assert(tradingViewPineRecoveryContent.includes('requestTradingViewPineCodeOnly'), 'TradingView Pine recovery module should own code-only Pine generation retries');
   assert(tradingViewRegistryBootstrapContent.includes('registerTradingViewRegistryBootstrap'), 'TradingView registry bootstrap module should expose a registration helper');
   assert(tradingViewRegistryBootstrapContent.includes("registerToolRewrites('tradingview'"), 'TradingView registry bootstrap should register TradingView rewrite handlers');
   assert(tradingViewRegistryBootstrapContent.includes("registerToolRiskAssessor('tradingview'"), 'TradingView registry bootstrap should register TradingView risk assessors');

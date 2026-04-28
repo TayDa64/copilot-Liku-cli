@@ -331,6 +331,7 @@ function createTradingViewPineAuthoringHelpers(deps = {}) {
 
   return {
     isIncompleteTradingViewPineAuthoringPlan,
+    isTradingViewPineAuthoringRequest,
     buildTradingViewPineAuthoringSystemContract,
     extractPineScriptFromModelResponse,
     normalizeGeneratedPineScript,
