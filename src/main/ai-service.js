@@ -33,6 +33,14 @@ function pineRecoveryDebugLog(...args) {
   }
 }
 
+function isToolRegistryRewriteEnabled() {
+  return process.env.LIKU_USE_TOOL_REGISTRY_REWRITES === '1';
+}
+
+function isToolRegistryRiskEnabled() {
+  return process.env.LIKU_USE_TOOL_REGISTRY_RISKS === '1';
+}
+
 // `ai-service` is used by the Electron app *and* by the CLI.
 // When running in CLI-only mode, Electron may not be available.
 let shell;
@@ -99,51 +107,48 @@ const {
   buildProcessCandidatesFromAppName,
   buildTitleHintsFromAppName,
   buildVerifyTargetHintFromAppName,
-  resolveNormalizedAppIdentity
-} = require('./tradingview/app-profile');
-const {
+  resolveNormalizedAppIdentity,
   detectTradingViewDomainActionRisk,
   extractTradingViewObservationKeywords,
   inferTradingViewTradingMode,
   inferTradingViewObservationSpec,
-  isTradingViewTargetHint
-} = require('./tradingview/verification');
-const {
-  maybeRewriteTradingViewIndicatorWorkflow
-} = require('./tradingview/indicator-workflows');
-const {
-  maybeRewriteTradingViewAlertWorkflow
-} = require('./tradingview/alert-workflows');
-const {
-  maybeRewriteTradingViewTimeframeWorkflow,
-  maybeRewriteTradingViewSymbolWorkflow,
-  maybeRewriteTradingViewWatchlistWorkflow
-} = require('./tradingview/chart-verification');
-const {
-  maybeRewriteTradingViewDrawingWorkflow
-} = require('./tradingview/drawing-workflows');
-const {
+  isTradingViewTargetHint,
   buildTradingViewPineResumePrerequisites,
-  maybeRewriteTradingViewPineWorkflow,
   containsPineScriptPayloadText,
-  sanitizePineScriptText
-} = require('./tradingview/pine-workflows');
-const {
+  sanitizePineScriptText,
+  detectRequestedPineVersion,
+  normalizePineScriptSource,
   buildPineScriptState,
-  persistPineScriptState
-} = require('./tradingview/pine-script-state');
+  persistPineScriptState,
+} = require('./tools/tradingview-tool');
+const {
+  applyTradingViewReliabilityRewrites
+} = require('./tradingview/rewrite-runner');
+const {
+  registerTradingViewRegistryBootstrap
+} = require('./tradingview/registry-bootstrap');
+const {
+  applyRegisteredToolRewrites,
+  getRegisteredToolRewrites,
+  registerToolRewrites
+} = require('./ai-service/rewrite-registry');
+const {
+  assessRegisteredToolRisk,
+  getRegisteredToolRiskAssessors,
+  registerToolRiskAssessor
+} = require('./ai-service/risk-registry');
 const {
   buildExecutionContextEnvelope
 } = require('./ai-service/execution-context');
 const {
-  maybeRewriteTradingViewPaperWorkflow
-} = require('./tradingview/paper-workflows');
-const {
-  maybeRewriteTradingViewDomWorkflow
-} = require('./tradingview/dom-workflows');
-const {
   createObservationCheckpointRuntime
 } = require('./ai-service/observation-checkpoints');
+const {
+  createTradingViewRuntimeRecovery
+} = require('./tradingview/runtime/recovery');
+const {
+  createTradingViewPineAuthoringHelpers
+} = require('./tradingview/pine-authoring');
 const {
   clearSemanticDOMSnapshot,
   getSemanticDOMContextText,
@@ -203,6 +208,7 @@ let lastSelectionProvenance = {
 };
 
 let lastRuntimeTraceSummary = null;
+let pendingRuntimeTracePrelude = null;
 
 function cloneSerializable(value) {
   if (value === null || value === undefined) return value ?? null;
@@ -237,6 +243,103 @@ function summarizeSelectionProvenanceForTrace(selectionProvenance = null) {
     memorySummary: cloneSerializable(selectionProvenance.memories?.summary || null),
     executionContext: cloneSerializable(selectionProvenance.executionContext || null)
   };
+}
+
+function buildRuntimeTracePreludeFingerprint({ userMessage = '', actionPlan = null } = {}) {
+  const normalizedUserMessage = String(userMessage || '').trim().toLowerCase().slice(0, 320);
+  const normalizedThought = String(actionPlan?.thought || '').trim().toLowerCase().slice(0, 200);
+  const normalizedVerification = String(actionPlan?.verification || '').trim().toLowerCase().slice(0, 200);
+  const actionSummary = Array.isArray(actionPlan?.actions)
+    ? actionPlan.actions
+      .slice(0, 12)
+      .map((action) => {
+        const type = String(action?.type || '').trim().toLowerCase();
+        const detail = String(action?.command || action?.key || action?.text || action?.reason || '').trim().toLowerCase().slice(0, 120);
+        return `${type}:${detail}`;
+      })
+      .join('|')
+    : '';
+
+  return JSON.stringify({
+    userMessage: normalizedUserMessage,
+    thought: normalizedThought,
+    verification: normalizedVerification,
+    actionSummary
+  });
+}
+
+function normalizeRuntimeTracePreludeEvents(events = []) {
+  if (!Array.isArray(events)) return [];
+  return events
+    .map((entry) => {
+      if (!entry || typeof entry !== 'object') return null;
+      const event = String(entry.event || '').trim();
+      if (!event) return null;
+      const data = { ...entry };
+      delete data.event;
+      return {
+        event,
+        data: cloneSerializable(data)
+      };
+    })
+    .filter(Boolean);
+}
+
+function recordPendingRuntimeTracePrelude(payload = null) {
+  if (!payload || typeof payload !== 'object') {
+    pendingRuntimeTracePrelude = null;
+    return;
+  }
+
+  const normalizedEvents = normalizeRuntimeTracePreludeEvents(payload.events || []);
+  if (!normalizedEvents.length) {
+    pendingRuntimeTracePrelude = null;
+    return;
+  }
+
+  pendingRuntimeTracePrelude = {
+    fingerprint: buildRuntimeTracePreludeFingerprint({
+      userMessage: payload.userMessage,
+      actionPlan: payload.actionPlan
+    }),
+    events: normalizedEvents,
+    recordedAt: Date.now()
+  };
+}
+
+function consumePendingRuntimeTracePrelude({ userMessage = '', actionPlan = null, explicitEvents = null } = {}) {
+  const directEvents = normalizeRuntimeTracePreludeEvents(explicitEvents || []);
+  if (directEvents.length) return directEvents;
+
+  if (!pendingRuntimeTracePrelude || typeof pendingRuntimeTracePrelude !== 'object') return [];
+  if ((Date.now() - Number(pendingRuntimeTracePrelude.recordedAt || 0)) > (10 * 60 * 1000)) {
+    pendingRuntimeTracePrelude = null;
+    return [];
+  }
+
+  const fingerprint = buildRuntimeTracePreludeFingerprint({ userMessage, actionPlan });
+  if (pendingRuntimeTracePrelude.fingerprint !== fingerprint) return [];
+
+  const consumed = normalizeRuntimeTracePreludeEvents(pendingRuntimeTracePrelude.events || []);
+  pendingRuntimeTracePrelude = null;
+  return consumed;
+}
+
+function appendRuntimeTracePreludeEvents(traceLog, events = []) {
+  normalizeRuntimeTracePreludeEvents(events).forEach((entry) => {
+    appendRuntimeTraceEvent(traceLog, entry.event, entry.data || {});
+  });
+}
+
+function summarizePolicyViolationsForTrace(violations = []) {
+  if (!Array.isArray(violations)) return [];
+  return violations.slice(0, 8).map((violation) => ({
+    actionIndex: Number.isFinite(Number(violation?.actionIndex)) ? Number(violation.actionIndex) : null,
+    reason: String(violation?.reason || '').trim() || null,
+    forbiddenMethod: String(violation?.forbiddenMethod || '').trim() || null,
+    actionType: String(violation?.action?.type || '').trim() || null,
+    action: summarizeActionForTrace(violation?.action || null)
+  }));
 }
 
 function summarizeExecutionContextAuthority(executionContextEnvelope = null) {
@@ -543,6 +646,7 @@ const {
   recordRuntimeSelection,
   rememberValidatedChatFallback,
   resolveCopilotModelKey: resolveCopilotModelKeyFromRegistry,
+  setSessionCopilotModel: setSessionCopilotModelInRegistry,
   setCopilotModel: setCopilotModelInRegistry,
   setProvider: syncProviderModelMetadata
 } = copilotModelRegistry;
@@ -603,6 +707,10 @@ function setApiKey(provider, key) {
  */
 function setCopilotModel(model) {
   return setCopilotModelInRegistry(model);
+}
+
+function setSessionCopilotModel(model) {
+  return setSessionCopilotModelInRegistry(model);
 }
 
 /**
@@ -739,6 +847,7 @@ const commandHandler = createCommandHandler({
   clearSessionIntentState,
   getSessionIntentState,
   setApiKey,
+  setSessionCopilotModel,
   setCopilotModel,
   setProvider,
   slashCommandHelpers,
@@ -1553,310 +1662,21 @@ function looksLikeAutomationRequest(text) {
   return false;
 }
 
-function isIncompleteTradingViewPineAuthoringPlan(actionBlock, userMessage = '') {
-  const normalizedMessage = String(userMessage || '').toLowerCase();
-  if (!/\btradingview\b/.test(normalizedMessage)) return false;
-  if (!/\bpine\b/.test(normalizedMessage) && !/\bscript\b/.test(normalizedMessage)) return false;
-  if (!/\b(create|build|generate|write|draft|make|replace|overwrite|rewrite)\b/.test(normalizedMessage)) return false;
-
-  const collectNestedActions = (items = [], seen = new Set()) => {
-    const collected = [];
-    for (const action of Array.isArray(items) ? items : []) {
-      if (!action || typeof action !== 'object' || seen.has(action)) continue;
-      seen.add(action);
-      collected.push(action);
-      if (Array.isArray(action.continueActions)) {
-        collected.push(...collectNestedActions(action.continueActions, seen));
-      }
-      const lifecycleBranches = action.continueActionsByPineLifecycleState;
-      if (lifecycleBranches && typeof lifecycleBranches === 'object') {
-        for (const branchActions of Object.values(lifecycleBranches)) {
-          if (Array.isArray(branchActions)) {
-            collected.push(...collectNestedActions(branchActions, seen));
-          }
-        }
-      }
-    }
-    return collected;
-  };
-
-  const actions = collectNestedActions(Array.isArray(actionBlock?.actions) ? actionBlock.actions.filter(Boolean) : []);
-  if (actions.length === 0) return false;
-
-  const requestedAddToChart = /\bctrl\s*\+\s*enter\b/.test(normalizedMessage)
-    || /\b(add|apply|load|put)\b.{0,20}\bchart\b/.test(normalizedMessage);
-  const requestedVisibleResult = /\b(report|read|summari[sz]e|tell me|show me|capture)\b.{0,40}\b(?:compile|apply|result|status|error|warning)\b/.test(normalizedMessage)
-    || /\bvisible\s+(?:compile|apply|compiler|result|status|error|warning)\b/.test(normalizedMessage);
-
-  const hasScriptPayload = actions.some((action) => {
-    const type = String(action?.type || '').trim().toLowerCase();
-    if (type === 'type') {
-      const text = String(action?.text || '').trim();
-      return containsPineScriptPayloadText(text);
-    }
-    if (type === 'run_command') {
-      if (
-        String(action?.pineCanonicalState?.sourcePath || '').trim()
-        && action?.pineCanonicalState?.validation?.valid !== false
-      ) {
-        return true;
-      }
-      return /\bset-clipboard\b/i.test(String(action?.command || ''))
-        && containsPineScriptPayloadText(String(action?.command || ''));
-    }
-    return false;
-  });
-
-  const hasInsertionStep = actions.some((action) => {
-    const type = String(action?.type || '').trim().toLowerCase();
-    if (type === 'type') {
-      return containsPineScriptPayloadText(String(action?.text || ''));
-    }
-    if (type === 'key') {
-      return String(action?.key || '').trim().toLowerCase() === 'ctrl+v';
-    }
-    return false;
-  });
-
-  const hasApplyStep = actions.some((action) => {
-    const type = String(action?.type || '').trim().toLowerCase();
-    const key = String(action?.key || '').trim().toLowerCase();
-    const combined = [action?.reason, action?.text]
-      .map((value) => String(value || '').trim())
-      .filter(Boolean)
-      .join(' ');
-    return (type === 'key' && key === 'ctrl+enter')
-      || /\b(add|apply|load|put)\b.{0,20}\bchart\b/i.test(combined);
-  });
-
-  const hasVisibleResultReadback = actions.some((action) => {
-    if (String(action?.type || '').trim().toLowerCase() !== 'get_text') return false;
-    const text = String(action?.text || '').trim();
-    const reason = String(action?.reason || '').trim();
-    const evidenceMode = String(action?.pineEvidenceMode || '').trim().toLowerCase();
-    return evidenceMode === 'compile-result'
-      || /\b(?:added|error|warning|pine editor|compile|compiler|result|status)\b/i.test(`${text} ${reason}`);
-  });
-
-  if (!hasScriptPayload || !hasInsertionStep) {
-    return true;
-  }
-  if (requestedAddToChart && !hasApplyStep) {
-    return true;
-  }
-  if (requestedVisibleResult && !hasVisibleResultReadback) {
-    return true;
-  }
-
-  return false;
-}
-
-function isTradingViewPineAuthoringRequest(userMessage = '') {
-  const normalizedMessage = String(userMessage || '').toLowerCase();
-  return /\btradingview\b/.test(normalizedMessage)
-    && (/\bpine\b/.test(normalizedMessage) || /\bscript\b/.test(normalizedMessage))
-    && /\b(create|build|generate|write|draft|make|replace|overwrite|rewrite)\b/.test(normalizedMessage);
-}
-
-function requestRequiresFreshTradingViewPineIndicator(userMessage = '') {
-  const normalizedMessage = String(userMessage || '').toLowerCase();
-  return /\bnew\s+(?:interactive\s+)?(?:chart\s+)?indicator\b/.test(normalizedMessage)
-    || /\binteractive\s+chart\s+indicator\b/.test(normalizedMessage)
-    || /\bnew\s+indicator\s+flow\b/.test(normalizedMessage)
-    || /\bdoes\s+not\s+reuse\s+the\s+current\s+script\b/.test(normalizedMessage)
-    || /\bnew\s+pine\s+(?:indicator|script)\b/.test(normalizedMessage);
-}
-
-function buildTradingViewPineAuthoringSystemContract(userMessage = '') {
-  if (!isTradingViewPineAuthoringRequest(userMessage)) return '';
-
-  const normalized = String(userMessage || '').toLowerCase();
-  const requestedAddToChart = /\bctrl\s*\+\s*enter\b/.test(normalized)
-    || /\b(add|apply|load|put)\b.{0,20}\bchart\b/.test(normalized);
-  const requestedVisibleResult = /\b(report|read|summari[sz]e|tell me|show me|capture)\b.{0,40}\b(?:compile|apply|result|status|error|warning)\b/.test(normalized)
-    || /\bvisible\s+(?:compile|apply|compiler|result|status|error|warning)\b/.test(normalized);
-  const requiresFreshIndicator = requestRequiresFreshTradingViewPineIndicator(userMessage);
-
-  const lines = [
-    'TRADINGVIEW PINE AUTHORING CONTRACT:',
-    '- Return a complete executable TradingView Pine workflow, not just window activation.',
-    '- Open Pine Editor through the verified TradingView quick-search route.',
-    '- Inspect visible Pine Editor state before editing.',
-    requiresFreshIndicator
-      ? '- This request requires a fresh TradingView indicator script. Use the new-indicator flow and do not reuse or inspect-copy the existing script buffer as the authoring payload.'
-      : '- Do not overwrite an existing visible script implicitly; prefer a safe new-script or bounded starter-script path unless the user explicitly asked to replace the current script.',
-    '- Insert the actual Pine code with Set-Clipboard plus Ctrl+V or with direct multiline typing.',
-    '- If you use Set-Clipboard, the clipboard payload must contain the Pine code itself.',
-    '- The first Pine header line must be exactly `//@version=...` with no leading UI text such as `Pine editor`.',
-    '- Do not use clipboard-inspection-only commands, websearch placeholders, or focus-only plans as substitutes for authoring.'
-  ];
-
-  if (requestedAddToChart) {
-    lines.push('- Use Ctrl+Enter only after the script has been inserted and saved.');
-  }
-  if (requestedVisibleResult || requestedAddToChart) {
-    lines.push('- Read visible compile/apply result text before claiming success.');
-  }
-
-  return lines.join('\n');
-}
-
-function extractPineScriptFromModelResponse(response = '') {
-  const raw = String(response || '').trim();
-  if (!raw) return '';
-
-  const fencedMatch = raw.match(/```(?:pine|pinescript)?\s*([\s\S]*?)```/i);
-  const candidate = fencedMatch?.[1] || raw;
-  return sanitizePineScriptText(String(candidate || '').trim());
-}
-
-function normalizeGeneratedPineScript(pineScript = '') {
-  let normalized = sanitizePineScriptText(String(pineScript || '').trim());
-  if (!normalized) return '';
-
-  if (/\/\/\s*@version\s*=\s*\d+\b/i.test(normalized)) {
-    normalized = normalized.replace(/\/\/\s*@version\s*=\s*\d+\b/i, '//@version=6');
-  } else if (containsPineScriptPayloadText(normalized)) {
-    normalized = `//@version=6\n${normalized}`;
-  }
-
-  return normalized.trim();
-}
-
-function buildPineClipboardPreparationCommand(pineScript = '') {
-  const normalized = normalizeGeneratedPineScript(pineScript);
-  if (!normalized) return '';
-  return `Set-Clipboard -Value @'\n${normalized}\n'@`;
-}
-
-function buildTradingViewPineCodeGenerationPrompt(userMessage = '') {
-  if (!isTradingViewPineAuthoringRequest(userMessage)) return '';
-
-  const requiresFreshIndicator = requestRequiresFreshTradingViewPineIndicator(userMessage);
-  return [
-    'Return only Pine Script source code for this TradingView request.',
-    'No markdown. No prose. No JSON. No tool calls.',
-    'The first line must be exactly `//@version=6`.',
-    requiresFreshIndicator
-      ? 'Generate a fresh indicator script for a new interactive chart indicator.'
-      : 'Generate an indicator unless the user explicitly requested a strategy.',
-    'Do not prepend UI text such as `Pine editor` before the version header.',
-    `Request: ${String(userMessage || '').trim()}`
-  ].join('\n');
-}
-
-function buildTradingViewPineCodeGenerationRetryPrompt(userMessage = '') {
-  if (!isTradingViewPineAuthoringRequest(userMessage)) return '';
-
-  return `Return only Pine Script code. First line exactly //@version=6. No markdown, no prose, no JSON, no tool calls. Fresh indicator script. Request: ${String(userMessage || '').trim()}`;
-}
-
-function buildTradingViewPineCodeValidationRetryPrompt(userMessage = '', validation = null) {
-  if (!isTradingViewPineAuthoringRequest(userMessage)) return '';
-
-  const issueLines = Array.isArray(validation?.issues)
-    ? validation.issues
-      .map((issue) => String(issue?.message || '').trim())
-      .filter(Boolean)
-      .slice(0, 5)
-    : [];
-
-  return [
-    'Return only Pine Script code.',
-    'First line exactly //@version=6.',
-    'No markdown, no prose, no JSON, no tool calls.',
-    'The previous Pine draft failed local validation and must be regenerated cleanly.',
-    '- Do not include Pine Editor UI text anywhere inside the code body.',
-    '- Do not emit corrupted identifiers or partial editor labels inside conditions or expressions.',
-    ...(issueLines.length > 0 ? issueLines.map((line) => `- Fix this issue: ${line}`) : []),
-    `Request: ${String(userMessage || '').trim()}`
-  ].join('\n');
-}
-
-function buildIncompleteTradingViewPinePlanBlockMessage() {
-  return [
-    'Verified result: only a partial TradingView window-activation plan was produced.',
-    'Bounded inference: no Pine script insertion payload or `Ctrl+Enter` add-to-chart step was generated, so Liku did not execute Pine edits or apply a script to the chart.',
-    'Unverified next step: retry with a full TradingView Pine authoring plan that opens the Pine Editor, inserts the script, and verifies the compile/apply result.'
-  ].join('\n');
-}
-
-function extractTradingViewPineTargetSymbol(text = '') {
-  const raw = String(text || '');
-  const chartMatch = raw.match(/\b(?:to|for|on)\s+the\s+([A-Z][A-Z0-9._-]{0,9})\s+chart\b/);
-  if (chartMatch?.[1]) return chartMatch[1].toUpperCase();
-
-  const symbolMatch = raw.match(/\b([A-Z][A-Z0-9._-]{1,9})\b(?=\s+chart\b)/);
-  if (symbolMatch?.[1]) return symbolMatch[1].toUpperCase();
-
-  return null;
-}
-
-function buildIncompleteTradingViewPineRecoveryPrompt(userMessage = '') {
-  const raw = String(userMessage || '').trim();
-  if (!raw) return '';
-
-  const targetSymbol = extractTradingViewPineTargetSymbol(raw);
-  const normalized = raw.toLowerCase();
-  const requestedAddToChart = /\bctrl\s*\+\s*enter\b/.test(normalized)
-    || /\b(add|apply|load|put)\b.{0,20}\bchart\b/.test(normalized);
-
-  return [
-    'Retry the blocked TradingView Pine authoring task.',
-    `Original request: ${raw}`,
-    'You must respond ONLY with a JSON code block (```json ... ```).',
-    'Return an object with keys: thought, actions, verification.',
-    'Requirements:',
-    '- Produce a complete executable TradingView Pine workflow, not just window activation.',
-    '- Open TradingView Pine Editor through a verified TradingView route.',
-    '- Inspect the visible Pine Editor state before editing.',
-    '- Do not overwrite an existing visible script implicitly; prefer a safe new-script or bounded starter-script path unless the user explicitly asked to replace the current script.',
-    '- Insert the Pine script content using substantive authoring actions such as Set-Clipboard plus Ctrl+V or direct Pine code typing.',
-    '- If you use Set-Clipboard, the clipboard payload must contain the actual Pine code, and the first Pine header line must be exactly `//@version=...` with no `Pine editor` or other leading contamination.',
-    '- Do not treat clipboard inspection, websearch placeholders, or focus-only steps as completion of the authoring task.',
-    requestedAddToChart
-      ? '- Use Ctrl+Enter only after the script is inserted, then read visible compile/apply result text.'
-      : '- After insertion, verify visible Pine compile/apply result text before claiming success.',
-    targetSymbol
-      ? `- Keep the requested chart target in mind: ${targetSymbol}.`
-      : '- Keep the requested TradingView chart target unchanged unless the user explicitly asked to switch symbols.'
-  ].join('\n');
-}
-
-function formatAutomationActionBlockMessage(actionBlock = {}) {
-  return '```json\n' + JSON.stringify({
-    thought: actionBlock.thought || 'Executing requested actions',
-    actions: Array.isArray(actionBlock.actions) ? actionBlock.actions : [],
-    verification: actionBlock.verification || 'Verify the actions completed successfully'
-  }, null, 2) + '\n```';
-}
-
-function maybeBuildRecoveredTradingViewPineActionResponse(actionBlock, userMessage = '') {
-  if (!isIncompleteTradingViewPineAuthoringPlan(actionBlock, userMessage)) {
-    return null;
-  }
-
-  const originalActions = Array.isArray(actionBlock?.actions) ? actionBlock.actions.filter(Boolean) : [];
-  const salvageSeedActions = originalActions.length > 0
-    ? originalActions
-    : [{ type: 'focus_window', title: 'TradingView', processName: 'tradingview' }];
-  const rewrittenActions = rewriteActionsForReliability(salvageSeedActions, { userMessage });
-
-  const recovered = {
-    thought: actionBlock?.thought || 'Create and apply the requested TradingView Pine script',
-    actions: Array.isArray(rewrittenActions) ? rewrittenActions : [],
-    verification: actionBlock?.verification || 'TradingView should show the Pine Editor workflow, bounded script insertion path, and visible compile/apply result.'
-  };
-
-  if (isIncompleteTradingViewPineAuthoringPlan(recovered, userMessage)) {
-    return null;
-  }
-
-  return {
-    actionBlock: recovered,
-    message: formatAutomationActionBlockMessage(recovered)
-  };
-}
+const {
+  isIncompleteTradingViewPineAuthoringPlan,
+  buildTradingViewPineAuthoringSystemContract,
+  extractPineScriptFromModelResponse,
+  normalizeGeneratedPineScript,
+  buildPineClipboardPreparationCommand,
+  buildTradingViewPineCodeGenerationPrompt,
+  buildTradingViewPineCodeGenerationRetryPrompt,
+  buildTradingViewPineCodeValidationRetryPrompt,
+  buildIncompleteTradingViewPinePlanBlockMessage,
+  buildIncompleteTradingViewPineRecoveryPrompt,
+  maybeBuildRecoveredTradingViewPineActionResponse
+} = createTradingViewPineAuthoringHelpers({
+  rewriteActionsForReliability
+});
 
 /**
  * Send a message and get AI response with auto-continuation
@@ -1890,6 +1710,7 @@ async function sendMessage(userMessage, options = {}) {
   } = options;
 
   const parsedTags = parseInlineIntentTags(userMessage);
+  recordPendingRuntimeTracePrelude(null);
   const tagSet = new Set(parsedTags.tags);
   const effectiveEnforceActions = enforceActions && !tagSet.has('research') && !tagSet.has('plan');
 
@@ -2323,6 +2144,8 @@ async function sendMessage(userMessage, options = {}) {
     // If violated, silently regenerate (bounded attempts) BEFORE returning to CLI/Electron.
     try {
       const parsed = parseActions(response);
+      const policyTracePreludeEvents = [];
+      let finalPolicyParsed = parsed;
       if (parsed && Array.isArray(parsed.actions) && parsed.actions.length > 0) {
         let fg = null;
         try {
@@ -2361,13 +2184,47 @@ async function sendMessage(userMessage, options = {}) {
               userMessage: enhancedMessage,
               processName: fgProcess
             });
+            policyTracePreludeEvents.push({
+              event: 'plan:policy-check',
+              attempt,
+              processName: fgProcess || null,
+              actionCount: Array.isArray(currentParsed?.actions) ? currentParsed.actions.length : 0,
+              negativeViolationCount: Array.isArray(negCheck?.violations) ? negCheck.violations.length : 0,
+              actionViolationCount: Array.isArray(actCheck?.violations) ? actCheck.violations.length : 0,
+              capabilityViolationCount: Array.isArray(capabilityCheck?.violations) ? capabilityCheck.violations.length : 0,
+              surfaceClass: String(capabilitySnapshot?.surfaceClass || '').trim() || null
+            });
             if (negCheck.ok && actCheck.ok && capabilityCheck.ok) {
+              if (policyTracePreludeEvents.some((entry) => entry.event === 'policy:violation')) {
+                policyTracePreludeEvents.push({
+                  event: 'plan:accepted-after-policy-rewrite',
+                  attempt,
+                  processName: fgProcess || null,
+                  actionCount: Array.isArray(currentParsed?.actions) ? currentParsed.actions.length : 0
+                });
+              }
               response = currentResponse;
+              finalPolicyParsed = currentParsed;
               break;
             }
 
+            policyTracePreludeEvents.push({
+              event: 'policy:violation',
+              attempt,
+              processName: fgProcess || null,
+              negativeViolations: summarizePolicyViolationsForTrace(negCheck?.violations || []),
+              actionViolations: summarizePolicyViolationsForTrace(actCheck?.violations || []),
+              capabilityViolations: summarizePolicyViolationsForTrace(capabilityCheck?.violations || [])
+            });
+
             if (attempt === maxPolicyRetries) {
               // Give up safely: return no actions so we don't prompt/exe a forbidden plan.
+              policyTracePreludeEvents.push({
+                event: 'plan:rejected',
+                attempt,
+                processName: fgProcess || null,
+                reason: 'policy-retries-exhausted'
+              });
               response =
                 '```json\n' +
                 JSON.stringify({
@@ -2398,7 +2255,58 @@ async function sendMessage(userMessage, options = {}) {
               : (typeof regenerated === 'string' ? regenerated : null);
             currentResponse = regenText || currentResponse;
             currentParsed = parseActions(currentResponse) || { actions: [] };
+            policyTracePreludeEvents.push({
+              event: 'plan:regenerated',
+              attempt,
+              processName: fgProcess || null,
+              provider: usedProvider,
+              actionCount: Array.isArray(currentParsed?.actions) ? currentParsed.actions.length : 0
+            });
             attempt++;
+          }
+
+          finalPolicyParsed = finalPolicyParsed || currentParsed;
+        }
+      }
+
+      const normalizedPolicyTracePrelude = normalizeRuntimeTracePreludeEvents(policyTracePreludeEvents);
+      if (normalizedPolicyTracePrelude.length > 0) {
+        const finalParsed = parseActions(response) || finalPolicyParsed || null;
+        if (finalParsed && Array.isArray(finalParsed.actions) && finalParsed.actions.length > 0) {
+          recordPendingRuntimeTracePrelude({
+            userMessage: enhancedMessage,
+            actionPlan: finalParsed,
+            events: normalizedPolicyTracePrelude
+          });
+        } else {
+          const planningTraceLog = buildRuntimeTraceLogForExecution('plan', finalParsed || {
+            thought: null,
+            verification: null,
+            actions: []
+          }, {
+            userMessage: enhancedMessage,
+            selectionProvenance
+          });
+          appendRuntimeTracePreludeEvents(planningTraceLog, normalizedPolicyTracePrelude);
+          closeRuntimeTraceLog(planningTraceLog, {
+            success: false,
+            blockedByPolicy: true,
+            actionCount: Array.isArray(finalParsed?.actions) ? finalParsed.actions.length : 0
+          });
+          const planningTraceSummary = buildLastRuntimeTraceSummary({
+            traceLog: planningTraceLog,
+            mode: 'plan',
+            thought: finalParsed?.thought || null,
+            verification: finalParsed?.verification || null,
+            success: false,
+            error: 'Policy enforcement rejected or rewrote the generated plan before execution.',
+            actionCount: Array.isArray(finalParsed?.actions) ? finalParsed.actions.length : 0,
+            rewriteSources: Array.isArray(finalParsed?.rewriteSources) ? finalParsed.rewriteSources : [],
+            selectionProvenance,
+            executionContextEnvelope: selectionExecutionContextEnvelope
+          });
+          if (planningTraceSummary) {
+            recordLastRuntimeTraceSummary(planningTraceSummary);
           }
         }
       }
@@ -2814,6 +2722,48 @@ const DANGER_PATTERNS = [
   // Administrative actions
   /\b(admin|administrator|root|sudo|elevated|run as)\b/i
 ];
+
+const GLOBAL_DANGER_PATTERNS = [
+  // Destructive actions
+  /\b(delete|remove|erase|destroy|clear|reset|uninstall|format)\b/i,
+  // Global financial actions that remain dangerous outside tool-specific contexts
+  /\b(buy|purchase|checkout|pay|payment|subscribe|donate|transfer|send money|place\s+order)\b/i,
+  // Account actions
+  /\b(logout|log out|sign out|deactivate|close account|cancel subscription)\b/i,
+  // System actions
+  /\b(shutdown|restart|reboot|sleep|hibernate|power off)\b/i,
+  // Confirmation text with explicitly destructive/irreversible context
+  /\b(yes,?\s*(delete|remove|reset|uninstall)|confirm\s+(delete|remove|reset|purchase|payment|transfer|subscription)|permanently|irreversible|cannot be undone)\b/i,
+  // Administrative actions
+  /\b(admin|administrator|root|sudo|elevated|run as)\b/i
+];
+
+const TRADINGVIEW_SCOPED_DANGER_PATTERNS = [
+  /\b(order|depth of market|order book|dom|paper trading|buy mkt|sell mkt|market order|limit order|stop order|qty|quantity|flatten|reverse|position management|margin)\b/i
+];
+
+function shouldApplyTradingViewScopedDangerPatterns(riskTextToCheck = '', action = null, targetInfo = {}, tradingDomainRisk = null) {
+  if (tradingDomainRisk?.toolName === 'tradingview') return true;
+  if (tradingDomainRisk?.tradingMode) return true;
+  if (isTradingViewTargetHint(action?.verifyTarget || targetInfo?.verifyTarget || null)) return true;
+
+  return /\b(tradingview|depth of market|order book|dom|paper trading|pine editor|chart)\b/i.test(String(riskTextToCheck || ''));
+}
+
+function getDangerPatternsForContext(riskTextToCheck = '', action = null, targetInfo = {}, tradingDomainRisk = null) {
+  if (!isToolRegistryRiskEnabled()) {
+    return DANGER_PATTERNS;
+  }
+
+  const patterns = [...GLOBAL_DANGER_PATTERNS];
+  const hasConcreteTradingViewDomainRisk = tradingDomainRisk?.toolName === 'tradingview'
+    || !!tradingDomainRisk?.tradingMode;
+  if (!hasConcreteTradingViewDomainRisk
+    && shouldApplyTradingViewScopedDangerPatterns(riskTextToCheck, action, targetInfo, tradingDomainRisk)) {
+    patterns.push(...TRADINGVIEW_SCOPED_DANGER_PATTERNS);
+  }
+  return patterns;
+}
 
 /**
  * Safe/benign patterns that reduce risk level
@@ -3280,6 +3230,22 @@ function analyzeActionSafety(action, targetInfo = {}) {
   };
   const isReadOnlyInspectionCommand = String(action?.type || '').trim().toLowerCase() === 'run_command'
     && isReadOnlyRunCommand(action?.command || '');
+  const executionContextConfidence = String(
+    targetInfo?.executionContextEnvelope?.confidence
+    || targetInfo?.executionContextConfidence
+    || ''
+  ).trim().toLowerCase();
+  const isStateMutatingAction = (() => {
+    const actionType = String(action?.type || '').trim().toLowerCase();
+    if (!actionType) return false;
+    if (['screenshot', 'wait', 'grep_repo', 'semantic_search_repo', 'pgrep_process', 'focus_window', 'bring_window_to_front', 'send_window_to_back', 'minimize_window', 'restore_window', 'get_text', 'find_element'].includes(actionType)) {
+      return false;
+    }
+    if (actionType === 'run_command') {
+      return !isReadOnlyInspectionCommand;
+    }
+    return ['scroll', 'click', 'double_click', 'right_click', 'type', 'key', 'drag', 'click_element', 'set_value', 'scroll_element', 'expand_element', 'collapse_element'].includes(actionType);
+  })();
   
   // Check action type base risk
   switch (action.type) {
@@ -3411,9 +3377,17 @@ function analyzeActionSafety(action, targetInfo = {}) {
     && /\b(time\s*frame|timeframe|chart|symbol|watchlist|indicator|search|open|focus|switch|selector|tab|5m|1m|15m|30m|1h|4h|1d)\b/i.test(riskTextToCheck)
     && !/\b(delete|remove|purchase|payment|transfer|permanent|irreversible|shutdown|restart|unsubscribe|close account)\b/i.test(riskTextToCheck);
 
-  const tradingDomainRisk = detectTradingViewDomainActionRisk(riskTextToCheck, ActionRiskLevel, {
-    actionType: action?.type
-  });
+  const tradingDomainRisk = isToolRegistryRiskEnabled()
+    ? assessRegisteredToolRisk({
+      riskTextToCheck,
+      ActionRiskLevel,
+      action,
+      targetInfo,
+      registeredToolRiskAssessors: getRegisteredToolRiskAssessors()
+    })
+    : detectTradingViewDomainActionRisk(riskTextToCheck, ActionRiskLevel, {
+      actionType: action?.type
+    });
   if (tradingDomainRisk) {
     result.riskLevel = tradingDomainRisk.riskLevel;
     result.warnings.push(tradingDomainRisk.warning);
@@ -3426,7 +3400,8 @@ function analyzeActionSafety(action, targetInfo = {}) {
   }
   
   // Check for danger patterns
-  for (const pattern of DANGER_PATTERNS) {
+  const dangerPatterns = getDangerPatternsForContext(riskTextToCheck, action, targetInfo, tradingDomainRisk);
+  for (const pattern of dangerPatterns) {
     if (pattern.test(riskTextToCheck)) {
       const matchedKeyword = String(riskTextToCheck.match(pattern)?.[0] || '');
       if (isReadOnlyInspectionCommand) {
@@ -3470,6 +3445,14 @@ function analyzeActionSafety(action, targetInfo = {}) {
   if (targetInfo.confidence !== undefined && targetInfo.confidence < 0.5) {
     result.riskLevel = ActionRiskLevel.HIGH;
     result.warnings.push('Very low confidence - verify target manually');
+  }
+
+  if (executionContextConfidence === 'low' && isStateMutatingAction) {
+    result.warnings.push('Low-confidence execution context — require explicit confirmation for mutating action');
+    result.requiresConfirmation = true;
+    if (result.riskLevel !== ActionRiskLevel.CRITICAL) {
+      result.riskLevel = ActionRiskLevel.HIGH;
+    }
   }
   
   // Generate human-readable description
@@ -3576,20 +3559,20 @@ async function buildExecutionContextEnvelopeForPendingAction(options = {}) {
     : null;
 
   let foreground = options.foreground || null;
-  if (!foreground) {
-    try {
-      foreground = await systemAutomation.getForegroundWindowInfo();
-    } catch {
-      foreground = null;
-    }
-  }
-
   if ((!foreground || !foreground.processName) && (action?.processName || lastTargetWindowProfile?.processName || action?.title || action?.windowTitle || lastTargetWindowProfile?.title)) {
     foreground = {
       ...(foreground && typeof foreground === 'object' ? foreground : {}),
       processName: action?.processName || lastTargetWindowProfile?.processName || foreground?.processName || null,
       title: action?.title || action?.windowTitle || lastTargetWindowProfile?.title || foreground?.title || null
     };
+  }
+
+  if (!foreground) {
+    try {
+      foreground = await systemAutomation.getForegroundWindowInfo();
+    } catch {
+      foreground = null;
+    }
   }
 
   try {
@@ -4774,62 +4757,27 @@ function rewriteActionsForReliability(actions, context = {}) {
     });
   };
 
-  const tradingViewTimeframeRewrite = maybeRewriteTradingViewTimeframeWorkflow(actions, { userMessage });
-  if (tradingViewTimeframeRewrite) {
-    registerRewrite('maybeRewriteTradingViewTimeframeWorkflow', 'tradingview-timeframe', 'matched TradingView timeframe reliability workflow', actions, tradingViewTimeframeRewrite);
-    return tradingViewTimeframeRewrite;
-  }
-
-  const tradingViewSymbolRewrite = maybeRewriteTradingViewSymbolWorkflow(actions, { userMessage });
-  if (tradingViewSymbolRewrite) {
-    registerRewrite('maybeRewriteTradingViewSymbolWorkflow', 'tradingview-symbol', 'matched TradingView symbol reliability workflow', actions, tradingViewSymbolRewrite);
-    return tradingViewSymbolRewrite;
-  }
-
-  const tradingViewWatchlistRewrite = maybeRewriteTradingViewWatchlistWorkflow(actions, { userMessage });
-  if (tradingViewWatchlistRewrite) {
-    registerRewrite('maybeRewriteTradingViewWatchlistWorkflow', 'tradingview-watchlist', 'matched TradingView watchlist reliability workflow', actions, tradingViewWatchlistRewrite);
-    return tradingViewWatchlistRewrite;
-  }
-
-  const tradingViewDrawingRewrite = maybeRewriteTradingViewDrawingWorkflow(actions, { userMessage });
-  if (tradingViewDrawingRewrite) {
-    registerRewrite('maybeRewriteTradingViewDrawingWorkflow', 'tradingview-drawing', 'matched TradingView drawing reliability workflow', actions, tradingViewDrawingRewrite);
-    return tradingViewDrawingRewrite;
-  }
-
-  const tradingViewPineRewrite = maybeRewriteTradingViewPineWorkflow(actions, {
-    ...context,
-    executionContextEnvelope,
-    userMessage
-  });
-  if (tradingViewPineRewrite) {
-    registerRewrite('maybeRewriteTradingViewPineWorkflow', 'tradingview-pine', 'matched TradingView Pine reliability workflow', actions, tradingViewPineRewrite);
-    return tradingViewPineRewrite;
-  }
-
-  const tradingViewPaperRewrite = maybeRewriteTradingViewPaperWorkflow(actions, { userMessage });
-  if (tradingViewPaperRewrite) {
-    registerRewrite('maybeRewriteTradingViewPaperWorkflow', 'tradingview-paper', 'matched TradingView Paper Trading reliability workflow', actions, tradingViewPaperRewrite);
-    return tradingViewPaperRewrite;
-  }
-
-  const tradingViewDomRewrite = maybeRewriteTradingViewDomWorkflow(actions, { userMessage });
-  if (tradingViewDomRewrite) {
-    registerRewrite('maybeRewriteTradingViewDomWorkflow', 'tradingview-dom', 'matched TradingView DOM reliability workflow', actions, tradingViewDomRewrite);
-    return tradingViewDomRewrite;
-  }
-
-  const tradingViewIndicatorRewrite = maybeRewriteTradingViewIndicatorWorkflow(actions, { userMessage });
-  if (tradingViewIndicatorRewrite) {
-    registerRewrite('maybeRewriteTradingViewIndicatorWorkflow', 'tradingview-indicator', 'matched TradingView indicator reliability workflow', actions, tradingViewIndicatorRewrite);
-    return tradingViewIndicatorRewrite;
-  }
-
-  const tradingViewAlertRewrite = maybeRewriteTradingViewAlertWorkflow(actions, { userMessage });
-  if (tradingViewAlertRewrite) {
-    registerRewrite('maybeRewriteTradingViewAlertWorkflow', 'tradingview-alert', 'matched TradingView alert reliability workflow', actions, tradingViewAlertRewrite);
-    return tradingViewAlertRewrite;
+  if (isToolRegistryRewriteEnabled()) {
+    const registryRewrite = applyRegisteredToolRewrites(actions, {
+      ...context,
+      executionContextEnvelope,
+      userMessage,
+      registerRewrite,
+      registeredToolRewrites: getRegisteredToolRewrites()
+    });
+    if (registryRewrite.actions !== actions) {
+      return registryRewrite.actions;
+    }
+  } else {
+    const tradingViewRewrite = applyTradingViewReliabilityRewrites(actions, {
+      ...context,
+      executionContextEnvelope,
+      userMessage,
+      registerRewrite
+    });
+    if (tradingViewRewrite !== actions) {
+      return tradingViewRewrite;
+    }
   }
 
   // ── Redundant-search elimination ──────────────────────────────
@@ -5361,6 +5309,21 @@ const {
   verifyKeyObservationCheckpoint
 } = observationCheckpointRuntime;
 
+const {
+  ensureTradingViewQuickSearchInputClearBeforeTyping,
+  maybeRecoverTradingViewQuickSearchOpen,
+  maybeRecoverTradingViewPineEditorOpen
+} = createTradingViewRuntimeRecovery({
+  systemAutomation,
+  sleepMs,
+  verifyKeyObservationCheckpoint
+});
+
+registerTradingViewRegistryBootstrap({
+  registerToolRewrites,
+  registerToolRiskAssessor
+});
+
 function buildPostLaunchSelfHealPlans(target, runtime = {}) {
   const plans = [];
   const hasRunningCandidates = !!runtime.hasRunningCandidates;
@@ -5563,8 +5526,20 @@ function buildFocusLockFailureMessage(action = {}, verification = {}) {
   return `Could not confirm focus on ${targetLabel} before ${actionLabel}; foreground remained ${foregroundLabel}`;
 }
 
+function buildMissingFocusLockTargetMessage(action = {}) {
+  const actionLabel = action?.type === 'click'
+    ? 'coordinate click'
+    : action?.type === 'double_click'
+      ? 'coordinate double-click'
+      : action?.type === 'right_click'
+        ? 'coordinate right-click'
+        : 'coordinate input';
+  return `Cannot verify foreground lock for ${actionLabel} because no target window handle is known.`;
+}
+
 async function ensureFocusLockedBeforeInputAction(action = {}, context = {}) {
   const lastTargetWindowHandle = Number(context.lastTargetWindowHandle || 0) || 0;
+  const preverifiedForegroundHandle = Number(context.preverifiedForegroundHandle || 0) || 0;
   const lastTargetWindowProfile = context.lastTargetWindowProfile && typeof context.lastTargetWindowProfile === 'object'
     ? context.lastTargetWindowProfile
     : null;
@@ -5592,6 +5567,53 @@ async function ensureFocusLockedBeforeInputAction(action = {}, context = {}) {
       lastTargetWindowProfile,
       focusRecoveryTarget
     };
+  }
+
+  if (!forceRefocus && preverifiedForegroundHandle && preverifiedForegroundHandle === lastTargetWindowHandle) {
+    return {
+      applicable: true,
+      ok: true,
+      verification: {
+        applicable: true,
+        verified: true,
+        drifted: false,
+        attempts: 0,
+        expectedWindowHandle: lastTargetWindowHandle,
+        attemptedRestore: false,
+        attemptedRefocus: false,
+        foreground: null,
+        reason: 'recent-verified-foreground'
+      },
+      lastTargetWindowHandle,
+      lastTargetWindowProfile,
+      focusRecoveryTarget
+    };
+  }
+
+  if (!forceRefocus && typeof systemAutomation.getForegroundWindowHandle === 'function') {
+    try {
+      const currentForegroundHandle = Number(await systemAutomation.getForegroundWindowHandle() || 0) || 0;
+      if (currentForegroundHandle && currentForegroundHandle === lastTargetWindowHandle) {
+        return {
+          applicable: true,
+          ok: true,
+          verification: {
+            applicable: true,
+            verified: true,
+            drifted: false,
+            attempts: 0,
+            expectedWindowHandle: lastTargetWindowHandle,
+            attemptedRestore: false,
+            attemptedRefocus: false,
+            foreground: null,
+            reason: 'foreground-handle-matched'
+          },
+          lastTargetWindowHandle,
+          lastTargetWindowProfile,
+          focusRecoveryTarget
+        };
+      }
+    } catch {}
   }
 
   if (forceRefocus) {
@@ -5894,612 +5916,6 @@ function classifyActionFocusTargetResult(action = {}, result = {}) {
     foreground: actualForeground,
     matchReason: foregroundMatch.matchReason || 'foreground-mismatch'
   };
-}
-
-const PINE_EDITOR_RESULT_CLICK_CANDIDATES = Object.freeze([
-  { text: 'Open Pine Editor', exact: true },
-  { text: 'Pine Editor', exact: false }
-]);
-
-const PINE_EDITOR_SURFACE_PROBE_CANDIDATES = Object.freeze([
-  { text: 'Add to chart', exact: true },
-  { text: 'Publish script', exact: false },
-  { text: 'Pine Logs', exact: false },
-  { text: 'Strategy Tester', exact: false }
-]);
-
-const TRADINGVIEW_QUICK_SEARCH_SURFACE_PROBE_CANDIDATES = Object.freeze([
-  { text: 'Search tool or function', exact: true, controlType: 'Text' },
-  { text: 'Nothing matches your criteria', exact: false, controlType: 'Text' },
-  { text: 'Search', exact: true, controlType: 'Edit' }
-]);
-
-const TRADINGVIEW_QUICK_SEARCH_INPUT_FOCUS_CANDIDATES = Object.freeze([
-  { text: 'Search', exact: true, controlType: 'Edit' },
-  { text: 'Search tool or function', exact: true, controlType: 'Edit' }
-]);
-
-const TRADINGVIEW_QUICK_SEARCH_EMPTY_TEXT_PATTERNS = Object.freeze([
-  /^$/,
-  /^search$/i,
-  /^search\s+tool\s+or\s+function$/i
-]);
-
-function normalizeQuickSearchWindowProcessName(value = '') {
-  return String(value || '').trim().toLowerCase();
-}
-
-async function getQuickSearchTrustedWindowInfo(windowHandle, fallbackForeground = null) {
-  const numericHandle = Number(windowHandle || 0) || 0;
-  if (!numericHandle) return null;
-  if (Number(fallbackForeground?.hwnd || 0) === numericHandle) {
-    return fallbackForeground && typeof fallbackForeground === 'object'
-      ? fallbackForeground
-      : null;
-  }
-  if (typeof systemAutomation.getWindowInfoByHandle !== 'function') {
-    return null;
-  }
-  try {
-    const info = await systemAutomation.getWindowInfoByHandle(numericHandle);
-    return info?.success ? info : null;
-  } catch {
-    return null;
-  }
-}
-
-async function isTrustedTradingViewQuickSearchMatch(matched, options = {}) {
-  if (!matched?.element) {
-    return { trusted: false, reason: 'missing-element', trustedWindow: null };
-  }
-
-  const elementWindowHandle = Number(matched?.element?.WindowHandle || 0) || 0;
-  const expectedWindowHandle = Number(options.expectedWindowHandle || 0) || 0;
-  const foreground = options.foreground && typeof options.foreground === 'object'
-    ? options.foreground
-    : await systemAutomation.getForegroundWindowInfo();
-  const foregroundHandle = Number(foreground?.hwnd || 0) || 0;
-
-  if (elementWindowHandle && expectedWindowHandle && elementWindowHandle === expectedWindowHandle) {
-    return { trusted: true, reason: 'expected-window', trustedWindow: foreground };
-  }
-
-  if (elementWindowHandle && foregroundHandle && elementWindowHandle === foregroundHandle) {
-    return { trusted: true, reason: 'foreground-window', trustedWindow: foreground };
-  }
-
-  const trustedWindow = await getQuickSearchTrustedWindowInfo(elementWindowHandle, foreground);
-  const expectedProcessName = normalizeQuickSearchWindowProcessName(options.expectedProcessName || foreground?.processName || '');
-  const trustedProcessName = normalizeQuickSearchWindowProcessName(trustedWindow?.processName || '');
-  const trustedWindowKind = String(trustedWindow?.windowKind || '').trim().toLowerCase();
-
-  if (trustedWindow && expectedProcessName && trustedProcessName === expectedProcessName
-    && (!trustedWindowKind || ['main', 'owned', 'palette'].includes(trustedWindowKind))) {
-    return {
-      trusted: true,
-      reason: matched?.matchedBy === 'global-fallback' ? 'same-process-global-fallback' : 'same-process-window-family',
-      trustedWindow
-    };
-  }
-
-  return {
-    trusted: false,
-    reason: matched?.matchedBy === 'global-fallback' ? 'cross-window-global-fallback' : 'window-family-mismatch',
-    trustedWindow
-  };
-}
-
-async function findForegroundElementByText(searchText, options = {}) {
-  if (typeof systemAutomation.findElementByText !== 'function') {
-    return null;
-  }
-
-  const exact = typeof options === 'boolean'
-    ? options
-    : !!options?.exact;
-  const controlType = typeof options === 'object' && options !== null
-    ? String(options.controlType || '').trim()
-    : '';
-  const allowGlobalFallback = typeof options === 'object' && options !== null
-    ? options.allowGlobalFallback === true
-    : false;
-  const explicitWindowHandle = typeof options === 'object' && options !== null
-    ? (Number(options.windowHandle || 0) || 0)
-    : 0;
-
-  const foreground = await systemAutomation.getForegroundWindowInfo();
-  const foregroundHwnd = Number(foreground?.hwnd || 0) || 0;
-  const attempts = [];
-  if (explicitWindowHandle > 0) {
-    attempts.push({ windowHandle: explicitWindowHandle, foregroundOnly: true, enforceWindowHandle: true, matchedBy: 'explicit-window' });
-  } else if (foregroundHwnd > 0) {
-    attempts.push({ windowHandle: foregroundHwnd, foregroundOnly: true, enforceWindowHandle: true, matchedBy: 'foreground-window' });
-  }
-  if (allowGlobalFallback) {
-    attempts.push({ windowHandle: 0, foregroundOnly: false, enforceWindowHandle: false, matchedBy: 'global-fallback' });
-  }
-  if (attempts.length === 0) {
-    attempts.push({ windowHandle: 0, foregroundOnly: false, enforceWindowHandle: false, matchedBy: 'global-search' });
-  }
-
-  for (const attempt of attempts) {
-    try {
-      const found = await systemAutomation.findElementByText(searchText, {
-        exact,
-        controlType,
-        windowHandle: attempt.windowHandle,
-        foregroundOnly: attempt.foregroundOnly
-      });
-      const element = found?.element || null;
-      if (!element) {
-        continue;
-      }
-
-      const elementHwnd = Number(element?.WindowHandle || 0) || 0;
-      if (attempt.enforceWindowHandle && attempt.windowHandle && elementHwnd && attempt.windowHandle !== elementHwnd) {
-        continue;
-      }
-
-      return {
-        foreground,
-        element,
-        text: searchText,
-        exact,
-        controlType,
-        matchedBy: attempt.matchedBy
-      };
-    } catch {
-      // Continue to the next probe scope.
-    }
-  }
-
-  return null;
-}
-
-async function probeTradingViewPineEditorSurface() {
-  for (const candidate of PINE_EDITOR_SURFACE_PROBE_CANDIDATES) {
-    const matched = await findForegroundElementByText(candidate.text, {
-      exact: candidate.exact
-    });
-    if (matched) {
-      return {
-        matched: true,
-        text: candidate.text,
-        exact: candidate.exact,
-        element: matched.element,
-        foreground: matched.foreground
-      };
-    }
-  }
-
-  return null;
-}
-
-async function probeTradingViewQuickSearchSurface() {
-  const foreground = await systemAutomation.getForegroundWindowInfo();
-  const expectedWindowHandle = Number(foreground?.hwnd || 0) || 0;
-  const expectedProcessName = foreground?.processName || '';
-
-  for (const candidate of TRADINGVIEW_QUICK_SEARCH_SURFACE_PROBE_CANDIDATES) {
-    const matched = await findForegroundElementByText(candidate.text, {
-      exact: candidate.exact,
-      controlType: candidate.controlType,
-      allowGlobalFallback: true
-    });
-    if (matched) {
-      const trust = await isTrustedTradingViewQuickSearchMatch(matched, {
-        expectedWindowHandle,
-        expectedProcessName,
-        foreground
-      });
-      return {
-        matched: true,
-        text: candidate.text,
-        exact: candidate.exact,
-        controlType: candidate.controlType,
-        matchedBy: matched.matchedBy || 'foreground-window',
-        element: matched.element,
-        foreground: matched.foreground,
-        trusted: trust.trusted === true,
-        trustReason: trust.reason || null,
-        trustedWindow: trust.trustedWindow || null
-      };
-    }
-  }
-
-  return null;
-}
-
-function normalizeTradingViewQuickSearchInputText(value = '') {
-  return String(value || '')
-    .replace(/[\u200B-\u200D\uFEFF]/g, '')
-    .replace(/\r/g, '')
-    .trim();
-}
-
-function isTradingViewQuickSearchInputEmpty(value = '') {
-  const normalized = normalizeTradingViewQuickSearchInputText(value);
-  return TRADINGVIEW_QUICK_SEARCH_EMPTY_TEXT_PATTERNS.some((pattern) => pattern.test(normalized));
-}
-
-async function readTradingViewQuickSearchInputValue(inputMatch) {
-  const bounds = inputMatch?.element?.Bounds || null;
-  if (!bounds) {
-    return { success: false, error: 'Quick-search input bounds were not available for readback' };
-  }
-
-  try {
-    const uia = require('./ui-automation');
-    const host = uia.getSharedUIAHost();
-    const response = await host.getText(bounds.CenterX, bounds.CenterY);
-    const text = String(response?.text || '');
-    return {
-      success: true,
-      text,
-      normalizedText: normalizeTradingViewQuickSearchInputText(text),
-      method: response?.method || 'UIAHost.getText',
-      empty: isTradingViewQuickSearchInputEmpty(text)
-    };
-  } catch (error) {
-    return {
-      success: false,
-      error: error?.message || String(error || 'Quick-search input readback failed')
-    };
-  }
-}
-
-async function trySetTradingViewQuickSearchInputValue(inputMatch, value = '') {
-  const bounds = inputMatch?.element?.Bounds || null;
-  if (!bounds) {
-    return { success: false, error: 'Quick-search input bounds were not available for setValue' };
-  }
-
-  try {
-    const uia = require('./ui-automation');
-    const host = uia.getSharedUIAHost();
-    const response = await host.setValue(bounds.CenterX, bounds.CenterY, value);
-    return {
-      success: true,
-      method: 'ValuePattern',
-      response
-    };
-  } catch (error) {
-    return {
-      success: false,
-      error: error?.message || String(error || 'Quick-search input setValue failed')
-    };
-  }
-}
-
-async function ensureTradingViewQuickSearchInputClearBeforeTyping(action, preferredWindowHandle = 0) {
-  if (String(action?.type || '').trim().toLowerCase() !== 'type') {
-    return { applicable: false, ready: true };
-  }
-
-  if (String(action?.searchSurfaceContract?.route || '').trim().toLowerCase() !== 'quick-search') {
-    return { applicable: false, ready: true };
-  }
-
-  const inputFocus = await focusTradingViewQuickSearchInput(preferredWindowHandle);
-  if (!inputFocus?.focused) {
-    return {
-      applicable: true,
-      ready: false,
-      error: 'Could not re-focus the TradingView quick-search input before typing',
-      inputFocus: inputFocus || null
-    };
-  }
-
-  const initialRead = await readTradingViewQuickSearchInputValue(inputFocus);
-  if (!initialRead.success) {
-    return {
-      applicable: true,
-      ready: false,
-      error: initialRead.error || 'Could not read the TradingView quick-search input before typing',
-      inputFocus,
-      initialRead
-    };
-  }
-
-  if (initialRead.empty) {
-    return {
-      applicable: true,
-      ready: true,
-      emptyConfirmed: true,
-      clearedBy: 'already-empty',
-      inputFocus,
-      initialRead,
-      finalRead: initialRead
-    };
-  }
-
-  const valueClearAttempt = await trySetTradingViewQuickSearchInputValue(inputFocus, '');
-  await sleepMs(80);
-  const afterValueClearRead = await readTradingViewQuickSearchInputValue(inputFocus);
-  if (valueClearAttempt.success && afterValueClearRead.success && afterValueClearRead.empty) {
-    return {
-      applicable: true,
-      ready: true,
-      emptyConfirmed: true,
-      clearedBy: 'value-pattern',
-      inputFocus,
-      initialRead,
-      clearAttempt: valueClearAttempt,
-      finalRead: afterValueClearRead
-    };
-  }
-
-  const keyboardFallback = {
-    attempted: false,
-    success: false,
-    error: null
-  };
-  if (typeof systemAutomation.pressKey === 'function') {
-    keyboardFallback.attempted = true;
-    try {
-      await systemAutomation.pressKey('ctrl+a', action);
-      await sleepMs(90);
-      await systemAutomation.pressKey('backspace', action);
-      await sleepMs(90);
-      keyboardFallback.success = true;
-    } catch (error) {
-      keyboardFallback.error = error?.message || String(error || 'Keyboard fallback failed');
-    }
-  }
-
-  const afterKeyboardClearRead = await readTradingViewQuickSearchInputValue(inputFocus);
-  if (afterKeyboardClearRead.success && afterKeyboardClearRead.empty) {
-    return {
-      applicable: true,
-      ready: true,
-      emptyConfirmed: true,
-      clearedBy: keyboardFallback.success ? 'keyboard-fallback' : 'already-empty-after-recheck',
-      inputFocus,
-      initialRead,
-      clearAttempt: valueClearAttempt,
-      keyboardFallback,
-      finalRead: afterKeyboardClearRead
-    };
-  }
-
-  return {
-    applicable: true,
-    ready: false,
-    error: 'TradingView quick-search input could not be proven empty before typing the query',
-    inputFocus,
-    initialRead,
-    clearAttempt: valueClearAttempt,
-    keyboardFallback,
-    finalRead: afterKeyboardClearRead.success ? afterKeyboardClearRead : afterValueClearRead
-  };
-}
-
-async function focusTradingViewQuickSearchInput(preferredWindowHandle = 0) {
-  if (typeof systemAutomation.click !== 'function') {
-    return null;
-  }
-
-  const foreground = await systemAutomation.getForegroundWindowInfo();
-  const expectedWindowHandle = Number(preferredWindowHandle || 0) || Number(foreground?.hwnd || 0) || 0;
-  const expectedProcessName = foreground?.processName || '';
-
-  for (const candidate of TRADINGVIEW_QUICK_SEARCH_INPUT_FOCUS_CANDIDATES) {
-    const matched = await findForegroundElementByText(candidate.text, {
-      exact: candidate.exact,
-      controlType: candidate.controlType,
-      windowHandle: preferredWindowHandle,
-      allowGlobalFallback: true
-    });
-    if (!matched?.element?.Bounds) {
-      continue;
-    }
-
-    const trust = await isTrustedTradingViewQuickSearchMatch(matched, {
-      expectedWindowHandle,
-      expectedProcessName,
-      foreground
-    });
-    if (!trust.trusted) {
-      continue;
-    }
-
-    const clickResult = {
-      success: true,
-      coordinates: {
-        x: matched.element.Bounds.CenterX,
-        y: matched.element.Bounds.CenterY
-      }
-    };
-
-    try {
-      await systemAutomation.click(
-        matched.element.Bounds.CenterX,
-        matched.element.Bounds.CenterY,
-        'left'
-      );
-    } catch (error) {
-      clickResult.success = false;
-      clickResult.error = error?.message || String(error || 'click failed');
-    }
-
-    if (!clickResult.success) {
-      continue;
-    }
-
-    await sleepMs(160);
-
-    return {
-      focused: true,
-      text: candidate.text,
-      exact: candidate.exact,
-      controlType: candidate.controlType,
-      matchedBy: matched.matchedBy || 'foreground-window',
-      element: matched.element,
-      foreground: matched.foreground,
-      trusted: true,
-      trustReason: trust.reason || null,
-      trustedWindow: trust.trustedWindow || null,
-      clickResult
-    };
-  }
-
-  return null;
-}
-
-async function maybeRecoverTradingViewQuickSearchOpen(action, checkpointSpec, checkpointBeforeForeground, observationCheckpoint, options = {}) {
-  const verifyTarget = String(action?.verify?.target || '').trim().toLowerCase();
-  const key = String(action?.key || '').trim().toLowerCase();
-  const shortcutId = String(action?.tradingViewShortcut?.id || '').trim().toLowerCase();
-  const searchRoute = String(action?.searchSurfaceContract?.route || '').trim().toLowerCase();
-
-  if (verifyTarget !== 'quick-search' || key !== 'ctrl+k') {
-    return null;
-  }
-
-  if (shortcutId !== 'symbol-search' && searchRoute !== 'quick-search') {
-    return null;
-  }
-
-  const probeMatched = await probeTradingViewQuickSearchSurface();
-  if (!probeMatched) {
-    return null;
-  }
-
-  if (probeMatched.trusted !== true) {
-    return null;
-  }
-
-  const preferredWindowHandle = Number(probeMatched?.trustedWindow?.hwnd || 0)
-    || Number(probeMatched?.element?.WindowHandle || 0)
-    || Number(probeMatched?.foreground?.hwnd || 0)
-    || 0;
-  const focusedInput = await focusTradingViewQuickSearchInput(preferredWindowHandle);
-  if (!focusedInput?.focused) {
-    return null;
-  }
-  const relaxedCheckpoint = await verifyKeyObservationCheckpoint({
-    ...checkpointSpec,
-    requiresObservedChange: false
-  }, checkpointBeforeForeground, {
-    expectedWindowHandle: options.expectedWindowHandle
-  });
-
-  const foreground = relaxedCheckpoint?.foreground?.success
-    ? relaxedCheckpoint.foreground
-    : await systemAutomation.getForegroundWindowInfo();
-
-  return {
-    recovered: true,
-    checkpoint: {
-      ...observationCheckpoint,
-      ...(relaxedCheckpoint || {}),
-      verified: true,
-      error: null,
-      foreground,
-      matchReason: relaxedCheckpoint?.matchReason || 'quick-search-surface-probe',
-      recoveredBy: focusedInput?.focused ? 'semantic-input-focus' : 'surface-probe',
-      quickSearchSurfaceProbe: probeMatched,
-      quickSearchInputFocus: focusedInput || null
-    }
-  };
-}
-
-async function maybeRecoverTradingViewPineEditorOpen(action, checkpointSpec, checkpointBeforeForeground, observationCheckpoint, options = {}) {
-  const routeId = String(action?.searchSurfaceContract?.id || '').trim().toLowerCase();
-  const verifyTarget = String(action?.verify?.target || '').trim().toLowerCase();
-  const key = String(action?.key || '').trim().toLowerCase();
-  if (routeId !== 'open-pine-editor' || verifyTarget !== 'pine-editor' || key !== 'enter') {
-    return null;
-  }
-
-  const probeMatchedBeforeClick = await probeTradingViewPineEditorSurface();
-  if (probeMatchedBeforeClick) {
-    const foreground = await systemAutomation.getForegroundWindowInfo();
-    return {
-      recovered: true,
-      checkpoint: {
-        ...observationCheckpoint,
-        verified: true,
-        error: null,
-        editorActiveMatched: true,
-        foreground,
-        matchReason: 'pine-editor-surface-probe',
-        recoveredBy: 'surface-probe',
-        pineEditorSurfaceProbe: probeMatchedBeforeClick
-      }
-    };
-  }
-
-  if (typeof systemAutomation.click !== 'function') {
-    return null;
-  }
-
-  for (const candidate of PINE_EDITOR_RESULT_CLICK_CANDIDATES) {
-    const matchedResult = await findForegroundElementByText(candidate.text, {
-      exact: candidate.exact
-    });
-    if (!matchedResult?.element?.Bounds) {
-      continue;
-    }
-
-    const clickResult = {
-      success: true,
-      coordinates: {
-        x: matchedResult.element.Bounds.CenterX,
-        y: matchedResult.element.Bounds.CenterY
-      }
-    };
-
-    try {
-      await systemAutomation.click(
-        matchedResult.element.Bounds.CenterX,
-        matchedResult.element.Bounds.CenterY,
-        'left'
-      );
-    } catch (error) {
-      clickResult.success = false;
-      clickResult.error = error?.message || String(error || 'click failed');
-    }
-
-    if (!clickResult.success) continue;
-
-    await sleepMs(240);
-
-    const relaxedCheckpoint = await verifyKeyObservationCheckpoint({
-      ...checkpointSpec,
-      requiresObservedChange: false
-    }, checkpointBeforeForeground, {
-      expectedWindowHandle: options.expectedWindowHandle
-    });
-
-    const probeMatchedAfterClick = await probeTradingViewPineEditorSurface();
-    if (relaxedCheckpoint?.verified || probeMatchedAfterClick) {
-      const foreground = relaxedCheckpoint?.foreground?.success
-        ? relaxedCheckpoint.foreground
-        : await systemAutomation.getForegroundWindowInfo();
-      return {
-        recovered: true,
-        clickResult,
-        checkpoint: {
-          ...observationCheckpoint,
-          ...(relaxedCheckpoint || {}),
-          verified: true,
-          error: null,
-          editorActiveMatched: true,
-          foreground,
-          matchReason: relaxedCheckpoint?.matchReason || 'pine-editor-semantic-click-recovery',
-          recoveredBy: 'semantic-click',
-          pineEditorResultClick: {
-            text: candidate.text,
-            exact: candidate.exact
-          },
-          pineEditorSurfaceProbe: probeMatchedAfterClick || null
-        }
-      };
-    }
-  }
-
-  return null;
 }
 
 function buildWindowProfileFromForeground(foreground, fallbackProfile = null) {
@@ -7327,11 +6743,21 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
     enablePopupRecipes = false
   } = options;
 
+  const runtimeTracePreludeEvents = consumePendingRuntimeTracePrelude({
+    userMessage,
+    actionPlan: actionData,
+    explicitEvents: options.runtimeTracePreludeEvents
+  });
+
   const sessionState = getSessionIntentState({ cwd: process.cwd() });
+  const firstPlannedAction = Array.isArray(actionData?.actions) && actionData.actions.length > 0
+    ? actionData.actions[0]
+    : null;
   const executionContextEnvelope = options.executionContextEnvelope
     || await buildExecutionContextEnvelopeForPendingAction({
       cwd: process.cwd(),
       sessionState,
+      action: firstPlannedAction,
       userMessage,
       foreground: null
     });
@@ -7360,6 +6786,7 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
   let lastTargetWindowHandle = null;
   let lastTargetWindowProfile = null;
   let focusRecoveryTarget = null;
+  let trustedForegroundHandle = 0;
   let requirePreInputRefocus = false;
   let postVerification = { applicable: false, verified: true, healed: false, attempts: 0 };
   const observationCheckpoints = [];
@@ -7367,6 +6794,8 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
     ...options,
     selectionProvenance
   });
+
+  appendRuntimeTracePreludeEvents(runtimeTraceLog, runtimeTracePreludeEvents);
 
   appendRuntimeTraceEvent(runtimeTraceLog, 'action:plan', {
     thought: actionData.thought || null,
@@ -7383,6 +6812,7 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
 
   for (let i = 0; i < actionData.actions.length; i++) {
     const action = actionData.actions[i];
+    let preActionForegroundSnapshot = null;
     const actionWindowHandle = Number(action?.windowHandle || action?.hwnd || action?.targetWindowHandle || 0) || 0;
     if (actionWindowHandle > 0) {
       lastTargetWindowHandle = actionWindowHandle;
@@ -7455,7 +6885,9 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
       nearbyText: Array.isArray(targetAnalysis[`${action.x},${action.y}`]?.nearbyText)
         ? targetAnalysis[`${action.x},${action.y}`].nearbyText
         : [],
-      userMessage: options.userMessage || actionData.userMessage || ''
+      userMessage: options.userMessage || actionData.userMessage || '',
+      executionContextEnvelope,
+      executionContextConfidence: executionContextEnvelope?.confidence || null
     };
     
     // Analyze safety
@@ -7599,10 +7031,43 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
     }
 
     // Ensure focus-sensitive input goes to the last known target window.
-    if ((action.type === 'key' || action.type === 'type' || action.type === 'click_element') && lastTargetWindowHandle) {
+    const requiresForegroundLock = action.type === 'key'
+      || action.type === 'type'
+      || action.type === 'click_element'
+      || ((action.type === 'click' || action.type === 'double_click' || action.type === 'right_click') && action.x !== undefined);
+
+    if (requiresForegroundLock && (action.type === 'click' || action.type === 'double_click' || action.type === 'right_click') && action.x !== undefined && !lastTargetWindowHandle) {
+      const blockedResult = {
+        success: false,
+        action: action.type,
+        error: buildMissingFocusLockTargetMessage(action),
+        reason: action.reason || '',
+        safety,
+        blockedByFocusLock: true,
+        focusVerification: {
+          applicable: false,
+          verified: false,
+          drifted: false,
+          attempts: 0,
+          expectedWindowHandle: 0,
+          attemptedRestore: false,
+          attemptedRefocus: false,
+          foreground: null,
+          reason: 'missing-target-window-handle'
+        }
+      };
+      results.push(blockedResult);
+      if (onAction) {
+        onAction(blockedResult, i, actionData.actions.length);
+      }
+      break;
+    }
+
+    if (requiresForegroundLock && lastTargetWindowHandle) {
       console.log(`[AI-SERVICE] Verifying locked focus on target window ${lastTargetWindowHandle} before ${action.type}`);
       const focusLock = await ensureFocusLockedBeforeInputAction(action, {
         lastTargetWindowHandle,
+        preverifiedForegroundHandle: trustedForegroundHandle,
         lastTargetWindowProfile,
         focusRecoveryTarget,
         forceRefocus: requirePreInputRefocus
@@ -7611,8 +7076,13 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
       lastTargetWindowProfile = focusLock.lastTargetWindowProfile;
       focusRecoveryTarget = focusLock.focusRecoveryTarget;
       requirePreInputRefocus = false;
+      if (focusLock?.verification?.foreground?.success) {
+        preActionForegroundSnapshot = focusLock.verification.foreground;
+        trustedForegroundHandle = Number(focusLock.verification.foreground.hwnd || 0) || trustedForegroundHandle;
+      }
 
       if (!focusLock.ok) {
+        trustedForegroundHandle = 0;
         const blockedResult = {
           success: false,
           action: action.type,
@@ -7661,7 +7131,7 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
       focusRecoveryTarget
     });
     const checkpointBeforeForeground = checkpointSpec?.applicable
-      ? await systemAutomation.getForegroundWindowInfo()
+      ? (preActionForegroundSnapshot || await systemAutomation.getForegroundWindowInfo())
       : null;
 
     const quickSearchPreflight = await ensureTradingViewQuickSearchInputClearBeforeTyping(
@@ -7734,6 +7204,7 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
         if (classifiedFocus.accepted) {
           if (classifiedFocus.targetWindowHandle) {
             lastTargetWindowHandle = classifiedFocus.targetWindowHandle;
+            trustedForegroundHandle = classifiedFocus.targetWindowHandle;
           }
           lastTargetWindowProfile = buildWindowProfileFromForeground(classifiedFocus.foreground, lastTargetWindowProfile);
           focusRecoveryTarget = {
@@ -7742,6 +7213,7 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
           };
           requirePreInputRefocus = false;
         } else {
+          trustedForegroundHandle = 0;
           requirePreInputRefocus = true;
         }
       }
@@ -7793,6 +7265,7 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
         const observedHwnd = Number(observationCheckpoint.foreground.hwnd || 0) || 0;
         if (observedHwnd) {
           lastTargetWindowHandle = observedHwnd;
+          trustedForegroundHandle = observedHwnd;
         }
         lastTargetWindowProfile = {
           processName: observationCheckpoint.foreground.processName || lastTargetWindowProfile?.processName || undefined,
@@ -7807,6 +7280,7 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
       }
 
       if (!observationCheckpoint.verified) {
+        trustedForegroundHandle = 0;
         result.success = false;
         result.error = observationCheckpoint.error;
       }
@@ -8422,7 +7896,9 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
       text: action.reason || '',
       buttonText: action.targetText || '',
       nearbyText: [],
-      userMessage: options.userMessage || pending?.userMessage || ''
+      userMessage: options.userMessage || pending?.userMessage || '',
+      executionContextEnvelope: pending.executionContextEnvelope || options.executionContextEnvelope || null,
+      executionContextConfidence: pending.executionContextEnvelope?.confidence || options.executionContextEnvelope?.confidence || null
     });
     if (resumeSafety.blockExecution) {
       const blockedResult = {
@@ -8470,7 +7946,39 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
       }
     }
 
-    if ((action.type === 'key' || action.type === 'type' || action.type === 'click_element') && lastTargetWindowHandle) {
+    const requiresForegroundLock = action.type === 'key'
+      || action.type === 'type'
+      || action.type === 'click_element'
+      || ((action.type === 'click' || action.type === 'double_click' || action.type === 'right_click') && action.x !== undefined);
+
+    if (requiresForegroundLock && (action.type === 'click' || action.type === 'double_click' || action.type === 'right_click') && action.x !== undefined && !lastTargetWindowHandle) {
+      const blockedResult = {
+        success: false,
+        action: action.type,
+        error: buildMissingFocusLockTargetMessage(action),
+        reason: action.reason || '',
+        userConfirmed: resumePrerequisites.length === 0 && i === 0,
+        blockedByFocusLock: true,
+        focusVerification: {
+          applicable: false,
+          verified: false,
+          drifted: false,
+          attempts: 0,
+          expectedWindowHandle: 0,
+          attemptedRestore: false,
+          attemptedRefocus: false,
+          foreground: null,
+          reason: 'missing-target-window-handle'
+        }
+      };
+      results.push(blockedResult);
+      if (onAction) {
+        onAction(blockedResult, i, actionsToResume.length);
+      }
+      break;
+    }
+
+    if (requiresForegroundLock && lastTargetWindowHandle) {
       console.log(`[AI-SERVICE] (resume) Verifying locked focus on target window ${lastTargetWindowHandle} before ${action.type}`);
       const focusLock = await ensureFocusLockedBeforeInputAction(action, {
         lastTargetWindowHandle,
@@ -8902,6 +8410,7 @@ function extractTopKeywords(text, n) {
 module.exports = {
   setProvider,
   setApiKey,
+  setSessionCopilotModel,
   setCopilotModel,
   getCopilotModels,
   discoverCopilotModels,

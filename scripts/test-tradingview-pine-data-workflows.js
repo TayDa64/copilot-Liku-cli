@@ -544,10 +544,10 @@ test('TradingView Pine authoring contract stays inactive for non-authoring Tradi
   assert.strictEqual(contract, '', 'read-only Pine prompts should not receive the authoring contract');
 });
 
-test('generated Pine normalization restores an exact version-6 header', () => {
+test('generated Pine normalization preserves an exact requested-or-existing version header', () => {
   const normalized = aiService.normalizeGeneratedPineScript('Pine editor//@version=5\nindicator("Momentum Confidence", overlay=false)\nplot(close)');
 
-  assert.strictEqual(normalized.split('\n')[0], '//@version=6', 'generated Pine normalization should force a clean version-6 header on the first line');
+  assert.strictEqual(normalized.split('\n')[0], '//@version=5', 'generated Pine normalization should preserve the clean requested or existing version header on the first line');
   assert(!/^pine\s*editor/i.test(normalized), 'generated Pine normalization should remove UI-label contamination');
 });
 
@@ -561,7 +561,7 @@ test('canonical Pine state persists normalized source for later TradingView reco
   const persisted = persistPineScriptState(state, { cwd: tempRoot });
 
   try {
-    assert.strictEqual(state.normalizedSource.split('\n')[0], '//@version=6', 'canonical Pine state should normalize the version header');
+    assert.strictEqual(state.normalizedSource.split('\n')[0], '//@version=5', 'canonical Pine state should preserve the normalized version header from the source or intent');
     assert.strictEqual(state.scriptTitle, 'Momentum Confidence', 'canonical Pine state should infer the indicator title');
     assert(persisted?.sourcePath && persisted?.metadataPath, 'canonical Pine state should persist source and metadata artifacts');
   } finally {

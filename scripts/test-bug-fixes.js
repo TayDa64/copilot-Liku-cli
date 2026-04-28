@@ -46,6 +46,15 @@ function assertDeepEqual(actual, expected, message) {
   }
 }
 
+function normalizeSafetyResultForComparison(result) {
+  if (!result || typeof result !== 'object') return result;
+  return {
+    ...result,
+    actionId: '<normalized>',
+    timestamp: 0
+  };
+}
+
 console.log('\n========================================');
 console.log('  Testing v0.0.5 Bug Fixes');
 console.log('========================================\n');
@@ -259,6 +268,136 @@ test('rewriteActionsForReliability normalizes typoed app launches', () => {
   assert(launchAction.verifyTarget.domKeywords.includes('depth of market'), 'verifyTarget should include TradingView DOM keywords');
 });
 
+test('rewriteActionsForReliability preserves parity when tool registry rewrites are enabled', () => {
+  const aiServicePath = path.join(__dirname, '..', 'src', 'main', 'ai-service.js');
+  const aiService = require(aiServicePath);
+  const previousFlag = process.env.LIKU_USE_TOOL_REGISTRY_REWRITES;
+
+  const tradingViewActions = [
+    { type: 'key', key: 'ctrl+e' },
+    { type: 'type', text: 'plot(close)' }
+  ];
+  const tradingViewContext = {
+    userMessage: 'open pine editor in tradingview and type plot(close)'
+  };
+
+  const browserActions = [
+    { type: 'focus_window', windowHandle: 264274 },
+    { type: 'wait', ms: 1000 },
+    { type: 'screenshot' }
+  ];
+  const browserContext = {
+    userMessage: 'I have tradingview open in the background, what do you think?'
+  };
+
+  try {
+    delete process.env.LIKU_USE_TOOL_REGISTRY_REWRITES;
+    const legacyTradingViewRewrite = aiService.rewriteActionsForReliability(tradingViewActions, tradingViewContext);
+    const legacyNonTradingViewRewrite = aiService.rewriteActionsForReliability(browserActions, browserContext);
+
+    process.env.LIKU_USE_TOOL_REGISTRY_REWRITES = '1';
+    const registryTradingViewRewrite = aiService.rewriteActionsForReliability(tradingViewActions, tradingViewContext);
+    const registryNonTradingViewRewrite = aiService.rewriteActionsForReliability(browserActions, browserContext);
+
+    assertDeepEqual(registryTradingViewRewrite, legacyTradingViewRewrite, 'TradingView rewrite registry path should stay byte-identical to legacy TradingView rewrite behavior');
+    assertDeepEqual(registryNonTradingViewRewrite, legacyNonTradingViewRewrite, 'Registry flag should not change non-TradingView rewrite behavior');
+  } finally {
+    if (previousFlag === undefined) {
+      delete process.env.LIKU_USE_TOOL_REGISTRY_REWRITES;
+    } else {
+      process.env.LIKU_USE_TOOL_REGISTRY_REWRITES = previousFlag;
+    }
+  }
+});
+
+test('analyzeActionSafety preserves parity when tool registry risks are enabled', () => {
+  const aiServicePath = path.join(__dirname, '..', 'src', 'main', 'ai-service.js');
+  const aiService = require(aiServicePath);
+  const previousFlag = process.env.LIKU_USE_TOOL_REGISTRY_RISKS;
+
+  const tradingViewAction = {
+    type: 'key',
+    key: 'enter',
+    reason: 'Place a buy market order in the TradingView DOM'
+  };
+  const tradingViewTarget = {
+    thought: 'Place a buy market order in the TradingView DOM',
+    userMessage: 'place a buy market order in the tradingview dom now'
+  };
+
+  const nonTradingViewAction = {
+    type: 'run_command',
+    command: 'Get-Process | Select-Object -First 1',
+    shell: 'powershell'
+  };
+  const nonTradingViewTarget = {
+    thought: 'Inspect the current process list',
+    userMessage: 'inspect the current process list'
+  };
+
+  try {
+    delete process.env.LIKU_USE_TOOL_REGISTRY_RISKS;
+    const legacyTradingViewRisk = aiService.analyzeActionSafety(tradingViewAction, tradingViewTarget);
+    const legacyNonTradingViewRisk = aiService.analyzeActionSafety(nonTradingViewAction, nonTradingViewTarget);
+
+    process.env.LIKU_USE_TOOL_REGISTRY_RISKS = '1';
+    const registryTradingViewRisk = aiService.analyzeActionSafety(tradingViewAction, tradingViewTarget);
+    const registryNonTradingViewRisk = aiService.analyzeActionSafety(nonTradingViewAction, nonTradingViewTarget);
+
+    assertDeepEqual(
+      normalizeSafetyResultForComparison(registryTradingViewRisk),
+      normalizeSafetyResultForComparison(legacyTradingViewRisk),
+      'TradingView risk registry path should stay behavior-identical to legacy TradingView risk behavior'
+    );
+    assertDeepEqual(
+      normalizeSafetyResultForComparison(registryNonTradingViewRisk),
+      normalizeSafetyResultForComparison(legacyNonTradingViewRisk),
+      'Risk registry flag should not change non-TradingView safety behavior'
+    );
+  } finally {
+    if (previousFlag === undefined) {
+      delete process.env.LIKU_USE_TOOL_REGISTRY_RISKS;
+    } else {
+      process.env.LIKU_USE_TOOL_REGISTRY_RISKS = previousFlag;
+    }
+  }
+});
+
+test('tool registry risk path scopes bare order danger keywords away from non-TradingView plans', () => {
+  const aiServicePath = path.join(__dirname, '..', 'src', 'main', 'ai-service.js');
+  const aiService = require(aiServicePath);
+  const previousFlag = process.env.LIKU_USE_TOOL_REGISTRY_RISKS;
+
+  const action = {
+    type: 'type',
+    text: 'Monthly order summary',
+    reason: 'Create a budget spreadsheet order summary'
+  };
+  const targetInfo = {
+    thought: 'Create a budget spreadsheet order summary',
+    userMessage: 'create a budget spreadsheet order summary in excel'
+  };
+
+  try {
+    delete process.env.LIKU_USE_TOOL_REGISTRY_RISKS;
+    const legacyRisk = aiService.analyzeActionSafety(action, targetInfo);
+
+    process.env.LIKU_USE_TOOL_REGISTRY_RISKS = '1';
+    const scopedRisk = aiService.analyzeActionSafety(action, targetInfo);
+
+    assertEqual(legacyRisk.riskLevel, 'HIGH', 'Legacy danger patterns should still treat bare order language as high-risk');
+    assert(scopedRisk.riskLevel === 'MEDIUM' || scopedRisk.riskLevel === 'LOW', 'Scoped danger patterns should avoid escalating non-TradingView order-summary language');
+    assertEqual(scopedRisk.requiresConfirmation, false, 'Scoped danger patterns should not require confirmation for non-TradingView order-summary language');
+    assert(!scopedRisk.warnings.some((warning) => /order/i.test(String(warning || ''))), 'Scoped danger patterns should suppress bare order warnings outside TradingView context');
+  } finally {
+    if (previousFlag === undefined) {
+      delete process.env.LIKU_USE_TOOL_REGISTRY_RISKS;
+    } else {
+      process.env.LIKU_USE_TOOL_REGISTRY_RISKS = previousFlag;
+    }
+  }
+});
+
 test('pine workflow encodes diagnostics and compile-result evidence modes', () => {
   const pineWorkflowPath = path.join(__dirname, '..', 'src', 'main', 'tradingview', 'pine-workflows.js');
   const shortcutProfilePath = path.join(__dirname, '..', 'src', 'main', 'tradingview', 'shortcut-profile.js');
@@ -350,13 +489,16 @@ test('rewriteActionsForReliability does not reinterpret passive TradingView open
 
 test('ai-service normalizes app identity for learned skill scope', () => {
   const aiServicePath = path.join(__dirname, '..', 'src', 'main', 'ai-service.js');
+  const tradingViewToolPath = path.join(__dirname, '..', 'src', 'main', 'tools', 'tradingview-tool.js');
   const appProfilePath = path.join(__dirname, '..', 'src', 'main', 'tradingview', 'app-profile.js');
   const fs = require('fs');
 
   const aiServiceContent = fs.readFileSync(aiServicePath, 'utf8');
+  const tradingViewToolContent = fs.readFileSync(tradingViewToolPath, 'utf8');
   const appProfileContent = fs.readFileSync(appProfilePath, 'utf8');
 
-  assert(aiServiceContent.includes("require('./tradingview/app-profile')"), 'ai-service should consume the extracted app profile module');
+  assert(aiServiceContent.includes("require('./tools/tradingview-tool')"), 'ai-service should consume the TradingView facade module');
+  assert(tradingViewToolContent.includes("require('../tradingview/app-profile')"), 'TradingView facade should consume the extracted app profile module');
   assert(appProfileContent.includes('resolveNormalizedAppIdentity('), 'app profile module should define normalized app identity resolution');
   assert(appProfileContent.includes("'tradeing view'"), 'app profile module should recognize the TradingView typo alias');
   assert(aiServiceContent.includes('normalizedSkillApp?.processNames'), 'Learned skill scope should include normalized process names');
@@ -372,6 +514,13 @@ test('ai-service normalizes app identity for learned skill scope', () => {
 test('ai-service gates TradingView follow-up typing on post-key observation checkpoints', () => {
   const aiServicePath = path.join(__dirname, '..', 'src', 'main', 'ai-service.js');
   const observationCheckpointPath = path.join(__dirname, '..', 'src', 'main', 'ai-service', 'observation-checkpoints.js');
+  const rewriteRegistryPath = path.join(__dirname, '..', 'src', 'main', 'ai-service', 'rewrite-registry.js');
+  const riskRegistryPath = path.join(__dirname, '..', 'src', 'main', 'ai-service', 'risk-registry.js');
+  const tradingViewToolPath = path.join(__dirname, '..', 'src', 'main', 'tools', 'tradingview-tool.js');
+  const tradingViewRuntimeRecoveryPath = path.join(__dirname, '..', 'src', 'main', 'tradingview', 'runtime', 'recovery.js');
+  const tradingViewRegistryBootstrapPath = path.join(__dirname, '..', 'src', 'main', 'tradingview', 'registry-bootstrap.js');
+  const tradingViewRewriteRunnerPath = path.join(__dirname, '..', 'src', 'main', 'tradingview', 'rewrite-runner.js');
+  const tradingViewPineAuthoringPath = path.join(__dirname, '..', 'src', 'main', 'tradingview', 'pine-authoring.js');
   const tradingViewVerificationPath = path.join(__dirname, '..', 'src', 'main', 'tradingview', 'verification.js');
   const tradingViewIndicatorPath = path.join(__dirname, '..', 'src', 'main', 'tradingview', 'indicator-workflows.js');
   const tradingViewAlertPath = path.join(__dirname, '..', 'src', 'main', 'tradingview', 'alert-workflows.js');
@@ -388,6 +537,13 @@ test('ai-service gates TradingView follow-up typing on post-key observation chec
 
   const aiServiceContent = fs.readFileSync(aiServicePath, 'utf8');
   const observationCheckpointContent = fs.readFileSync(observationCheckpointPath, 'utf8');
+  const rewriteRegistryContent = fs.readFileSync(rewriteRegistryPath, 'utf8');
+  const riskRegistryContent = fs.readFileSync(riskRegistryPath, 'utf8');
+  const tradingViewToolContent = fs.readFileSync(tradingViewToolPath, 'utf8');
+  const tradingViewRuntimeRecoveryContent = fs.readFileSync(tradingViewRuntimeRecoveryPath, 'utf8');
+  const tradingViewRegistryBootstrapContent = fs.readFileSync(tradingViewRegistryBootstrapPath, 'utf8');
+  const tradingViewRewriteRunnerContent = fs.readFileSync(tradingViewRewriteRunnerPath, 'utf8');
+  const tradingViewPineAuthoringContent = fs.readFileSync(tradingViewPineAuthoringPath, 'utf8');
   const tradingViewVerificationContent = fs.readFileSync(tradingViewVerificationPath, 'utf8');
   const tradingViewIndicatorContent = fs.readFileSync(tradingViewIndicatorPath, 'utf8');
   const tradingViewAlertContent = fs.readFileSync(tradingViewAlertPath, 'utf8');
@@ -408,13 +564,39 @@ test('ai-service gates TradingView follow-up typing on post-key observation chec
   assert(observationCheckpointContent.includes('surface change before continuing'), 'Checkpoint failures should explain missing TradingView surface changes');
   assert(observationCheckpointContent.includes('inferTradingViewObservationSpec'), 'Observation checkpoint module should consume the extracted TradingView observation-spec helper');
   assert(observationCheckpointContent.includes('inferTradingViewTradingMode'), 'Observation checkpoint module should consume the TradingView trading-mode inference helper');
-  assert(aiServiceContent.includes("require('./tradingview/indicator-workflows')"), 'ai-service should consume the extracted TradingView indicator workflow helper');
-  assert(aiServiceContent.includes("require('./tradingview/alert-workflows')"), 'ai-service should consume the extracted TradingView alert workflow helper');
-  assert(aiServiceContent.includes("require('./tradingview/chart-verification')"), 'ai-service should consume the extracted TradingView chart verification helper');
-  assert(aiServiceContent.includes("require('./tradingview/drawing-workflows')"), 'ai-service should consume the extracted TradingView drawing workflow helper');
-  assert(aiServiceContent.includes("require('./tradingview/pine-workflows')"), 'ai-service should consume the extracted TradingView Pine workflow helper');
-  assert(aiServiceContent.includes("require('./tradingview/paper-workflows')"), 'ai-service should consume the extracted TradingView Paper Trading workflow helper');
-  assert(aiServiceContent.includes("require('./tradingview/dom-workflows')"), 'ai-service should consume the extracted TradingView DOM workflow helper');
+  assert(aiServiceContent.includes("require('./ai-service/rewrite-registry')"), 'ai-service should consume the internal rewrite registry module');
+  assert(aiServiceContent.includes("require('./ai-service/risk-registry')"), 'ai-service should consume the internal risk registry module');
+  assert(aiServiceContent.includes("require('./tools/tradingview-tool')"), 'ai-service should consume the TradingView facade module');
+  assert(aiServiceContent.includes("require('./tradingview/runtime/recovery')"), 'ai-service should consume the extracted TradingView runtime recovery module');
+  assert(aiServiceContent.includes("require('./tradingview/registry-bootstrap')"), 'ai-service should consume the extracted TradingView registry bootstrap module');
+  assert(aiServiceContent.includes("require('./tradingview/rewrite-runner')"), 'ai-service should consume the extracted TradingView rewrite runner module');
+  assert(aiServiceContent.includes("require('./tradingview/pine-authoring')"), 'ai-service should consume the extracted TradingView Pine authoring module');
+  assert(aiServiceContent.includes('LIKU_USE_TOOL_REGISTRY_REWRITES'), 'ai-service should guard the registry path behind an explicit feature flag');
+  assert(aiServiceContent.includes('LIKU_USE_TOOL_REGISTRY_RISKS'), 'ai-service should guard the risk registry path behind an explicit feature flag');
+  assert(rewriteRegistryContent.includes('registerToolRewrites'), 'Rewrite registry module should support tool rewrite registration');
+  assert(rewriteRegistryContent.includes('applyRegisteredToolRewrites'), 'Rewrite registry module should support ordered rewrite dispatch');
+  assert(riskRegistryContent.includes('registerToolRiskAssessor'), 'Risk registry module should support tool risk registration');
+  assert(riskRegistryContent.includes('assessRegisteredToolRisk'), 'Risk registry module should support ordered tool risk dispatch');
+  assert(tradingViewRuntimeRecoveryContent.includes('createTradingViewRuntimeRecovery'), 'TradingView runtime recovery module should expose a factory for executor helpers');
+  assert(tradingViewRuntimeRecoveryContent.includes('ensureTradingViewQuickSearchInputClearBeforeTyping'), 'TradingView runtime recovery module should own quick-search preflight proof helpers');
+  assert(tradingViewRuntimeRecoveryContent.includes('maybeRecoverTradingViewQuickSearchOpen'), 'TradingView runtime recovery module should own quick-search recovery helpers');
+  assert(tradingViewRuntimeRecoveryContent.includes('maybeRecoverTradingViewPineEditorOpen'), 'TradingView runtime recovery module should own Pine Editor recovery helpers');
+  assert(tradingViewPineAuthoringContent.includes('createTradingViewPineAuthoringHelpers'), 'TradingView Pine authoring module should expose a helper factory');
+  assert(tradingViewPineAuthoringContent.includes('buildTradingViewPineAuthoringSystemContract'), 'TradingView Pine authoring module should own the Pine contract guidance');
+  assert(tradingViewPineAuthoringContent.includes('maybeBuildRecoveredTradingViewPineActionResponse'), 'TradingView Pine authoring module should own Pine plan recovery helpers');
+  assert(tradingViewRegistryBootstrapContent.includes('registerTradingViewRegistryBootstrap'), 'TradingView registry bootstrap module should expose a registration helper');
+  assert(tradingViewRegistryBootstrapContent.includes("registerToolRewrites('tradingview'"), 'TradingView registry bootstrap should register TradingView rewrite handlers');
+  assert(tradingViewRegistryBootstrapContent.includes("registerToolRiskAssessor('tradingview'"), 'TradingView registry bootstrap should register TradingView risk assessors');
+  assert(tradingViewRewriteRunnerContent.includes('applyTradingViewReliabilityRewrites'), 'TradingView rewrite runner module should expose the ordered TradingView rewrite pipeline');
+  assert(tradingViewRewriteRunnerContent.includes('maybeRewriteTradingViewPineWorkflow'), 'TradingView rewrite runner should preserve Pine rewrite participation');
+  assert(tradingViewRewriteRunnerContent.includes('maybeRewriteTradingViewAlertWorkflow'), 'TradingView rewrite runner should preserve alert rewrite participation');
+  assert(tradingViewToolContent.includes("require('../tradingview/indicator-workflows')"), 'TradingView facade should consume the extracted TradingView indicator workflow helper');
+  assert(tradingViewToolContent.includes("require('../tradingview/alert-workflows')"), 'TradingView facade should consume the extracted TradingView alert workflow helper');
+  assert(tradingViewToolContent.includes("require('../tradingview/chart-verification')"), 'TradingView facade should consume the extracted TradingView chart verification helper');
+  assert(tradingViewToolContent.includes("require('../tradingview/drawing-workflows')"), 'TradingView facade should consume the extracted TradingView drawing workflow helper');
+  assert(tradingViewToolContent.includes("require('../tradingview/pine-workflows')"), 'TradingView facade should consume the extracted TradingView Pine workflow helper');
+  assert(tradingViewToolContent.includes("require('../tradingview/paper-workflows')"), 'TradingView facade should consume the extracted TradingView Paper Trading workflow helper');
+  assert(tradingViewToolContent.includes("require('../tradingview/dom-workflows')"), 'TradingView facade should consume the extracted TradingView DOM workflow helper');
   assert(tradingViewVerificationContent.includes("classification === 'panel-open'"), 'TradingView checkpoints should recognize panel-open flows such as Pine or DOM');
   assert(observationCheckpointContent.includes("kind === 'editor-active' || kind === 'editor-ready'"), 'Observation checkpoint module should recognize editor-active/editor-ready verification kinds');
   assert(observationCheckpointContent.includes("classification === 'editor-active'"), 'Observation checkpoint module should preserve editor-active classification');
@@ -795,6 +977,52 @@ test('ai-service app launch detection treats TradingView shortcut surfaces as ap
   assert(aiServiceContent.includes('new\\s+alert'), 'TradingView new-alert phrasing should be treated as an app surface');
   assert(aiServiceContent.includes('version\\s+history'), 'TradingView version-history phrasing should be treated as an app surface');
   assert(aiServiceContent.includes('object(?:\\s+|-)tree'), 'TradingView object-tree variants should be treated as an app surface');
+});
+
+test('Wave 1 runtime safety rails preserve low-confidence gating, Pine version intent, and nullable UIA bounds', () => {
+  const aiServicePath = path.join(__dirname, '..', 'src', 'main', 'ai-service.js');
+  const pineStatePath = path.join(__dirname, '..', 'src', 'main', 'tradingview', 'pine-script-state.js');
+  const uiaLegacyPath = path.join(__dirname, '..', 'src', 'native', 'windows-uia', 'Program.cs');
+  const uiaDotnetPath = path.join(__dirname, '..', 'src', 'native', 'windows-uia-dotnet', 'Program.cs');
+  const fs = require('fs');
+
+  const aiService = require(aiServicePath);
+  const pineState = require(pineStatePath);
+  const aiServiceContent = fs.readFileSync(aiServicePath, 'utf8');
+  const uiaLegacyContent = fs.readFileSync(uiaLegacyPath, 'utf8');
+  const uiaDotnetContent = fs.readFileSync(uiaDotnetPath, 'utf8');
+
+  const lowConfidenceSafety = aiService.analyzeActionSafety({ type: 'click', x: 10, y: 10 }, {
+    userMessage: 'click the dangerous button',
+    executionContextEnvelope: { confidence: 'low' }
+  });
+
+  assertEqual(lowConfidenceSafety.requiresConfirmation, true, 'Low-confidence mutating actions should require confirmation');
+  assertEqual(lowConfidenceSafety.riskLevel, 'HIGH', 'Low-confidence mutating actions should be escalated to high risk');
+  assert(lowConfidenceSafety.warnings.some((warning) => warning.includes('Low-confidence execution context')), 'Low-confidence mutating actions should emit a confidence warning');
+
+  const pinePrompt = aiService.buildTradingViewPineCodeGenerationPrompt('write a Pine Script v5 indicator for RSI divergence');
+  const normalizedPine = aiService.normalizeGeneratedPineScript({
+    pineScript: 'indicator("RSI Divergence")\nplot(close)',
+    userMessage: 'write a Pine Script v5 indicator for RSI divergence'
+  });
+  const pineStateRecord = pineState.buildPineScriptState({
+    source: 'indicator("RSI Divergence")\nplot(close)',
+    intent: 'write a Pine Script v5 indicator for RSI divergence'
+  });
+
+  assert(pinePrompt.includes('//@version=5'), 'Pine generation prompt should preserve requested version intent');
+  assert(normalizedPine.startsWith('//@version=5'), 'Generated Pine normalization should preserve requested version intent');
+  assertEqual(pineState.detectRequestedPineVersion('write a Pine Script v5 indicator', ''), '5', 'Pine state should detect requested version from intent');
+  assertEqual(pineStateRecord.pineVersion, '5', 'Pine state should persist the requested Pine version');
+  assertEqual(pineStateRecord.validation.valid, true, 'Pine state validation should accept the requested version header');
+
+  assert(aiServiceContent.includes('plan:policy-check'), 'ai-service should record policy prelude trace events');
+  assert(aiServiceContent.includes('Low-confidence execution context'), 'ai-service should expose low-confidence confirmation messaging');
+  assert(uiaDotnetContent.includes('Dictionary<string, double?>'), '.NET UIA host should serialize bounds as nullable doubles');
+  assert(uiaDotnetContent.includes('public double? x'), '.NET UIA bounds should be nullable');
+  assert(uiaLegacyContent.includes('static double? SafeNumber'), 'Legacy UIA host should return nullable safe numbers');
+  assert(uiaLegacyContent.includes('public double? x'), 'Legacy UIA bounds should be nullable');
 });
 
 // Test DANGEROUS_COMMAND_PATTERNS covers critical cases
