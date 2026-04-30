@@ -33,6 +33,8 @@ docs/pdf/*.txt
 
 # Test artifacts
 .tmp-hook-check/
+.tmp-test-logs/
+artifacts/live-validation/
 
 # Local runtime / scratch artifacts
 .liku/

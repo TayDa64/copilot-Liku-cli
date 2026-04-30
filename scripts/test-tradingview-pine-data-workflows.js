@@ -301,6 +301,29 @@ test('clipboard-only pine authoring plan rewrites into guarded continuation afte
   assert(saveInspect.continueActions.some((action) => action?.type === 'get_text' && action?.pineEvidenceMode === 'compile-result'), 'save-verified continuation should gather compile-result feedback after add-to-chart');
 });
 
+test('save-only pine creation prompt suppresses auto add-to-chart continuation', () => {
+  const userMessage = 'TradingView is already open. Create a new Pine script, save the script, and report the visible save status. Do not add it to the chart.';
+  const sourceActions = [
+    {
+      type: 'run_command',
+      shell: 'powershell',
+      command: "Set-Clipboard -Value @'\n//@version=6\nindicator(\"Liku Live Save Probe\", overlay=false)\nplot(close)\n'@",
+      reason: 'Copy the prepared Pine script to the clipboard'
+    }
+  ];
+
+  const intent = inferTradingViewPineIntent(userMessage, sourceActions);
+  const rewritten = buildTradingViewPineWorkflowActions(intent, sourceActions);
+
+  const freshInspect = intent?.safeAuthoringContinuationSteps?.find((action) => action?.type === 'get_text' && action?.pineEvidenceMode === 'safe-authoring-inspect' && Array.isArray(action?.continueActions));
+  const saveInspect = freshInspect?.continueActions?.find((action) => action?.type === 'get_text' && action?.pineEvidenceMode === 'save-status');
+
+  assert(intent, 'save-only prompt should infer a TradingView Pine intent');
+  assert(Array.isArray(rewritten) && rewritten.length > 0, 'save-only prompt should still build a rewritten workflow');
+  assert(saveInspect, 'safe authoring flow should still verify save status');
+  assert(!saveInspect.continueActions.some((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'ctrl+enter'), 'save-only prompt should not auto-add the script to the chart');
+});
+
 test('validated canonical pine state forces the fresh-script route and drives clear-and-paste replacement from the persisted state file', () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'liku-pine-canonical-'));
   const pineState = buildPineScriptState({

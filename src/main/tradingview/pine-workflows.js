@@ -332,6 +332,11 @@ function shouldAutoAddPineScriptToChart(raw = '', actions = []) {
   const normalized = normalizeTextForMatch(raw);
   if (!normalized) return false;
 
+   const explicitlySaveOnly = /\b(save(?:\s+the)?\s+script|save\s+only|only\s+save|do\s+not\s+(?:add|apply|put|load|run)\b|dont\s+(?:add|apply|put|load|run)\b|without\s+(?:adding|applying|loading|running)\b)/.test(normalized);
+   if (explicitlySaveOnly) {
+    return false;
+  }
+
   return /\btradingview\b/.test(normalized)
     && /\b(write|create|generate|build|draft|make)\b/.test(normalized)
     && /\bpine\b/.test(normalized);
@@ -918,16 +923,23 @@ function buildTradingViewPineWorkflowActions(intent = {}, actions = []) {
   ];
 
   if (intent.surfaceTarget === 'pine-editor') {
+    const pineEditorOpenVerify = {
+      kind: intent.requiresEditorActivation ? 'editor-active' : intent.verifyKind,
+      appName: 'TradingView',
+      target: intent.surfaceTarget,
+      keywords: expectedKeywords,
+      requiresObservedChange: !!intent.requiresObservedChange
+    };
+    const prefersOfficialDirectPineOpen = intent.safeAuthoringDefault
+      && !intent.requiresFreshIndicator
+      && !intent.explicitOverwriteAuthoring;
     const routeActions = buildTradingViewShortcutRoute('open-pine-editor', {
+      routeStrategy: prefersOfficialDirectPineOpen ? 'official-direct' : 'quick-search',
+      routeShortcutId: prefersOfficialDirectPineOpen ? 'new-pine-indicator' : undefined,
+      skipQueryClearBeforeType: true,
       enterReason: opener?.reason || intent.reason,
       enterActionOverrides: {
-        verify: opener?.verify || {
-          kind: intent.requiresEditorActivation ? 'editor-active' : intent.verifyKind,
-          appName: 'TradingView',
-          target: intent.surfaceTarget,
-          keywords: expectedKeywords,
-          requiresObservedChange: !!intent.requiresObservedChange
-        },
+        verify: pineEditorOpenVerify,
         verifyTarget
       }
     });
@@ -938,13 +950,7 @@ function buildTradingViewPineWorkflowActions(intent = {}, actions = []) {
       rewritten.push({
         ...opener,
         reason: opener?.reason || intent.reason,
-        verify: opener?.verify || {
-          kind: intent.requiresEditorActivation ? 'editor-active' : intent.verifyKind,
-          appName: 'TradingView',
-          target: intent.surfaceTarget,
-          keywords: expectedKeywords,
-          requiresObservedChange: !!intent.requiresObservedChange
-        },
+        verify: pineEditorOpenVerify,
         verifyTarget
       });
     }
@@ -1128,6 +1134,7 @@ function buildTradingViewPineResumePrerequisites(actions = [], pauseIndex = -1, 
     },
     { type: 'wait', ms: 650 },
     ...((buildTradingViewShortcutRoute('open-pine-editor', {
+      skipQueryClearBeforeType: true,
       enterReason: 'Re-open or re-activate TradingView Pine Editor after confirmation before continuing authoring',
       enterActionOverrides: {
         verify: {
