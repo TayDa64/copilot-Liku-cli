@@ -17,14 +17,40 @@ function sanitizePineHeaderNoise(value = '') {
   return raw;
 }
 
-function normalizePineScriptSource(source = '') {
+function detectPineVersionHeader(value = '') {
+  const match = String(value || '').match(/\/\/\s*@version\s*=\s*(\d+)\b/i);
+  return String(match?.[1] || '').trim() || null;
+}
+
+function detectRequestedPineVersion(intent = '', source = '') {
+  const sourceVersion = detectPineVersionHeader(source);
+  if (sourceVersion) return sourceVersion;
+
+  const text = String(intent || '');
+  if (!text.trim()) return '6';
+
+  const explicitVersionMatch = text.match(/\b(?:pine(?:\s*script)?|pinescript|script|strategy|indicator|library)?\s*(?:@?version|v)\s*=?\s*(\d+)\b/i);
+  if (explicitVersionMatch?.[1]) return explicitVersionMatch[1];
+
+  const versionedScriptMatch = text.match(/\bversion\s*(\d+)\s+(?:pine\s*script|pinescript|script|strategy|indicator|library)\b/i);
+  if (versionedScriptMatch?.[1]) return versionedScriptMatch[1];
+
+  const maintenanceMatch = text.match(/\b(?:update|fix|repair|rewrite|migrate|convert|maintain)\b[\s\S]{0,80}?\bversion\s*(\d+)\b/i);
+  if (maintenanceMatch?.[1]) return maintenanceMatch[1];
+
+  return '6';
+}
+
+function normalizePineScriptSource(source = '', options = {}) {
   let normalized = sanitizePineHeaderNoise(String(source || '').trim());
   if (!normalized) return '';
 
+  const requestedVersion = String(options.version || detectRequestedPineVersion(options.intent, normalized) || '6').trim() || '6';
+
   if (/\/\/\s*@version\s*=\s*\d+\b/i.test(normalized)) {
-    normalized = normalized.replace(/\/\/\s*@version\s*=\s*\d+\b/i, '//@version=6');
+    normalized = normalized.replace(/\/\/\s*@version\s*=\s*\d+\b/i, `//@version=${requestedVersion}`);
   } else {
-    normalized = `//@version=6\n${normalized}`;
+    normalized = `//@version=${requestedVersion}\n${normalized}`;
   }
 
   return normalized.trim();
@@ -36,8 +62,9 @@ function inferPineScriptTitle(source = '') {
   return String(titleMatch?.[1] || 'Liku Pine Script').trim() || 'Liku Pine Script';
 }
 
-function validatePineScriptStateSource(source = '') {
-  const normalizedSource = normalizePineScriptSource(source);
+function validatePineScriptStateSource(source = '', options = {}) {
+  const expectedVersion = String(options.version || detectRequestedPineVersion(options.intent, source) || '6').trim() || '6';
+  const normalizedSource = normalizePineScriptSource(source, { ...options, version: expectedVersion });
   const issues = [];
 
   if (!normalizedSource) {
@@ -48,10 +75,10 @@ function validatePineScriptStateSource(source = '') {
   } else {
     const lines = normalizedSource.split(/\r?\n/);
     const firstLine = String(lines[0] || '').trim();
-    if (firstLine !== '//@version=6') {
+    if (firstLine !== `//@version=${expectedVersion}`) {
       issues.push({
         code: 'invalid-version-header',
-        message: 'The first Pine line must be exactly //@version=6.'
+        message: `The first Pine line must be exactly //@version=${expectedVersion}.`
       });
     }
 
@@ -105,11 +132,12 @@ function validatePineScriptStateSource(source = '') {
 }
 
 function buildPineScriptState({ source = '', intent = '', origin = 'generated', targetApp = 'tradingview' } = {}) {
-  const normalizedSource = normalizePineScriptSource(source);
+  const pineVersion = detectRequestedPineVersion(intent, source);
+  const normalizedSource = normalizePineScriptSource(source, { intent, version: pineVersion });
   const sourceHash = crypto.createHash('sha256').update(normalizedSource, 'utf8').digest('hex');
   const scriptTitle = inferPineScriptTitle(normalizedSource);
   const createdAt = new Date().toISOString();
-  const validation = validatePineScriptStateSource(normalizedSource);
+  const validation = validatePineScriptStateSource(normalizedSource, { intent, version: pineVersion });
 
   return {
     id: `pine-${sourceHash.slice(0, 12)}`,
@@ -117,6 +145,7 @@ function buildPineScriptState({ source = '', intent = '', origin = 'generated', 
     origin,
     targetApp,
     intent: String(intent || '').trim() || null,
+    pineVersion,
     scriptTitle,
     sourceHash,
     normalizedSource,
@@ -170,6 +199,7 @@ function buildPineClipboardPreparationCommandFromCanonicalState(canonicalState =
 }
 
 module.exports = {
+  detectRequestedPineVersion,
   normalizePineScriptSource,
   inferPineScriptTitle,
   validatePineScriptStateSource,

@@ -6,7 +6,10 @@ const path = require('path');
 const aiService = require(path.join(__dirname, '..', 'src', 'main', 'ai-service.js'));
 const { getUIWatcher } = require(path.join(__dirname, '..', 'src', 'main', 'ui-watcher.js'));
 const windowManager = require(path.join(__dirname, '..', 'src', 'main', 'ui-automation', 'window', 'manager.js'));
-const { buildVerifyTargetHintFromAppName } = require(path.join(__dirname, '..', 'src', 'main', 'tradingview', 'app-profile.js'));
+const {
+  buildVerifyTargetHintFromAppName,
+  buildOpenApplicationActions
+} = require(path.join(__dirname, '..', 'src', 'main', 'tradingview', 'app-profile.js'));
 const {
   buildTradingViewPineWorkflowActions,
   inferTradingViewPineIntent
@@ -20,6 +23,11 @@ const DEFAULT_ARTIFACT_DIR = path.join(__dirname, '..', 'artifacts', 'live-valid
 const DEFAULT_POLL_INTERVAL_MS = 250;
 const DEFAULT_PINE_CREATE_SAVE_NAME = 'Liku Live Save Probe';
 const DEFAULT_PINE_CREATE_SAVE_PROMPT = `TradingView is already open. Create a new Pine script called "${DEFAULT_PINE_CREATE_SAVE_NAME}", save the script, and report the visible save status. Do not add it to the chart.`;
+const DEFAULT_PINE_INSERT_MODE = 'clipboard';
+const DEFAULT_PINE_SOURCE_PROFILE = 'auto';
+const DEFAULT_TRADINGVIEW_BROWSER_URL = 'https://www.tradingview.com/chart/';
+const DEFAULT_CONTEXT_WAIT_MS = 15000;
+const DEFAULT_CONTEXT_POLL_MS = 750;
 
 function getArgValue(flagName) {
   const index = process.argv.indexOf(flagName);
@@ -197,11 +205,37 @@ async function findTradingViewContext() {
   ].map((value) => String(value || '').trim()).filter(Boolean)));
 
   const windowsByHint = [];
+  const buildContextFromWindows = async (candidateWindows) => {
+    const windows = dedupeWindows(candidateWindows).filter(windowLooksLikeTradingView);
+    const selectedWindow = pickPreferredTradingViewWindow(windows, foreground);
+    const processNames = Array.from(new Set(windows
+      .map((win) => String(win?.processName || '').trim().toLowerCase())
+      .filter(Boolean)));
+
+    let processes = [];
+    if (processNames.length > 0) {
+      processes = await aiService.systemAutomation.getRunningProcessesByNames(processNames);
+    }
+
+    return {
+      foreground,
+      windows,
+      selectedWindow,
+      processes,
+      processNames
+    };
+  };
+
   for (const processName of knownProcessNames) {
     try {
       const found = await windowManager.findWindows({ processName, includeUntitled: true });
       windowsByHint.push(...(Array.isArray(found) ? found : []));
     } catch {}
+  }
+
+  const processContext = await buildContextFromWindows(windowsByHint);
+  if (processContext?.selectedWindow) {
+    return processContext;
   }
 
   for (const title of titleSearches) {
@@ -211,24 +245,133 @@ async function findTradingViewContext() {
     } catch {}
   }
 
-  const windows = dedupeWindows(windowsByHint).filter(windowLooksLikeTradingView);
-  const selectedWindow = pickPreferredTradingViewWindow(windows, foreground);
+  return buildContextFromWindows(windowsByHint);
+}
 
-  const processNames = Array.from(new Set(windows
-    .map((win) => String(win?.processName || '').trim().toLowerCase())
-    .filter(Boolean)));
+async function waitForTradingViewContext(timeoutMs = DEFAULT_CONTEXT_WAIT_MS, pollMs = DEFAULT_CONTEXT_POLL_MS) {
+  let latest = await findTradingViewContext();
+  if (latest?.selectedWindow) {
+    return latest;
+  }
 
-  let processes = [];
-  if (processNames.length > 0) {
-    processes = await aiService.systemAutomation.getRunningProcessesByNames(processNames);
+  const deadline = Date.now() + Math.max(1000, Number(timeoutMs || DEFAULT_CONTEXT_WAIT_MS) || DEFAULT_CONTEXT_WAIT_MS);
+  const intervalMs = Math.max(200, Number(pollMs || DEFAULT_CONTEXT_POLL_MS) || DEFAULT_CONTEXT_POLL_MS);
+  while (Date.now() < deadline) {
+    await sleep(intervalMs);
+    latest = await findTradingViewContext();
+    if (latest?.selectedWindow) {
+      return latest;
+    }
+  }
+
+  return latest;
+}
+
+async function tryLaunchTradingViewDesktop() {
+  console.log('No TradingView-like window detected. Attempting TradingView Desktop launch...');
+  let execResult = null;
+  let error = null;
+
+  try {
+    execResult = await aiService.executeActions({
+      thought: 'Launch TradingView Desktop before live smoke validation',
+      verification: 'TradingView should become discoverable as a live app window',
+      actions: buildOpenApplicationActions('TradingView')
+    }, (result, index, total) => {
+      const label = `${index + 1}/${total}`;
+      const summary = result?.success ? (result?.message || 'ok') : (result?.error || 'failed');
+      console.log(`[launch desktop ${label}] ${result?.action || 'action'}: ${summary}`);
+    }, null, {
+      userMessage: 'open tradingview',
+      skipSafetyConfirmation: true
+    });
+  } catch (launchError) {
+    error = String(launchError?.message || launchError || 'Desktop launch attempt failed');
+  }
+
+  const context = await waitForTradingViewContext();
+  return {
+    mode: 'desktop',
+    attempted: true,
+    success: !!context?.selectedWindow,
+    execResult,
+    error: context?.selectedWindow ? null : (error || execResult?.error || 'TradingView Desktop was not discoverable after launch attempt'),
+    context
+  };
+}
+
+async function tryLaunchTradingViewBrowser(url = DEFAULT_TRADINGVIEW_BROWSER_URL) {
+  const targetUrl = String(url || DEFAULT_TRADINGVIEW_BROWSER_URL).trim() || DEFAULT_TRADINGVIEW_BROWSER_URL;
+  console.log(`TradingView Desktop did not become discoverable. Attempting browser fallback: ${targetUrl}`);
+
+  let result = null;
+  let error = null;
+  try {
+    result = await aiService.systemAutomation.executeAction({
+      type: 'run_command',
+      shell: 'powershell',
+      command: `$ErrorActionPreference='Stop'; Start-Process ${JSON.stringify(targetUrl)}`,
+      reason: 'Open TradingView in the default browser for live smoke validation'
+    });
+  } catch (launchError) {
+    error = String(launchError?.message || launchError || 'Browser fallback launch failed');
+  }
+
+  await sleep(2000);
+  const context = await waitForTradingViewContext(20000, 1000);
+  return {
+    mode: 'browser',
+    attempted: true,
+    success: !!context?.selectedWindow,
+    result,
+    error: context?.selectedWindow ? null : (error || result?.error || 'TradingView browser window/tab was not discoverable after fallback launch'),
+    context,
+    url: targetUrl
+  };
+}
+
+async function ensureTradingViewContext() {
+  const initial = await gatherPreflight();
+  const launchAttempts = [];
+  if (initial?.selectedWindow) {
+    return {
+      ...initial,
+      launchAttempts
+    };
+  }
+
+  const desktopAttempt = await tryLaunchTradingViewDesktop();
+  launchAttempts.push({
+    mode: desktopAttempt.mode,
+    attempted: true,
+    success: desktopAttempt.success,
+    error: desktopAttempt.error || null
+  });
+  if (desktopAttempt?.context?.selectedWindow) {
+    return {
+      ...desktopAttempt.context,
+      launchAttempts
+    };
+  }
+
+  const browserAttempt = await tryLaunchTradingViewBrowser();
+  launchAttempts.push({
+    mode: browserAttempt.mode,
+    attempted: true,
+    success: browserAttempt.success,
+    error: browserAttempt.error || null,
+    url: browserAttempt.url || null
+  });
+  if (browserAttempt?.context?.selectedWindow) {
+    return {
+      ...browserAttempt.context,
+      launchAttempts
+    };
   }
 
   return {
-    foreground,
-    windows,
-    selectedWindow,
-    processes,
-    processNames
+    ...(browserAttempt?.context || desktopAttempt?.context || initial || {}),
+    launchAttempts
   };
 }
 
@@ -314,6 +457,33 @@ function buildClipboardSetCommand(value = '') {
   return `$ErrorActionPreference='Stop'; Set-Clipboard -Value @'\n${normalized}\n'@`;
 }
 
+function buildPineInsertSourceActions(scriptSource = '', options = {}) {
+  const normalizedSource = String(scriptSource || '').replace(/\r/g, '').trim();
+  const insertMode = String(options.insertMode || DEFAULT_PINE_INSERT_MODE).trim().toLowerCase();
+  const scriptName = String(options.scriptName || DEFAULT_PINE_CREATE_SAVE_NAME).trim() || DEFAULT_PINE_CREATE_SAVE_NAME;
+
+  if (!normalizedSource) return [];
+
+  if (insertMode === 'clipboard') {
+    return [
+      {
+        type: 'run_command',
+        shell: 'powershell',
+        command: buildClipboardSetCommand(normalizedSource),
+        reason: `Copy the prepared Pine script (${scriptName}) to the clipboard for live create/save validation`
+      }
+    ];
+  }
+
+  return [
+    {
+      type: 'type',
+      text: normalizedSource,
+      reason: `Type the prepared Pine script (${scriptName}) directly into the active Pine Editor for live create/save validation`
+    }
+  ];
+}
+
 function buildLiveSaveProbeSource(scriptName = DEFAULT_PINE_CREATE_SAVE_NAME) {
   const safeName = String(scriptName || DEFAULT_PINE_CREATE_SAVE_NAME).trim() || DEFAULT_PINE_CREATE_SAVE_NAME;
   return [
@@ -323,18 +493,88 @@ function buildLiveSaveProbeSource(scriptName = DEFAULT_PINE_CREATE_SAVE_NAME) {
   ].join('\n');
 }
 
-function buildPineCreateSaveScenario(prompt, scriptName) {
+function buildIndustryStandardPineSource(scriptName = 'Industry Standard Trend Momentum Suite') {
+  const safeName = String(scriptName || 'Industry Standard Trend Momentum Suite').trim() || 'Industry Standard Trend Momentum Suite';
+  return [
+    '//@version=6',
+    `indicator(${JSON.stringify(safeName)}, overlay=true, max_labels_count=200)`,
+    '',
+    '// Industry-standard trend + momentum confirmation template',
+    'fastEmaLength = input.int(21, "Fast EMA", minval=1)',
+    'slowEmaLength = input.int(50, "Slow EMA", minval=1)',
+    'rsiLength = input.int(14, "RSI Length", minval=1)',
+    'atrLength = input.int(14, "ATR Length", minval=1)',
+    'atrMultiplier = input.float(2.0, "ATR Multiplier", minval=0.1, step=0.1)',
+    '',
+    'fastEma = ta.ema(close, fastEmaLength)',
+    'slowEma = ta.ema(close, slowEmaLength)',
+    'rsiValue = ta.rsi(close, rsiLength)',
+    'atrValue = ta.atr(atrLength)',
+    '',
+    'bullTrend = fastEma > slowEma and rsiValue >= 55',
+    'bearTrend = fastEma < slowEma and rsiValue <= 45',
+    'bullCross = ta.crossover(fastEma, slowEma) and rsiValue >= 50',
+    'bearCross = ta.crossunder(fastEma, slowEma) and rsiValue <= 50',
+    '',
+    'longRiskBand = close - atrValue * atrMultiplier',
+    'shortRiskBand = close + atrValue * atrMultiplier',
+    '',
+    'plot(fastEma, "Fast EMA", color=color.new(color.teal, 0), linewidth=2)',
+    'plot(slowEma, "Slow EMA", color=color.new(color.orange, 0), linewidth=2)',
+    'plot(bullTrend ? longRiskBand : na, "Bull ATR Risk Band", color=color.new(color.green, 35), linewidth=1, style=plot.style_linebr)',
+    'plot(bearTrend ? shortRiskBand : na, "Bear ATR Risk Band", color=color.new(color.red, 35), linewidth=1, style=plot.style_linebr)',
+    '',
+    'plotshape(bullCross, title="Bullish Signal", style=shape.triangleup, location=location.belowbar, color=color.new(color.lime, 0), size=size.tiny, text="BUY")',
+    'plotshape(bearCross, title="Bearish Signal", style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 0), size=size.tiny, text="SELL")',
+    '',
+    'bgcolor(bullTrend ? color.new(color.green, 92) : bearTrend ? color.new(color.red, 92) : na, title="Trend Bias")',
+    '',
+    'alertcondition(bullCross, title="Bullish EMA/RSI Signal", message="Bullish crossover with RSI confirmation")',
+    'alertcondition(bearCross, title="Bearish EMA/RSI Signal", message="Bearish crossunder with RSI confirmation")'
+  ].join('\n');
+}
+
+function inferPineSourceProfile(prompt = '', requestedProfile = DEFAULT_PINE_SOURCE_PROFILE) {
+  const normalizedRequested = String(requestedProfile || DEFAULT_PINE_SOURCE_PROFILE).trim().toLowerCase();
+  if (normalizedRequested && normalizedRequested !== 'auto') {
+    return normalizedRequested;
+  }
+
+  const normalizedPrompt = String(prompt || '').trim().toLowerCase();
+  if (/\bindustry\s+standard\b|\bprofessional\b|\bema\b|\brsi\b|\batr\b|\btrend\s+following\b/.test(normalizedPrompt)) {
+    return 'industry-standard';
+  }
+
+  return 'probe';
+}
+
+function buildPineScenarioSource(scriptName, prompt, options = {}) {
+  const resolvedProfile = inferPineSourceProfile(prompt, options.sourceProfile);
+  if (resolvedProfile === 'industry-standard') {
+    return {
+      profile: resolvedProfile,
+      source: buildIndustryStandardPineSource(scriptName)
+    };
+  }
+
+  return {
+    profile: 'probe',
+    source: buildLiveSaveProbeSource(scriptName)
+  };
+}
+
+function buildPineCreateSaveScenario(prompt, scriptName, options = {}) {
   const effectivePrompt = String(prompt || DEFAULT_PINE_CREATE_SAVE_PROMPT).trim() || DEFAULT_PINE_CREATE_SAVE_PROMPT;
   const effectiveScriptName = String(scriptName || DEFAULT_PINE_CREATE_SAVE_NAME).trim() || DEFAULT_PINE_CREATE_SAVE_NAME;
-  const scriptSource = buildLiveSaveProbeSource(effectiveScriptName);
-  const sourceActions = [
-    {
-      type: 'run_command',
-      shell: 'powershell',
-      command: buildClipboardSetCommand(scriptSource),
-      reason: `Copy the prepared Pine script (${effectiveScriptName}) to the clipboard for live create/save validation`
-    }
-  ];
+  const insertMode = String(options.insertMode || DEFAULT_PINE_INSERT_MODE).trim().toLowerCase() || DEFAULT_PINE_INSERT_MODE;
+  const scriptPlan = buildPineScenarioSource(effectiveScriptName, effectivePrompt, {
+    sourceProfile: options.sourceProfile
+  });
+  const scriptSource = scriptPlan.source;
+  const sourceActions = buildPineInsertSourceActions(scriptSource, {
+    insertMode,
+    scriptName: effectiveScriptName
+  });
   const inferredIntent = inferTradingViewPineIntent(effectivePrompt, sourceActions);
   if (!inferredIntent) {
     throw new Error('Could not infer a TradingView Pine create/save intent from the provided prompt.');
@@ -342,7 +582,7 @@ function buildPineCreateSaveScenario(prompt, scriptName) {
 
   return {
     id: `pine-create-save-${sanitizeFileSegment(effectiveScriptName, 'pine-save')}`,
-    description: `Create a fresh Pine script named ${effectiveScriptName}, save it, and verify visible save-state evidence without adding it to the chart.`,
+    description: `Create a fresh Pine script named ${effectiveScriptName}, save it, and verify visible save-state evidence without adding it to the chart using ${insertMode === 'clipboard' ? 'clipboard paste' : 'direct typing'} and the ${scriptPlan.profile} Pine source profile.`,
     userMessage: effectivePrompt,
     actionData: {
       thought: `Create and save a fresh TradingView Pine script named ${effectiveScriptName}`,
@@ -397,7 +637,10 @@ function buildScenarioPlan(options = {}) {
       continue;
     }
     if (id === 'pine-create-save' || id === 'pine-save') {
-      scenarios.push(buildPineCreateSaveScenario(options.pinePrompt, options.pineScriptName));
+      scenarios.push(buildPineCreateSaveScenario(options.pinePrompt, options.pineScriptName, {
+        insertMode: options.pineInsertMode,
+        sourceProfile: options.pineSourceProfile
+      }));
       continue;
     }
     if (id === 'symbol') {
@@ -433,7 +676,9 @@ Usage:
   node scripts/live-tradingview-smoke.js [options]
 
 Default behavior:
-  - requires an already-open TradingView session
+  - prefers an already-open TradingView session
+  - if none is found, attempts to launch TradingView Desktop first
+  - if Desktop is unavailable, attempts to open TradingView in the default browser
   - runs non-destructive focus + Pine Editor smoke checks
   - starts a fast UI watcher for watcher-backed surface proof
   - exports runtime traces and a manifest to artifacts/live-validation/
@@ -444,6 +689,8 @@ Options:
   --timeframe <value>          Timeframe for the timeframe scenario
   --pine-prompt <text>         User prompt for the pine-create-save scenario
   --pine-script-name <name>    Script title for the pine-create-save scenario
+  --pine-insert-mode <mode>    Pine insertion mode: clipboard (default) or type
+  --pine-source-profile <id>   Pine source profile: auto (default), probe, industry-standard
   --allow-symbol-change        Explicitly allow symbol mutation
   --allow-timeframe-change     Explicitly allow timeframe mutation
   --artifact-dir <path>        Output directory (default: artifacts/live-validation)
@@ -456,6 +703,8 @@ Examples:
   node scripts/live-tradingview-smoke.js --dry-run
   node scripts/live-tradingview-smoke.js --scenarios focus,pine-editor
   node scripts/live-tradingview-smoke.js --scenarios pine-create-save
+  node scripts/live-tradingview-smoke.js --scenarios pine-create-save --pine-insert-mode clipboard
+  node scripts/live-tradingview-smoke.js --scenarios pine-create-save --pine-source-profile industry-standard
   node scripts/live-tradingview-smoke.js --scenarios symbol --symbol BTCUSD --allow-symbol-change
   node scripts/live-tradingview-smoke.js --scenarios timeframe --timeframe 5m --allow-timeframe-change
 `);
@@ -508,7 +757,8 @@ async function runScenario(scenario, context) {
     },
     null,
     {
-      userMessage: effectiveScenario.userMessage
+      userMessage: effectiveScenario.userMessage,
+      skipSafetyConfirmation: true
     }
   );
 
@@ -565,6 +815,8 @@ async function main() {
     timeframe: getArgValue('--timeframe') || '',
     pinePrompt: getArgValue('--pine-prompt') || DEFAULT_PINE_CREATE_SAVE_PROMPT,
     pineScriptName: getArgValue('--pine-script-name') || DEFAULT_PINE_CREATE_SAVE_NAME,
+    pineInsertMode: getArgValue('--pine-insert-mode') || DEFAULT_PINE_INSERT_MODE,
+    pineSourceProfile: getArgValue('--pine-source-profile') || DEFAULT_PINE_SOURCE_PROFILE,
     allowSymbolChange: hasFlag('--allow-symbol-change'),
     allowTimeframeChange: hasFlag('--allow-timeframe-change')
   };
@@ -597,10 +849,10 @@ async function main() {
   console.log(`Scenarios:    ${scenarios.map((scenario) => scenario.id).join(', ')}`);
   console.log(`Watcher poll: ${pollInterval}ms`);
 
-  const preflight = await gatherPreflight();
+  const preflight = await ensureTradingViewContext();
   const { processes, foreground, windows, selectedWindow } = preflight;
   if (!selectedWindow) {
-    throw new Error('No TradingView-like window was detected via UIA/window discovery. Make sure an actual TradingView desktop window or browser tab is open and visible, then rerun the live smoke harness.');
+    throw new Error(`No TradingView-like window was detected via UIA/window discovery after launch attempts. Launch attempts: ${JSON.stringify(preflight?.launchAttempts || [])}`);
   }
 
   console.log(`TradingView-like windows detected: ${Array.isArray(windows) ? windows.length : 0}`);
@@ -635,6 +887,7 @@ async function main() {
     pollInterval,
     scenarios: [],
     preflight: {
+      launchAttempts: Array.isArray(preflight?.launchAttempts) ? preflight.launchAttempts : [],
       processes,
       processNames: Array.isArray(preflight?.processNames) ? preflight.processNames : [],
       windows,

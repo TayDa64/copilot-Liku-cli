@@ -29,6 +29,14 @@ function createTradingViewPineAuthoringHelpers(deps = {}) {
         if (Array.isArray(action.continueActions)) {
           collected.push(...collectNestedActions(action.continueActions, seen));
         }
+        const editorStateBranches = action.continueActionsByPineEditorState;
+        if (editorStateBranches && typeof editorStateBranches === 'object') {
+          for (const branchActions of Object.values(editorStateBranches)) {
+            if (Array.isArray(branchActions)) {
+              collected.push(...collectNestedActions(branchActions, seen));
+            }
+          }
+        }
         const lifecycleBranches = action.continueActionsByPineLifecycleState;
         if (lifecycleBranches && typeof lifecycleBranches === 'object') {
           for (const branchActions of Object.values(lifecycleBranches)) {

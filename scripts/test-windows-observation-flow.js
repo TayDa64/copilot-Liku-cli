@@ -3,6 +3,54 @@
 const assert = require('assert');
 const path = require('path');
 const fs = require('fs');
+const { execFileSync } = require('child_process');
+
+process.env.NODE_ENV = process.env.NODE_ENV || 'test';
+process.env.LIKU_DISABLE_REFLECTION = '1';
+process.env.LIKU_REFLECTION_MODEL = process.env.LIKU_REFLECTION_MODEL || 'gpt-4o';
+
+let cleanupStarted = false;
+function cleanupDescendantProcesses() {
+  if (cleanupStarted || process.platform !== 'win32') return;
+  cleanupStarted = true;
+  const pid = String(process.pid);
+  const script = `
+$root = ${pid}
+$all = Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name
+$queue = New-Object System.Collections.Queue
+$queue.Enqueue([int]$root)
+$desc = New-Object System.Collections.Generic.List[int]
+while ($queue.Count -gt 0) {
+  $parent = [int]$queue.Dequeue()
+  foreach ($proc in $all | Where-Object { [int]$_.ParentProcessId -eq $parent }) {
+    $child = [int]$proc.ProcessId
+    if ($child -ne $root -and -not $desc.Contains($child)) {
+      $desc.Add($child)
+      $queue.Enqueue($child)
+    }
+  }
+}
+foreach ($child in $desc) {
+  try { Stop-Process -Id $child -Force -ErrorAction SilentlyContinue } catch {}
+}
+`;
+  try {
+    execFileSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script], {
+      stdio: 'ignore',
+      timeout: 5000
+    });
+  } catch {}
+}
+
+process.once('exit', cleanupDescendantProcesses);
+process.once('SIGINT', () => {
+  cleanupDescendantProcesses();
+  process.exit(130);
+});
+process.once('SIGTERM', () => {
+  cleanupDescendantProcesses();
+  process.exit(143);
+});
 
 const aiService = require(path.join(__dirname, '..', 'src', 'main', 'ai-service.js'));
 const uiAutomation = require(path.join(__dirname, '..', 'src', 'main', 'ui-automation'));
@@ -14,10 +62,19 @@ const DEFAULT_GET_SHARED_UIA_HOST = uiAutomation.getSharedUIAHost;
 const results = {
   passed: 0,
   failed: 0,
+  skipped: 0,
   tests: []
 };
 
+const testNameFilter = String(process.env.LIKU_TEST_FILTER || '').trim();
+
 async function testAsync(name, fn) {
+  if (testNameFilter && !String(name || '').toLowerCase().includes(testNameFilter.toLowerCase())) {
+    results.skipped++;
+    results.tests.push({ name, status: 'SKIP' });
+    return;
+  }
+
   try {
     await fn();
     results.passed++;
@@ -39,7 +96,9 @@ async function withPatchedSystemAutomation(overrides, fn) {
   const originals = {};
   const originalGetSharedUIAHost = uiAutomation.getSharedUIAHost;
   let currentQuickSearchValue = String(systemAutomationOverrides.initialQuickSearchValue || '');
+  let currentClipboardValue = String(systemAutomationOverrides.initialClipboardValue || '');
   delete systemAutomationOverrides.initialQuickSearchValue;
+  delete systemAutomationOverrides.initialClipboardValue;
 
   if (originalGetSharedUIAHost === DEFAULT_GET_SHARED_UIA_HOST) {
     uiAutomation.getSharedUIAHost = () => ({
@@ -93,6 +152,18 @@ async function withPatchedSystemAutomation(overrides, fn) {
 
   const defaultOverrides = {
     executeAction: async (action) => ({ success: true, action: action?.type || 'unknown', message: 'ok' }),
+    executeCommand: async (command) => {
+      const text = String(command || '');
+      const setMatch = text.match(/\bSet-Clipboard\s+-Value\s+@'\r?\n([\s\S]*?)\r?\n'@/i);
+      if (setMatch) {
+        currentClipboardValue = setMatch[1];
+        return { success: true, exitCode: 0, stdout: '', stderr: '' };
+      }
+      if (/\bGet-Clipboard\b/i.test(text)) {
+        return { success: true, exitCode: 0, stdout: currentClipboardValue, stderr: '' };
+      }
+      return { success: true, exitCode: 0, stdout: '', stderr: '' };
+    },
     findElementByText: defaultFindElementByText,
     getWindowInfoByHandle: async (hwnd) => ({
       success: true,
@@ -400,6 +471,110 @@ async function run() {
     });
   });
 
+  await testAsync('background TradingView process without a usable window still launches before continuing', async () => {
+    const executed = [];
+    let launched = false;
+    const verifyTarget = buildVerifyTargetHintFromAppName('TradingView');
+
+    await withPatchedSystemAutomation({
+      resolveWindowHandle: async (action) => {
+        if (action?.processName === 'tradingview') {
+          return launched ? 777 : 0;
+        }
+        return 0;
+      },
+      focusWindow: async (hwnd) => ({
+        success: hwnd === 777,
+        actualForegroundHandle: hwnd,
+        actualForeground: launched
+          ? { success: true, hwnd: 777, title: 'TradingView', processName: 'tradingview', windowKind: 'main' }
+          : { success: false }
+      }),
+      getForegroundWindowHandle: async () => (launched ? 777 : 111),
+      getForegroundWindowInfo: async () => (
+        launched
+          ? { success: true, hwnd: 777, title: 'TradingView', processName: 'tradingview', windowKind: 'main' }
+          : { success: true, hwnd: 111, title: 'README.md - Visual Studio Code', processName: 'code', windowKind: 'main' }
+      ),
+      getRunningProcessesByNames: async () => (
+        launched
+          ? [{ pid: 4242, processName: 'tradingview', mainWindowHandle: 777, mainWindowTitle: 'TradingView', startTime: '2026-03-23T00:00:00Z' }]
+          : [{ pid: 4141, processName: 'tradingview', mainWindowHandle: 0, mainWindowTitle: '', startTime: '2026-03-23T00:00:00Z' }]
+      )
+    }, async () => {
+      const execResult = await aiService.executeActions({
+        thought: 'Focus TradingView before bounded workflow',
+        verification: 'TradingView should be visible',
+        actions: [
+          {
+            type: 'bring_window_to_front',
+            title: 'TradingView',
+            processName: 'tradingview',
+            reason: 'Focus TradingView before the timeframe workflow',
+            verifyTarget
+          },
+          { type: 'wait', ms: 50 }
+        ]
+      }, null, null, {
+        userMessage: 'set the TradingView chart to 5m and confirm it changed',
+        actionExecutor: async (action) => {
+          executed.push(`${action.type}:${action.key || action.text || action.processName || action.title || ''}`);
+
+          if (action?.type === 'key' && action?.key === 'enter' && /launch tradingview/i.test(String(action?.reason || ''))) {
+            launched = true;
+          }
+
+          if (action?.type === 'bring_window_to_front' && action?.processName === 'tradingview' && !launched) {
+            return { success: false, action: action.type, error: 'Window "TradingView" not found. Make sure the application is running and visible.' };
+          }
+
+          if (action?.type === 'bring_window_to_front' && action?.processName === 'tradingview') {
+            return {
+              success: true,
+              action: action.type,
+              message: 'focused',
+              requestedWindowHandle: 777,
+              actualForegroundHandle: 777,
+              actualForeground: {
+                success: true,
+                hwnd: 777,
+                title: 'TradingView',
+                processName: 'tradingview',
+                windowKind: 'main'
+              },
+              focusTarget: {
+                requestedWindowHandle: 777,
+                actualForegroundHandle: 777,
+                actualForeground: {
+                  success: true,
+                  hwnd: 777,
+                  title: 'TradingView',
+                  processName: 'tradingview',
+                  windowKind: 'main'
+                },
+                exactMatch: true,
+                outcome: 'exact'
+              }
+            };
+          }
+
+          return { success: true, action: action.type, message: 'ok' };
+        }
+      });
+
+      assert.strictEqual(execResult.success, true, 'Execution should recover even if a background TradingView process exists without a window');
+      assert.strictEqual(launched, true, 'Recovery should still launch TradingView when only a background process exists');
+      assert.deepStrictEqual(
+        executed.slice(0, 4),
+        ['key:win', 'wait:', 'type:TradingView', 'wait:'],
+        'Recovery should begin with the bounded app-launch sequence'
+      );
+      assert(executed.includes('key:enter'), 'Recovery should confirm the TradingView launch');
+      assert.strictEqual(execResult.postVerification.verified, true, 'Post verification should confirm TradingView after recovery');
+      assert(execResult.postVerification.runningPids.includes(4242), 'Recovered TradingView PID should be reported after launch');
+    });
+  });
+
   await testAsync('last target window only updates on exact or recovered tradingview focus', async () => {
     const focusCalls = [];
     const foregroundSequence = [
@@ -490,6 +665,103 @@ async function run() {
     });
   });
 
+  await testAsync('background TradingView process without a usable window still triggers bounded launch recovery', async () => {
+    const rewritten = aiService.rewriteActionsForReliability([
+      { type: 'run_command', command: 'Start-Process "tradeing view"', shell: 'powershell' }
+    ], {
+      userMessage: 'open tradeing view'
+    });
+
+    const launchAction = rewritten.find((action) => action?.type === 'key' && action?.key === 'enter');
+    assert(launchAction?.verifyTarget, 'Launch rewrite should produce verifyTarget metadata');
+
+    let launched = false;
+    const executed = [];
+
+    await withPatchedSystemAutomation({
+      resolveWindowHandle: async (action) => {
+        if (action?.processName !== 'tradingview') return 0;
+        return launched ? 777 : 0;
+      },
+      getForegroundWindowHandle: async () => (launched ? 777 : 111),
+      getForegroundWindowInfo: async () => (launched
+        ? { success: true, hwnd: 777, title: 'TradingView', processName: 'tradingview', windowKind: 'main' }
+        : { success: true, hwnd: 111, title: 'README.md - Visual Studio Code', processName: 'code', windowKind: 'main' }),
+      getRunningProcessesByNames: async () => ([
+        { pid: 4242, processName: 'tradingview', mainWindowTitle: '', startTime: '2026-03-23T00:00:00Z' }
+      ])
+    }, async () => {
+      const execResult = await aiService.executeActions({
+        thought: 'Focus TradingView before the Pine workflow',
+        verification: 'TradingView should be focused',
+        actions: [
+          {
+            type: 'bring_window_to_front',
+            title: 'TradingView',
+            processName: 'tradingview',
+            reason: 'Focus TradingView before the Pine workflow',
+            verifyTarget: launchAction.verifyTarget
+          },
+          { type: 'wait', ms: 50 }
+        ]
+      }, null, null, {
+        userMessage: 'bring tradeing view to front and tell me what you see',
+        actionExecutor: async (action) => {
+          executed.push(`${action.type}:${action.key || action.text || action.processName || action.title || ''}`);
+          if (action?.type === 'key' && action?.key === 'enter' && /launch tradingview/i.test(String(action?.reason || ''))) {
+            launched = true;
+          }
+
+          if (action?.type === 'bring_window_to_front' && action?.processName === 'tradingview' && !launched) {
+            return { success: false, action: action.type, error: 'Window "TradingView" not found. Make sure the application is running and visible.' };
+          }
+
+          if (action?.type === 'bring_window_to_front' && action?.processName === 'tradingview' && launched) {
+            return {
+              success: true,
+              action: action.type,
+              message: 'focused',
+              requestedWindowHandle: 777,
+              actualForegroundHandle: 777,
+              actualForeground: {
+                success: true,
+                hwnd: 777,
+                title: 'TradingView',
+                processName: 'tradingview',
+                windowKind: 'main'
+              },
+              focusTarget: {
+                requestedWindowHandle: 777,
+                actualForegroundHandle: 777,
+                actualForeground: {
+                  success: true,
+                  hwnd: 777,
+                  title: 'TradingView',
+                  processName: 'tradingview',
+                  windowKind: 'main'
+                },
+                exactMatch: true,
+                outcome: 'exact'
+              }
+            };
+          }
+
+          return { success: true, action: action.type, message: 'ok' };
+        }
+      });
+
+      assert.strictEqual(execResult.success, true, 'Execution should recover by launching TradingView when only a background process exists');
+      assert.strictEqual(launched, true, 'Recovery should launch TradingView when no usable TradingView window is present');
+      assert.deepStrictEqual(
+        executed.slice(0, 4),
+        ['key:win', 'wait:', 'type:TradingView', 'wait:'],
+        'Recovery should begin with the bounded app-launch sequence'
+      );
+      assert(executed.includes('key:enter'), 'Recovery should confirm the TradingView launch');
+      assert.strictEqual(execResult.postVerification.verified, true, 'Post verification should confirm TradingView after background-process launch recovery');
+    });
+  });
+
   await testAsync('focus-sensitive TradingView input stops before sending keys when target focus is not locked', async () => {
     const vsCodeForeground = {
       success: true,
@@ -525,7 +797,7 @@ async function run() {
           { type: 'key', key: 'ctrl+k', reason: 'Open TradingView quick search' }
         ]
       }, null, null, {
-        userMessage: 'open the Pine Editor in TradingView',
+        userMessage: 'focus tradingview and continue with the planned shortcut',
         actionExecutor: async (action) => {
           if (action.type === 'bring_window_to_front') {
             return {
@@ -566,6 +838,76 @@ async function run() {
       assert(focusCalls >= 1, 'Focus lock verification should attempt to refocus the requested TradingView handle');
       assert(blockedInput, 'Blocked input should be marked as a focus-lock failure');
       assert(/could not confirm focus/i.test(blockedInput.error || ''), 'Blocked input should explain the focus-lock failure');
+    });
+  });
+
+  await testAsync('focus-sensitive TradingView input re-resolves a fresh TradingView window handle before continuing', async () => {
+    const vsCodeForeground = {
+      success: true,
+      hwnd: 1969552,
+      title: 'README.md - Visual Studio Code',
+      processName: 'code',
+      windowKind: 'main'
+    };
+    const tradingViewForeground = {
+      success: true,
+      hwnd: 777,
+      title: 'TradingView',
+      processName: 'tradingview',
+      windowKind: 'main'
+    };
+    const focusCalls = [];
+    const resolveCalls = [];
+    let currentForegroundHandle = 1969552;
+
+    await withPatchedSystemAutomation({
+      resolveWindowHandle: async (action) => {
+        resolveCalls.push(`${action?.processName || ''}|${action?.title || ''}`);
+        if (action?.processName === 'tradingview') {
+          return resolveCalls.length === 1 ? 264274 : 777;
+        }
+        return 0;
+      },
+      getForegroundWindowHandle: async () => currentForegroundHandle,
+      getForegroundWindowInfo: async () => currentForegroundHandle === 777 ? tradingViewForeground : vsCodeForeground,
+      focusWindow: async (hwnd) => {
+        focusCalls.push(hwnd);
+        if (hwnd === 777) {
+          currentForegroundHandle = 777;
+        }
+        return {
+          success: true,
+          requestedWindowHandle: hwnd,
+          actualForegroundHandle: currentForegroundHandle,
+          actualForeground: currentForegroundHandle === 777 ? tradingViewForeground : vsCodeForeground,
+          exactMatch: hwnd === 777,
+          outcome: hwnd === 777 ? 'exact' : 'mismatch'
+        };
+      },
+      executeAction: async (action) => ({ success: true, action: action?.type || 'unknown', message: 'ok' })
+    }, async () => {
+      const focusLock = await aiService.ensureFocusLockedBeforeInputAction({
+        type: 'key',
+        key: 'ctrl+k',
+        reason: 'Open TradingView quick search'
+      }, {
+        lastTargetWindowHandle: 264274,
+        preverifiedForegroundHandle: 0,
+        lastTargetWindowProfile: null,
+        focusRecoveryTarget: {
+          title: 'TradingView',
+          processName: 'tradingview'
+        },
+        forceRefocus: true
+      });
+
+      assert.strictEqual(focusLock.ok, true, 'Guarded keyboard input should recover after re-resolving the TradingView handle');
+      assert(focusCalls.includes(264274), 'The stale TradingView handle should still be attempted first');
+      assert(focusCalls.includes(777), 'Recovery should refocus the freshly re-resolved TradingView handle');
+      assert(resolveCalls.length >= 2, 'Recovery should perform a second TradingView window-handle resolution before typing');
+      assert.strictEqual(focusLock.verification?.verified, true, 'Recovered focus verification should succeed');
+      assert.strictEqual(focusLock.verification?.expectedWindowHandle, 777, 'Focus verification should update to the recovered TradingView handle');
+      assert.strictEqual(focusLock.lastTargetWindowHandle, 777, 'Recovered focus lock should promote the fresh TradingView handle');
     });
   });
 
@@ -1265,7 +1607,7 @@ async function run() {
       });
 
       assert.strictEqual(execResult.success, true, 'Execution should proceed after Pine Editor is observed');
-      assert.deepStrictEqual(executed, ['bring_window_to_front', 'wait', 'key', 'wait', 'key', 'wait', 'key', 'wait', 'type', 'wait', 'key', 'wait', 'wait', 'get_text'], 'Bounded Pine Editor diagnostics gathering should upgrade legacy opener plans into the TradingView quick-search route, clear stale query text explicitly, and then read text');
+      assert.deepStrictEqual(executed, ['bring_window_to_front', 'wait', 'wait', 'key', 'wait', 'key', 'wait', 'type', 'wait', 'key', 'wait', 'wait', 'get_text'], 'Bounded Pine Editor diagnostics gathering should recover an already-open TradingView quick-search route, clear stale query text explicitly, and then read text');
       assert.deepStrictEqual(evidenceModes, ['compile-result'], 'Pine Editor diagnostics gathering should preserve compile-result evidence mode');
       assert(execResult.observationCheckpoints.length >= 1, 'At least one bounded observation checkpoint should be returned');
       assert.strictEqual(execResult.observationCheckpoints[execResult.observationCheckpoints.length - 1].verified, true, 'The final Pine Editor panel observation should pass');
@@ -1320,7 +1662,7 @@ async function run() {
       });
 
       assert.strictEqual(execResult.success, true, 'Execution should proceed after Pine Editor diagnostics surface is observed');
-      assert.deepStrictEqual(executed, ['bring_window_to_front', 'wait', 'key', 'wait', 'key', 'wait', 'key', 'wait', 'type', 'wait', 'key', 'wait', 'wait', 'get_text'], 'Bounded Pine Editor diagnostics should upgrade legacy opener plans into the TradingView quick-search route, clear stale query text explicitly, and then read text');
+      assert.deepStrictEqual(executed, ['bring_window_to_front', 'wait', 'wait', 'key', 'wait', 'key', 'wait', 'type', 'wait', 'key', 'wait', 'wait', 'get_text'], 'Bounded Pine Editor diagnostics should recover an already-open TradingView quick-search route, clear stale query text explicitly, and then read text');
       assert.deepStrictEqual(evidenceModes, ['diagnostics'], 'Pine diagnostics gathering should preserve diagnostics evidence mode');
       assert(execResult.observationCheckpoints.length >= 1, 'At least one bounded observation checkpoint should be returned');
       assert.strictEqual(execResult.observationCheckpoints[execResult.observationCheckpoints.length - 1].verified, true, 'The final Pine Editor panel observation should pass');
@@ -1411,11 +1753,227 @@ async function run() {
 
       assert.strictEqual(execResult.success, true, 'Execution should recover when the Pine Editor result is visible but enter alone does not prove activation');
       assert(clickedPineResult, 'semantic Pine Editor result click fallback should be attempted');
-      assert.deepStrictEqual(executed, ['bring_window_to_front', 'wait', 'key', 'wait', 'key', 'wait', 'key', 'wait', 'type', 'wait', 'key', 'wait', 'wait', 'type'], 'typing should continue after the semantic Pine result recovery succeeds and the quick-search query is explicitly cleared and replaced safely');
+      assert.deepStrictEqual(executed, ['bring_window_to_front', 'wait', 'wait', 'key', 'wait', 'key', 'wait', 'type', 'wait', 'key', 'wait', 'wait', 'type'], 'typing should continue after the semantic Pine result recovery succeeds and the already-open quick-search query is explicitly cleared and replaced safely');
       assert(execResult.observationCheckpoints.length >= 1, 'at least one Pine editor checkpoint should be recorded');
       assert.strictEqual(execResult.observationCheckpoints[execResult.observationCheckpoints.length - 1].verified, true, 'the recovered terminal checkpoint should be marked verified');
       const recoveryResult = execResult.results.find((result) => result?.pineEditorRecovery?.recoveredBy === 'semantic-click');
       assert.strictEqual(recoveryResult?.pineEditorRecovery?.recoveredBy, 'semantic-click', 'result metadata should record the Pine semantic-click recovery path');
+    });
+  });
+
+  await testAsync('pine quick-search enter without strict editor evidence stops before fresh indicator and paste', async () => {
+    const executedKeys = [];
+
+    await withPatchedSystemAutomation({
+      getForegroundWindowHandle: async () => 777,
+      getForegroundWindowInfo: async () => ({ success: true, hwnd: 777, title: 'TradingView', processName: 'tradingview', windowKind: 'main' }),
+      findElementByText: async () => ({ success: true, count: 0, element: null, elements: [] }),
+      click: async () => ({ success: true })
+    }, async () => {
+      const execResult = await aiService.executeActions({
+        thought: 'Commit TradingView quick-search Pine Editor result then create a script',
+        verification: 'Pine Editor must be verified before any fresh-indicator shortcut or paste is sent',
+        actions: [
+          {
+            type: 'key',
+            key: 'enter',
+            reason: 'Open TradingView Pine Editor with verification',
+            verify: {
+              kind: 'editor-active',
+              appName: 'TradingView',
+              target: 'pine-editor',
+              keywords: ['pine', 'pine editor', 'script'],
+              requiresObservedChange: true
+            },
+            searchSurfaceContract: {
+              id: 'open-pine-editor',
+              route: 'quick-search',
+              surface: 'pine-editor'
+            }
+          },
+          { type: 'wait', ms: 120 },
+          { type: 'key', key: 'ctrl+k', reason: 'Fresh Pine indicator step 1' },
+          { type: 'key', key: 'ctrl+i', reason: 'Fresh Pine indicator step 2' },
+          { type: 'run_command', shell: 'powershell', command: 'Set-Clipboard -Value "//@version=6"' },
+          { type: 'key', key: 'ctrl+v', reason: 'Paste Pine source' }
+        ]
+      }, null, null, {
+        userMessage: 'open pine editor, create a fresh pine indicator, and paste source',
+        actionExecutor: async (action) => {
+          if (String(action?.type || '').toLowerCase() === 'key') {
+            executedKeys.push(String(action.key || '').toLowerCase());
+          }
+          return { success: true, action: action.type, message: `executed ${action.type}` };
+        }
+      });
+
+      assert.strictEqual(execResult.success, false, 'execution should fail safe when Enter does not prove Pine Editor');
+      assert.deepStrictEqual(executedKeys, ['enter'], 'no fresh-indicator shortcut or paste key should run after an unverified Pine Editor Enter');
+      assert(/active Pine Editor surface/i.test(String(execResult.error || '')), 'failure should identify the missing Pine Editor proof');
+    });
+  });
+
+  await testAsync('deferred Pine quick-search enter retries semantic recovery before safe-authoring get_text', async () => {
+    let clickedPineResult = false;
+    const foregroundSequence = [
+      { success: true, hwnd: 777, title: 'TradingView', processName: 'tradingview', windowKind: 'main' },
+      { success: true, hwnd: 777, title: 'TradingView', processName: 'tradingview', windowKind: 'main' },
+      { success: true, hwnd: 777, title: 'TradingView', processName: 'tradingview', windowKind: 'main' },
+      { success: true, hwnd: 777, title: 'TradingView', processName: 'tradingview', windowKind: 'main' },
+      { success: true, hwnd: 777, title: 'Pine Editor - TradingView', processName: 'tradingview', windowKind: 'main' }
+    ];
+
+    await withPatchedSystemAutomation({
+      resolveWindowHandle: async (action) => action?.processName === 'tradingview' ? 777 : 0,
+      getForegroundWindowHandle: async () => 777,
+      getForegroundWindowInfo: async () => foregroundSequence.shift() || {
+        success: true,
+        hwnd: 777,
+        title: clickedPineResult ? 'Pine Editor - TradingView' : 'TradingView',
+        processName: 'tradingview',
+        windowKind: 'main'
+      },
+      focusWindow: async () => ({ success: true }),
+      getRunningProcessesByNames: async () => ([{ pid: 4242, processName: 'tradingview', mainWindowTitle: 'TradingView', startTime: '2026-03-23T00:00:00Z' }]),
+      findElementByText: async (text, options = {}) => {
+        const normalized = String(text || '').trim().toLowerCase();
+        const normalizedControlType = String(options?.controlType || '').trim().toLowerCase();
+
+        if (normalized === 'search tool or function' && normalizedControlType === 'text') {
+          return {
+            success: true,
+            count: 1,
+            element: {
+              Name: 'Search tool or function',
+              WindowHandle: 892,
+              Bounds: { X: 321, Y: 90, Width: 180, Height: 24, CenterX: 411, CenterY: 102 }
+            },
+            elements: []
+          };
+        }
+
+        if (normalized === 'search' && normalizedControlType === 'edit') {
+          return {
+            success: true,
+            count: 1,
+            element: {
+              Name: 'Search',
+              WindowHandle: 892,
+              Bounds: { X: 330, Y: 138, Width: 365, Height: 34, CenterX: 512, CenterY: 155 }
+            },
+            elements: []
+          };
+        }
+
+        if (!clickedPineResult && /open pine editor|pine editor/.test(normalized)) {
+          return {
+            success: true,
+            count: 1,
+            element: {
+              Name: 'Open Pine Editor',
+              Bounds: { CenterX: 480, CenterY: 240 },
+              ControlType: 'Text',
+              WindowHandle: 777
+            },
+            elements: []
+          };
+        }
+
+        if (clickedPineResult && /add to chart/.test(normalized)) {
+          return {
+            success: true,
+            count: 1,
+            element: {
+              Name: 'Add to chart',
+              Bounds: { CenterX: 540, CenterY: 820 },
+              ControlType: 'Button',
+              WindowHandle: 777
+            },
+            elements: []
+          };
+        }
+
+        return { success: true, count: 0, element: null, elements: [] };
+      },
+      click: async (x, y) => {
+        if (Number(x) === 480 && Number(y) === 240) {
+          clickedPineResult = true;
+        }
+        return { success: true };
+      }
+    }, async () => {
+      const actions = [
+        {
+          type: 'key',
+          key: 'enter',
+          reason: 'Commit the TradingView quick-search Pine Editor result',
+          verify: {
+            kind: 'editor-active',
+            appName: 'TradingView',
+            target: 'pine-editor',
+            keywords: ['pine', 'pine editor', 'script'],
+            requiresObservedChange: true
+          },
+          searchSurfaceContract: {
+            id: 'open-pine-editor',
+            route: 'quick-search',
+            surface: 'pine-editor'
+          }
+        },
+        { type: 'wait', ms: 220, reason: 'Allow TradingView to surface Pine Editor after quick-search commit' },
+        { type: 'get_text', text: 'Pine Editor', reason: 'Inspect current visible Pine Editor state before choosing a safe new-script or bounded-edit path', pineEvidenceMode: 'safe-authoring-inspect' }
+      ];
+      const deferredEnterResult = {
+        success: true,
+        action: 'key',
+        observationCheckpoint: {
+          applicable: true,
+          verified: false,
+          classification: 'editor-active',
+          verifyTarget: 'pine-editor',
+          error: 'TradingView Pine Editor activation checkpoint did not verify after Enter'
+        },
+        deferredObservationCheckpoint: {
+          reason: 'TradingView Pine Editor activation checkpoint deferred to bounded Pine readback'
+        },
+        proof: {
+          proofId: 'proof-test',
+          actionType: 'key',
+          level: 0,
+          levelName: 'executed',
+          status: 'bounded',
+          checks: [],
+          limitations: [],
+          boundedClaims: []
+        }
+      };
+      const observationCheckpoints = [];
+
+      const recovery = await aiService.maybeRecoverDeferredTradingViewPineEditorBeforeReadback(
+        actions[2],
+        {
+          thought: 'Commit TradingView quick-search Pine entry and inspect the editor safely',
+          verification: 'TradingView should surface Pine Editor before bounded safe-authoring inspection',
+          actions
+        },
+        2,
+        [deferredEnterResult],
+        {
+          userMessage: 'TradingView quick search already contains Pine Editor; press enter and inspect the current Pine Editor state safely',
+          focusRecoveryTarget: { title: 'TradingView', processName: 'tradingview' },
+          expectedWindowHandle: 777,
+          expectedQuery: 'Pine Editor',
+          observationCheckpoints,
+          runtimeTraceLog: null
+        }
+      );
+
+      assert.strictEqual(recovery?.recovered, true, 'the helper should retry Pine recovery before safe-authoring readback');
+      assert.strictEqual(deferredEnterResult.pineEditorRecovery?.preGetTextRetry, true, 'the deferred enter checkpoint should record the pre-get_text Pine recovery retry');
+      assert(['surface-probe', 'semantic-click', 'keyboard-selection'].includes(deferredEnterResult.pineEditorRecovery?.recoveredBy), 'the retry should resolve through a valid Pine recovery path before readback');
+      assert.strictEqual(deferredEnterResult.observationCheckpoint?.verified, true, 'the deferred enter checkpoint should be upgraded to verified before get_text continues');
+      assert.strictEqual(observationCheckpoints.length, 1, 'the upgraded checkpoint should be recorded as an observation checkpoint');
+      assert.strictEqual(observationCheckpoints[0]?.verified, true, 'the recorded checkpoint should be verified');
     });
   });
 
@@ -1622,10 +2180,8 @@ async function run() {
     assert(rewritten.some((action) => action?.type === 'get_text' && action?.text === 'Pine Editor'), 'safe authoring should inspect the Pine Editor state first');
     const quickSearchSelectAll = rewritten.find((action) => String(action?.key || '').toLowerCase() === 'ctrl+a');
     const quickSearchBackspace = rewritten.find((action) => String(action?.key || '').toLowerCase() === 'backspace');
-    assert(quickSearchSelectAll, 'safe authoring may select existing TradingView quick-search text before replacing it');
-    assert(quickSearchBackspace, 'safe authoring may clear the TradingView quick-search query before typing Pine Editor');
-    assert(/quick-search/i.test(String(quickSearchSelectAll?.reason || '')), 'select-all should be limited to TradingView quick-search query replacement');
-    assert(/quick-search/i.test(String(quickSearchBackspace?.reason || '')), 'backspace should be limited to TradingView quick-search query replacement');
+    assert.strictEqual(quickSearchSelectAll, undefined, 'safe authoring should avoid select-all while opening Pine Editor for inspect-first authoring');
+    assert.strictEqual(quickSearchBackspace, undefined, 'safe authoring should avoid destructive quick-search clear-first behavior while opening Pine Editor for inspect-first authoring');
     assert(!rewritten.some((action) => /clear editor/i.test(String(action?.reason || ''))), 'safe authoring should still remove destructive editor clear-first steps by default');
   });
 
@@ -1658,6 +2214,9 @@ async function run() {
       userMessage: 'in tradingview, create a pine script that builds confidence and insight from movement and momentum',
       actionExecutor: async (action) => {
         executed.push(action.type === 'key' ? `key:${action.key}` : action.type);
+        if (action?.type === 'run_command') {
+          return aiService.systemAutomation.executeCommand(action.command, { shell: action.shell || 'powershell' });
+        }
         if (action?.type === 'get_text' && action?.pineEvidenceMode === 'safe-authoring-inspect') {
           return {
             success: true,
@@ -1704,10 +2263,10 @@ async function run() {
     assert.strictEqual(execResult.success, true, 'Execution should continue after empty/starter inspection');
     assert(inspectIndex >= 0, 'safe authoring should inspect Pine Editor state');
     assert(executed.includes('run_command'), 'safe authoring should preserve clipboard preparation');
-    assert(executed.includes('key:ctrl+i'), 'safe authoring should create a fresh Pine indicator via the official shortcut chord');
+    assert(executed.includes('type'), 'safe authoring should open Pine Editor through the verified desktop quick-search route');
     assert(executed.includes('key:ctrl+s'), 'safe authoring should save the script before attempting add-to-chart');
-    assert(executed.includes('key:ctrl+a'), 'safe authoring should now clear the TradingView quick-search query explicitly before typing Pine Editor');
-    assert(executed.includes('key:backspace'), 'safe authoring should now erase the TradingView quick-search query explicitly before typing Pine Editor');
+    assert(executed.includes('key:ctrl+a'), 'safe authoring should select any stale TradingView quick-search text before typing Pine Editor');
+    assert(executed.includes('key:backspace'), 'safe authoring should clear stale TradingView quick-search text before typing Pine Editor');
     assert(pasteIndex > inspectIndex, 'paste should occur after the safe inspection step');
     assert(addToChartIndex > pasteIndex, 'add-to-chart should occur after the script is pasted');
     assert(execResult.results.some((result) => result?.pineContinuationInjected), 'inspect step should inject continuation actions');
@@ -1743,6 +2302,9 @@ async function run() {
       userMessage: 'in tradingview, create a pine script that builds confidence and insight from movement and momentum',
       actionExecutor: async (action) => {
         executed.push(action.type === 'key' ? `key:${action.key}` : action.type);
+        if (action?.type === 'run_command') {
+          return aiService.systemAutomation.executeCommand(action.command, { shell: action.shell || 'powershell' });
+        }
         if (action?.type === 'get_text' && action?.pineEvidenceMode === 'safe-authoring-inspect') {
           return {
             success: true,
@@ -1866,6 +2428,9 @@ async function run() {
       userMessage: 'in tradingview, create a pine script that builds confidence and insight from movement and momentum',
       actionExecutor: async (action) => {
         executed.push(action.type === 'key' ? `key:${action.key}` : action.type);
+        if (action?.type === 'run_command') {
+          return aiService.systemAutomation.executeCommand(action.command, { shell: action.shell || 'powershell' });
+        }
         if (action?.type === 'get_text' && action?.pineEvidenceMode === 'safe-authoring-inspect') {
           return {
             success: true,
@@ -1938,6 +2503,9 @@ async function run() {
       userMessage: 'in tradingview, create a pine script that builds confidence and insight from movement and momentum',
       actionExecutor: async (action) => {
         executed.push(action.type === 'key' ? `key:${action.key}` : action.type);
+        if (action?.type === 'run_command') {
+          return aiService.systemAutomation.executeCommand(action.command, { shell: action.shell || 'powershell' });
+        }
         if (action?.type === 'get_text' && action?.pineEvidenceMode === 'safe-authoring-inspect') {
           return {
             success: true,
@@ -2396,7 +2964,7 @@ async function run() {
       assert(pending, 'Pending Pine overwrite should be stored');
       assert(Array.isArray(pending.resumePrerequisites), 'Pending Pine overwrite should store resume prerequisites');
       assert.strictEqual(pending.resumePrerequisites[2].key, 'ctrl+k');
-      assert(pending.resumePrerequisites.some((action) => String(action?.key || '').toLowerCase() === 'backspace'), 'Pending Pine overwrite prerequisites should also clear any existing quick-search query before reopening the editor');
+      assert(pending.resumePrerequisites.some((action) => String(action?.key || '').toLowerCase() === 'backspace'), 'Pending Pine overwrite prerequisites should clear any existing quick-search query before reopening the editor');
       assert(pending.resumePrerequisites.some((action) => String(action?.key || '').toLowerCase() === 'ctrl+a'), 'Pending Pine overwrite prerequisites should re-select contents before destructive edit resumes');
 
       aiService.confirmPendingAction(pending.actionId);
@@ -2443,8 +3011,8 @@ async function run() {
       assert.strictEqual(resumed.success, true, 'Pine resume should succeed after editor prerequisites are re-established');
       assert.deepStrictEqual(
         executed,
-        ['bring_window_to_front', 'wait', 'key:ctrl+k', 'wait', 'key:ctrl+a', 'wait', 'key:backspace', 'wait', 'type', 'wait', 'key:enter', 'wait', 'wait', 'key:ctrl+a', 'wait', 'key:backspace', 'type'],
-        'Pine resume should re-open the editor through TradingView quick search and re-select contents before destructive overwrite continues'
+        ['bring_window_to_front', 'wait', 'wait', 'key:ctrl+a', 'wait', 'key:backspace', 'wait', 'type', 'wait', 'key:enter', 'wait', 'wait', 'key:ctrl+a', 'wait', 'key:backspace', 'type'],
+        'Pine resume should recover the already-open TradingView quick search and re-select contents before destructive overwrite continues'
       );
       const resumedPineCheckpoint = resumed.observationCheckpoints.find((checkpoint) => checkpoint?.classification === 'editor-active')
         || resumed.observationCheckpoints[resumed.observationCheckpoints.length - 1];
@@ -2800,7 +3368,7 @@ async function run() {
       });
 
       assert.strictEqual(execResult.success, true, 'Execution should proceed after the Pine Editor surface is observed');
-      assert.deepStrictEqual(executed, ['bring_window_to_front', 'wait', 'key', 'wait', 'key', 'wait', 'key', 'wait', 'type', 'wait', 'key', 'wait', 'wait', 'type'], 'Typing should continue only after the legacy Pine opener is rewritten into the TradingView quick-search route, the stale query is explicitly cleared and replaced, and the result is verified');
+      assert.deepStrictEqual(executed, ['bring_window_to_front', 'wait', 'wait', 'key', 'wait', 'key', 'wait', 'type', 'wait', 'key', 'wait', 'wait', 'type'], 'Typing should continue only after the legacy Pine opener recovers the already-open TradingView quick-search route, the stale query is explicitly cleared and replaced, and the result is verified');
       const pineCheckpoint = execResult.observationCheckpoints.find((checkpoint) => checkpoint?.classification === 'editor-active')
         || execResult.observationCheckpoints[execResult.observationCheckpoints.length - 1];
       assert(execResult.observationCheckpoints.length >= 1, 'At least one post-key observation checkpoint should be returned');
@@ -2863,7 +3431,7 @@ async function run() {
       });
 
       assert.strictEqual(execResult.success, false, 'Typing should not continue when Pine Editor activation is not observed');
-      assert.deepStrictEqual(executed.slice(0, 11), ['bring_window_to_front', 'wait', 'key', 'wait', 'key', 'wait', 'key', 'wait', 'type', 'wait', 'key'], 'Typing should stop after the rewritten Pine opener route fails its editor-active checkpoint');
+      assert.deepStrictEqual(executed.slice(0, 10), ['bring_window_to_front', 'wait', 'wait', 'key', 'wait', 'key', 'wait', 'type', 'wait', 'key'], 'Typing should stop after the rewritten Pine opener route fails its editor-active checkpoint');
       assert.strictEqual(executed.filter((entry) => entry === 'type').length, 1, 'Only the quick-search query typing should occur before the editor-active checkpoint fails');
       const failedPineCheckpoint = execResult.observationCheckpoints.find((checkpoint) => checkpoint?.classification === 'editor-active')
         || execResult.observationCheckpoints[execResult.observationCheckpoints.length - 1];
@@ -2911,7 +3479,7 @@ async function run() {
         resolveWindowHandle: async (action) => action?.processName === 'tradingview' ? 777 : 0,
         getForegroundWindowInfo: async () => ({ success: true, hwnd: 777, title: 'TradingView', processName: 'tradingview', windowKind: 'main' }),
         focusWindow: async () => ({ success: true }),
-        getRunningProcessesByNames: async () => ([{ pid: 4242, processName: 'tradingview', mainWindowTitle: 'TradingView', startTime: '2026-03-23T00:00:00Z' }]),
+        getRunningProcessesByNames: async () => ([{ pid: 4242, processName: 'tradingview', mainWindowHandle: 777, mainWindowTitle: 'TradingView', startTime: '2026-03-23T00:00:00Z' }]),
         findElementByText: async () => ({ success: true, count: 0, element: null, elements: [] }),
         click: async (x, y) => {
           const isQuickSearchInputClick = (Number(x) === 411 && Number(y) === 102)
@@ -2956,7 +3524,7 @@ async function run() {
         assert.strictEqual(pineCheckpoint?.verified, true, 'The editor-active checkpoint should pass on watcher surface evidence');
         assert.strictEqual(pineCheckpoint?.watcherSurfaceMatched, true, 'Checkpoint metadata should record watcher-backed Pine surface evidence');
         assert.strictEqual(pineCheckpoint?.watcherSurfaceAnchor, 'add to chart', 'Checkpoint should preserve the watcher anchor that proved editor activation');
-        assert.deepStrictEqual(executed, ['bring_window_to_front', 'wait', 'key', 'wait', 'key', 'wait', 'key', 'wait', 'type', 'wait', 'key', 'wait', 'wait', 'type'], 'Typing should continue after watcher-backed Pine editor verification succeeds and the quick-search query is explicitly cleared and safely replaced');
+        assert.deepStrictEqual(executed, ['bring_window_to_front', 'wait', 'wait', 'key', 'wait', 'key', 'wait', 'type', 'wait', 'key', 'wait', 'wait', 'type'], 'Typing should continue after watcher-backed Pine editor verification succeeds and the already-open quick-search query is explicitly cleared and safely replaced');
       });
     } finally {
       aiService.setUIWatcher(previousWatcher);
@@ -3233,7 +3801,7 @@ async function run() {
         const typedResult = execResult.results.find((result) => result.action === 'type');
 
         assert.strictEqual(execResult.success, true, 'Execution should recover when TradingView quick search is already open and stale text needs to be cleared');
-        assert.deepStrictEqual(executed, ['focus_window:', 'key:ctrl+k', 'key:ctrl+a', 'key:backspace', 'type:Pine Editor'], 'Recovery should verify the open quick-search surface first, then clear stale text before typing');
+        assert.deepStrictEqual(executed, ['focus_window:', 'key:ctrl+a', 'key:backspace', 'type:Pine Editor'], 'Recovery should verify the already-open quick-search surface without toggling it closed, then clear stale text before typing');
         assert.strictEqual(execResult.observationCheckpoints.length, 1, 'A quick-search checkpoint should still be recorded during recovery');
         assert.strictEqual(execResult.observationCheckpoints[0].verified, true, 'The recovered quick-search checkpoint should be marked verified');
         assert.strictEqual(execResult.observationCheckpoints[0].recoveredBy, 'semantic-input-focus', 'Recovery should report that it re-focused the quick-search input semantically');
@@ -3550,7 +4118,7 @@ async function run() {
           actualForeground: currentForeground
         };
       },
-      getRunningProcessesByNames: async () => ([{ pid: 4242, processName: 'tradingview', mainWindowTitle: 'TradingView', startTime: '2026-03-23T00:00:00Z' }]),
+      getRunningProcessesByNames: async () => ([{ pid: 4242, processName: 'tradingview', mainWindowHandle: quickSearchOpen ? 892 : 777, mainWindowTitle: quickSearchOpen ? 'Search tool or function - TradingView' : 'TradingView', startTime: '2026-03-23T00:00:00Z' }]),
       pressKey: async () => ({ success: true })
     }, async () => {
       const originalGetSharedUIAHost = uiAutomation.getSharedUIAHost;
@@ -3597,7 +4165,7 @@ async function run() {
           || execResult.observationCheckpoints[execResult.observationCheckpoints.length - 1];
 
         assert.strictEqual(execResult.success, true, 'Execution should succeed after the contaminated quick-search regression fixture is proven empty and AAPL is applied');
-        assert.deepStrictEqual(executed, ['bring_window_to_front', 'wait', 'key:ctrl+k', 'wait', 'key:ctrl+a', 'wait', 'key:backspace', 'wait', 'type:AAPL', 'wait', 'key:enter', 'wait'], 'Symbol workflow should explicitly open quick search, clear stale text, type AAPL, and confirm it');
+        assert.deepStrictEqual(executed, ['bring_window_to_front', 'wait', 'wait', 'key:ctrl+a', 'wait', 'key:backspace', 'wait', 'type:AAPL', 'wait', 'key:enter', 'wait'], 'Symbol workflow should recover the already-open quick search, clear stale text, type AAPL, and confirm it');
         assert.strictEqual(typedResult?.quickSearchPreflight?.emptyConfirmed, true, 'Typing should only proceed after the quick-search input is proven empty');
         assert.strictEqual(typedResult?.quickSearchPreflight?.initialRead?.normalizedText, dirtyQuickSearchFixture, 'Preflight should preserve the contaminated symbol-search fixture text that triggered semantic clearing');
         assert.strictEqual(typedResult?.quickSearchPreflight?.clearedBy, 'value-pattern', 'When keyboard clearing is not authoritative, the quick-search preflight should clear via semantic value replacement');
@@ -4037,6 +4605,9 @@ async function run() {
   console.log(`  Total:  ${results.passed + results.failed}`);
   console.log(`  Passed: ${results.passed}`);
   console.log(`  Failed: ${results.failed}`);
+  if (results.skipped > 0) {
+    console.log(`  Skipped: ${results.skipped}`);
+  }
   console.log('========================================\n');
 
   process.exit(results.failed > 0 ? 1 : 0);

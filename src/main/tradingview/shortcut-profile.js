@@ -411,6 +411,10 @@ function normalizeKey(value) {
   return String(value || '').trim().toLowerCase();
 }
 
+function normalizeRouteStrategy(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
 function normalizeShortcutPhrase(value) {
   return String(value || '')
     .toLowerCase()
@@ -569,6 +573,44 @@ function buildTradingViewShortcutRoute(id, overrides = {}) {
   if (!shortcut) return null;
 
   if (shortcut.id === 'open-pine-editor') {
+    const routeStrategy = normalizeRouteStrategy(overrides.routeStrategy || overrides.preferredRoute);
+    const routeShortcutId = resolveTradingViewShortcutId(overrides.routeShortcutId || overrides.preferredShortcutId || 'new-pine-indicator');
+    const prefersOfficialDirect = routeStrategy === 'official-direct'
+      || routeStrategy === 'direct-sequence'
+      || routeStrategy === 'new-pine-indicator'
+      || routeStrategy === 'new-pine-strategy';
+
+    if (prefersOfficialDirect && routeShortcutId) {
+      const directShortcut = getTradingViewShortcut(routeShortcutId);
+      if (directShortcut) {
+        const directRouteMetadata = {
+          ...buildTradingViewShortcutMetadata(shortcut),
+          route: 'official-direct',
+          entryShortcutId: directShortcut.id,
+          entryShortcutKeySequence: Array.isArray(directShortcut.keySequence) ? [...directShortcut.keySequence] : []
+        };
+        const finalActionOverrides = {
+          ...(overrides.selectionActionOverrides && typeof overrides.selectionActionOverrides === 'object'
+            ? overrides.selectionActionOverrides
+            : (overrides.enterActionOverrides && typeof overrides.enterActionOverrides === 'object'
+              ? overrides.enterActionOverrides
+              : {})),
+          tradingViewShortcut: buildTradingViewShortcutMetadata(directShortcut),
+          searchSurfaceContract: directRouteMetadata
+        };
+
+        return buildTradingViewShortcutSequenceRoute(directShortcut, {
+          reason: overrides.reason || overrides.enterReason || 'Open TradingView Pine Editor through the official Pine shortcut route',
+          verify: finalActionOverrides.verify || cloneValue(shortcut.verificationContract) || cloneValue(directShortcut.verificationContract),
+          verifyTarget: finalActionOverrides.verifyTarget,
+          finalActionOverrides,
+          interStepWaitMs: overrides.interStepWaitMs,
+          finalWaitMs: overrides.selectionWaitMs ?? overrides.finalWaitMs
+        });
+      }
+    }
+
+    const skipQueryClearBeforeType = overrides.skipQueryClearBeforeType === true;
     const quickSearchAction = buildTradingViewShortcutAction('symbol-search', {
       reason: overrides.searchReason || 'Open TradingView quick search before selecting Pine Editor'
     });
@@ -590,33 +632,49 @@ function buildTradingViewShortcutRoute(id, overrides = {}) {
         ? overrides.typeActionOverrides
         : {});
 
-    return [
+    const routeActions = [
       mergeAction(quickSearchAction, { searchSurfaceContract: routeMetadata }),
-      { type: 'wait', ms: Number.isFinite(Number(overrides.searchWaitMs)) ? Number(overrides.searchWaitMs) : 220 },
-      {
-        type: 'key',
-        key: 'ctrl+a',
-        reason: overrides.clearReason || 'Select any existing TradingView quick-search text before replacing it',
-        searchSurfaceContract: routeMetadata,
-        tradingViewShortcut: routeMetadata
-      },
-      { type: 'wait', ms: Number.isFinite(Number(overrides.clearWaitMs)) ? Number(overrides.clearWaitMs) : 90 },
-      {
-        type: 'key',
-        key: 'backspace',
-        reason: overrides.eraseReason || 'Clear the selected TradingView quick-search text before typing Pine Editor',
-        searchSurfaceContract: routeMetadata,
-        tradingViewShortcut: routeMetadata
-      },
-      { type: 'wait', ms: Number.isFinite(Number(overrides.eraseWaitMs)) ? Number(overrides.eraseWaitMs) : 90 },
+      { type: 'wait', ms: Number.isFinite(Number(overrides.searchWaitMs)) ? Number(overrides.searchWaitMs) : 220 }
+    ];
+
+    if (!skipQueryClearBeforeType) {
+      routeActions.push(
+        {
+          type: 'key',
+          key: 'ctrl+a',
+          reason: overrides.clearReason || 'Select any existing TradingView quick-search text before replacing it',
+          searchSurfaceContract: routeMetadata,
+          tradingViewShortcut: routeMetadata
+        },
+        { type: 'wait', ms: Number.isFinite(Number(overrides.clearWaitMs)) ? Number(overrides.clearWaitMs) : 90 },
+        {
+          type: 'key',
+          key: 'backspace',
+          reason: overrides.eraseReason || 'Clear the selected TradingView quick-search text before typing Pine Editor',
+          searchSurfaceContract: routeMetadata,
+          tradingViewShortcut: routeMetadata
+        },
+        { type: 'wait', ms: Number.isFinite(Number(overrides.eraseWaitMs)) ? Number(overrides.eraseWaitMs) : 90 }
+      );
+    }
+
+    routeActions.push(
       mergeAction({
         type: 'type',
         text: overrides.searchText || 'Pine Editor',
         reason: overrides.typeReason || 'Replace the active TradingView quick-search text with Pine Editor',
         searchSurfaceContract: routeMetadata,
-        tradingViewShortcut: routeMetadata
-      }, queryActionOverrides),
-      { type: 'wait', ms: Number.isFinite(Number(overrides.commitWaitMs)) ? Number(overrides.commitWaitMs) : 260 },
+        tradingViewShortcut: routeMetadata,
+        forceQuickSearchType: !skipQueryClearBeforeType
+      }, queryActionOverrides)
+    );
+
+    const commitWaitMs = Number.isFinite(Number(overrides.commitWaitMs)) ? Number(overrides.commitWaitMs) : 260;
+    if (commitWaitMs > 0) {
+      routeActions.push({ type: 'wait', ms: commitWaitMs });
+    }
+
+    routeActions.push(
       mergeAction({
         type: 'key',
         key: 'enter',
@@ -633,7 +691,9 @@ function buildTradingViewShortcutRoute(id, overrides = {}) {
         tradingViewShortcut: routeMetadata
       }, selectionActionOverrides),
       { type: 'wait', ms: Number.isFinite(Number(overrides.selectionWaitMs)) ? Number(overrides.selectionWaitMs) : 220 }
-    ];
+    );
+
+    return routeActions;
   }
 
   return buildTradingViewShortcutSequenceRoute(shortcut, overrides);

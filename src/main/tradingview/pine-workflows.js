@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const { buildVerifyTargetHintFromAppName } = require('./app-profile');
 const { extractTradingViewObservationKeywords } = require('./verification');
 const { buildPineClipboardPreparationCommandFromCanonicalState } = require('./pine-script-state');
@@ -164,6 +165,92 @@ function sanitizePineScriptText(value = '') {
 function containsPineScriptPayloadText(value = '') {
   const text = sanitizePineScriptText(value);
   return /\/\/\s*@version\s*=\s*\d+|\b(?:indicator|strategy|library)\s*\(|\bplot(?:shape|char)?\s*\(|\binput(?:\.[a-z]+)?\s*\(|\balertcondition\s*\(/i.test(text);
+}
+
+function normalizePineClipboardContractText(value = '') {
+  return sanitizePineScriptText(value)
+    .replace(/\r/g, '')
+    .trim();
+}
+
+function hashPineClipboardContractText(value = '') {
+  const normalized = normalizePineClipboardContractText(value);
+  if (!normalized) return '';
+  return crypto.createHash('sha256').update(normalized, 'utf8').digest('hex');
+}
+
+function extractInlinePineClipboardPayload(command = '') {
+  const text = String(command || '');
+  const hereStringMatch = text.match(/\bSet-Clipboard\s+-Value\s+@'\r?\n([\s\S]*?)\r?\n'@/i);
+  if (hereStringMatch) {
+    return sanitizePineScriptText(hereStringMatch[1]);
+  }
+
+  const quotedValueMatch = text.match(/\bSet-Clipboard\s+-Value\s+(['"])([\s\S]*?)\1/i);
+  if (quotedValueMatch) {
+    return sanitizePineScriptText(quotedValueMatch[2]);
+  }
+
+  return '';
+}
+
+function buildPineClipboardContract(action) {
+  if (!action || typeof action !== 'object') return null;
+
+  const canonicalState = action.pineCanonicalState && typeof action.pineCanonicalState === 'object'
+    ? action.pineCanonicalState
+    : null;
+  const canonicalHash = String(canonicalState?.sourceHash || '').trim();
+  if (canonicalHash) {
+    return {
+      kind: 'pine-script',
+      source: 'canonical-state',
+      required: true,
+      expectedHash: canonicalHash,
+      sourcePath: canonicalState?.sourcePath || null,
+      scriptTitle: sanitizePineScriptName(canonicalState?.scriptTitle || '')
+    };
+  }
+
+  const payload = extractInlinePineClipboardPayload(action.command || '');
+  const expectedHash = hashPineClipboardContractText(payload);
+  if (!expectedHash || !containsPineScriptPayloadText(payload)) return null;
+
+  return {
+    kind: 'pine-script',
+    source: 'inline-set-clipboard',
+    required: true,
+    expectedHash,
+    scriptTitle: sanitizePineScriptName(extractPineDeclarationTitle(payload)),
+    firstLine: normalizePineClipboardContractText(payload).split('\n')[0] || null
+  };
+}
+
+function attachPineClipboardContracts(steps = []) {
+  if (!Array.isArray(steps) || steps.length === 0) return steps;
+
+  let pendingContract = null;
+  return steps.map((step) => {
+    const cloned = cloneAction(step);
+    if (isPineClipboardPreparationAction(cloned)) {
+      pendingContract = buildPineClipboardContract(cloned);
+      if (pendingContract) {
+        cloned.pineClipboardContract = pendingContract;
+      }
+      return cloned;
+    }
+
+    if (isPinePasteStep(cloned) && pendingContract) {
+      cloned.pineClipboardContract = pendingContract;
+      return cloned;
+    }
+
+    if (getNormalizedActionType(cloned) === 'type' && isPineScriptTypeAction(cloned)) {
+      pendingContract = null;
+    }
+
+    return cloned;
+  });
 }
 
 function sanitizePineAuthoringAction(action) {
@@ -383,7 +470,8 @@ function buildSafePineAuthoringContinuationSteps(actions = [], intent = {}, raw 
     return [];
   }
 
-  const derivedScriptName = inferSafePineScriptName(payloadSteps, raw);
+  const guardedPayloadSteps = attachPineClipboardContracts(payloadSteps);
+  const derivedScriptName = inferSafePineScriptName(guardedPayloadSteps, raw);
 
   const applyContinuationSteps = [];
   if (addToChartSteps.length > 0) {
@@ -415,7 +503,7 @@ function buildSafePineAuthoringContinuationSteps(actions = [], intent = {}, raw 
   }
 
   const saveFollowUpActions = [
-    ...payloadSteps,
+    ...guardedPayloadSteps,
     { type: 'wait', ms: 220 },
     ...(saveSteps.length > 0
       ? saveSteps
@@ -430,14 +518,15 @@ function buildSafePineAuthoringContinuationSteps(actions = [], intent = {}, raw 
         }
       ])),
     { type: 'wait', ms: 280 },
-    {
-      type: 'get_text',
-      text: 'Pine Editor',
-      reason: 'Verify visible Pine save-state evidence before adding the script to the chart',
-      pineEvidenceMode: 'save-status',
-      continueOnPineLifecycleState: 'saved-state-verified',
-      continueActions: applyContinuationSteps,
-      continueActionsByPineLifecycleState: {
+      {
+        type: 'get_text',
+        text: 'Pine Editor',
+        reason: 'Verify visible Pine save-state evidence before adding the script to the chart',
+        pineEvidenceMode: 'save-status',
+        allowSparseSaveStateFallback: true,
+        continueOnPineLifecycleState: 'saved-state-verified',
+        continueActions: applyContinuationSteps,
+        continueActionsByPineLifecycleState: {
         'save-required-before-apply': [
           { type: 'wait', ms: 180 },
           {
@@ -457,6 +546,7 @@ function buildSafePineAuthoringContinuationSteps(actions = [], intent = {}, raw 
             text: 'Pine Editor',
             reason: 'Re-verify visible Pine save-state evidence after naming the script',
             pineEvidenceMode: 'save-status',
+            allowSparseSaveStateFallback: true,
             continueOnPineLifecycleState: 'saved-state-verified',
             continueActions: applyContinuationSteps,
             haltOnPineLifecycleStateMismatch: true,
@@ -477,23 +567,43 @@ function buildSafePineAuthoringContinuationSteps(actions = [], intent = {}, raw 
     }
   ];
 
-  return [
-    ...(buildTradingViewShortcutRoute('new-pine-indicator', {
-      reason: 'Create a fresh Pine indicator before inserting the prepared script'
-    }) || []),
+  const freshIndicatorContinuationSteps = [
     { type: 'wait', ms: 220 },
     {
       type: 'get_text',
       text: 'Pine Editor',
-      reason: 'Verify that a fresh Pine script surface is active before inserting the prepared script',
+      reason: 'Verify that the TradingView Desktop Pine Editor is active before inserting the prepared script',
       pineEvidenceMode: 'safe-authoring-inspect',
       continueOnPineEditorState: 'empty-or-starter',
       continueActions: saveFollowUpActions,
       haltOnPineEditorStateMismatch: true,
       pineStateMismatchReasons: {
-        'existing-script-visible': 'Creating a fresh Pine indicator did not yield a clean starter script; stop rather than overwrite visible script content.',
-        'unknown-visible-state': 'The fresh Pine indicator state is ambiguous; inspect further before inserting the script.',
-        '': 'The fresh Pine indicator state is ambiguous; inspect further before inserting the script.'
+        'existing-script-visible': 'Existing visible Pine script content is already present; not overwriting it without a verified new-script surface.',
+        'unknown-visible-state': 'The Pine Editor state is ambiguous; inspect further before inserting the script.',
+        '': 'The Pine Editor state is ambiguous; inspect further before inserting the script.'
+      }
+    }
+  ];
+
+  const mustForceFreshIndicatorRoute = !!canonicalReplacementPayloadSteps || !!intent.requiresFreshIndicator;
+  if (mustForceFreshIndicatorRoute) {
+    return freshIndicatorContinuationSteps;
+  }
+
+  return [
+    {
+      type: 'get_text',
+      text: 'Pine Editor',
+      reason: 'Reuse the already-open Pine starter script when it is still clean; otherwise create a fresh Pine indicator before inserting the prepared script',
+      pineEvidenceMode: 'safe-authoring-inspect',
+      continueActionsByPineEditorState: {
+        'empty-or-starter': saveFollowUpActions
+      },
+      haltOnPineEditorStateMismatch: true,
+      pineStateMismatchReasons: {
+        'existing-script-visible': 'Existing visible Pine script content is already present; not overwriting it without an explicit replacement request.',
+        'unknown-visible-state': 'The current Pine Editor state is ambiguous; inspect further before inserting the script.',
+        '': 'The current Pine Editor state is ambiguous; inspect further before inserting the script.'
       }
     }
   ];
@@ -797,6 +907,11 @@ function inferTradingViewPineIntent(userMessage = '', actions = [], context = {}
   const openerIndex = Array.isArray(actions)
     ? actions.findIndex((action) => openerTypes.has(action?.type))
     : -1;
+  const openerAction = openerIndex >= 0 ? actions[openerIndex] : null;
+  const openerIsQuickSearchCommit = String(openerAction?.type || '').trim().toLowerCase() === 'key'
+    && String(openerAction?.key || '').trim().toLowerCase() === 'enter'
+    && String(openerAction?.searchSurfaceContract?.route || '').trim().toLowerCase() === 'quick-search'
+    && String(openerAction?.searchSurfaceContract?.id || '').trim().toLowerCase() === 'open-pine-editor';
   const surface = inferPineSurfaceTarget(raw);
   const syntheticAuthoringPayload = !!pineAuthoringMode
     && surface?.target === 'pine-editor'
@@ -846,7 +961,7 @@ function inferTradingViewPineIntent(userMessage = '', actions = [], context = {}
   const requiresFreshIndicator = surface.target === 'pine-editor'
     && (requestRequiresFreshPineIndicator(raw) || hasValidatedCanonicalPineState(actions));
   const safeAuthoringContinuationSteps = safeAuthoringDefault
-    ? buildSafePineAuthoringContinuationSteps(actions, { openerIndex, syntheticOpener }, raw)
+    ? buildSafePineAuthoringContinuationSteps(actions, { openerIndex, syntheticOpener, requiresFreshIndicator }, raw)
     : [];
   const requiresEditorActivation = surface.target === 'pine-editor'
     && (isPineAuthoringStep(nextAction) || safeAuthoringDefault || safeAuthoringContinuationSteps.length > 0);
@@ -866,6 +981,7 @@ function inferTradingViewPineIntent(userMessage = '', actions = [], context = {}
     syntheticOpener,
     safeAuthoringDefault,
     requiresFreshIndicator,
+    preserveQuickSearchCommit: openerIsQuickSearchCommit,
     safeAuthoringContinuationSteps,
     explicitOverwriteAuthoring,
     reason: surface.target === 'pine-logs'
@@ -911,14 +1027,26 @@ function buildTradingViewPineWorkflowActions(intent = {}, actions = []) {
       verifyTarget.titleHints
     ]);
 
+  const inheritedFocusTarget = intent.focusTarget && typeof intent.focusTarget === 'object'
+    ? intent.focusTarget
+    : extractTradingViewFocusTargetFromActions(actions);
+
+  const focusAction = {
+    type: 'bring_window_to_front',
+    title: inheritedFocusTarget?.title || 'TradingView',
+    processName: inheritedFocusTarget?.processName || 'tradingview',
+    reason: 'Focus an already-open TradingView window before the Pine workflow; launch only if no matching UIA/window target is found',
+    verifyTarget,
+    openIfMissing: true
+  };
+  const inheritedHwnd = Number(inheritedFocusTarget?.windowHandle || inheritedFocusTarget?.hwnd || inheritedFocusTarget?.targetWindowHandle || 0) || 0;
+  if (inheritedHwnd > 0) {
+    focusAction.windowHandle = inheritedHwnd;
+    focusAction.hwnd = inheritedHwnd;
+  }
+
   const rewritten = [
-    {
-      type: 'bring_window_to_front',
-      title: 'TradingView',
-      processName: 'tradingview',
-      reason: 'Focus TradingView before the Pine workflow',
-      verifyTarget
-    },
+    focusAction,
     { type: 'wait', ms: 650 }
   ];
 
@@ -930,29 +1058,42 @@ function buildTradingViewPineWorkflowActions(intent = {}, actions = []) {
       keywords: expectedKeywords,
       requiresObservedChange: !!intent.requiresObservedChange
     };
-    const prefersOfficialDirectPineOpen = intent.safeAuthoringDefault
-      && !intent.requiresFreshIndicator
-      && !intent.explicitOverwriteAuthoring;
-    const routeActions = buildTradingViewShortcutRoute('open-pine-editor', {
-      routeStrategy: prefersOfficialDirectPineOpen ? 'official-direct' : 'quick-search',
-      routeShortcutId: prefersOfficialDirectPineOpen ? 'new-pine-indicator' : undefined,
-      skipQueryClearBeforeType: true,
-      enterReason: opener?.reason || intent.reason,
-      enterActionOverrides: {
-        verify: pineEditorOpenVerify,
-        verifyTarget
-      }
-    });
-
-    if (Array.isArray(routeActions) && routeActions.length > 0) {
-      rewritten.push(...routeActions);
-    } else {
+    const openerIsQuickSearchCommit = !intent.syntheticOpener
+      && String(opener?.type || '').trim().toLowerCase() === 'key'
+      && String(opener?.key || '').trim().toLowerCase() === 'enter'
+      && String(opener?.searchSurfaceContract?.route || '').trim().toLowerCase() === 'quick-search'
+      && String(opener?.searchSurfaceContract?.id || '').trim().toLowerCase() === 'open-pine-editor';
+    const prefersOfficialDirectPineOpen = false;
+    if (openerIsQuickSearchCommit) {
+      rewritten.length = 0;
       rewritten.push({
         ...opener,
         reason: opener?.reason || intent.reason,
-        verify: pineEditorOpenVerify,
+        verify: opener?.verify || pineEditorOpenVerify,
         verifyTarget
       });
+    } else {
+      const routeActions = buildTradingViewShortcutRoute('open-pine-editor', {
+        routeStrategy: prefersOfficialDirectPineOpen ? 'official-direct' : 'quick-search',
+        routeShortcutId: prefersOfficialDirectPineOpen ? 'new-pine-indicator' : undefined,
+        skipQueryClearBeforeType: false,
+        enterReason: opener?.reason || intent.reason,
+        enterActionOverrides: {
+          verify: pineEditorOpenVerify,
+          verifyTarget
+        }
+      });
+
+      if (Array.isArray(routeActions) && routeActions.length > 0) {
+        rewritten.push(...routeActions);
+      } else {
+        rewritten.push({
+          ...opener,
+          reason: opener?.reason || intent.reason,
+          verify: pineEditorOpenVerify,
+          verifyTarget
+        });
+      }
     }
   } else {
     rewritten.push({
@@ -975,7 +1116,11 @@ function buildTradingViewPineWorkflowActions(intent = {}, actions = []) {
   }
 
   if (intent.safeAuthoringDefault) {
-    if (intent.requiresFreshIndicator && Array.isArray(intent.safeAuthoringContinuationSteps) && intent.safeAuthoringContinuationSteps.length > 0) {
+    if (intent.preserveQuickSearchCommit) {
+      return rewritten;
+    }
+
+    if (Array.isArray(intent.safeAuthoringContinuationSteps) && intent.safeAuthoringContinuationSteps.length > 0) {
       if (rewritten.length > 0 && rewritten[rewritten.length - 1]?.type !== 'wait') {
         rewritten.push({ type: 'wait', ms: 220 });
       }
@@ -986,7 +1131,8 @@ function buildTradingViewPineWorkflowActions(intent = {}, actions = []) {
       type: 'get_text',
       text: 'Pine Editor',
       reason: 'Inspect the current visible Pine Editor state before choosing a safe new-script or bounded-edit path',
-      pineEvidenceMode: 'safe-authoring-inspect'
+      pineEvidenceMode: 'safe-authoring-inspect',
+      allowSparseOpenStateFallback: true
     };
 
     if (Array.isArray(intent.safeAuthoringContinuationSteps) && intent.safeAuthoringContinuationSteps.length > 0) {
@@ -1051,11 +1197,46 @@ function buildTradingViewPineWorkflowActions(intent = {}, actions = []) {
   return rewritten.concat(trailing);
 }
 
+function extractTradingViewFocusTargetFromActions(actions = []) {
+  if (!Array.isArray(actions)) return null;
+  for (const action of actions) {
+    if (!action || typeof action !== 'object') continue;
+    const type = String(action.type || '').trim().toLowerCase();
+    if (type !== 'bring_window_to_front' && type !== 'focus_window') continue;
+    const haystack = [action.title, action.windowTitle, action.processName, action.reason]
+      .map((value) => String(value || '').trim().toLowerCase())
+      .filter(Boolean)
+      .join(' ');
+    const hwnd = Number(action.windowHandle || action.hwnd || action.targetWindowHandle || 0) || 0;
+    if (!hwnd && !/tradingview|trading\s+view|pine editor/.test(haystack)) continue;
+    return {
+      title: action.title || action.windowTitle || undefined,
+      processName: action.processName || undefined,
+      windowHandle: hwnd || undefined,
+      hwnd: hwnd || undefined
+    };
+  }
+  return null;
+}
+
 function maybeRewriteTradingViewPineWorkflow(actions, context = {}) {
   if (!Array.isArray(actions) || actions.length === 0) return null;
 
+  const hasCanonicalSafeAuthoringContinuation = actions.some((action) => {
+    if (!action || typeof action !== 'object') return false;
+    if (String(action.type || '').trim().toLowerCase() !== 'get_text') return false;
+    if (String(action.pineEvidenceMode || '').trim().toLowerCase() !== 'safe-authoring-inspect') return false;
+    return (Array.isArray(action.continueActions) && action.continueActions.length > 0)
+      || (action.continueActionsByPineEditorState && typeof action.continueActionsByPineEditorState === 'object');
+  });
+  if (hasCanonicalSafeAuthoringContinuation) return null;
+
   const intent = inferTradingViewPineIntent(context.userMessage || '', actions, context);
   if (!intent || (!intent.syntheticOpener && intent.openerIndex < 0)) return null;
+  const focusTarget = extractTradingViewFocusTargetFromActions(actions);
+  if (focusTarget) {
+    intent.focusTarget = focusTarget;
+  }
 
   if (intent.syntheticOpener) {
     return buildTradingViewPineWorkflowActions(intent, actions);
@@ -1134,7 +1315,7 @@ function buildTradingViewPineResumePrerequisites(actions = [], pauseIndex = -1, 
     },
     { type: 'wait', ms: 650 },
     ...((buildTradingViewShortcutRoute('open-pine-editor', {
-      skipQueryClearBeforeType: true,
+      skipQueryClearBeforeType: false,
       enterReason: 'Re-open or re-activate TradingView Pine Editor after confirmation before continuing authoring',
       enterActionOverrides: {
         verify: {

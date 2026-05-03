@@ -81,6 +81,17 @@ test('Pine diagnostics summary surfaces visible compiler errors and warnings', (
   ]);
 });
 
+test('Pine safe-authoring summary treats anchor-only starter surfaces as empty-or-starter', () => {
+  const summary = systemAutomation.buildPineEditorSafeAuthoringSummary(
+    'Publish script\nAdd to chart\nPine Logs\nStrategy Tester'
+  );
+
+  assert(summary, 'summary should be returned');
+  assert.strictEqual(summary.evidenceMode, 'safe-authoring-inspect');
+  assert.strictEqual(summary.editorVisibleState, 'empty-or-starter');
+  assert(summary.visibleSignals.includes('starter-surface-anchors-visible'));
+});
+
 test('Pine line-budget summary exposes visible count hints and limit pressure', () => {
   const summary = systemAutomation.buildPineEditorDiagnosticsStructuredSummary(
     'Line count: 487 / 500 lines. Warning: script is close to the Pine limit.',
@@ -190,6 +201,7 @@ testAsync('GET_TEXT falls back to Pine editor anchors when exact Pine Editor ele
       type: 'get_text',
       text: 'Pine Editor',
       pineEvidenceMode: 'safe-authoring-inspect',
+      allowSparseOpenStateFallback: true,
       criteria: { text: 'Pine Editor', windowTitle: 'TradingView' }
     });
 
@@ -200,6 +212,125 @@ testAsync('GET_TEXT falls back to Pine editor anchors when exact Pine Editor ele
       /pine-editor-fallback:Publish script|WatcherCache \(pine-editor-fallback\)/i.test(String(result.method || '')),
       'fallback method should record either the Pine anchor or the watcher-backed Pine fallback'
     );
+  } finally {
+    uiAutomation.getElementText = originalGetElementText;
+    uiAutomation.findElement = originalFindElement;
+    host.getText = originalHostGetText;
+    uiContext.setUIWatcher(previousWatcher);
+  }
+});
+
+testAsync('GET_TEXT prefers fast Pine fallback before full UIA text extraction for safe authoring', async () => {
+  const uiAutomation = require(path.join(__dirname, '..', 'src', 'main', 'ui-automation'));
+  const uiContext = require(path.join(__dirname, '..', 'src', 'main', 'ai-service', 'ui-context.js'));
+  const originalGetElementText = uiAutomation.getElementText;
+  const originalFindElement = uiAutomation.findElement;
+  const host = uiAutomation.getSharedUIAHost();
+  const originalHostGetText = host.getText.bind(host);
+  const previousWatcher = uiContext.getUIWatcher();
+  let getElementTextCalls = 0;
+
+  uiAutomation.getElementText = async () => {
+    getElementTextCalls++;
+    return {
+      success: false,
+      error: 'This path should not be used when fast Pine fallback succeeds'
+    };
+  };
+  uiAutomation.findElement = async (criteria) => {
+    if (/publish script/i.test(String(criteria?.text || ''))) {
+      return {
+        success: true,
+        element: {
+          name: 'Publish script',
+          bounds: { x: 100, y: 100, width: 120, height: 24, centerX: 160, centerY: 112 }
+        }
+      };
+    }
+    if (/add to chart/i.test(String(criteria?.text || ''))) {
+      return {
+        success: true,
+        element: {
+          name: 'Add to chart',
+          bounds: { x: 100, y: 140, width: 120, height: 24, centerX: 160, centerY: 152 }
+        }
+      };
+    }
+    return { success: false, error: 'Element not found' };
+  };
+  host.getText = async () => {
+    throw new Error('TextPattern failed');
+  };
+  uiContext.setUIWatcher(null);
+
+  try {
+    const result = await systemAutomation.executeAction({
+      type: 'get_text',
+      text: 'Pine Editor',
+      pineEvidenceMode: 'safe-authoring-inspect',
+      allowSparseOpenStateFallback: true,
+      criteria: { text: 'Pine Editor', windowTitle: 'TradingView' }
+    });
+
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(getElementTextCalls, 0, 'fast Pine fallback should bypass full UIA text extraction when anchors are already enough');
+    assert.strictEqual(result.pineStructuredSummary.editorVisibleState, 'empty-or-starter');
+    assert(/ElementAnchor \(pine-editor-fallback\)/i.test(String(result.method || '')));
+  } finally {
+    uiAutomation.getElementText = originalGetElementText;
+    uiAutomation.findElement = originalFindElement;
+    host.getText = originalHostGetText;
+    uiContext.setUIWatcher(previousWatcher);
+  }
+});
+
+testAsync('GET_TEXT checks synthetic Pine anchors before literal Pine Editor probe for safe authoring', async () => {
+  const uiAutomation = require(path.join(__dirname, '..', 'src', 'main', 'ui-automation'));
+  const uiContext = require(path.join(__dirname, '..', 'src', 'main', 'ai-service', 'ui-context.js'));
+  const originalGetElementText = uiAutomation.getElementText;
+  const originalFindElement = uiAutomation.findElement;
+  const host = uiAutomation.getSharedUIAHost();
+  const originalHostGetText = host.getText.bind(host);
+  const previousWatcher = uiContext.getUIWatcher();
+  const searchedTexts = [];
+
+  uiAutomation.getElementText = async () => ({
+    success: false,
+    error: 'Element not found'
+  });
+  uiAutomation.findElement = async (criteria) => {
+    const text = String(criteria?.text || '');
+    searchedTexts.push(text);
+    if (/untitled script/i.test(text)) {
+      return {
+        success: true,
+        element: {
+          name: 'Untitled script',
+          bounds: { x: 100, y: 100, width: 120, height: 24, centerX: 160, centerY: 112 }
+        }
+      };
+    }
+    if (/pine editor/i.test(text)) {
+      throw new Error('literal Pine Editor probe should not be attempted before synthetic anchors');
+    }
+    return { success: false, error: 'Element not found' };
+  };
+  host.getText = async () => {
+    throw new Error('TextPattern failed');
+  };
+  uiContext.setUIWatcher(null);
+
+  try {
+    const result = await systemAutomation.executeAction({
+      type: 'get_text',
+      text: 'Pine Editor',
+      pineEvidenceMode: 'safe-authoring-inspect',
+      criteria: { text: 'Pine Editor', windowTitle: 'TradingView' }
+    });
+
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(searchedTexts[0], 'Untitled script');
+    assert(/ElementAnchor \(pine-editor-fallback\)/i.test(String(result.method || '')));
   } finally {
     uiAutomation.getElementText = originalGetElementText;
     uiAutomation.findElement = originalFindElement;
@@ -260,6 +391,65 @@ testAsync('GET_TEXT degrades to bounded Pine element anchors when UIA text extra
     assert.strictEqual(result.pineStructuredSummary.editorVisibleState, 'empty-or-starter');
     assert(/ElementAnchor \(pine-editor-fallback\)/i.test(String(result.method || '')), 'bounded Pine anchor fallback should record its degraded evidence method');
     assert(/Untitled script/i.test(String(result.text || '')), 'bounded Pine anchor fallback should preserve the starter-surface anchor text');
+  } finally {
+    uiAutomation.getElementText = originalGetElementText;
+    uiAutomation.findElement = originalFindElement;
+    host.getText = originalHostGetText;
+    uiContext.setUIWatcher(previousWatcher);
+  }
+});
+
+testAsync('GET_TEXT bounds safe-authoring fallback candidates when watcher evidence is sparse', async () => {
+  const uiAutomation = require(path.join(__dirname, '..', 'src', 'main', 'ui-automation'));
+  const uiContext = require(path.join(__dirname, '..', 'src', 'main', 'ai-service', 'ui-context.js'));
+  const originalGetElementText = uiAutomation.getElementText;
+  const originalFindElement = uiAutomation.findElement;
+  const host = uiAutomation.getSharedUIAHost();
+  const originalHostGetText = host.getText.bind(host);
+  const previousWatcher = uiContext.getUIWatcher();
+  const searchedTexts = [];
+
+  uiAutomation.getElementText = async () => ({
+    success: false,
+    error: 'Full UIA text extraction should remain bypassed for safe-authoring fast fallback'
+  });
+  uiAutomation.findElement = async (criteria) => {
+    searchedTexts.push(String(criteria?.text || ''));
+    return { success: false, error: 'Element not found' };
+  };
+  host.getText = async () => {
+    throw new Error('TextPattern should not run without a matched bounded candidate');
+  };
+  uiContext.setUIWatcher({
+    cache: {
+      activeWindow: {
+        hwnd: 986022,
+        processName: 'TradingView',
+        title: 'INTC / Unnamed'
+      },
+      elements: [
+        { name: 'chart', windowHandle: 986022 },
+        { name: 'price scale', windowHandle: 986022 },
+        { name: 'toolbar', windowHandle: 986022 },
+        ...Array.from({ length: 12 }, (_, index) => ({ name: `other-${index}`, windowHandle: 12345 }))
+      ]
+    }
+  });
+
+  try {
+    const result = await systemAutomation.executeAction({
+      type: 'get_text',
+      text: 'Pine Editor',
+      pineEvidenceMode: 'safe-authoring-inspect',
+      allowSparseOpenStateFallback: true,
+      criteria: { text: 'Pine Editor', windowTitle: 'TradingView' }
+    });
+
+    assert.strictEqual(result.success, true, 'sparse watcher evidence without Pine anchors should return bounded open-state proof instead of hanging');
+    assert(searchedTexts.length <= 2, `safe-authoring inspect should stop after a sparse watcher candidate budget, saw ${searchedTexts.length}`);
+    assert(!searchedTexts.includes('My Strategy'), 'sparse watcher budget should not exhaust later synthetic candidates');
+    assert(/WatcherOpenState \(pine-editor-sparse-safe-authoring\)/i.test(String(result.method || '')), 'sparse watcher fallback should record bounded open-state proof');
+    assert.strictEqual(result.pineStructuredSummary.evidenceMode, 'safe-authoring-inspect');
   } finally {
     uiAutomation.getElementText = originalGetElementText;
     uiAutomation.findElement = originalFindElement;
@@ -377,6 +567,64 @@ testAsync('GET_TEXT falls back to watcher-backed Pine surface text when UIA text
     assert.strictEqual(result.pineStructuredSummary.editorVisibleState, 'empty-or-starter');
     assert(/WatcherCache \(pine-editor-fallback\)/i.test(String(result.method || '')), 'watcher fallback should record its method');
     assert(/Untitled script/i.test(String(result.text || '')), 'watcher fallback should preserve bounded Pine surface text');
+  } finally {
+    uiAutomation.getElementText = originalGetElementText;
+    uiAutomation.findElement = originalFindElement;
+    host.getText = originalHostGetText;
+    uiContext.setUIWatcher(previousWatcher);
+  }
+});
+
+testAsync('GET_TEXT returns bounded unknown save-state proof when sparse TradingView UIA cannot expose save text', async () => {
+  const uiAutomation = require(path.join(__dirname, '..', 'src', 'main', 'ui-automation'));
+  const originalGetElementText = uiAutomation.getElementText;
+  const originalFindElement = uiAutomation.findElement;
+  const host = uiAutomation.getSharedUIAHost();
+  const originalHostGetText = host.getText.bind(host);
+  const uiContext = require(path.join(__dirname, '..', 'src', 'main', 'ai-service', 'ui-context.js'));
+  const previousWatcher = uiContext.getUIWatcher();
+
+  uiAutomation.getElementText = async () => ({
+    success: false,
+    error: 'Element not found'
+  });
+  uiAutomation.findElement = async () => ({
+    success: false,
+    error: 'Element not found'
+  });
+  host.getText = async () => {
+    throw new Error('TextPattern failed');
+  };
+  uiContext.setUIWatcher({
+    cache: {
+      activeWindow: {
+        hwnd: 777,
+        title: 'TradingView',
+        processName: 'tradingview',
+        windowKind: 'main'
+      },
+      elements: [
+        { name: 'Pine Editor container', windowHandle: 777, automationId: '', className: 'Pane' },
+        { name: 'Editor shell', windowHandle: 777, automationId: '', className: 'Pane' },
+        { name: 'Status area', windowHandle: 777, automationId: '', className: 'Text' },
+        { name: 'Off-window chart title', windowHandle: 999, automationId: '', className: 'Text' }
+      ]
+    }
+  });
+
+  try {
+    const result = await systemAutomation.executeAction({
+      type: 'get_text',
+      text: 'Pine Editor',
+      pineEvidenceMode: 'save-status',
+      allowSparseSaveStateFallback: true,
+      criteria: { text: 'Pine Editor', windowTitle: 'TradingView' }
+    });
+
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.pineStructuredSummary.evidenceMode, 'save-status');
+    assert.strictEqual(result.pineStructuredSummary.lifecycleState, 'unknown-save-state');
+    assert(/WatcherOpenState \(pine-editor-sparse-save-status\)/i.test(String(result.method || '')), 'sparse save fallback should record bounded degraded proof');
   } finally {
     uiAutomation.getElementText = originalGetElementText;
     uiAutomation.findElement = originalFindElement;

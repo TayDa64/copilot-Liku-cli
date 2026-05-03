@@ -261,8 +261,8 @@ test('generic pine script creation prefers safe new-script workflow', () => {
   assert.strictEqual(rewritten[2].key, 'ctrl+k');
   assert.strictEqual(opener.verify.kind, 'editor-active');
   assert(rewritten.some((action) => action?.type === 'get_text' && action?.text === 'Pine Editor'), 'safe authoring should inspect visible Pine Editor state first');
-  assert(!rewritten.some((action) => String(action?.key || '').toLowerCase() === 'ctrl+a'), 'safe authoring should avoid select-all by default');
-  assert(!rewritten.some((action) => String(action?.key || '').toLowerCase() === 'backspace'), 'safe authoring should avoid destructive clear-first behavior');
+  assert(!rewritten.some((action) => /clear editor/i.test(String(action?.reason || ''))), 'safe authoring should still remove destructive editor clear-first steps by default');
+  assert(rewritten.some((action) => action?.type === 'type' && String(action?.text || '').trim().toLowerCase() === 'pine editor'), 'desktop safe authoring should type Pine Editor into verified quick search');
 });
 
 test('clipboard-only pine authoring plan rewrites into guarded continuation after safe inspection', () => {
@@ -279,26 +279,48 @@ test('clipboard-only pine authoring plan rewrites into guarded continuation afte
 
   const opener = rewritten.find((action) => action?.verify?.target === 'pine-editor');
   const inspectStep = rewritten.find((action) => action?.type === 'get_text' && action?.pineEvidenceMode === 'safe-authoring-inspect');
+  const directReuseBranch = inspectStep?.continueActionsByPineEditorState?.['empty-or-starter'];
+  const existingScriptBranch = inspectStep?.continueActionsByPineEditorState?.['existing-script-visible'];
+  const saveInspect = directReuseBranch?.find((action) => action?.type === 'get_text' && action?.pineEvidenceMode === 'save-status');
 
   assert(Array.isArray(rewritten), 'workflow should rewrite');
   assert.strictEqual(rewritten[0].type, 'bring_window_to_front');
   assert.strictEqual(rewritten[2].key, 'ctrl+k');
   assert.strictEqual(opener.verify.kind, 'editor-active');
   assert(inspectStep, 'safe authoring should inspect Pine Editor state first');
-  assert.strictEqual(inspectStep.continueOnPineEditorState, 'empty-or-starter');
-  assert(Array.isArray(inspectStep.continueActions) && inspectStep.continueActions.length > 0, 'safe authoring inspect step should carry continuation actions');
-  assert(inspectStep.continueActions.some((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'ctrl+i'), 'continuation should create a fresh Pine indicator through the official shortcut chord');
-  const freshInspect = inspectStep.continueActions.find((action) => action?.type === 'get_text' && action?.pineEvidenceMode === 'safe-authoring-inspect' && Array.isArray(action?.continueActions));
-  assert(freshInspect, 'continuation should verify a fresh Pine script surface after creating a new indicator');
-  assert(freshInspect.continueActions.some((action) => action?.type === 'run_command' && /set-clipboard/i.test(String(action?.command || ''))), 'fresh-script continuation should preserve clipboard preparation');
-  assert(freshInspect.continueActions.some((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'ctrl+v'), 'fresh-script continuation should paste the prepared script');
-  const saveInspect = freshInspect.continueActions.find((action) => action?.type === 'get_text' && action?.pineEvidenceMode === 'save-status');
-  assert(saveInspect, 'fresh-script continuation should verify visible save status before applying');
+  assert(Array.isArray(directReuseBranch) && directReuseBranch.length > 0, 'safe authoring inspect step should carry a direct-reuse continuation branch');
+  assert.strictEqual(existingScriptBranch, undefined, 'generic safe authoring should stop on existing visible scripts instead of automatically creating a fresh indicator');
+  assert(directReuseBranch.some((action) => action?.type === 'run_command' && /set-clipboard/i.test(String(action?.command || ''))), 'direct-reuse branch should preserve clipboard preparation');
+  assert(directReuseBranch.some((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'ctrl+v'), 'direct-reuse branch should paste the prepared script');
+  assert(saveInspect, 'direct-reuse branch should verify visible save status before applying');
   assert.strictEqual(saveInspect.continueOnPineLifecycleState, 'saved-state-verified');
   assert(Array.isArray(saveInspect?.continueActionsByPineLifecycleState?.['save-required-before-apply']), 'save verification should branch into a first-save recovery path when TradingView requires a script name');
   assert(saveInspect.continueActionsByPineLifecycleState['save-required-before-apply'].some((action) => action?.type === 'type' && /Momentum Confidence/.test(String(action?.text || ''))), 'first-save recovery should derive a script name from the Pine payload');
   assert(saveInspect.continueActions.some((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'ctrl+enter'), 'save-verified continuation should add the script to the chart');
   assert(saveInspect.continueActions.some((action) => action?.type === 'get_text' && action?.pineEvidenceMode === 'compile-result'), 'save-verified continuation should gather compile-result feedback after add-to-chart');
+});
+
+test('generic pine authoring reuses an already-open clean starter script without overwriting existing scripts', () => {
+  const rewritten = maybeRewriteTradingViewPineWorkflow([
+    {
+      type: 'type',
+      text: '//@version=6\nindicator("Momentum Confidence", overlay=false)\nplot(close)',
+      reason: 'Type the prepared Pine script directly into the active Pine Editor'
+    }
+  ], {
+    userMessage: 'TradingView is already open. Create a Pine script for momentum confidence, save it, and report the visible save status. Do not add it to the chart.'
+  });
+
+  const firstInspect = rewritten.find((action) => action?.type === 'get_text' && action?.pineEvidenceMode === 'safe-authoring-inspect');
+  const directReuseBranch = firstInspect?.continueActionsByPineEditorState?.['empty-or-starter'];
+  const existingScriptBranch = firstInspect?.continueActionsByPineEditorState?.['existing-script-visible'];
+  const directTypedInsert = directReuseBranch?.find((action) => action?.type === 'type' && /@version=6/.test(String(action?.text || '')));
+
+  assert(firstInspect, 'generic safe-authoring flow should inspect the current Pine Editor state first');
+  assert(Array.isArray(directReuseBranch) && directReuseBranch.length > 0, 'safe-authoring flow should have a direct reuse branch for a clean starter buffer');
+  assert.strictEqual(existingScriptBranch, undefined, 'safe-authoring flow should stop on an existing visible script unless the user explicitly asks for a new/fresh indicator flow');
+  assert(directTypedInsert, 'clean starter reuse branch should preserve direct Pine typing payloads');
+  assert(!directReuseBranch.some((action) => action?.type === 'run_command' && /set-clipboard/i.test(String(action?.command || ''))), 'direct reuse branch should not force clipboard preparation when the payload is already typed');
 });
 
 test('save-only pine creation prompt suppresses auto add-to-chart continuation', () => {
@@ -317,11 +339,77 @@ test('save-only pine creation prompt suppresses auto add-to-chart continuation',
 
   const freshInspect = intent?.safeAuthoringContinuationSteps?.find((action) => action?.type === 'get_text' && action?.pineEvidenceMode === 'safe-authoring-inspect' && Array.isArray(action?.continueActions));
   const saveInspect = freshInspect?.continueActions?.find((action) => action?.type === 'get_text' && action?.pineEvidenceMode === 'save-status');
+  const verifiedQuickSearchIndex = rewritten.findIndex((action) =>
+    action?.type === 'key'
+    && String(action?.key || '').toLowerCase() === 'ctrl+k'
+    && String(action?.verify?.target || '').toLowerCase() === 'quick-search'
+  );
+  const pineEditorInspectIndex = rewritten.findIndex((action) => action?.type === 'get_text' && action?.pineEvidenceMode === 'safe-authoring-inspect');
+  const quickSearchCommitBeforeInspect = rewritten
+    .slice(0, Math.max(0, pineEditorInspectIndex))
+    .some((action) =>
+      action?.type === 'key'
+      && String(action?.key || '').toLowerCase() === 'enter'
+      && String(action?.searchSurfaceContract?.route || '').toLowerCase() === 'quick-search'
+    );
+  const typedPineEditorBeforeInspect = rewritten
+    .slice(0, Math.max(0, pineEditorInspectIndex))
+    .some((action) =>
+      action?.type === 'type'
+      && String(action?.text || '').trim().toLowerCase() === 'pine editor'
+      && String(action?.searchSurfaceContract?.route || '').toLowerCase() === 'quick-search'
+    );
 
   assert(intent, 'save-only prompt should infer a TradingView Pine intent');
   assert(Array.isArray(rewritten) && rewritten.length > 0, 'save-only prompt should still build a rewritten workflow');
+  assert(verifiedQuickSearchIndex >= 0, 'desktop Pine creation should first verify the TradingView quick-search opener');
+  assert.strictEqual(typedPineEditorBeforeInspect, true, 'workflow should type Pine Editor into verified quick search before inspecting the editor');
+  assert.strictEqual(quickSearchCommitBeforeInspect, true, 'workflow should commit a verified Pine Editor opener before inspecting the editor');
   assert(saveInspect, 'safe authoring flow should still verify save status');
   assert(!saveInspect.continueActions.some((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'ctrl+enter'), 'save-only prompt should not auto-add the script to the chart');
+});
+
+test('Pine clipboard paste is bound to the freshly prepared payload hash', () => {
+  const userMessage = 'TradingView is already open. Create a new Pine script called "Liku Live Save Probe", save the script, and report the visible save status. Do not add it to the chart.';
+  const sourceActions = [
+    {
+      type: 'run_command',
+      shell: 'powershell',
+      command: "Set-Clipboard -Value @'\n//@version=6\nindicator(\"Liku Live Save Probe\", overlay=false)\nplot(close)\n'@",
+      reason: 'Copy the prepared Pine script to the clipboard'
+    }
+  ];
+
+  const intent = inferTradingViewPineIntent(userMessage, sourceActions);
+  const rewritten = buildTradingViewPineWorkflowActions(intent, sourceActions);
+  const freshInspect = rewritten.find((action) => action?.type === 'get_text' && action?.pineEvidenceMode === 'safe-authoring-inspect' && Array.isArray(action?.continueActions));
+  const clipboardStep = freshInspect?.continueActions?.find((action) => action?.type === 'run_command' && /set-clipboard/i.test(String(action?.command || '')));
+  const pasteStep = freshInspect?.continueActions?.find((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'ctrl+v');
+
+  assert(clipboardStep?.pineClipboardContract?.required === true, 'clipboard preparation should carry a Pine clipboard contract');
+  assert(pasteStep?.pineClipboardContract?.required === true, 'paste should require a Pine clipboard contract');
+  assert.strictEqual(pasteStep.pineClipboardContract.expectedHash, clipboardStep.pineClipboardContract.expectedHash, 'paste should be bound to the exact prepared payload hash');
+});
+
+test('canonical Pine create-save workflow survives reliability preflight with continuations intact', () => {
+  const userMessage = 'TradingView is already open. Create a new Pine script called "Liku Live Industry Probe", save the script, and report the visible save status. Do not add it to the chart.';
+  const sourceActions = [
+    {
+      type: 'run_command',
+      shell: 'powershell',
+      command: "Set-Clipboard -Value @'\n//@version=6\nindicator(\"Liku Live Industry Probe\", overlay=true)\nplot(close)\n'@",
+      reason: 'Copy the prepared Pine script to the clipboard for live create/save validation'
+    }
+  ];
+
+  const intent = inferTradingViewPineIntent(userMessage, sourceActions);
+  const canonical = buildTradingViewPineWorkflowActions(intent, sourceActions);
+  const preflighted = aiService.rewriteActionsForReliability(canonical, { userMessage });
+  const inspectStep = preflighted.find((action) => action?.type === 'get_text' && action?.pineEvidenceMode === 'safe-authoring-inspect');
+
+  assert.strictEqual(preflighted, canonical, 'preflight should not rebuild an already-canonical Pine workflow and drop continuation branches');
+  assert(inspectStep, 'canonical workflow should still contain the safe-authoring inspect step');
+  assert(Array.isArray(inspectStep.continueActions) || inspectStep.continueActionsByPineEditorState, 'safe-authoring inspect should retain authoring continuation actions');
 });
 
 test('validated canonical pine state forces the fresh-script route and drives clear-and-paste replacement from the persisted state file', () => {
@@ -356,7 +444,6 @@ plot(close)`,
     });
 
     const firstInspectIndex = rewritten.findIndex((action) => action?.type === 'get_text' && action?.pineEvidenceMode === 'safe-authoring-inspect');
-    const newIndicatorIndex = rewritten.findIndex((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'ctrl+i');
     const freshInspect = rewritten.find((action) => action?.type === 'get_text' && action?.pineEvidenceMode === 'safe-authoring-inspect' && Array.isArray(action?.continueActions));
     const clearIndex = freshInspect?.continueActions?.findIndex((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'ctrl+a');
     const backspaceIndex = freshInspect?.continueActions?.findIndex((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'backspace');
@@ -366,12 +453,11 @@ plot(close)`,
     const pasteStep = pasteIndex >= 0 ? freshInspect?.continueActions?.[pasteIndex] : null;
 
     assert(freshInspect, 'canonical-state flow should still verify the fresh Pine surface');
-    assert(newIndicatorIndex >= 0, 'validated canonical-state flow should force the official new-indicator shortcut');
-    assert(firstInspectIndex > newIndicatorIndex, 'validated canonical-state flow should skip the ambiguous current-buffer inspect and inspect only after starting the fresh-indicator route');
+    assert(rewritten.some((action) => action?.type === 'type' && String(action?.text || '').trim().toLowerCase() === 'pine editor'), 'validated canonical-state flow should open Pine Editor through verified desktop quick search');
     assert.strictEqual(
       rewritten.slice(0, Math.max(0, firstInspectIndex)).some((action) => action?.type === 'get_text' && action?.pineEvidenceMode === 'safe-authoring-inspect'),
       false,
-      'validated canonical-state flow should not inspect the current Pine buffer before starting fresh-script creation'
+      'validated canonical-state flow should not inspect the current Pine buffer before opening Pine Editor'
     );
     assert(clearIndex >= 0, 'canonical-state flow should select the starter script before replacement');
     assert(backspaceIndex > clearIndex, 'canonical-state flow should clear the starter script after select-all');
@@ -387,7 +473,7 @@ plot(close)`,
   }
 });
 
-test('explicit fresh-indicator prompts skip the ambiguous current-buffer inspect and go straight to the new-indicator flow', () => {
+test('explicit fresh-indicator prompts open Pine Editor through verified desktop quick search before inspection', () => {
   const rewritten = maybeRewriteTradingViewPineWorkflow([
     {
       type: 'run_command',
@@ -400,14 +486,16 @@ test('explicit fresh-indicator prompts skip the ambiguous current-buffer inspect
   });
 
   const firstInspectIndex = rewritten.findIndex((action) => action?.type === 'get_text' && action?.pineEvidenceMode === 'safe-authoring-inspect');
-  const newIndicatorIndex = rewritten.findIndex((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'ctrl+i');
+  const typedPineEditorIndex = rewritten.findIndex((action) => action?.type === 'type' && String(action?.text || '').trim().toLowerCase() === 'pine editor');
+  const quickSearchEnterIndex = rewritten.findIndex((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'enter' && String(action?.searchSurfaceContract?.route || '').toLowerCase() === 'quick-search');
 
-  assert(newIndicatorIndex >= 0, 'fresh-indicator prompts should still route through the official new-indicator shortcut');
-  assert(firstInspectIndex > newIndicatorIndex, 'fresh-indicator prompts should inspect only after starting the fresh-indicator flow');
+  assert(typedPineEditorIndex >= 0, 'fresh-indicator prompts should type Pine Editor into verified desktop quick search');
+  assert(quickSearchEnterIndex > typedPineEditorIndex, 'fresh-indicator prompts should commit the Pine Editor quick-search opener');
+  assert(firstInspectIndex > quickSearchEnterIndex, 'fresh-indicator prompts should inspect only after opening Pine Editor');
   assert.strictEqual(
     rewritten.slice(0, Math.max(0, firstInspectIndex)).some((action) => action?.type === 'get_text' && action?.pineEvidenceMode === 'safe-authoring-inspect'),
     false,
-    'fresh-indicator prompts should not gate on inspecting the current buffer before starting the new-indicator flow'
+    'fresh-indicator prompts should not gate on inspecting the current buffer before opening Pine Editor'
   );
 });
 
@@ -448,8 +536,8 @@ test('transcript-style Pine clipboard/edit/apply plans are normalized back onto 
   assert(Array.isArray(rewritten), 'workflow should rewrite the transcript-style Pine plan');
   assert.strictEqual(rewritten[0].type, 'bring_window_to_front');
   assert.strictEqual(rewritten[2].key, 'ctrl+k', 'rewrite should route Pine Editor opening through the verified TradingView quick-search path');
-  assert(freshInspect, 'rewrite should restore the safe Pine inspection contract before any authoring edit resumes');
-  assert(rewritten.some((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'ctrl+i'), 'rewrite should force fresh-indicator creation instead of preserving raw clipboard overwrite steps');
+  assert(freshInspect, 'rewrite should verify the fresh Pine starter surface before any authoring edit resumes');
+  assert(rewritten.some((action) => action?.type === 'type' && String(action?.text || '').trim().toLowerCase() === 'pine editor'), 'rewrite should force verified Pine Editor opening instead of preserving raw clipboard overwrite steps');
   assert(freshInspect.continueActions.some((action) => action?.type === 'run_command' && /set-clipboard/i.test(String(action?.command || ''))), 'rewrite should preserve bounded clipboard preparation only after the fresh Pine surface is verified');
   assert(!rewritten.some((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'ctrl+c'), 'rewrite should not preserve raw clipboard inspection keystrokes outside the guarded continuation');
 });
@@ -522,26 +610,28 @@ test('guarded TradingView Pine continuation branches count as substantive author
         type: 'get_text',
         text: 'Pine Editor',
         pineEvidenceMode: 'safe-authoring-inspect',
-        continueActions: [
-          {
-            type: 'get_text',
-            text: 'Pine Editor',
-            pineEvidenceMode: 'safe-authoring-inspect',
-            continueActions: [
-              { type: 'run_command', shell: 'powershell', command: "Set-Clipboard -Value @'\n//@version=6\nindicator(\"Confidence\", overlay=false)\nplot(close)\n'@" },
-              { type: 'key', key: 'ctrl+v' },
-              {
-                type: 'get_text',
-                text: 'Pine Editor',
-                pineEvidenceMode: 'save-status',
-                continueActions: [
-                  { type: 'key', key: 'ctrl+enter' },
-                  { type: 'get_text', text: 'Pine Editor', pineEvidenceMode: 'compile-result' }
-                ]
-              }
-            ]
-          }
-        ]
+        continueActionsByPineEditorState: {
+          'existing-script-visible': [
+            {
+              type: 'get_text',
+              text: 'Pine Editor',
+              pineEvidenceMode: 'safe-authoring-inspect',
+              continueActions: [
+                { type: 'run_command', shell: 'powershell', command: "Set-Clipboard -Value @'\n//@version=6\nindicator(\"Confidence\", overlay=false)\nplot(close)\n'@" },
+                { type: 'key', key: 'ctrl+v' },
+                {
+                  type: 'get_text',
+                  text: 'Pine Editor',
+                  pineEvidenceMode: 'save-status',
+                  continueActions: [
+                    { type: 'key', key: 'ctrl+enter' },
+                    { type: 'get_text', text: 'Pine Editor', pineEvidenceMode: 'compile-result' }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
       }
     ]
   }, 'TradingView is already open on the LUNR chart. In Pine Editor, create a new interactive chart indicator script for volume and momentum confidence. Use the new indicator flow so it does not reuse the current script, add it to the chart with Ctrl+Enter, and report the visible compile/apply result.');

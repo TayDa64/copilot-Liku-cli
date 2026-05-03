@@ -61,26 +61,49 @@ test('buildTradingViewPineWorkflowActions wraps the opener with panel verificati
   const opener = actions.find((action) => action?.verify?.target === 'pine-editor');
   const typed = actions.find((action) => action?.type === 'type' && action?.text === 'strategy("test")');
   const quickSearchOpener = actions.find((action) => action?.type === 'key' && action?.key === 'ctrl+k');
-  const selectExistingQuery = actions.find((action) => action?.type === 'key' && action?.key === 'ctrl+a');
-  const clearExistingQuery = actions.find((action) => action?.type === 'key' && action?.key === 'backspace');
   const ctrlKIndex = actions.findIndex((action) => action?.type === 'key' && action?.key === 'ctrl+k');
-  const ctrlAIndex = actions.findIndex((action) => action?.type === 'key' && action?.key === 'ctrl+a');
-  const backspaceIndex = actions.findIndex((action) => action?.type === 'key' && action?.key === 'backspace');
   const typeIndex = actions.findIndex((action) => action?.type === 'type' && action?.text === 'Pine Editor');
+  const enterIndex = actions.findIndex((action) => action?.type === 'key' && action?.key === 'enter');
 
   assert.strictEqual(actions[0].type, 'bring_window_to_front');
   assert.strictEqual(actions[2].type, 'key');
   assert.strictEqual(actions[2].key, 'ctrl+k');
   assert.strictEqual(quickSearchOpener.verify.kind, 'dialog-visible');
   assert.strictEqual(quickSearchOpener.verify.target, 'quick-search');
-  assert(selectExistingQuery, 'quick-search route should select any stale query text before typing');
-  assert(clearExistingQuery, 'quick-search route should explicitly clear the selected stale query before typing');
-  assert(ctrlAIndex > ctrlKIndex && ctrlAIndex < backspaceIndex, 'query selection should occur after quick-search opens and before the stale query is cleared');
-  assert(backspaceIndex > ctrlAIndex && backspaceIndex < typeIndex, 'stale query clearing should occur after selection and before Pine Editor is typed');
+  assert(typeIndex > ctrlKIndex, 'the Pine Editor query should be typed after quick-search opens');
+  assert(enterIndex > typeIndex, 'the route should commit the Pine Editor query after typing it');
+  assert.strictEqual(actions[typeIndex + 1]?.type, 'key', 'Pine Editor enter should immediately follow typed query so runtime clipboard verification is the only gate');
+  assert.strictEqual(actions[typeIndex + 1]?.key, 'enter', 'Pine Editor enter should immediately follow typed query');
+  assert(!actions.some((action) => action?.type === 'key' && action?.key === 'ctrl+a'), 'inspect-first Pine workflows should not inject static quick-search selection clears');
+  assert(!actions.some((action) => action?.type === 'key' && action?.key === 'backspace'), 'inspect-first Pine workflows should defer stale-query handling to runtime proof and recovery');
   assert.strictEqual(opener.verify.kind, 'panel-visible');
   assert.strictEqual(opener.verify.target, 'pine-editor');
   assert.strictEqual(opener.verify.requiresObservedChange, true);
   assert(typed, 'typing should remain after the Pine Editor opener route');
+});
+
+test('maybeRewriteTradingViewPineWorkflow preserves a UIA-discovered TradingView HWND on action 0', () => {
+  const rewritten = maybeRewriteTradingViewPineWorkflow([
+    {
+      type: 'bring_window_to_front',
+      title: 'INTC ? 94.48 -0.28% / Unnamed',
+      processName: 'TradingView',
+      windowHandle: 986022,
+      hwnd: 986022
+    },
+    { type: 'key', key: 'ctrl+k' },
+    { type: 'type', text: 'Pine Editor' },
+    { type: 'key', key: 'enter' }
+  ], {
+    userMessage: 'Create and save a fresh Pine script in TradingView.'
+  });
+
+  assert(Array.isArray(rewritten), 'pine rewrite should return an action array');
+  assert.strictEqual(rewritten[0].type, 'bring_window_to_front');
+  assert.strictEqual(rewritten[0].windowHandle, 986022, 'rewrite should preserve the UIA/window-manager discovered hwnd');
+  assert.strictEqual(rewritten[0].hwnd, 986022, 'rewrite should preserve hwnd alias for direct focus');
+  assert.strictEqual(rewritten[0].openIfMissing, true, 'focus action should document open-if-missing behavior for focus recovery');
+  assert(/already-open TradingView/.test(rewritten[0].reason), 'focus action should prefer an already-open TradingView window');
 });
 
 test('maybeRewriteTradingViewPineWorkflow rewrites low-signal Pine Editor opener plans', () => {

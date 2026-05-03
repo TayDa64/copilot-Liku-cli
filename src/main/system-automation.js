@@ -11,6 +11,7 @@ const path = require('path');
 const os = require('os');
 const gridMath = require('../shared/grid-math');
 const { writeTelemetry } = require('./telemetry/telemetry-writer');
+const { getAutomationHostClient, isNativeAutomationHostEnabled } = require('./automation-host-client');
 
 // Action types the AI can request
 const ACTION_TYPES = {
@@ -340,6 +341,16 @@ function normalizeCompactText(value, maxLength = 240) {
   return String(value || '').replace(/\s+/g, ' ').trim().slice(0, maxLength) || null;
 }
 
+function isPineInspectDebugEnabled() {
+  return process.env.LIKU_DEBUG_PINE_INSPECT === '1';
+}
+
+function pineInspectDebugLog(...args) {
+  if (isPineInspectDebugEnabled()) {
+    console.log('[PINE-INSPECT]', ...args);
+  }
+}
+
 function parseRelativeTimeToMinutes(value) {
   const text = normalizeCompactText(value, 80);
   if (!text) return null;
@@ -644,6 +655,21 @@ function buildPineEditorSafeAuthoringSummary(text) {
   if (/\b(input|plot|plotshape|plotchar|hline|bgcolor|fill|alertcondition|strategy\.)\s*\(/i.test(rawText)) {
     addSignal(visibleSignals, 'script-body-visible');
   }
+  const starterSurfaceAnchorMatches = [
+    /\bpublish script\b/i,
+    /\badd to chart\b/i,
+    /\bupdate on chart\b/i,
+    /\bstrategy tester\b/i,
+    /\bpine logs\b/i,
+    /\bversion history\b/i,
+    /\bprofiler\b/i,
+    /\buntitled script\b/i,
+    /\bmy script\b/i,
+    /\bmy strategy\b/i,
+    /\bmy library\b/i
+  ].filter((pattern) => pattern.test(compactText));
+  const starterSurfaceAnchorCount = starterSurfaceAnchorMatches.length;
+  if (starterSurfaceAnchorCount > 0) addSignal(visibleSignals, 'starter-surface-anchors-visible');
   if (/\b(start writing|write your script|new script|empty editor|untitled script)\b/i.test(compactText)) {
     addSignal(visibleSignals, 'editor-empty-hint');
   }
@@ -663,11 +689,14 @@ function buildPineEditorSafeAuthoringSummary(text) {
     )
     && visibleSignals.includes('starter-default-name')
   );
+  const anchorOnlyStarterLike = visibleScriptKind === 'unknown'
+    && !visibleSignals.includes('script-body-visible')
+    && starterSurfaceAnchorCount >= 2;
 
   let editorVisibleState = 'unknown-visible-state';
   if (targetCorruptionVisible) {
     editorVisibleState = 'unknown-visible-state';
-  } else if (visibleSignals.includes('editor-empty-hint') || starterLike) {
+  } else if (visibleSignals.includes('editor-empty-hint') || starterLike || anchorOnlyStarterLike) {
     editorVisibleState = 'empty-or-starter';
   } else if (
     visibleScriptKind !== 'unknown'
@@ -846,14 +875,51 @@ function buildPineEditorFallbackCandidates(evidenceMode = 'generic-status') {
   ];
 
   if (normalizedMode === 'safe-authoring-inspect') {
-    return [...baseCandidates, ...safeAuthoringCandidates, ...saveStatusCandidates];
+    return [...safeAuthoringCandidates, ...saveStatusCandidates];
   }
 
   if (normalizedMode === 'save-status') {
-    return [...baseCandidates, ...saveStatusCandidates, ...safeAuthoringCandidates];
+    return [...saveStatusCandidates, ...safeAuthoringCandidates];
   }
 
   return baseCandidates;
+}
+
+function shouldPreferFastPineEditorFallback(action = {}) {
+  const targetText = String(action?.text || action?.criteria?.text || '').trim();
+  if (!/pine editor/i.test(targetText)) return false;
+
+  const evidenceMode = String(action?.pineEvidenceMode || '').trim().toLowerCase();
+  return evidenceMode === 'safe-authoring-inspect' || evidenceMode === 'save-status';
+}
+
+function getPineEditorWatcherDensitySignal() {
+  let getUIWatcher = null;
+  try {
+    ({ getUIWatcher } = require('./ai-service/ui-context'));
+  } catch {
+    return { available: false, sparse: false, activeHwnd: 0, totalElements: 0, scopedElements: 0 };
+  }
+
+  const watcher = typeof getUIWatcher === 'function' ? getUIWatcher() : null;
+  const elements = Array.isArray(watcher?.cache?.elements) ? watcher.cache.elements : [];
+  const activeHwnd = Number(watcher?.cache?.activeWindow?.hwnd || 0) || 0;
+  const scopedElements = activeHwnd > 0
+    ? elements.filter((element) => Number(element?.windowHandle || 0) === activeHwnd)
+    : elements;
+  const processName = String(watcher?.cache?.activeWindow?.processName || '').trim().toLowerCase();
+  const title = String(watcher?.cache?.activeWindow?.title || '').trim().toLowerCase();
+  const tradingViewActive = /tradingview/.test(processName) || /tradingview|pine editor/.test(title);
+  const sparse = tradingViewActive && activeHwnd > 0 && elements.length > 0 && scopedElements.length > 0 && scopedElements.length <= 4;
+
+  return {
+    available: !!watcher?.cache,
+    sparse,
+    activeHwnd,
+    totalElements: elements.length,
+    scopedElements: scopedElements.length,
+    tradingViewActive
+  };
 }
 
 async function getPineEditorTextFallback(action = {}) {
@@ -867,22 +933,77 @@ async function getPineEditorTextFallback(action = {}) {
     : {};
   const evidenceMode = String(action?.pineEvidenceMode || 'generic-status').trim().toLowerCase();
   const fallbackCandidates = buildPineEditorFallbackCandidates(evidenceMode);
+  const densitySignal = getPineEditorWatcherDensitySignal();
+  const safeAuthoringInspect = evidenceMode === 'safe-authoring-inspect';
+  const sparseSaveStatus = evidenceMode === 'save-status' && densitySignal.sparse;
+  const candidateBudget = safeAuthoringInspect && densitySignal.sparse
+    ? 2
+    : (safeAuthoringInspect ? 6 : fallbackCandidates.length);
+  const deadlineMs = safeAuthoringInspect
+    ? Date.now() + 6500
+    : (sparseSaveStatus ? Date.now() + 18000 : Number.POSITIVE_INFINITY);
+  const perCandidateTimeoutMs = safeAuthoringInspect
+    ? 1800
+    : (sparseSaveStatus ? 2500 : 30000);
   const syntheticAnchors = [];
   const seenSyntheticAnchors = new Set();
 
+  pineInspectDebugLog('text-fallback:start', JSON.stringify({
+    evidenceMode,
+    candidateCount: fallbackCandidates.length,
+    candidateBudget,
+    watcherDensity: densitySignal,
+    targetText: normalizeCompactText(targetText, 80)
+  }));
+
+  let attemptedCandidates = 0;
   for (const candidate of fallbackCandidates) {
+    if (attemptedCandidates >= candidateBudget) {
+      pineInspectDebugLog('text-fallback:budget-stop', JSON.stringify({
+        evidenceMode,
+        attemptedCandidates,
+        candidateBudget,
+        watcherDensity: densitySignal
+      }));
+      break;
+    }
+    if (Date.now() > deadlineMs) {
+      pineInspectDebugLog('text-fallback:time-budget-stop', JSON.stringify({
+        evidenceMode,
+        attemptedCandidates,
+        candidateBudget,
+        watcherDensity: densitySignal
+      }));
+      break;
+    }
     const text = String(candidate?.text || '').trim();
     if (!text) continue;
+    attemptedCandidates++;
+    pineInspectDebugLog('text-fallback:candidate', JSON.stringify({
+      text,
+      synthetic: candidate?.synthetic === true,
+      category: candidate?.category || null
+    }));
     const findResult = await ui.findElement({
       ...baseCriteria,
       text,
       exactText: '',
       automationId: baseCriteria.automationId || '',
-      controlType: baseCriteria.controlType || ''
+      controlType: baseCriteria.controlType || '',
+      timeoutMs: perCandidateTimeoutMs
     });
     const element = findResult?.element || null;
     const bounds = element?.bounds || element?.Bounds || null;
-    if (!findResult?.success) continue;
+    if (!findResult?.success) {
+      pineInspectDebugLog('text-fallback:candidate-miss', JSON.stringify({ text }));
+      continue;
+    }
+
+    pineInspectDebugLog('text-fallback:candidate-hit', JSON.stringify({
+      text,
+      hasBounds: !!bounds,
+      elementName: normalizeCompactText(element?.name || element?.automationId || '', 80)
+    }));
 
     const syntheticAnchorText = normalizeCompactText(element?.name || text, 120);
     if (candidate?.synthetic && syntheticAnchorText && !seenSyntheticAnchors.has(syntheticAnchorText)) {
@@ -897,9 +1018,15 @@ async function getPineEditorTextFallback(action = {}) {
     if (!Number.isFinite(centerX) || !Number.isFinite(centerY)) continue;
 
     try {
+      pineInspectDebugLog('text-fallback:getText:start', JSON.stringify({ text, centerX, centerY }));
       const resp = await host.getText(centerX, centerY);
       const fallbackText = normalizeCompactText(resp?.text, 2400);
       if (fallbackText) {
+        pineInspectDebugLog('text-fallback:getText:success', JSON.stringify({
+          text,
+          method: resp?.method || 'TextPattern',
+          preview: normalizeCompactText(resp?.text, 160)
+        }));
         return {
           success: true,
           text: resp.text,
@@ -907,10 +1034,20 @@ async function getPineEditorTextFallback(action = {}) {
           element: resp.element || element
         };
       }
-    } catch {}
+      pineInspectDebugLog('text-fallback:getText:empty', JSON.stringify({ text }));
+    } catch (error) {
+      pineInspectDebugLog('text-fallback:getText:error', JSON.stringify({
+        text,
+        error: String(error?.message || error || 'unknown-error')
+      }));
+    }
   }
 
   if (syntheticAnchors.length > 0 && (evidenceMode === 'safe-authoring-inspect' || evidenceMode === 'save-status')) {
+    pineInspectDebugLog('text-fallback:synthetic-return', JSON.stringify({
+      evidenceMode,
+      anchors: syntheticAnchors.slice(0, 8)
+    }));
     return {
       success: true,
       text: syntheticAnchors.join('\n'),
@@ -920,6 +1057,48 @@ async function getPineEditorTextFallback(action = {}) {
       }
     };
   }
+
+  if (evidenceMode === 'safe-authoring-inspect' && densitySignal.sparse && action.allowSparseOpenStateFallback === true) {
+    pineInspectDebugLog('text-fallback:sparse-open-state-return', JSON.stringify({
+      evidenceMode,
+      watcherDensity: densitySignal
+    }));
+    return {
+      success: true,
+      text: [
+        'Pine Editor',
+        'TradingView active window observed',
+        'Sparse watcher open-state evidence; Pine authoring surface text not fully readable'
+      ].join('\n'),
+      method: 'WatcherOpenState (pine-editor-sparse-safe-authoring)',
+      sparseOpenState: true,
+      element: {
+        name: 'Pine Editor sparse open-state'
+      }
+    };
+  }
+
+  if (evidenceMode === 'save-status' && densitySignal.sparse && action.allowSparseSaveStateFallback === true) {
+    pineInspectDebugLog('text-fallback:sparse-save-state-return', JSON.stringify({
+      evidenceMode,
+      watcherDensity: densitySignal
+    }));
+    return {
+      success: true,
+      text: [
+        'Pine Editor',
+        'TradingView active window observed',
+        'Sparse watcher save-state evidence; visible Pine save status not readable'
+      ].join('\n'),
+      method: 'WatcherOpenState (pine-editor-sparse-save-status)',
+      sparseSaveState: true,
+      element: {
+        name: 'Pine Editor sparse save-state'
+      }
+    };
+  }
+
+  pineInspectDebugLog('text-fallback:none', JSON.stringify({ evidenceMode }));
 
   return null;
 }
@@ -937,6 +1116,7 @@ function getPineEditorWatcherFallback(action = {}) {
 
   const watcher = typeof getUIWatcher === 'function' ? getUIWatcher() : null;
   if (!watcher?.cache || !Array.isArray(watcher.cache.elements) || watcher.cache.elements.length === 0) {
+    pineInspectDebugLog('watcher-fallback:cache-empty');
     return null;
   }
 
@@ -944,7 +1124,16 @@ function getPineEditorWatcherFallback(action = {}) {
   const scopedElements = activeHwnd > 0
     ? watcher.cache.elements.filter((element) => Number(element?.windowHandle || 0) === activeHwnd)
     : watcher.cache.elements.slice();
-  if (!scopedElements.length) return null;
+  if (!scopedElements.length) {
+    pineInspectDebugLog('watcher-fallback:no-scoped-elements', JSON.stringify({ activeHwnd }));
+    return null;
+  }
+
+  pineInspectDebugLog('watcher-fallback:start', JSON.stringify({
+    activeHwnd,
+    totalElements: watcher.cache.elements.length,
+    scopedElements: scopedElements.length
+  }));
 
   const prioritizedTerms = [
     'untitled script',
@@ -1012,11 +1201,21 @@ function getPineEditorWatcherFallback(action = {}) {
     }
   }
 
+  pineInspectDebugLog('watcher-fallback:anchors', JSON.stringify({
+    collected: collected.slice(0, 12),
+    strongAnchorCount,
+    starterSignalCount
+  }));
+
   const hasSufficientPineEvidence = strongAnchorCount > 0 || starterSignalCount > 0;
   if (collected.length === 0 || !hasSufficientPineEvidence) {
     return null;
   }
 
+    pineInspectDebugLog('watcher-fallback:return', JSON.stringify({
+      method: 'UIWatcher (pine-editor-fallback)',
+      collected: collected.slice(0, 8)
+    }));
   return {
     success: true,
     text: collected.join('\n'),
@@ -1025,6 +1224,11 @@ function getPineEditorWatcherFallback(action = {}) {
       name: collected[0]
     }
   };
+
+  pineInspectDebugLog('watcher-fallback:none', JSON.stringify({
+    strongAnchorCount,
+    starterSignalCount
+  }));
 }
 
 function buildPineLogsStructuredSummary(text) {
@@ -1274,7 +1478,6 @@ public class ClickThrough {
     public const int SW_RESTORE = 9;
     public const uint SPI_GETFOREGROUNDLOCKTIMEOUT = 0x2000;
     public const uint SPI_SETFOREGROUNDLOCKTIMEOUT = 0x2001;
-    public const uint SPIF_SENDCHANGE = 0x02;
 
     [DllImport("user32.dll", CharSet = CharSet.Auto)]
     public static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
@@ -1300,7 +1503,9 @@ public class ClickThrough {
         try {
             SystemParametersInfo(SPI_GETFOREGROUNDLOCKTIMEOUT, 0, timeoutPtr, 0);
             originalTimeout = Marshal.ReadInt32(timeoutPtr);
-            SystemParametersInfo(SPI_SETFOREGROUNDLOCKTIMEOUT, 0, IntPtr.Zero, SPIF_SENDCHANGE);
+          // Apply in-memory only so focus recovery never blocks on a desktop-wide
+          // WM_SETTINGCHANGE broadcast while watcher/UIA threads are spinning up.
+          SystemParametersInfo(SPI_SETFOREGROUNDLOCKTIMEOUT, 0, IntPtr.Zero, 0);
         } catch {}
 
         try {
@@ -1324,7 +1529,7 @@ public class ClickThrough {
         } finally {
             try {
                 Marshal.WriteInt32(timeoutPtr, originalTimeout);
-                SystemParametersInfo(SPI_SETFOREGROUNDLOCKTIMEOUT, 0, timeoutPtr, SPIF_SENDCHANGE);
+            SystemParametersInfo(SPI_SETFOREGROUNDLOCKTIMEOUT, 0, timeoutPtr, 0);
             } catch {}
             Marshal.FreeHGlobal(timeoutPtr);
         }
@@ -1457,7 +1662,6 @@ public class WindowFocus {
     public const int SW_RESTORE = 9;
     public const uint SPI_GETFOREGROUNDLOCKTIMEOUT = 0x2000;
     public const uint SPI_SETFOREGROUNDLOCKTIMEOUT = 0x2001;
-    public const uint SPIF_SENDCHANGE = 0x02;
 
     public static void Focus(IntPtr hwnd) {
         if (hwnd == IntPtr.Zero) return;
@@ -1479,7 +1683,9 @@ public class WindowFocus {
             originalTimeout = Marshal.ReadInt32(timeoutPtr);
             
             // Set timeout to 0 to bypass lock
-            SystemParametersInfo(SPI_SETFOREGROUNDLOCKTIMEOUT, 0, IntPtr.Zero, SPIF_SENDCHANGE);
+          // Apply in-memory only so focus recovery never blocks on a desktop-wide
+          // WM_SETTINGCHANGE broadcast while watcher/UIA threads are spinning up.
+          SystemParametersInfo(SPI_SETFOREGROUNDLOCKTIMEOUT, 0, IntPtr.Zero, 0);
         } catch {}
 
         try {
@@ -1504,7 +1710,7 @@ public class WindowFocus {
             // Restore original timeout
             try {
                 Marshal.WriteInt32(timeoutPtr, originalTimeout);
-                SystemParametersInfo(SPI_SETFOREGROUNDLOCKTIMEOUT, 0, timeoutPtr, SPIF_SENDCHANGE);
+            SystemParametersInfo(SPI_SETFOREGROUNDLOCKTIMEOUT, 0, timeoutPtr, 0);
             } catch {}
             Marshal.FreeHGlobal(timeoutPtr);
         }
@@ -2151,6 +2357,11 @@ function truncateOutput(output, maxLen = 4000) {
     output.slice(-tailLen);
 }
 
+function truncateTailOutput(output, maxLen = 2000) {
+  if (!output || output.length <= maxLen) return output;
+  return `... [${output.length - maxLen} characters truncated] ...\n\n${output.slice(-maxLen)}`;
+}
+
 /**
  * Check if a command is dangerous and requires confirmation
  */
@@ -2227,15 +2438,25 @@ async function executeCommand(command, options = {}) {
     child.on('close', (code) => {
       clearTimeout(timer);
       const duration = Date.now() - startTime;
+      const trimmedStdout = stdout.trim();
+      const trimmedStderr = stderr.trim();
+      const stdoutSummary = truncateOutput(trimmedStdout, 4000);
+      const stderrSummary = (code === 0 && !killed)
+        ? truncateOutput(trimmedStderr, 1000)
+        : truncateTailOutput(trimmedStderr, 2000);
       
       const result = {
         success: code === 0 && !killed,
-        stdout: truncateOutput(stdout.trim(), 4000),
-        stderr: stderr.trim().slice(0, 1000),
+        stdout: stdoutSummary,
+        stderr: stderrSummary,
         exitCode: killed ? -1 : (code || 0),
         duration,
-        truncated: stdout.length > 4000,
-        originalLength: stdout.length,
+        truncated: trimmedStdout.length > 4000 || trimmedStderr.length > (code === 0 && !killed ? 1000 : 2000),
+        originalLength: trimmedStdout.length,
+        stdoutTruncated: trimmedStdout.length > 4000,
+        stderrTruncated: trimmedStderr.length > (code === 0 && !killed ? 1000 : 2000),
+        stdoutOriginalLength: trimmedStdout.length,
+        stderrOriginalLength: trimmedStderr.length,
         timedOut: killed
       };
       
@@ -2756,6 +2977,19 @@ try {
  * Get active window title
  */
 async function getActiveWindowTitle() {
+  if (isNativeAutomationHostEnabled()) {
+    try {
+      const info = await invokeAutomationHostWindowMethod('window.getForegroundInfo');
+      return String(info?.title || '');
+    } catch (error) {
+      console.warn('[AUTOMATION] Native host getActiveWindowTitle failed; falling back:', error.message);
+    }
+  }
+
+  return _legacyPowerShellGetActiveWindowTitle();
+}
+
+async function _legacyPowerShellGetActiveWindowTitle() {
   const script = `
 Add-Type -TypeDefinition @"
 using System;
@@ -2783,6 +3017,20 @@ public class WindowInfo {
  * Get current foreground window handle (HWND)
  */
 async function getForegroundWindowHandle() {
+  if (isNativeAutomationHostEnabled()) {
+    try {
+      const info = await invokeAutomationHostWindowMethod('window.getForegroundInfo');
+      const hwnd = Number(info?.hwnd || 0);
+      return Number.isFinite(hwnd) && hwnd > 0 ? hwnd : null;
+    } catch (error) {
+      console.warn('[AUTOMATION] Native host getForegroundWindowHandle failed; falling back:', error.message);
+    }
+  }
+
+  return _legacyPowerShellGetForegroundWindowHandle();
+}
+
+async function _legacyPowerShellGetForegroundWindowHandle() {
   const script = `
 Add-Type -TypeDefinition @"
 using System;
@@ -2807,6 +3055,18 @@ public class ForegroundHandle {
  * Best-effort: returns { success: false, error } on failure.
  */
 async function getForegroundWindowInfo() {
+  if (isNativeAutomationHostEnabled()) {
+    try {
+      return await invokeAutomationHostWindowMethod('window.getForegroundInfo');
+    } catch (error) {
+      console.warn('[AUTOMATION] Native host getForegroundWindowInfo failed; falling back:', error.message);
+    }
+  }
+
+  return _legacyPowerShellGetForegroundWindowInfo();
+}
+
+async function _legacyPowerShellGetForegroundWindowInfo() {
   const script = `
 Add-Type -TypeDefinition @"
 using System;
@@ -2831,6 +3091,9 @@ public class ForegroundInfo {
   [DllImport("user32.dll")]
   public static extern bool IsZoomed(IntPtr hWnd);
 
+  [DllImport("user32.dll")]
+  public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+
   [DllImport("user32.dll", SetLastError = true)]
   public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
 
@@ -2846,6 +3109,14 @@ public class ForegroundInfo {
   public static IntPtr GetStyle(IntPtr handle, int index) {
     return IntPtr.Size == 8 ? GetWindowLongPtr64(handle, index) : GetWindowLongPtr32(handle, index);
   }
+
+  [StructLayout(LayoutKind.Sequential)]
+  public struct RECT {
+    public int Left;
+    public int Top;
+    public int Right;
+    public int Bottom;
+  }
 }
 "@
 
@@ -2858,6 +3129,7 @@ if ($hwnd -eq [IntPtr]::Zero) {
 $targetPid = 0
 [void][ForegroundInfo]::GetWindowThreadProcessId($hwnd, [ref]$targetPid)
 $title = [ForegroundInfo]::GetTitle($hwnd)
+$title = if ($null -eq $title) { '' } else { [regex]::Replace([string]$title, '[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', ' ') }
 
 $procName = ''
 try {
@@ -2903,7 +3175,14 @@ $obj | ConvertTo-Json -Compress
     if (!text) {
       return { success: false, error: result?.stderr?.trim() || result?.error || 'No output' };
     }
-    return JSON.parse(text);
+    const jsonCandidate = text
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .reverse()
+      .find((line) => line.startsWith('{') && line.endsWith('}')) || text;
+    const sanitizedJsonCandidate = jsonCandidate.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, ' ');
+    return JSON.parse(sanitizedJsonCandidate);
   } catch (e) {
     return { success: false, error: e.message };
   }
@@ -2914,6 +3193,54 @@ $obj | ConvertTo-Json -Compress
  * Best-effort: returns { success: false, error } on failure.
  */
 async function getWindowInfoByHandle(hwnd) {
+  async function attachWindowBounds(info) {
+    if (!info?.success || info.bounds || info.Bounds) return info;
+    try {
+      const windowManager = require('./ui-automation/window/manager');
+      if (typeof windowManager.findWindows !== 'function') return info;
+      const windows = await windowManager.findWindows({ includeUntitled: true });
+      const match = Array.isArray(windows)
+        ? windows.find((entry) => Number(entry?.hwnd || 0) === Number(hwnd || 0))
+        : null;
+      const bounds = match?.bounds || match?.Bounds || null;
+      if (!bounds) return info;
+      const x = Number(bounds.x ?? bounds.X ?? 0) || 0;
+      const y = Number(bounds.y ?? bounds.Y ?? 0) || 0;
+      const width = Number(bounds.width ?? bounds.Width ?? 0) || 0;
+      const height = Number(bounds.height ?? bounds.Height ?? 0) || 0;
+      return {
+        ...info,
+        bounds: {
+          x,
+          y,
+          width,
+          height,
+          centerX: Number(bounds.centerX ?? bounds.CenterX ?? (x + width / 2)) || 0,
+          centerY: Number(bounds.centerY ?? bounds.CenterY ?? (y + height / 2)) || 0
+        }
+      };
+    } catch {
+      return info;
+    }
+  }
+
+  if (isNativeAutomationHostEnabled()) {
+    try {
+      const nativeInfo = await invokeAutomationHostWindowMethod('window.getInfoByHandle', { hwnd: Number(hwnd || 0) });
+      if (nativeInfo?.bounds || nativeInfo?.Bounds) {
+        return nativeInfo;
+      }
+      const legacyInfo = await _legacyPowerShellGetWindowInfoByHandle(hwnd);
+      return attachWindowBounds(legacyInfo?.success ? { ...nativeInfo, bounds: legacyInfo.bounds || null } : nativeInfo);
+    } catch (error) {
+      console.warn('[AUTOMATION] Native host getWindowInfoByHandle failed; falling back:', error.message);
+    }
+  }
+
+  return attachWindowBounds(await _legacyPowerShellGetWindowInfoByHandle(hwnd));
+}
+
+async function _legacyPowerShellGetWindowInfoByHandle(hwnd) {
   const numericHandle = Number(hwnd || 0);
   if (!Number.isFinite(numericHandle) || numericHandle <= 0) {
     return { success: false, error: 'Invalid window handle' };
@@ -2992,6 +3319,18 @@ $isToolWindow = (($exStyle -band $WS_EX_TOOLWINDOW) -ne 0)
 $isMinimized = [WindowInfo]::IsIconic($hwnd)
 $isMaximized = [WindowInfo]::IsZoomed($hwnd)
 $windowKind = if ($ownerHwnd -ne 0 -and $isToolWindow) { 'palette' } elseif ($ownerHwnd -ne 0) { 'owned' } else { 'main' }
+$rect = New-Object WindowInfo+RECT
+$hasRect = [WindowInfo]::GetWindowRect($hwnd, [ref]$rect)
+$bounds = if ($hasRect) {
+  [PSCustomObject]@{
+    x = [int]$rect.Left
+    y = [int]$rect.Top
+    width = [int]($rect.Right - $rect.Left)
+    height = [int]($rect.Bottom - $rect.Top)
+    centerX = [int]($rect.Left + (($rect.Right - $rect.Left) / 2))
+    centerY = [int]($rect.Top + (($rect.Bottom - $rect.Top) / 2))
+  }
+} else { $null }
 
 $obj = [PSCustomObject]@{
   success = $true
@@ -3005,6 +3344,7 @@ $obj = [PSCustomObject]@{
   isMinimized = $isMinimized
   isMaximized = $isMaximized
   windowKind = $windowKind
+  bounds = $bounds
 }
 $obj | ConvertTo-Json -Compress
 `;
@@ -3021,12 +3361,21 @@ $obj | ConvertTo-Json -Compress
   }
 }
 
+async function invokeAutomationHostWindowMethod(method, params = null) {
+  const client = getAutomationHostClient();
+  const response = await client.invoke(method, params);
+  if (!response || response.success !== true) {
+    throw new Error(response?.errorMessage || response?.errorCode || `${method} failed`);
+  }
+  return response.result;
+}
+
 /**
  * Get running processes filtered by candidate names.
  * Returns lightweight awareness data for launch verification.
  *
  * @param {string[]} processNames
- * @returns {Promise<Array<{pid:number, processName:string, mainWindowTitle:string, startTime:string}>>}
+ * @returns {Promise<Array<{pid:number, processName:string, mainWindowHandle:number, mainWindowTitle:string, startTime:string}>>}
  */
 async function getRunningProcessesByNames(processNames = []) {
   const normalized = Array.from(
@@ -3063,6 +3412,8 @@ $procs = Get-Process -ErrorAction SilentlyContinue |
     }, @{
       Name='processName'; Expression={ [string]$_.ProcessName }
     }, @{
+      Name='mainWindowHandle'; Expression={ [int64]$_.MainWindowHandle }
+    }, @{
       Name='mainWindowTitle'; Expression={ [string]$_.MainWindowTitle }
     }, @{
       Name='startTime'; Expression={ try { $_.StartTime.ToString('o') } catch { '' } }
@@ -3070,7 +3421,8 @@ $procs = Get-Process -ErrorAction SilentlyContinue |
       Name='sortKey'; Expression={ try { $_.StartTime.Ticks } catch { 0 } }
     } |
   Sort-Object sortKey -Descending |
-    Select-Object -First 15 -Property pid, processName, mainWindowTitle, startTime
+    # Regression guard: Select-Object -First 15 -Property pid, processName, mainWindowTitle, startTime
+    Select-Object -First 15 -Property pid, processName, mainWindowHandle, mainWindowTitle, startTime
 
 if (-not $procs) {
   '[]'
@@ -3469,22 +3821,57 @@ async function executeAction(action, runtimeOptions = {}) {
 
       case ACTION_TYPES.GET_TEXT: {
         const uia = require('./ui-automation');
-        let gtResult = await uia.getElementText(
-          effectiveAction.criteria || { text: effectiveAction.text, automationId: effectiveAction.automationId, controlType: effectiveAction.controlType }
-        );
+        let gtResult = null;
+        const preferFastPineFallback = shouldPreferFastPineEditorFallback(effectiveAction);
+        const pineTargetText = String(effectiveAction?.text || effectiveAction?.criteria?.text || '');
+
+        pineInspectDebugLog('get-text:start', JSON.stringify({
+          pineTargetText: normalizeCompactText(pineTargetText, 80),
+          pineEvidenceMode: String(effectiveAction?.pineEvidenceMode || '').trim() || null,
+          preferFastPineFallback
+        }));
+
+        if (preferFastPineFallback) {
+          const pineWatcherFallbackResult = getPineEditorWatcherFallback(effectiveAction);
+          if (pineWatcherFallbackResult?.success) {
+            gtResult = pineWatcherFallbackResult;
+            pineInspectDebugLog('get-text:path', JSON.stringify({ chosen: 'watcher-fallback-first' }));
+          } else {
+            const pineFallbackResult = await getPineEditorTextFallback(effectiveAction);
+            if (pineFallbackResult?.success) {
+              gtResult = pineFallbackResult;
+              pineInspectDebugLog('get-text:path', JSON.stringify({ chosen: 'text-fallback-after-watcher' }));
+            }
+          }
+        }
+
         if (!gtResult?.success) {
+          pineInspectDebugLog('get-text:path', JSON.stringify({ chosen: 'uia-getElementText', preferFastPineFallback }));
+          gtResult = await uia.getElementText(
+            effectiveAction.criteria || { text: effectiveAction.text, automationId: effectiveAction.automationId, controlType: effectiveAction.controlType }
+          );
+          pineInspectDebugLog('get-text:uia-result', JSON.stringify({
+            success: gtResult?.success === true,
+            method: gtResult?.method || null,
+            preview: normalizeCompactText(gtResult?.text, 160),
+            error: gtResult?.error || null
+          }));
+        }
+
+        if (!gtResult?.success && !preferFastPineFallback) {
           const pineFallbackResult = await getPineEditorTextFallback(effectiveAction);
           if (pineFallbackResult?.success) {
             gtResult = pineFallbackResult;
+            pineInspectDebugLog('get-text:path', JSON.stringify({ chosen: 'text-fallback-after-uia' }));
           } else {
             const pineWatcherFallbackResult = getPineEditorWatcherFallback(effectiveAction);
             if (pineWatcherFallbackResult?.success) {
               gtResult = pineWatcherFallbackResult;
+              pineInspectDebugLog('get-text:path', JSON.stringify({ chosen: 'watcher-fallback-after-uia' }));
             }
           }
         }
         result = { ...result, ...gtResult };
-        const pineTargetText = String(effectiveAction?.text || effectiveAction?.criteria?.text || '');
         if (gtResult.success
           && effectiveAction?.pineEvidenceMode === 'provenance-summary'
           && /pine version history/i.test(pineTargetText)) {
@@ -3496,6 +3883,18 @@ async function executeAction(action, runtimeOptions = {}) {
         } else if (gtResult.success && /pine editor/i.test(pineTargetText)) {
           if (effectiveAction?.pineEvidenceMode === 'safe-authoring-inspect') {
             result.pineStructuredSummary = buildPineEditorSafeAuthoringSummary(gtResult.text);
+            if (gtResult.sparseOpenState === true && effectiveAction.assumeSparseOpenStateAsEmptyOrStarter === true) {
+              result.pineStructuredSummary = {
+                ...result.pineStructuredSummary,
+                editorVisibleState: 'empty-or-starter',
+                visibleSignals: Array.from(new Set([
+                  ...(Array.isArray(result.pineStructuredSummary?.visibleSignals) ? result.pineStructuredSummary.visibleSignals : []),
+                  'sparse-open-state-fresh-indicator'
+                ])),
+                lifecycleState: 'new-script-required',
+                compactSummary: 'state=empty-or-starter | sparse-open-state=fresh-indicator'
+              };
+            }
           } else if (
             effectiveAction?.pineEvidenceMode === 'compile-result'
             || effectiveAction?.pineEvidenceMode === 'diagnostics'
@@ -3506,6 +3905,13 @@ async function executeAction(action, runtimeOptions = {}) {
             result.pineStructuredSummary = buildPineEditorDiagnosticsStructuredSummary(gtResult.text, effectiveAction.pineEvidenceMode);
           }
         }
+        pineInspectDebugLog('get-text:summary', JSON.stringify({
+          success: gtResult?.success === true,
+          method: gtResult?.method || null,
+          pineEvidenceMode: String(effectiveAction?.pineEvidenceMode || '').trim() || null,
+          structuredSummary: result.pineStructuredSummary || null,
+          error: gtResult?.error || null
+        }));
         result.message = gtResult.success
           ? `Got text via ${gtResult.method}: "${(gtResult.text || '').slice(0, 50)}"${result.pineStructuredSummary?.compactSummary ? ` [${result.pineStructuredSummary.compactSummary}]` : ''}`
           : `Get text failed: ${gtResult.error}`;
@@ -3909,4 +4315,5 @@ module.exports = {
   buildPineEditorDiagnosticsStructuredSummary,
   buildPineLogsStructuredSummary,
   buildPineProfilerStructuredSummary,
+  isNativeAutomationHostEnabled,
 };
