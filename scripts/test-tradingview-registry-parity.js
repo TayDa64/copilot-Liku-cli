@@ -4,6 +4,7 @@ const assert = require('assert');
 const path = require('path');
 
 const aiService = require(path.join(__dirname, '..', 'src', 'main', 'ai-service.js'));
+const tradingViewTool = require(path.join(__dirname, '..', 'src', 'main', 'tools', 'tradingview-tool.js'));
 
 const REWRITE_ENV = 'LIKU_USE_TOOL_REGISTRY_REWRITES';
 const RISK_ENV = 'LIKU_USE_TOOL_REGISTRY_RISKS';
@@ -99,6 +100,37 @@ function test(name, fn) {
     process.exitCode = 1;
   }
 }
+
+test('TradingView tool exposes canonical registration surface while preserving compatibility exports', () => {
+  assert.strictEqual(tradingViewTool.TRADINGVIEW_TOOL_NAME, 'tradingview');
+  assert.strictEqual(tradingViewTool.TRADINGVIEW_TOOL_PRIORITY, -1);
+  assert.strictEqual(typeof tradingViewTool.registerTradingViewTool, 'function');
+  assert.strictEqual(typeof tradingViewTool.applyTradingViewReliabilityRewrites, 'function');
+  assert.strictEqual(typeof tradingViewTool.assessTradingViewRisk, 'function');
+  assert.strictEqual(typeof tradingViewTool.maybeRewriteTradingViewPineWorkflow, 'function');
+  assert.strictEqual(typeof tradingViewTool.detectTradingViewDomainActionRisk, 'function');
+
+  const calls = [];
+  const registration = tradingViewTool.registerTradingViewTool({
+    registerToolRewrites: (toolName, handler, priority) => {
+      calls.push({ kind: 'rewrite', toolName, handlerType: typeof handler, priority });
+      return { toolName, priority, rewriteCount: 1 };
+    },
+    registerToolRiskAssessor: (toolName, handler, priority) => {
+      calls.push({ kind: 'risk', toolName, handlerType: typeof handler, priority });
+      return { toolName, priority };
+    }
+  });
+
+  assert.deepStrictEqual(calls, [
+    { kind: 'rewrite', toolName: 'tradingview', handlerType: 'function', priority: -1 },
+    { kind: 'risk', toolName: 'tradingview', handlerType: 'function', priority: -1 }
+  ]);
+  assert.strictEqual(registration.toolName, 'tradingview');
+  assert.strictEqual(registration.priority, -1);
+  assert.deepStrictEqual(registration.rewriteEntry, { toolName: 'tradingview', priority: -1, rewriteCount: 1 });
+  assert.deepStrictEqual(registration.riskEntry, { toolName: 'tradingview', priority: -1 });
+});
 
 const rewriteCases = [
   {

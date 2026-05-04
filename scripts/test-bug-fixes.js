@@ -597,11 +597,13 @@ test('ai-service gates TradingView follow-up typing on post-key observation chec
   assert(tradingViewPineRecoveryContent.includes('maybeRecoverTradingViewPinePlanFromGeneratedCode'), 'TradingView Pine recovery module should own canonical-state recovery orchestration');
   assert(tradingViewPineRecoveryContent.includes('requestTradingViewPineCodeOnly'), 'TradingView Pine recovery module should own code-only Pine generation retries');
   assert(tradingViewRegistryBootstrapContent.includes('registerTradingViewRegistryBootstrap'), 'TradingView registry bootstrap module should expose a registration helper');
-  assert(tradingViewRegistryBootstrapContent.includes("registerToolRewrites('tradingview'"), 'TradingView registry bootstrap should register TradingView rewrite handlers');
-  assert(tradingViewRegistryBootstrapContent.includes("registerToolRiskAssessor('tradingview'"), 'TradingView registry bootstrap should register TradingView risk assessors');
+  assert(tradingViewToolContent.includes('registerTradingViewTool'), 'TradingView facade should expose canonical tool registration');
+  assert(tradingViewToolContent.includes('registerToolRewrites(TRADINGVIEW_TOOL_NAME'), 'TradingView facade should register TradingView rewrite handlers');
+  assert(tradingViewToolContent.includes('registerToolRiskAssessor(TRADINGVIEW_TOOL_NAME'), 'TradingView facade should register TradingView risk assessors');
+  assert(tradingViewRegistryBootstrapContent.includes('registerTradingViewTool(deps)'), 'TradingView registry bootstrap should delegate to the facade registration helper');
   assert(tradingViewRewriteRunnerContent.includes('applyTradingViewReliabilityRewrites'), 'TradingView rewrite runner module should expose the ordered TradingView rewrite pipeline');
-  assert(tradingViewRewriteRunnerContent.includes('maybeRewriteTradingViewPineWorkflow'), 'TradingView rewrite runner should preserve Pine rewrite participation');
-  assert(tradingViewRewriteRunnerContent.includes('maybeRewriteTradingViewAlertWorkflow'), 'TradingView rewrite runner should preserve alert rewrite participation');
+  assert(tradingViewToolContent.includes('maybeRewriteTradingViewPineWorkflow'), 'TradingView facade rewrite pipeline should preserve Pine rewrite participation');
+  assert(tradingViewToolContent.includes('maybeRewriteTradingViewAlertWorkflow'), 'TradingView facade rewrite pipeline should preserve alert rewrite participation');
   assert(tradingViewToolContent.includes("require('../tradingview/indicator-workflows')"), 'TradingView facade should consume the extracted TradingView indicator workflow helper');
   assert(tradingViewToolContent.includes("require('../tradingview/alert-workflows')"), 'TradingView facade should consume the extracted TradingView alert workflow helper');
   assert(tradingViewToolContent.includes("require('../tradingview/chart-verification')"), 'TradingView facade should consume the extracted TradingView chart verification helper');
