@@ -515,6 +515,7 @@ test('ai-service normalizes app identity for learned skill scope', () => {
 test('ai-service gates TradingView follow-up typing on post-key observation checkpoints', () => {
   const aiServicePath = path.join(__dirname, '..', 'src', 'main', 'ai-service.js');
   const observationCheckpointPath = path.join(__dirname, '..', 'src', 'main', 'ai-service', 'observation-checkpoints.js');
+  const observationProviderRegistryPath = path.join(__dirname, '..', 'src', 'main', 'ai-service', 'observation-provider-registry.js');
   const rewriteRegistryPath = path.join(__dirname, '..', 'src', 'main', 'ai-service', 'rewrite-registry.js');
   const riskRegistryPath = path.join(__dirname, '..', 'src', 'main', 'ai-service', 'risk-registry.js');
   const systemContractRegistryPath = path.join(__dirname, '..', 'src', 'main', 'ai-service', 'system-contract-registry.js');
@@ -541,6 +542,7 @@ test('ai-service gates TradingView follow-up typing on post-key observation chec
 
   const aiServiceContent = fs.readFileSync(aiServicePath, 'utf8');
   const observationCheckpointContent = fs.readFileSync(observationCheckpointPath, 'utf8');
+  const observationProviderRegistryContent = fs.readFileSync(observationProviderRegistryPath, 'utf8');
   const rewriteRegistryContent = fs.readFileSync(rewriteRegistryPath, 'utf8');
   const riskRegistryContent = fs.readFileSync(riskRegistryPath, 'utf8');
   const systemContractRegistryContent = fs.readFileSync(systemContractRegistryPath, 'utf8');
@@ -565,12 +567,16 @@ test('ai-service gates TradingView follow-up typing on post-key observation chec
   const systemPromptContent = fs.readFileSync(systemPromptPath, 'utf8');
 
   assert(aiServiceContent.includes("require('./ai-service/observation-checkpoints')"), 'ai-service should consume the extracted observation checkpoint helper module');
+  assert(aiServiceContent.includes("require('./ai-service/observation-provider-registry')"), 'ai-service should consume the observation provider registry module');
   assert(observationCheckpointContent.includes('inferKeyObservationCheckpoint'), 'Observation checkpoint module should infer TradingView post-key checkpoints');
   assert(observationCheckpointContent.includes('verifyKeyObservationCheckpoint'), 'Observation checkpoint module should verify TradingView post-key checkpoints');
+  assert(observationProviderRegistryContent.includes('registerObservationProvider'), 'Observation provider registry should support provider registration');
+  assert(observationProviderRegistryContent.includes('getRegisteredObservationProviders'), 'Observation provider registry should expose registered provider metadata');
   assert(aiServiceContent.includes('observationCheckpoints'), 'Execution results should expose key checkpoint metadata');
   assert(observationCheckpointContent.includes('surface change before continuing'), 'Checkpoint failures should explain missing TradingView surface changes');
-  assert(observationCheckpointContent.includes('inferTradingViewObservationSpec'), 'Observation checkpoint module should consume the extracted TradingView observation-spec helper');
-  assert(observationCheckpointContent.includes('inferTradingViewTradingMode'), 'Observation checkpoint module should consume the TradingView trading-mode inference helper');
+  assert(observationCheckpointContent.includes('observationProviders'), 'Observation checkpoint module should consume registered observation providers');
+  assert(observationCheckpointContent.includes("requireTradingViewProvider('inferObservationSpec')"), 'Observation checkpoint module should consume TradingView observation-spec through a provider');
+  assert(observationCheckpointContent.includes("requireTradingViewProvider('inferTradingMode')"), 'Observation checkpoint module should consume TradingView trading-mode inference through a provider');
   assert(aiServiceContent.includes("require('./ai-service/rewrite-registry')"), 'ai-service should consume the internal rewrite registry module');
   assert(aiServiceContent.includes("require('./ai-service/risk-registry')"), 'ai-service should consume the internal risk registry module');
   assert(aiServiceContent.includes("require('./ai-service/system-contract-registry')"), 'ai-service should consume the internal system contract registry module');
@@ -608,6 +614,7 @@ test('ai-service gates TradingView follow-up typing on post-key observation chec
   assert(tradingViewToolContent.includes('registerToolRiskAssessor(TRADINGVIEW_TOOL_NAME'), 'TradingView facade should register TradingView risk assessors');
   assert(tradingViewToolContent.includes('registerTradingViewSystemContracts'), 'TradingView facade should expose canonical system contract registration');
   assert(tradingViewToolContent.includes('isTradingViewPineContextEligible'), 'TradingView facade should gate Pine system contracts on execution context');
+  assert(tradingViewToolContent.includes('registerTradingViewObservationProvider'), 'TradingView facade should expose canonical observation provider registration');
   assert(!aiServiceContent.includes('const tradingViewPineContract = buildTradingViewPineAuthoringSystemContract(enhancedMessage)'), 'ai-service should not inject Pine contracts directly before execution context is available');
   assert(tradingViewRegistryBootstrapContent.includes('registerTradingViewTool(deps)'), 'TradingView registry bootstrap should delegate to the facade registration helper');
   assert(tradingViewRewriteRunnerContent.includes('applyTradingViewReliabilityRewrites'), 'TradingView rewrite runner module should expose the ordered TradingView rewrite pipeline');

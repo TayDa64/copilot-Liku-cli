@@ -6,6 +6,7 @@ const path = require('path');
 const aiService = require(path.join(__dirname, '..', 'src', 'main', 'ai-service.js'));
 const tradingViewTool = require(path.join(__dirname, '..', 'src', 'main', 'tools', 'tradingview-tool.js'));
 const systemContractRegistry = require(path.join(__dirname, '..', 'src', 'main', 'ai-service', 'system-contract-registry.js'));
+const observationProviderRegistry = require(path.join(__dirname, '..', 'src', 'main', 'ai-service', 'observation-provider-registry.js'));
 
 const REWRITE_ENV = 'LIKU_USE_TOOL_REGISTRY_REWRITES';
 const RISK_ENV = 'LIKU_USE_TOOL_REGISTRY_RISKS';
@@ -188,6 +189,48 @@ test('TradingView facade registers context-gated Pine system contracts', () => {
     priority: -1,
     systemContractEntry: { toolName: 'tradingview', priority: -1 }
   });
+});
+
+test('TradingView facade registers observation provider surface', () => {
+  assert.strictEqual(typeof tradingViewTool.createTradingViewObservationProvider, 'function');
+  assert.strictEqual(typeof tradingViewTool.registerTradingViewObservationProvider, 'function');
+
+  const provider = tradingViewTool.createTradingViewObservationProvider();
+  assert.strictEqual(provider.toolName, 'tradingview');
+  assert.strictEqual(typeof provider.inferObservationSpec, 'function');
+  assert.strictEqual(typeof provider.inferTradingMode, 'function');
+  assert.strictEqual(typeof provider.isTargetHint, 'function');
+  assert(provider.matchesContext({ userMessage: 'open Pine Editor in TradingView' }));
+  assert(!provider.matchesContext({ userMessage: 'open VS Code search' }));
+
+  const calls = [];
+  const registration = tradingViewTool.registerTradingViewObservationProvider({
+    registerObservationProvider: (toolName, registeredProvider, priority) => {
+      calls.push({ toolName, providerType: typeof registeredProvider, priority });
+      return { toolName, priority };
+    }
+  });
+
+  assert.deepStrictEqual(calls, [
+    { toolName: 'tradingview', providerType: 'object', priority: -1 }
+  ]);
+  assert.deepStrictEqual(registration, {
+    toolName: 'tradingview',
+    priority: -1,
+    observationProviderEntry: { toolName: 'tradingview', priority: -1 }
+  });
+});
+
+test('observation provider registry dispatches provider metadata', () => {
+  observationProviderRegistry.unregisterObservationProvider('test-observation-provider');
+  const entry = observationProviderRegistry.registerObservationProvider('test-observation-provider', {
+    toolName: 'test-observation-provider'
+  }, 7);
+
+  assert.strictEqual(entry.toolName, 'test-observation-provider');
+  const providers = observationProviderRegistry.getRegisteredObservationProviders();
+  assert(providers.some((provider) => provider.toolName === 'test-observation-provider' && provider.priority === 7));
+  observationProviderRegistry.unregisterObservationProvider('test-observation-provider');
 });
 
 const rewriteCases = [

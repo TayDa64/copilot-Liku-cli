@@ -121,6 +121,7 @@ const {
   buildPineScriptState,
   persistPineScriptState,
   registerTradingViewSystemContracts,
+  registerTradingViewObservationProvider,
 } = require('./tools/tradingview-tool');
 const {
   applyTradingViewReliabilityRewrites
@@ -146,6 +147,10 @@ const {
   getRegisteredSystemContractProviders,
   registerSystemContractProvider
 } = require('./ai-service/system-contract-registry');
+const {
+  getRegisteredObservationProviders,
+  registerObservationProvider
+} = require('./ai-service/observation-provider-registry');
 const {
   createObservationCheckpointRuntime
 } = require('./ai-service/observation-checkpoints');
@@ -1702,6 +1707,9 @@ const {
 registerTradingViewSystemContracts({
   registerSystemContractProvider,
   buildTradingViewPineAuthoringSystemContract
+});
+registerTradingViewObservationProvider({
+  registerObservationProvider
 });
 
 /**
@@ -5252,11 +5260,7 @@ const observationCheckpointRuntime = createObservationCheckpointRuntime({
   sleepMs,
   evaluateForegroundAgainstTarget,
   inferLaunchVerificationTarget,
-  buildVerifyTargetHintFromAppName,
-  extractTradingViewObservationKeywords,
-  inferTradingViewTradingMode,
-  inferTradingViewObservationSpec,
-  isTradingViewTargetHint,
+  observationProviders: getRegisteredObservationProviders(),
   keyCheckpointSettleMs: KEY_CHECKPOINT_SETTLE_MS,
   keyCheckpointTimeoutMs: KEY_CHECKPOINT_TIMEOUT_MS,
   keyCheckpointMaxPolls: KEY_CHECKPOINT_MAX_POLLS
