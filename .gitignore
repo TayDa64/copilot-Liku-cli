@@ -9,6 +9,8 @@ build/
 bin/
 src/native/windows-uia-dotnet/bin/
 src/native/windows-uia-dotnet/obj/
+src/dotnet/**/bin/
+src/dotnet/**/obj/
 *.log
 
 # OS files
@@ -38,4 +40,6 @@ artifacts/live-validation/
 
 # Local runtime / scratch artifacts
 .liku/
+.tmp_*.py
+TradingView-Global-to-Modular-Refactoring-Blueprint.pdf
 tmp-websearch-*.html
