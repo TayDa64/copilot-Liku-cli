@@ -3368,6 +3368,9 @@ function analyzeActionSafety(action, targetInfo = {}) {
       if (benignSearchSurfaceClearIntent && /\b(delete|remove|erase|destroy|clear|reset|format)\b/i.test(matchedKeyword)) {
         continue;
       }
+      if (tradingDomainRisk?.paperTradingOrderEntry === true && /\b(buy|sell|purchase|checkout|pay|payment|place\s+order|order|qty|quantity)\b/i.test(matchedKeyword)) {
+        continue;
+      }
       if (benignEnterIntent && /confirm/i.test(matchedKeyword)) {
         continue;
       }

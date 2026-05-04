@@ -258,7 +258,7 @@ for (const fixture of rewriteCases) {
 
 const riskCases = [
   {
-    name: 'paper-mode DOM order entry stays current-behavior blocked before paper semantics PR',
+    name: 'paper-mode DOM order entry requires confirmation without registry drift',
     action: {
       type: 'click',
       reason: 'Click buy market order in TradingView Paper Trading DOM',

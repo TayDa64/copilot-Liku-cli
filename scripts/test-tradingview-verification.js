@@ -49,6 +49,16 @@ test('TradingView DOM safety rail detects critical and high-risk actions', () =>
   assert.strictEqual(high.blockExecution, true);
 });
 
+test('TradingView paper-mode DOM order entry requires confirmation without advisory-only block', () => {
+  const risk = detectTradingViewDomainActionRisk('place a buy mkt order in the tradingview paper trading dom', ActionRiskLevel);
+  assert(risk, 'paper DOM order-entry risk should be detected');
+  assert.strictEqual(risk.riskLevel, ActionRiskLevel.HIGH);
+  assert.strictEqual(risk.requiresConfirmation, true);
+  assert.strictEqual(risk.blockExecution, false);
+  assert.strictEqual(risk.tradingMode.mode, 'paper');
+  assert.strictEqual(risk.tradingMode.confidence, 'high');
+});
+
 test('TradingView trading mode inference recognizes paper trading signals', () => {
   const paper = inferTradingViewTradingMode({
     title: 'Paper Trading - Depth of Market - TradingView',
@@ -65,7 +75,8 @@ test('TradingView DOM safety rail mentions paper trading guidance when paper mod
   const risk = detectTradingViewDomainActionRisk('place a limit order in the tradingview paper trading dom', ActionRiskLevel);
   assert(risk, 'paper-trading DOM order-entry risk should be detected');
   assert.strictEqual(risk.tradingMode.mode, 'paper');
-  assert(/paper trading/i.test(risk.blockReason || ''), 'paper-trading refusal should mention Paper Trading guidance');
+  assert.strictEqual(risk.requiresConfirmation, true, 'paper-trading DOM order entry should still require confirmation');
+  assert.strictEqual(risk.blockExecution, false, 'paper-trading DOM order entry should not be advisory-only blocked after PR 4 semantics');
 });
 
 test('TradingView target hint detection recognizes canonical app metadata', () => {
