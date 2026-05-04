@@ -25,6 +25,17 @@ Use the narrowest deterministic test first, then broaden only when the touched b
 
 ## TradingView live checks
 
+Use the opt-in live smoke harness when a PR changes TradingView foreground routing, Pine Editor workflows, chart state workflows, observation checkpoints, or safety/resume behavior:
+
+```powershell
+npm run smoke:tradingview-live -- --dry-run
+npm run smoke:tradingview-live -- --scenarios focus,pine-editor
+```
+
+The harness requires an already-open TradingView session and intentionally runs one scenario sequence at a time to avoid foreground/window contention. It is not part of `npm test`; run it only when live Windows UIA evidence is relevant.
+
+By default, live output is written to `artifacts\live-validation\` and includes per-scenario `*.summary.json` files plus a run `*.manifest.json`. When runtime tracing is available, summaries also link the exported trace artifact for the scenario.
+
 When a PR changes TradingView runtime behavior, include evidence for:
 
 1. TradingView is the actual foreground target before input begins.
@@ -34,6 +45,12 @@ When a PR changes TradingView runtime behavior, include evidence for:
 5. Runtime trace or summary artifacts are attached if behavior diverges from deterministic tests.
 
 Unexpected VS Code Accessibility View popups are evidence that keyboard input may have routed to VS Code instead of TradingView. Treat any result after that as suspicious until reproduced with correct focus.
+
+## Browser/Playwright proof
+
+Playwright evidence is optional and secondary. Use it only to inspect browser-visible TradingView state after Liku has performed the workflow; do not use Playwright to directly mutate TradingView DOM state, place orders, bypass confirmations, or replace the Windows UIA/native execution path.
+
+If browser proof is attached, include the Liku live smoke manifest or summary alongside the Playwright artifact so reviewers can confirm the browser state was produced by Liku-controlled actions.
 
 ## Safety boundaries
 

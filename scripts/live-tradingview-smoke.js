@@ -30,7 +30,9 @@ function getArgValue(flagName) {
 }
 
 function hasFlag(flagName) {
-  return process.argv.includes(flagName);
+  if (process.argv.includes(flagName)) return true;
+  const envName = `npm_config_${String(flagName || '').replace(/^--/, '').replace(/-/g, '_')}`;
+  return /^(1|true|yes)$/i.test(String(process.env[envName] || ''));
 }
 
 function sleep(ms) {
