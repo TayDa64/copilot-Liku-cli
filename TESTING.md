@@ -122,6 +122,8 @@ Treat the observation suite as a **necessary but insufficient** signal for Tradi
 
 When changing TradingView automation, do not stop at green observation-flow tests. Also validate through the real chat path.
 
+See `docs/TRADINGVIEW_VALIDATION_RUNBOOK.md` for the source-of-truth workflow used by delegated coding-agent PRs, including when to use deterministic tests, live Windows validation, and optional browser/Playwright proof.
+
 Minimum live checks:
 
 1. launch `liku chat`
