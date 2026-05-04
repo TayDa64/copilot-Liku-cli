@@ -33,12 +33,16 @@ function pineRecoveryDebugLog(...args) {
   }
 }
 
+function isRegistryFeatureDisabled(value) {
+  return /^(0|false|off|no)$/i.test(String(value || '').trim());
+}
+
 function isToolRegistryRewriteEnabled() {
-  return process.env.LIKU_USE_TOOL_REGISTRY_REWRITES === '1';
+  return !isRegistryFeatureDisabled(process.env.LIKU_USE_TOOL_REGISTRY_REWRITES);
 }
 
 function isToolRegistryRiskEnabled() {
-  return process.env.LIKU_USE_TOOL_REGISTRY_RISKS === '1';
+  return !isRegistryFeatureDisabled(process.env.LIKU_USE_TOOL_REGISTRY_RISKS);
 }
 
 // `ai-service` is used by the Electron app *and* by the CLI.

@@ -268,7 +268,7 @@ test('rewriteActionsForReliability normalizes typoed app launches', () => {
   assert(launchAction.verifyTarget.domKeywords.includes('depth of market'), 'verifyTarget should include TradingView DOM keywords');
 });
 
-test('rewriteActionsForReliability preserves parity when tool registry rewrites are enabled', () => {
+test('rewriteActionsForReliability uses registry rewrites by default while preserving legacy parity', () => {
   const aiServicePath = path.join(__dirname, '..', 'src', 'main', 'ai-service.js');
   const aiService = require(aiServicePath);
   const previousFlag = process.env.LIKU_USE_TOOL_REGISTRY_REWRITES;
@@ -291,16 +291,22 @@ test('rewriteActionsForReliability preserves parity when tool registry rewrites 
   };
 
   try {
-    delete process.env.LIKU_USE_TOOL_REGISTRY_REWRITES;
+    process.env.LIKU_USE_TOOL_REGISTRY_REWRITES = '0';
     const legacyTradingViewRewrite = aiService.rewriteActionsForReliability(tradingViewActions, tradingViewContext);
     const legacyNonTradingViewRewrite = aiService.rewriteActionsForReliability(browserActions, browserContext);
+
+    delete process.env.LIKU_USE_TOOL_REGISTRY_REWRITES;
+    const defaultTradingViewRewrite = aiService.rewriteActionsForReliability(tradingViewActions, tradingViewContext);
+    const defaultNonTradingViewRewrite = aiService.rewriteActionsForReliability(browserActions, browserContext);
 
     process.env.LIKU_USE_TOOL_REGISTRY_REWRITES = '1';
     const registryTradingViewRewrite = aiService.rewriteActionsForReliability(tradingViewActions, tradingViewContext);
     const registryNonTradingViewRewrite = aiService.rewriteActionsForReliability(browserActions, browserContext);
 
+    assertDeepEqual(defaultTradingViewRewrite, registryTradingViewRewrite, 'Default rewrite path should use registered tool rewrites');
+    assertDeepEqual(defaultNonTradingViewRewrite, registryNonTradingViewRewrite, 'Default rewrite path should preserve non-TradingView registry behavior');
     assertDeepEqual(registryTradingViewRewrite, legacyTradingViewRewrite, 'TradingView rewrite registry path should stay byte-identical to legacy TradingView rewrite behavior');
-    assertDeepEqual(registryNonTradingViewRewrite, legacyNonTradingViewRewrite, 'Registry flag should not change non-TradingView rewrite behavior');
+    assertDeepEqual(registryNonTradingViewRewrite, legacyNonTradingViewRewrite, 'Registry default should not change non-TradingView rewrite behavior');
   } finally {
     if (previousFlag === undefined) {
       delete process.env.LIKU_USE_TOOL_REGISTRY_REWRITES;
@@ -310,7 +316,7 @@ test('rewriteActionsForReliability preserves parity when tool registry rewrites 
   }
 });
 
-test('analyzeActionSafety preserves parity when tool registry risks are enabled', () => {
+test('analyzeActionSafety uses registry risks by default while preserving parity fixtures', () => {
   const aiServicePath = path.join(__dirname, '..', 'src', 'main', 'ai-service.js');
   const aiService = require(aiServicePath);
   const previousFlag = process.env.LIKU_USE_TOOL_REGISTRY_RISKS;
@@ -336,14 +342,28 @@ test('analyzeActionSafety preserves parity when tool registry risks are enabled'
   };
 
   try {
-    delete process.env.LIKU_USE_TOOL_REGISTRY_RISKS;
+    process.env.LIKU_USE_TOOL_REGISTRY_RISKS = '0';
     const legacyTradingViewRisk = aiService.analyzeActionSafety(tradingViewAction, tradingViewTarget);
     const legacyNonTradingViewRisk = aiService.analyzeActionSafety(nonTradingViewAction, nonTradingViewTarget);
+
+    delete process.env.LIKU_USE_TOOL_REGISTRY_RISKS;
+    const defaultTradingViewRisk = aiService.analyzeActionSafety(tradingViewAction, tradingViewTarget);
+    const defaultNonTradingViewRisk = aiService.analyzeActionSafety(nonTradingViewAction, nonTradingViewTarget);
 
     process.env.LIKU_USE_TOOL_REGISTRY_RISKS = '1';
     const registryTradingViewRisk = aiService.analyzeActionSafety(tradingViewAction, tradingViewTarget);
     const registryNonTradingViewRisk = aiService.analyzeActionSafety(nonTradingViewAction, nonTradingViewTarget);
 
+    assertDeepEqual(
+      normalizeSafetyResultForComparison(defaultTradingViewRisk),
+      normalizeSafetyResultForComparison(registryTradingViewRisk),
+      'Default risk path should use registered risk assessors'
+    );
+    assertDeepEqual(
+      normalizeSafetyResultForComparison(defaultNonTradingViewRisk),
+      normalizeSafetyResultForComparison(registryNonTradingViewRisk),
+      'Default risk path should preserve non-TradingView registry behavior'
+    );
     assertDeepEqual(
       normalizeSafetyResultForComparison(registryTradingViewRisk),
       normalizeSafetyResultForComparison(legacyTradingViewRisk),
@@ -379,13 +399,17 @@ test('tool registry risk path scopes bare order danger keywords away from non-Tr
   };
 
   try {
-    delete process.env.LIKU_USE_TOOL_REGISTRY_RISKS;
+    process.env.LIKU_USE_TOOL_REGISTRY_RISKS = '0';
     const legacyRisk = aiService.analyzeActionSafety(action, targetInfo);
+
+    delete process.env.LIKU_USE_TOOL_REGISTRY_RISKS;
+    const defaultRisk = aiService.analyzeActionSafety(action, targetInfo);
 
     process.env.LIKU_USE_TOOL_REGISTRY_RISKS = '1';
     const scopedRisk = aiService.analyzeActionSafety(action, targetInfo);
 
     assertEqual(legacyRisk.riskLevel, 'HIGH', 'Legacy danger patterns should still treat bare order language as high-risk');
+    assertDeepEqual(normalizeSafetyResultForComparison(defaultRisk), normalizeSafetyResultForComparison(scopedRisk), 'Default risk path should use scoped registry danger patterns');
     assert(scopedRisk.riskLevel === 'MEDIUM' || scopedRisk.riskLevel === 'LOW', 'Scoped danger patterns should avoid escalating non-TradingView order-summary language');
     assertEqual(scopedRisk.requiresConfirmation, false, 'Scoped danger patterns should not require confirmation for non-TradingView order-summary language');
     assert(!scopedRisk.warnings.some((warning) => /order/i.test(String(warning || ''))), 'Scoped danger patterns should suppress bare order warnings outside TradingView context');
@@ -593,8 +617,9 @@ test('ai-service gates TradingView follow-up typing on post-key observation chec
   assert(aiServiceContent.includes("require('./tradingview/pine-authoring')"), 'ai-service should consume the extracted TradingView Pine authoring module');
   assert(aiServiceContent.includes("require('./tradingview/pine-resume')"), 'ai-service should consume the extracted TradingView Pine resume module');
   assert(aiServiceContent.includes("require('./tradingview/pine-recovery')"), 'ai-service should consume the extracted TradingView Pine recovery module');
-  assert(aiServiceContent.includes('LIKU_USE_TOOL_REGISTRY_REWRITES'), 'ai-service should guard the registry path behind an explicit feature flag');
-  assert(aiServiceContent.includes('LIKU_USE_TOOL_REGISTRY_RISKS'), 'ai-service should guard the risk registry path behind an explicit feature flag');
+  assert(aiServiceContent.includes('LIKU_USE_TOOL_REGISTRY_REWRITES'), 'ai-service should retain a rewrite registry escape hatch');
+  assert(aiServiceContent.includes('LIKU_USE_TOOL_REGISTRY_RISKS'), 'ai-service should retain a risk registry escape hatch');
+  assert(aiServiceContent.includes('isRegistryFeatureDisabled'), 'ai-service should default registry features on unless explicitly disabled');
   assert(rewriteRegistryContent.includes('registerToolRewrites'), 'Rewrite registry module should support tool rewrite registration');
   assert(rewriteRegistryContent.includes('applyRegisteredToolRewrites'), 'Rewrite registry module should support ordered rewrite dispatch');
   assert(riskRegistryContent.includes('registerToolRiskAssessor'), 'Risk registry module should support tool risk registration');
