@@ -5,6 +5,7 @@ const path = require('path');
 
 const aiService = require(path.join(__dirname, '..', 'src', 'main', 'ai-service.js'));
 const tradingViewTool = require(path.join(__dirname, '..', 'src', 'main', 'tools', 'tradingview-tool.js'));
+const systemContractRegistry = require(path.join(__dirname, '..', 'src', 'main', 'ai-service', 'system-contract-registry.js'));
 
 const REWRITE_ENV = 'LIKU_USE_TOOL_REGISTRY_REWRITES';
 const RISK_ENV = 'LIKU_USE_TOOL_REGISTRY_RISKS';
@@ -130,6 +131,63 @@ test('TradingView tool exposes canonical registration surface while preserving c
   assert.strictEqual(registration.priority, -1);
   assert.deepStrictEqual(registration.rewriteEntry, { toolName: 'tradingview', priority: -1, rewriteCount: 1 });
   assert.deepStrictEqual(registration.riskEntry, { toolName: 'tradingview', priority: -1 });
+});
+
+test('system contract registry dispatches ordered provider messages', () => {
+  systemContractRegistry.unregisterSystemContractProvider('test-contract-alpha');
+  systemContractRegistry.unregisterSystemContractProvider('test-contract-beta');
+  systemContractRegistry.registerSystemContractProvider('test-contract-beta', () => 'beta contract', 10);
+  systemContractRegistry.registerSystemContractProvider('test-contract-alpha', () => ['alpha contract'], -10);
+
+  const messages = systemContractRegistry.buildRegisteredSystemContractMessages({
+    userMessage: 'irrelevant'
+  });
+
+  assert.deepStrictEqual(messages.slice(0, 2), ['alpha contract', 'beta contract']);
+  systemContractRegistry.unregisterSystemContractProvider('test-contract-alpha');
+  systemContractRegistry.unregisterSystemContractProvider('test-contract-beta');
+});
+
+test('TradingView facade registers context-gated Pine system contracts', () => {
+  assert.strictEqual(typeof tradingViewTool.createTradingViewSystemContractProvider, 'function');
+  assert.strictEqual(typeof tradingViewTool.registerTradingViewSystemContracts, 'function');
+
+  const provider = tradingViewTool.createTradingViewSystemContractProvider({
+    buildTradingViewPineAuthoringSystemContract: (message) => (
+      String(message || '').includes('create') ? 'TRADINGVIEW PINE AUTHORING CONTRACT: test' : ''
+    )
+  });
+
+  assert.deepStrictEqual(provider({
+    userMessage: 'create a TradingView Pine indicator',
+    executionContextEnvelope: { eligibility: { tradingViewPine: true } }
+  }), ['TRADINGVIEW PINE AUTHORING CONTRACT: test']);
+  assert.deepStrictEqual(provider({
+    userMessage: 'create a TradingView Pine indicator',
+    executionContextEnvelope: { eligibility: { tradingViewPine: false } }
+  }), []);
+  assert.deepStrictEqual(provider({
+    userMessage: 'read TradingView Pine diagnostics',
+    executionContextEnvelope: { eligibility: { tradingViewPine: true } }
+  }), []);
+
+  const calls = [];
+  const registration = tradingViewTool.registerTradingViewSystemContracts({
+    buildTradingViewPineAuthoringSystemContract: () => 'TRADINGVIEW PINE AUTHORING CONTRACT: test',
+    registerSystemContractProvider: (toolName, registeredProvider, priority) => {
+      calls.push({ toolName, handlerType: typeof registeredProvider, priority });
+      return { toolName, priority };
+    }
+  });
+
+  assert.deepStrictEqual(calls, [
+    { toolName: 'tradingview', handlerType: 'function', priority: -1 }
+  ]);
+  assert.deepStrictEqual(registration, {
+    toolName: 'tradingview',
+    priority: -1,
+    systemContractEntry: { toolName: 'tradingview', priority: -1 }
+  });
 });
 
 const rewriteCases = [

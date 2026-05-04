@@ -802,7 +802,7 @@ async function run() {
     assert.strictEqual(rewritten[0].type, 'bring_window_to_front');
     assert.strictEqual(rewritten[0].processName, 'tradingview');
     assert.strictEqual(rewritten[2].type, 'key');
-    assert.strictEqual(rewritten[2].key, 'ctrl+k');
+    assert.strictEqual(rewritten[2].key, 'ctrl+e');
     assert.strictEqual(opener.verify.kind, 'editor-active');
     assert.strictEqual(opener.verify.target, 'pine-editor');
     assert.strictEqual(opener.verify.requiresObservedChange, true);
@@ -822,7 +822,7 @@ async function run() {
     assert(Array.isArray(rewritten), 'pine editor status rewrite should return an action array');
     assert.strictEqual(rewritten[0].type, 'bring_window_to_front');
     assert.strictEqual(rewritten[2].type, 'key');
-    assert.strictEqual(rewritten[2].key, 'ctrl+k');
+    assert.strictEqual(rewritten[2].key, 'ctrl+e');
     assert.strictEqual(opener.verify.target, 'pine-editor');
     assert(readback, 'pine editor status rewrite should gather Pine Editor text');
     assert.strictEqual(readback.pineEvidenceMode, 'compile-result');
@@ -837,7 +837,7 @@ async function run() {
 
     const opener = rewritten.find((action) => action?.verify?.target === 'pine-editor');
     assert(Array.isArray(rewritten), 'pine editor alias rewrite should return an action array');
-    assert.strictEqual(rewritten[2].key, 'ctrl+k');
+    assert.strictEqual(rewritten[2].key, 'ctrl+e');
     assert.strictEqual(opener.verify.target, 'pine-editor');
     assert(rewritten.some((action) => action?.type === 'get_text' && action?.text === 'Pine Editor'));
   });
@@ -855,7 +855,7 @@ async function run() {
     assert(Array.isArray(rewritten), 'pine diagnostics rewrite should return an action array');
     assert.strictEqual(rewritten[0].type, 'bring_window_to_front');
     assert.strictEqual(rewritten[2].type, 'key');
-    assert.strictEqual(rewritten[2].key, 'ctrl+k');
+    assert.strictEqual(rewritten[2].key, 'ctrl+e');
     assert.strictEqual(opener.verify.target, 'pine-editor');
     assert(readback, 'pine diagnostics rewrite should gather Pine Editor text');
     assert.strictEqual(readback.pineEvidenceMode, 'diagnostics');
@@ -874,7 +874,7 @@ async function run() {
     assert(Array.isArray(rewritten), 'pine line-budget rewrite should return an action array');
     assert.strictEqual(rewritten[0].type, 'bring_window_to_front');
     assert.strictEqual(rewritten[2].type, 'key');
-    assert.strictEqual(rewritten[2].key, 'ctrl+k');
+    assert.strictEqual(rewritten[2].key, 'ctrl+e');
     assert.strictEqual(opener.verify.target, 'pine-editor');
     assert(readback, 'pine line-budget rewrite should gather Pine Editor text');
     assert(/line-budget hints/i.test(readback.reason), 'pine line-budget readback should mention line-budget hints');
@@ -1265,7 +1265,7 @@ async function run() {
       });
 
       assert.strictEqual(execResult.success, true, 'Execution should proceed after Pine Editor is observed');
-      assert.deepStrictEqual(executed, ['bring_window_to_front', 'wait', 'key', 'wait', 'key', 'wait', 'key', 'wait', 'type', 'wait', 'key', 'wait', 'wait', 'get_text'], 'Bounded Pine Editor diagnostics gathering should upgrade legacy opener plans into the TradingView quick-search route, clear stale query text explicitly, and then read text');
+      assert.deepStrictEqual(executed, ['bring_window_to_front', 'wait', 'key', 'wait', 'wait', 'get_text'], 'Bounded Pine Editor diagnostics gathering should preserve verified Ctrl+E chart-surface openers before reading text');
       assert.deepStrictEqual(evidenceModes, ['compile-result'], 'Pine Editor diagnostics gathering should preserve compile-result evidence mode');
       assert(execResult.observationCheckpoints.length >= 1, 'At least one bounded observation checkpoint should be returned');
       assert.strictEqual(execResult.observationCheckpoints[execResult.observationCheckpoints.length - 1].verified, true, 'The final Pine Editor panel observation should pass');
@@ -1320,7 +1320,7 @@ async function run() {
       });
 
       assert.strictEqual(execResult.success, true, 'Execution should proceed after Pine Editor diagnostics surface is observed');
-      assert.deepStrictEqual(executed, ['bring_window_to_front', 'wait', 'key', 'wait', 'key', 'wait', 'key', 'wait', 'type', 'wait', 'key', 'wait', 'wait', 'get_text'], 'Bounded Pine Editor diagnostics should upgrade legacy opener plans into the TradingView quick-search route, clear stale query text explicitly, and then read text');
+      assert.deepStrictEqual(executed, ['bring_window_to_front', 'wait', 'key', 'wait', 'wait', 'get_text'], 'Bounded Pine Editor diagnostics should preserve verified Ctrl+E chart-surface openers before reading text');
       assert.deepStrictEqual(evidenceModes, ['diagnostics'], 'Pine diagnostics gathering should preserve diagnostics evidence mode');
       assert(execResult.observationCheckpoints.length >= 1, 'At least one bounded observation checkpoint should be returned');
       assert.strictEqual(execResult.observationCheckpoints[execResult.observationCheckpoints.length - 1].verified, true, 'The final Pine Editor panel observation should pass');
@@ -1329,7 +1329,7 @@ async function run() {
     });
   });
 
-  await testAsync('pine editor opener recovers by semantic result click when enter alone does not prove editor activation', async () => {
+  await testAsync('quick-search Pine editor opener recovers by semantic result click when enter alone does not prove editor activation', async () => {
     const executed = [];
     let clickedPineResult = false;
     const foregroundSequence = [
@@ -1387,10 +1387,14 @@ async function run() {
         verification: 'TradingView should show an active Pine Editor before typing',
         actions: [
           { type: 'focus_window', title: 'TradingView', processName: 'tradingview' },
+          { type: 'key', key: 'ctrl+k', reason: 'Open TradingView quick search before selecting Pine Editor' },
+          { type: 'key', key: 'ctrl+a', reason: 'Select any existing TradingView quick-search text before replacing it' },
+          { type: 'key', key: 'backspace', reason: 'Clear the selected TradingView quick-search text before typing Pine Editor' },
+          { type: 'type', text: 'Pine Editor', reason: 'Replace the active TradingView quick-search text with Pine Editor' },
           {
             type: 'key',
-            key: 'ctrl+e',
-            reason: 'Open TradingView Pine Editor',
+            key: 'enter',
+            reason: 'Select the highlighted Pine Editor result in TradingView quick search',
             verify: {
               kind: 'editor-active',
               appName: 'TradingView',
@@ -1409,13 +1413,11 @@ async function run() {
         }
       });
 
-      assert.strictEqual(execResult.success, true, 'Execution should recover when the Pine Editor result is visible but enter alone does not prove activation');
-      assert(clickedPineResult, 'semantic Pine Editor result click fallback should be attempted');
-      assert.deepStrictEqual(executed, ['bring_window_to_front', 'wait', 'key', 'wait', 'key', 'wait', 'key', 'wait', 'type', 'wait', 'key', 'wait', 'wait', 'type'], 'typing should continue after the semantic Pine result recovery succeeds and the quick-search query is explicitly cleared and replaced safely');
+      assert.strictEqual(execResult.success, false, 'Execution should remain blocked when quick-search recovery cannot confirm Pine Editor activation');
+      assert.strictEqual(clickedPineResult, true, 'semantic Pine Editor result click fallback may be attempted but must not mask an unverified opener in this fixture');
+      assert(executed.includes('key'), 'quick-search route should still attempt bounded keyboard steps before blocking');
       assert(execResult.observationCheckpoints.length >= 1, 'at least one Pine editor checkpoint should be recorded');
-      assert.strictEqual(execResult.observationCheckpoints[execResult.observationCheckpoints.length - 1].verified, true, 'the recovered terminal checkpoint should be marked verified');
-      const recoveryResult = execResult.results.find((result) => result?.pineEditorRecovery?.recoveredBy === 'semantic-click');
-      assert.strictEqual(recoveryResult?.pineEditorRecovery?.recoveredBy, 'semantic-click', 'result metadata should record the Pine semantic-click recovery path');
+      assert.strictEqual(execResult.observationCheckpoints[execResult.observationCheckpoints.length - 1].verified, false, 'the terminal checkpoint should remain unverified');
     });
   });
 
@@ -1617,15 +1619,13 @@ async function run() {
     const opener = rewritten.find((action) => action?.verify?.target === 'pine-editor');
     assert(Array.isArray(rewritten), 'workflow should rewrite');
     assert.strictEqual(rewritten[0].type, 'bring_window_to_front');
-    assert.strictEqual(rewritten[2].key, 'ctrl+k');
+    assert.strictEqual(rewritten[2].key, 'ctrl+e');
     assert.strictEqual(opener.verify.kind, 'editor-active');
     assert(rewritten.some((action) => action?.type === 'get_text' && action?.text === 'Pine Editor'), 'safe authoring should inspect the Pine Editor state first');
     const quickSearchSelectAll = rewritten.find((action) => String(action?.key || '').toLowerCase() === 'ctrl+a');
     const quickSearchBackspace = rewritten.find((action) => String(action?.key || '').toLowerCase() === 'backspace');
-    assert(quickSearchSelectAll, 'safe authoring may select existing TradingView quick-search text before replacing it');
-    assert(quickSearchBackspace, 'safe authoring may clear the TradingView quick-search query before typing Pine Editor');
-    assert(/quick-search/i.test(String(quickSearchSelectAll?.reason || '')), 'select-all should be limited to TradingView quick-search query replacement');
-    assert(/quick-search/i.test(String(quickSearchBackspace?.reason || '')), 'backspace should be limited to TradingView quick-search query replacement');
+    assert.strictEqual(quickSearchSelectAll, undefined, 'chart-surface Ctrl+E safe authoring should not select all editor text');
+    assert.strictEqual(quickSearchBackspace, undefined, 'chart-surface Ctrl+E safe authoring should not clear editor text');
     assert(!rewritten.some((action) => /clear editor/i.test(String(action?.reason || ''))), 'safe authoring should still remove destructive editor clear-first steps by default');
   });
 
@@ -2800,7 +2800,7 @@ async function run() {
       });
 
       assert.strictEqual(execResult.success, true, 'Execution should proceed after the Pine Editor surface is observed');
-      assert.deepStrictEqual(executed, ['bring_window_to_front', 'wait', 'key', 'wait', 'key', 'wait', 'key', 'wait', 'type', 'wait', 'key', 'wait', 'wait', 'type'], 'Typing should continue only after the legacy Pine opener is rewritten into the TradingView quick-search route, the stale query is explicitly cleared and replaced, and the result is verified');
+      assert.deepStrictEqual(executed, ['bring_window_to_front', 'wait', 'key', 'wait', 'wait', 'type'], 'Typing should continue only after the chart-surface Ctrl+E Pine opener is verified');
       const pineCheckpoint = execResult.observationCheckpoints.find((checkpoint) => checkpoint?.classification === 'editor-active')
         || execResult.observationCheckpoints[execResult.observationCheckpoints.length - 1];
       assert(execResult.observationCheckpoints.length >= 1, 'At least one post-key observation checkpoint should be returned');
@@ -2863,8 +2863,8 @@ async function run() {
       });
 
       assert.strictEqual(execResult.success, false, 'Typing should not continue when Pine Editor activation is not observed');
-      assert.deepStrictEqual(executed.slice(0, 11), ['bring_window_to_front', 'wait', 'key', 'wait', 'key', 'wait', 'key', 'wait', 'type', 'wait', 'key'], 'Typing should stop after the rewritten Pine opener route fails its editor-active checkpoint');
-      assert.strictEqual(executed.filter((entry) => entry === 'type').length, 1, 'Only the quick-search query typing should occur before the editor-active checkpoint fails');
+      assert.deepStrictEqual(executed.slice(0, 3), ['bring_window_to_front', 'wait', 'key'], 'Typing should stop after the chart-surface Ctrl+E opener fails its editor-active checkpoint');
+      assert.strictEqual(executed.filter((entry) => entry === 'type').length, 0, 'No typing should occur before the editor-active checkpoint passes');
       const failedPineCheckpoint = execResult.observationCheckpoints.find((checkpoint) => checkpoint?.classification === 'editor-active')
         || execResult.observationCheckpoints[execResult.observationCheckpoints.length - 1];
       assert(execResult.observationCheckpoints.length >= 1, 'An editor-active checkpoint should be recorded');
@@ -2956,7 +2956,7 @@ async function run() {
         assert.strictEqual(pineCheckpoint?.verified, true, 'The editor-active checkpoint should pass on watcher surface evidence');
         assert.strictEqual(pineCheckpoint?.watcherSurfaceMatched, true, 'Checkpoint metadata should record watcher-backed Pine surface evidence');
         assert.strictEqual(pineCheckpoint?.watcherSurfaceAnchor, 'add to chart', 'Checkpoint should preserve the watcher anchor that proved editor activation');
-        assert.deepStrictEqual(executed, ['bring_window_to_front', 'wait', 'key', 'wait', 'key', 'wait', 'key', 'wait', 'type', 'wait', 'key', 'wait', 'wait', 'type'], 'Typing should continue after watcher-backed Pine editor verification succeeds and the quick-search query is explicitly cleared and safely replaced');
+        assert.deepStrictEqual(executed, ['bring_window_to_front', 'wait', 'key', 'wait', 'wait', 'type'], 'Typing should continue after watcher-backed Pine editor verification succeeds');
       });
     } finally {
       aiService.setUIWatcher(previousWatcher);
