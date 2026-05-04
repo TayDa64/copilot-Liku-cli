@@ -19,7 +19,7 @@ This repo currently emphasizes:
 - bounded safety checks before execution
 - strong Windows support through native UI Automation
 - persistent memory/skills under the Liku home directory
-- advisory-safe TradingView support, including explicit refusal of DOM order-entry and position-management actions
+- advisory-safe TradingView support, including fail-closed live/unknown trading mode, explicit Paper Trading confirmation, and blocked position-management actions
 
 See also:
 
@@ -65,7 +65,8 @@ Examples already enforced in code:
 - high-risk and critical actions trigger confirmation flows
 - fragile TradingView key flows require post-key observation checkpoints
 - screenshot-only continuation loops are prevented in terminal chat
-- TradingView **DOM / Depth of Market** order-entry and position-management actions are **blocked by advisory-only rails** rather than executed
+- TradingView **live/unknown DOM / Depth of Market** order-entry and all position-management actions are **blocked by advisory-only rails** rather than executed
+- high-confidence TradingView **Paper Trading** DOM order-entry requires explicit confirmation before execution can resume
 
 ---
 
@@ -269,7 +270,7 @@ Source of truth for these mappings is the current Electron main-process registra
 
 ## TradingView support
 
-TradingView support is being hardened as a **professional advisory / observation** workflow, not a broker-execution workflow.
+TradingView support is a **professional advisory / observation** workflow, not a broker-execution workflow. The current implementation is modularized behind tool registries and provider hooks so TradingView-specific behavior does not live directly in generic execution loops.
 
 ### Current grounded surfaces
 
@@ -282,17 +283,34 @@ The runtime now carries TradingView-specific grounding for:
 - Pine Editor
 - DOM / Depth of Market metadata
 
+### Current modular surfaces
+
+`src/main/tools/tradingview-tool.js` is the canonical TradingView facade. It registers:
+
+- ordered TradingView rewrite handlers through the tool rewrite registry
+- TradingView risk assessment through the tool risk registry
+- Pine authoring system contracts through the system-contract provider registry
+- TradingView observation/checkpoint helpers through the observation-provider registry
+- Pine resume lifecycle decisions through the lifecycle-hook registry
+
+Tool rewrite/risk registries are default-on. Temporary compatibility escape hatches remain available with `LIKU_USE_TOOL_REGISTRY_REWRITES=0` and `LIKU_USE_TOOL_REGISTRY_RISKS=0`.
+
 ### Current safety boundary
 
 Liku can reason about TradingView UI state, but it must remain advisory-safe.
 
 Specifically:
 
-- TradingView DOM order-entry actions are classified as high-risk
+- TradingView live or unknown-mode DOM order-entry actions are blocked fail-closed
+- high-confidence Paper Trading DOM order-entry is high-risk, requires explicit confirmation, and resumes only through the confirmation flow
 - TradingView DOM flatten / reverse / cancel-all style controls are classified as critical
-- TradingView DOM order-entry and position-management actions are **blocked before execution** by advisory-only safety rails
+- TradingView position-management actions are **blocked before execution** by advisory-only safety rails
 
-This means Liku can help observe, explain, and guide, but not place or manage DOM orders.
+This means Liku can help observe, explain, and guide. It must not place live/unknown-mode orders or manage positions, and Paper Trading order-entry remains gated by explicit confirmation.
+
+### Pine Editor grounding
+
+When a TradingView chart has established focus, `Ctrl+E` is treated as the grounded shortcut for opening Pine Script Editor. When chart focus is not established, Liku falls back to the verified quick-search route instead of assuming the shortcut will land in TradingView.
 
 ---
 
@@ -408,6 +426,7 @@ npm run test:ui
 npm run smoke
 npm run smoke:shortcuts
 npm run smoke:chat-direct
+npm run smoke:tradingview-live -- --dry-run
 npm run test:skills:inline
 npm run proof:inline -- --list-suites
 ```
@@ -420,6 +439,9 @@ The current focused AI bundle runs:
 - `scripts/test-ai-service-contract.js`
 - `scripts/test-ai-service-browser-rewrite.js`
 - `scripts/test-ai-service-state.js`
+- `scripts/test-tradingview-registry-parity.js`
+
+TradingView runtime behavior changes should also use `docs/TRADINGVIEW_VALIDATION_RUNBOOK.md`. The live smoke lane is opt-in and writes artifacts under `artifacts\live-validation\`; Playwright/browser evidence is secondary and must only validate browser-visible state after Liku actions.
 
 ---
 

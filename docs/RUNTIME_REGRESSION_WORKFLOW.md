@@ -201,6 +201,14 @@ Common examples that should be captured as runtime regressions:
 - the action stream halts around action 2 even though the target PID exists
 - the app process is present but focus-lock cannot prove the correct window/input surface
 
+For TradingView runtime changes, start with the opt-in dry-run lane:
+
+```powershell
+npm run smoke:tradingview-live -- --dry-run
+```
+
+When a real TradingView window is available, live smoke runs write summaries and runtime traces under `artifacts\live-validation\`. Attach those artifacts, or explain why live validation was not applicable, on PRs that change TradingView foreground routing, Pine Editor workflows, chart state workflows, observation checkpoints, or safety/resume behavior.
+
 When these happen:
 
 1. save the transcript or runtime trace
