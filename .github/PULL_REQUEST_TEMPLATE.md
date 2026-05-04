@@ -74,6 +74,14 @@
 - Pulse effect visibility.
 - Safety confirmation flow intact.
 
+## TradingView runtime evidence
+
+If this PR changes TradingView foreground routing, Pine Editor workflows, chart state workflows, observation checkpoints, paper-trading confirmation, or safety/resume behavior, attach the relevant `artifacts\live-validation\` manifest/summary paths or explain why live validation was not applicable.
+
+- [ ] TradingView runtime behavior changed and live evidence is attached or explained.
+- [ ] Browser/Playwright proof, if used, validates browser-visible state after Liku actions only and does not bypass Liku safety rails.
+- [ ] Live trading remains blocked and unknown trading mode remains fail-closed.
+
 ## Risks / Mitigations
 - DPI scaling drift → use Electron `screen.getPrimaryDisplay().scaleFactor`.
 - Performance → local fine grid only; throttled draw.
