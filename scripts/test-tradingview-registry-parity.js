@@ -7,6 +7,7 @@ const aiService = require(path.join(__dirname, '..', 'src', 'main', 'ai-service.
 const tradingViewTool = require(path.join(__dirname, '..', 'src', 'main', 'tools', 'tradingview-tool.js'));
 const systemContractRegistry = require(path.join(__dirname, '..', 'src', 'main', 'ai-service', 'system-contract-registry.js'));
 const observationProviderRegistry = require(path.join(__dirname, '..', 'src', 'main', 'ai-service', 'observation-provider-registry.js'));
+const lifecycleHooks = require(path.join(__dirname, '..', 'src', 'main', 'ai-service', 'lifecycle-hooks.js'));
 
 const REWRITE_ENV = 'LIKU_USE_TOOL_REGISTRY_REWRITES';
 const RISK_ENV = 'LIKU_USE_TOOL_REGISTRY_RISKS';
@@ -231,6 +232,22 @@ test('observation provider registry dispatches provider metadata', () => {
   const providers = observationProviderRegistry.getRegisteredObservationProviders();
   assert(providers.some((provider) => provider.toolName === 'test-observation-provider' && provider.priority === 7));
   observationProviderRegistry.unregisterObservationProvider('test-observation-provider');
+});
+
+test('lifecycle hook registry dispatches first concrete hook result', () => {
+  lifecycleHooks.unregisterLifecycleHooks('test-lifecycle-alpha');
+  lifecycleHooks.unregisterLifecycleHooks('test-lifecycle-beta');
+  lifecycleHooks.registerLifecycleHooks('test-lifecycle-beta', {
+    sampleHook: () => 'beta'
+  }, 10);
+  lifecycleHooks.registerLifecycleHooks('test-lifecycle-alpha', {
+    sampleHook: () => 'alpha'
+  }, -10);
+
+  assert.strictEqual(lifecycleHooks.runLifecycleHook('sampleHook', {}), 'alpha');
+  assert.strictEqual(lifecycleHooks.runLifecycleHook('missingHook', {}, 'fallback'), 'fallback');
+  lifecycleHooks.unregisterLifecycleHooks('test-lifecycle-alpha');
+  lifecycleHooks.unregisterLifecycleHooks('test-lifecycle-beta');
 });
 
 const rewriteCases = [

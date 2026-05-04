@@ -231,6 +231,28 @@ function registerTradingViewObservationProvider(deps = {}) {
   };
 }
 
+function registerTradingViewPineLifecycleHooks(deps = {}) {
+  const {
+    registerLifecycleHooks,
+    lifecycleHooks
+  } = deps;
+
+  if (typeof registerLifecycleHooks !== 'function') {
+    throw new Error('registerTradingViewPineLifecycleHooks requires registerLifecycleHooks');
+  }
+  if (!lifecycleHooks || typeof lifecycleHooks !== 'object') {
+    throw new Error('registerTradingViewPineLifecycleHooks requires lifecycleHooks');
+  }
+
+  const lifecycleHookEntry = registerLifecycleHooks(TRADINGVIEW_TOOL_NAME, lifecycleHooks, TRADINGVIEW_TOOL_PRIORITY);
+
+  return {
+    toolName: TRADINGVIEW_TOOL_NAME,
+    priority: TRADINGVIEW_TOOL_PRIORITY,
+    lifecycleHookEntry
+  };
+}
+
 module.exports = {
   TRADINGVIEW_TOOL_NAME,
   TRADINGVIEW_TOOL_PRIORITY,
@@ -239,6 +261,7 @@ module.exports = {
   registerTradingViewSystemContracts,
   createTradingViewObservationProvider,
   registerTradingViewObservationProvider,
+  registerTradingViewPineLifecycleHooks,
   applyTradingViewReliabilityRewrites,
   assessTradingViewRisk,
   buildOpenApplicationActions,

@@ -65,9 +65,18 @@ function createTradingViewPineResumeHelpers(deps = {}) {
     return resumePrerequisites.length === 0 && actionIndex === 0;
   }
 
+  function createTradingViewPineLifecycleHooks() {
+    return {
+      buildPendingConfirmationState: (payload = {}) => buildPendingTradingViewPineConfirmationState(payload),
+      buildResumeExecutionPlan: ({ pending } = {}) => buildTradingViewPineResumeExecutionPlan(pending),
+      isResumeActionUserConfirmed: ({ resumePlan, actionIndex } = {}) => isResumeActionUserConfirmed(resumePlan, actionIndex)
+    };
+  }
+
   return {
     buildPendingTradingViewPineConfirmationState,
     buildTradingViewPineResumeExecutionPlan,
+    createTradingViewPineLifecycleHooks,
     isResumeActionUserConfirmed
   };
 }

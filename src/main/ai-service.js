@@ -122,6 +122,7 @@ const {
   persistPineScriptState,
   registerTradingViewSystemContracts,
   registerTradingViewObservationProvider,
+  registerTradingViewPineLifecycleHooks
 } = require('./tools/tradingview-tool');
 const {
   applyTradingViewReliabilityRewrites
@@ -151,6 +152,10 @@ const {
   getRegisteredObservationProviders,
   registerObservationProvider
 } = require('./ai-service/observation-provider-registry');
+const {
+  registerLifecycleHooks,
+  runLifecycleHook
+} = require('./ai-service/lifecycle-hooks');
 const {
   createObservationCheckpointRuntime
 } = require('./ai-service/observation-checkpoints');
@@ -1699,10 +1704,23 @@ const {
 const {
   buildPendingTradingViewPineConfirmationState,
   buildTradingViewPineResumeExecutionPlan,
+  createTradingViewPineLifecycleHooks,
   isResumeActionUserConfirmed
 } = createTradingViewPineResumeHelpers({
   buildTradingViewPineResumePrerequisites
 });
+
+function buildPendingConfirmationState(payload = {}) {
+  return runLifecycleHook('buildPendingConfirmationState', payload, buildPendingTradingViewPineConfirmationState);
+}
+
+function buildResumeExecutionPlan(pending = {}) {
+  return runLifecycleHook('buildResumeExecutionPlan', { pending }, () => buildTradingViewPineResumeExecutionPlan(pending));
+}
+
+function isResumeActionConfirmed(resumePlan, actionIndex = 0) {
+  return runLifecycleHook('isResumeActionUserConfirmed', { resumePlan, actionIndex }, () => isResumeActionUserConfirmed(resumePlan, actionIndex));
+}
 
 registerTradingViewSystemContracts({
   registerSystemContractProvider,
@@ -1710,6 +1728,10 @@ registerTradingViewSystemContracts({
 });
 registerTradingViewObservationProvider({
   registerObservationProvider
+});
+registerTradingViewPineLifecycleHooks({
+  registerLifecycleHooks,
+  lifecycleHooks: createTradingViewPineLifecycleHooks()
 });
 
 /**
@@ -6920,7 +6942,7 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
       }
       
       // Store as pending action
-      setPendingAction(buildPendingTradingViewPineConfirmationState({
+      setPendingAction(buildPendingConfirmationState({
         safety,
         actionData,
         actionIndex: i,
@@ -7771,7 +7793,7 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
   let requirePreInputRefocus = false;
   let postVerification = { applicable: false, verified: true, healed: false, attempts: 0 };
   const observationCheckpoints = [];
-  const resumePlan = buildTradingViewPineResumeExecutionPlan(pending);
+  const resumePlan = buildResumeExecutionPlan(pending);
   const resumePrerequisites = resumePlan.resumePrerequisites;
   const actionsToResume = resumePlan.actionsToResume;
   const runtimeTraceLog = buildRuntimeTraceLogForExecution('resume', {
@@ -7860,7 +7882,7 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
         action: action.type,
         error: resumeSafety.blockReason || 'Action blocked by advisory-only safety rail',
         reason: action.reason || '',
-        userConfirmed: isResumeActionUserConfirmed(resumePlan, i),
+        userConfirmed: isResumeActionConfirmed(resumePlan, i),
         safety: resumeSafety,
         blockedByPolicy: true
       };
@@ -7879,7 +7901,7 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
           action: action.type,
           error: prevalidation.error,
           reason: action.reason || '',
-          userConfirmed: isResumeActionUserConfirmed(resumePlan, i)
+          userConfirmed: isResumeActionConfirmed(resumePlan, i)
         };
         results.push(blockedResult);
         if (onAction) {
@@ -7911,7 +7933,7 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
         action: action.type,
         error: buildMissingFocusLockTargetMessage(action),
         reason: action.reason || '',
-        userConfirmed: isResumeActionUserConfirmed(resumePlan, i),
+        userConfirmed: isResumeActionConfirmed(resumePlan, i),
         blockedByFocusLock: true,
         focusVerification: {
           applicable: false,
@@ -7951,7 +7973,7 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
           action: action.type,
           error: buildFocusLockFailureMessage(action, focusLock.verification),
           reason: action.reason || '',
-          userConfirmed: isResumeActionUserConfirmed(resumePlan, i),
+          userConfirmed: isResumeActionConfirmed(resumePlan, i),
           blockedByFocusLock: true,
           focusVerification: focusLock.verification
         };
@@ -7970,7 +7992,7 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
       if (smart.handled) {
         const smartResult = smart.result;
         smartResult.reason = action.reason || '';
-        smartResult.userConfirmed = isResumeActionUserConfirmed(resumePlan, i);
+        smartResult.userConfirmed = isResumeActionConfirmed(resumePlan, i);
         results.push(smartResult);
         if (onAction) onAction(smartResult, pending.actionIndex + i, pending.actionIndex + actionsToResume.length);
         if (!smartResult.success && !action.continue_on_error) break;
@@ -8010,7 +8032,7 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
         action: effectiveAction.type,
         error: quickSearchPreflight.error || 'Quick-search input empty-state proof failed before typing',
         reason: action.reason || '',
-        userConfirmed: isResumeActionUserConfirmed(resumePlan, i),
+        userConfirmed: isResumeActionConfirmed(resumePlan, i),
         quickSearchPreflight
       };
       results.push(failedResult);
@@ -8045,7 +8067,7 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
 
     const result = await (actionExecutor ? actionExecutor(effectiveAction) : systemAutomation.executeAction(effectiveAction));
     result.reason = action.reason || '';
-    result.userConfirmed = isResumeActionUserConfirmed(resumePlan, i);
+    result.userConfirmed = isResumeActionConfirmed(resumePlan, i);
     if (quickSearchPreflight?.applicable) {
       result.quickSearchPreflight = quickSearchPreflight;
     }
