@@ -2678,10 +2678,13 @@ const GLOBAL_DANGER_PATTERNS = [
 ];
 
 const TRADINGVIEW_SCOPED_DANGER_PATTERNS = [
-  /\b(order|depth of market|order book|dom|paper trading|buy mkt|sell mkt|market order|limit order|stop order|qty|quantity|flatten|reverse|position management|margin)\b/i
+  /\border\b/i
 ];
 
 function shouldApplyTradingViewScopedDangerPatterns(riskTextToCheck = '', action = null, targetInfo = {}, tradingDomainRisk = null) {
+  if (/\b(buy|purchase|checkout|pay|payment|subscribe|donate|transfer|send money|place\s+order)\b/i.test(String(riskTextToCheck || ''))) {
+    return false;
+  }
   if (tradingDomainRisk?.toolName === 'tradingview') return true;
   if (tradingDomainRisk?.tradingMode) return true;
   if (isTradingViewTargetHint(action?.verifyTarget || targetInfo?.verifyTarget || null)) return true;
@@ -2695,10 +2698,7 @@ function getDangerPatternsForContext(riskTextToCheck = '', action = null, target
   }
 
   const patterns = [...GLOBAL_DANGER_PATTERNS];
-  const hasConcreteTradingViewDomainRisk = tradingDomainRisk?.toolName === 'tradingview'
-    || !!tradingDomainRisk?.tradingMode;
-  if (!hasConcreteTradingViewDomainRisk
-    && shouldApplyTradingViewScopedDangerPatterns(riskTextToCheck, action, targetInfo, tradingDomainRisk)) {
+  if (shouldApplyTradingViewScopedDangerPatterns(riskTextToCheck, action, targetInfo, tradingDomainRisk)) {
     patterns.push(...TRADINGVIEW_SCOPED_DANGER_PATTERNS);
   }
   return patterns;

@@ -62,9 +62,9 @@ namespace UIAWrapper
             return node;
         }
 
-        static double SafeNumber(double value)
+        static double? SafeNumber(double value)
         {
-            return double.IsFinite(value) ? value : 0;
+            return double.IsFinite(value) ? value : null;
         }
     }
 
@@ -81,9 +81,9 @@ namespace UIAWrapper
 
     class Bounds
     {
-        public double x { get; set; }
-        public double y { get; set; }
-        public double width { get; set; }
-        public double height { get; set; }
+        public double? x { get; set; }
+        public double? y { get; set; }
+        public double? width { get; set; }
+        public double? height { get; set; }
     }
 }

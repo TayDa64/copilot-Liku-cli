@@ -1,0 +1,255 @@
+#!/usr/bin/env node
+
+const assert = require('assert');
+const path = require('path');
+
+const aiService = require(path.join(__dirname, '..', 'src', 'main', 'ai-service.js'));
+
+const REWRITE_ENV = 'LIKU_USE_TOOL_REGISTRY_REWRITES';
+const RISK_ENV = 'LIKU_USE_TOOL_REGISTRY_RISKS';
+
+function cloneJson(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+function withEnv(overrides, fn) {
+  const previous = {};
+  for (const key of Object.keys(overrides)) {
+    previous[key] = process.env[key];
+    const value = overrides[key];
+    if (value === undefined || value === null) {
+      delete process.env[key];
+    } else {
+      process.env[key] = String(value);
+    }
+  }
+
+  try {
+    return fn();
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+function normalizeRewriteResult(actions, userMessage) {
+  const rewriteJournal = [];
+  const rewritten = aiService.rewriteActionsForReliability(cloneJson(actions), {
+    userMessage,
+    rewriteJournal,
+    cwd: process.cwd()
+  });
+
+  return {
+    actions: rewritten,
+    rewrites: rewriteJournal.map((entry) => ({
+      rewriter: entry.rewriter,
+      category: entry.category,
+      reason: entry.reason,
+      changed: entry.changed,
+      beforeActionCount: entry.beforeActionCount,
+      afterActionCount: entry.afterActionCount,
+      beforeActionTypes: entry.beforeActionTypes,
+      afterActionTypes: entry.afterActionTypes
+    }))
+  };
+}
+
+function rewriteLegacy(actions, userMessage) {
+  return withEnv({ [REWRITE_ENV]: undefined }, () => normalizeRewriteResult(actions, userMessage));
+}
+
+function rewriteRegistry(actions, userMessage) {
+  return withEnv({ [REWRITE_ENV]: '1' }, () => normalizeRewriteResult(actions, userMessage));
+}
+
+function normalizeSafetyResult(result) {
+  return {
+    riskLevel: result.riskLevel,
+    warnings: result.warnings,
+    requiresConfirmation: result.requiresConfirmation,
+    blockExecution: result.blockExecution,
+    blockReason: result.blockReason,
+    tradingMode: result.tradingMode || null,
+    confirmationPrompt: result.confirmationPrompt || null
+  };
+}
+
+function safetyLegacy(action, targetInfo) {
+  return withEnv({ [RISK_ENV]: undefined }, () => normalizeSafetyResult(
+    aiService.analyzeActionSafety(cloneJson(action), cloneJson(targetInfo))
+  ));
+}
+
+function safetyRegistry(action, targetInfo) {
+  return withEnv({ [RISK_ENV]: '1' }, () => normalizeSafetyResult(
+    aiService.analyzeActionSafety(cloneJson(action), cloneJson(targetInfo))
+  ));
+}
+
+function test(name, fn) {
+  try {
+    fn();
+    console.log(`PASS ${name}`);
+  } catch (error) {
+    console.error(`FAIL ${name}`);
+    console.error(error.stack || error.message);
+    process.exitCode = 1;
+  }
+}
+
+const rewriteCases = [
+  {
+    name: 'TradingView timeframe workflow',
+    userMessage: 'change the timeframe selector from 1m to 5m in tradingview',
+    actions: [{ type: 'screenshot' }, { type: 'wait', ms: 250 }]
+  },
+  {
+    name: 'TradingView symbol workflow',
+    userMessage: 'change the symbol to NVDA in tradingview',
+    actions: [{ type: 'screenshot' }, { type: 'wait', ms: 250 }]
+  },
+  {
+    name: 'TradingView watchlist workflow',
+    userMessage: 'select the watchlist symbol NVDA in tradingview',
+    actions: [{ type: 'screenshot' }, { type: 'wait', ms: 250 }]
+  },
+  {
+    name: 'TradingView drawing workflow',
+    userMessage: 'open object tree in tradingview',
+    actions: [{ type: 'key', key: 'ctrl+shift+o' }, { type: 'wait', ms: 250 }]
+  },
+  {
+    name: 'TradingView Pine workflow',
+    userMessage: 'open pine editor in tradingview and type plot(close)',
+    actions: [{ type: 'key', key: 'ctrl+e' }, { type: 'type', text: 'plot(close)' }]
+  },
+  {
+    name: 'TradingView paper workflow',
+    userMessage: 'open paper trading in tradingview',
+    actions: [{ type: 'key', key: 'alt+t' }, { type: 'wait', ms: 250 }]
+  },
+  {
+    name: 'TradingView DOM workflow',
+    userMessage: 'open depth of market in tradingview',
+    actions: [{ type: 'key', key: 'ctrl+d' }, { type: 'wait', ms: 250 }]
+  },
+  {
+    name: 'TradingView indicator workflow',
+    userMessage: 'open indicator search in tradingview and add anchored vwap',
+    actions: [{ type: 'screenshot' }, { type: 'wait', ms: 300 }]
+  },
+  {
+    name: 'TradingView alert workflow',
+    userMessage: 'set an alert for a price target of $20.02 in tradingview',
+    actions: [{ type: 'screenshot' }, { type: 'wait', ms: 250 }]
+  },
+  {
+    name: 'non-TradingView browser rewrite',
+    userMessage: 'open https://example.com in Microsoft Edge',
+    actions: [
+      { type: 'key', key: 'ctrl+shift+p' },
+      { type: 'type', text: 'Simple Browser: Show' },
+      { type: 'key', key: 'enter' }
+    ]
+  }
+];
+
+for (const fixture of rewriteCases) {
+  test(`${fixture.name} rewrite registry output matches legacy`, () => {
+    assert.deepStrictEqual(
+      rewriteRegistry(fixture.actions, fixture.userMessage),
+      rewriteLegacy(fixture.actions, fixture.userMessage)
+    );
+  });
+}
+
+const riskCases = [
+  {
+    name: 'paper-mode DOM order entry stays current-behavior blocked before paper semantics PR',
+    action: {
+      type: 'click',
+      reason: 'Click buy market order in TradingView Paper Trading DOM',
+      targetText: 'Buy Mkt'
+    },
+    targetInfo: {
+      text: 'TradingView Paper Trading DOM buy market order',
+      nearbyText: ['Paper Trading', 'Buy Mkt', 'quantity'],
+      userMessage: 'place a paper trading buy market order in TradingView'
+    }
+  },
+  {
+    name: 'live-mode DOM order entry remains blocked',
+    action: {
+      type: 'click',
+      reason: 'Click buy market order in TradingView live trading DOM',
+      targetText: 'Buy Mkt'
+    },
+    targetInfo: {
+      text: 'TradingView live trading DOM buy market order real money',
+      nearbyText: ['Live Trading', 'Buy Mkt', 'quantity'],
+      userMessage: 'place a live trading buy market order in TradingView'
+    }
+  },
+  {
+    name: 'unknown-mode DOM order entry remains fail-closed',
+    action: {
+      type: 'click',
+      reason: 'Click limit order in TradingView DOM',
+      targetText: 'Limit Order'
+    },
+    targetInfo: {
+      text: 'TradingView DOM limit order quantity',
+      nearbyText: ['Depth of Market', 'Limit Order', 'quantity'],
+      userMessage: 'place a limit order in TradingView'
+    }
+  },
+  {
+    name: 'TradingView position management remains blocked',
+    action: {
+      type: 'click',
+      reason: 'Click flatten in TradingView DOM',
+      targetText: 'Flatten'
+    },
+    targetInfo: {
+      text: 'TradingView DOM flatten position',
+      nearbyText: ['Flatten', 'Reverse', 'CXL All'],
+      userMessage: 'flatten my TradingView position'
+    }
+  },
+  {
+    name: 'TradingView drawing placement remains blocked',
+    action: {
+      type: 'drag',
+      reason: 'Draw a trend line exactly on the TradingView chart'
+    },
+    targetInfo: {
+      text: 'TradingView chart draw trend line placement',
+      nearbyText: ['Trend Line', 'Drawing Tools'],
+      userMessage: 'draw a trend line exactly on tradingview'
+    }
+  },
+  {
+    name: 'non-TradingView safe prompt is unaffected by registry risk',
+    action: {
+      type: 'type',
+      text: 'Budget spreadsheet',
+      reason: 'Type a spreadsheet title'
+    },
+    targetInfo: {
+      text: 'Create a budget spreadsheet title',
+      userMessage: 'create a budget spreadsheet title'
+    }
+  }
+];
+
+for (const fixture of riskCases) {
+  test(`${fixture.name} risk registry output matches legacy`, () => {
+    assert.deepStrictEqual(
+      safetyRegistry(fixture.action, fixture.targetInfo),
+      safetyLegacy(fixture.action, fixture.targetInfo)
+    );
+  });
+}
