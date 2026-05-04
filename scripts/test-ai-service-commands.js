@@ -31,6 +31,7 @@ const historyStore = {
 
 let currentProvider = 'copilot';
 let currentCopilotModel = 'gpt-4o';
+let persistedCopilotModel = 'gpt-5.2';
 let clearedVisual = false;
 let resetBrowser = false;
 let clearedSessionIntent = false;
@@ -141,10 +142,18 @@ const handler = createCommandHandler({
     clearedSessionIntent = true;
   },
   setApiKey: () => true,
+  setSessionCopilotModel: (model) => {
+    if (!['gpt-4.1', 'gpt-4o', 'gpt-4o-mini', 'gpt-5.2'].includes(model)) {
+      return false;
+    }
+    currentCopilotModel = model;
+    return true;
+  },
   setCopilotModel: (model) => {
     if (!['gpt-4.1', 'gpt-4o', 'gpt-4o-mini', 'gpt-5.2'].includes(model)) {
       return false;
     }
+    persistedCopilotModel = model;
     currentCopilotModel = model;
     return true;
   },
@@ -243,13 +252,17 @@ test('model command uses normalized model keys', () => {
   const result = handler.handleCommand('/model gpt-4.1 - GPT-4.1');
   assert.strictEqual(result.type, 'system');
   assert.ok(result.message.includes('Switched to GPT-4.1'));
+  assert.ok(result.message.includes('for this session only.'));
+  assert.strictEqual(persistedCopilotModel, 'gpt-5.2');
 });
 
 test('model command supports budget alias', () => {
   const result = handler.handleCommand('/model cheap');
   assert.strictEqual(result.type, 'system');
   assert.ok(result.message.includes('via cheap alias'));
+  assert.ok(result.message.includes('for this session only.'));
   assert.strictEqual(currentCopilotModel, 'gpt-4o');
+  assert.strictEqual(persistedCopilotModel, 'gpt-5.2');
 });
 
 test('model command supports latest-gpt alias', () => {
@@ -258,6 +271,17 @@ test('model command supports latest-gpt alias', () => {
   assert.ok(result.message.includes('GPT-5.2'));
   assert.ok(result.message.includes('via latest-gpt alias'));
   assert.strictEqual(currentCopilotModel, 'gpt-5.2');
+  assert.strictEqual(persistedCopilotModel, 'gpt-5.2');
+});
+
+test('model command persists only with explicit flag', () => {
+  currentCopilotModel = 'gpt-4o';
+  persistedCopilotModel = 'gpt-5.2';
+  const result = handler.handleCommand('/model --persist gpt-4.1');
+  assert.strictEqual(result.type, 'system');
+  assert.ok(result.message.includes('saved it as your default.'));
+  assert.strictEqual(currentCopilotModel, 'gpt-4.1');
+  assert.strictEqual(persistedCopilotModel, 'gpt-4.1');
 });
 
 test('model inventory includes multiplier and shortcuts', () => {
@@ -265,6 +289,7 @@ test('model inventory includes multiplier and shortcuts', () => {
   assert.strictEqual(result.type, 'info');
   assert.ok(result.message.includes('[1x]'));
   assert.ok(result.message.includes('Shortcuts: /model cheap, /model latest-gpt'));
+  assert.ok(result.message.includes('/model --persist <id>'));
 });
 
 test('status command preserves status text shape', () => {

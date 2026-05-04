@@ -5259,6 +5259,7 @@ const {
 } = observationCheckpointRuntime;
 
 const {
+  detectTradingViewPineEditorQuickSearchResult,
   ensureTradingViewQuickSearchInputClearBeforeTyping,
   verifyTradingViewQuickSearchTypedValue,
   maybeRecoverTradingViewQuickSearchOpen,
@@ -6152,6 +6153,7 @@ function shouldDeferTradingViewQuickSearchCheckpointFailure(action, actionData, 
   const verifyTarget = normalizeObservationCheckpointVerifyTarget(observationCheckpoint.verifyTarget);
   const key = String(action?.key || '').trim().toLowerCase();
   const route = String(action?.searchSurfaceContract?.route || '').trim().toLowerCase();
+  const routeId = String(action?.searchSurfaceContract?.id || '').trim().toLowerCase();
   const shortcutId = String(action?.tradingViewShortcut?.id || '').trim().toLowerCase();
   const foreground = observationCheckpoint.foreground && typeof observationCheckpoint.foreground === 'object'
     ? observationCheckpoint.foreground
@@ -6159,18 +6161,24 @@ function shouldDeferTradingViewQuickSearchCheckpointFailure(action, actionData, 
   const foregroundProcessName = String(foreground?.processName || '').trim().toLowerCase();
   const foregroundWindowKind = String(foreground?.windowKind || '').trim().toLowerCase();
   const foregroundTitle = String(foreground?.title || '').trim().toLowerCase();
+  const foregroundHandle = Number(foreground?.hwnd || 0) || 0;
+  const expectedWindowHandle = Number(observationCheckpoint.expectedWindowHandle || observationCheckpoint.waitTargetHwnd || 0) || 0;
   const looksLikeQuickSearchSurface = foregroundProcessName === 'tradingview'
     && (
       foregroundWindowKind === 'owned'
       || foregroundWindowKind === 'palette'
       || /search tool or function|symbol search|quick search/.test(foregroundTitle)
     );
+  const stillOnRequestedTradingViewMain = foregroundProcessName === 'tradingview'
+    && foregroundWindowKind === 'main'
+    && (!expectedWindowHandle || !foregroundHandle || foregroundHandle === expectedWindowHandle);
 
   if (classification !== 'input-surface-open') return false;
   if (verifyTarget !== 'quick-search') return false;
   if (key !== 'ctrl+k') return false;
   if (route !== 'quick-search' && shortcutId !== 'symbol-search') return false;
-  if (!looksLikeQuickSearchSurface) return false;
+  if (observationCheckpoint.quickSearchSurfaceProbe?.trusted === false) return false;
+  if (!looksLikeQuickSearchSurface && !stillOnRequestedTradingViewMain) return false;
 
   const actions = Array.isArray(actionData?.actions) ? actionData.actions : [];
   const nextTypeAction = actions.slice(actionIndex + 1).find((candidate) => String(candidate?.type || '').trim().toLowerCase() === 'type');
@@ -6180,8 +6188,144 @@ function shouldDeferTradingViewQuickSearchCheckpointFailure(action, actionData, 
     && !!String(nextTypeAction?.text || '').trim();
 }
 
+function normalizeShortcutText(value = '') {
+  return String(value || '').trim().toLowerCase();
+}
+
+function getQuickSearchAutoFocusTypingContract(action = {}) {
+  const contract = action?.searchSurfaceContract?.autoFocusTyping;
+  if (!contract || typeof contract !== 'object' || contract.enabled !== true) return null;
+
+  const openerKey = normalizeShortcutText(contract.openerKey);
+  const expectedText = normalizeShortcutText(contract.expectedText || action?.text || '');
+  const appName = normalizeShortcutText(contract.appName || action?.searchSurfaceContract?.appName || 'TradingView');
+  const processNames = Array.isArray(contract.processNames)
+    ? contract.processNames.map(normalizeShortcutText).filter(Boolean)
+    : (appName ? [appName] : []);
+  const windowKinds = Array.isArray(contract.windowKinds)
+    ? contract.windowKinds.map(normalizeShortcutText).filter(Boolean)
+    : ['main'];
+
+  if (!openerKey || !expectedText || processNames.length === 0) return null;
+
+  return {
+    openerShortcutId: normalizeShortcutText(contract.openerShortcutId),
+    openerKey,
+    expectedText,
+    appName,
+    processNames,
+    windowKinds,
+    requirePinnedForeground: contract.requirePinnedForeground !== false
+  };
+}
+
+function getQuickSearchAutoFocusedTypingSignal(action, priorResults = []) {
+  const type = String(action?.type || '').trim().toLowerCase();
+  const route = String(action?.searchSurfaceContract?.route || '').trim().toLowerCase();
+  const text = normalizeShortcutText(action?.text);
+  const contract = getQuickSearchAutoFocusTypingContract(action);
+  if (type !== 'type' || route !== 'quick-search' || !contract || text !== contract.expectedText) {
+    return null;
+  }
+
+  const entries = Array.isArray(priorResults) ? priorResults : [];
+  let openIndex = -1;
+  for (let index = entries.length - 1; index >= 0; index--) {
+    const entry = entries[index];
+    const entryShortcutId = normalizeShortcutText(
+      entry?.effectiveAction?.tradingViewShortcut?.id
+      || entry?.effectiveAction?.searchSurfaceContract?.openerShortcutId
+      || entry?.effectiveAction?.searchSurfaceContract?.id
+      || ''
+    );
+    const isCtrlK = String(entry?.action || '').trim().toLowerCase() === 'key'
+      && (
+        String(entry?.message || '').toLowerCase().includes(contract.openerKey)
+        || String(entry?.observationCheckpoint?.reason || '').toLowerCase().includes(contract.openerKey)
+      )
+      && String(entry?.observationCheckpoint?.verifyTarget || '').trim().toLowerCase() === 'quick-search';
+    const shortcutMatches = !contract.openerShortcutId || !entryShortcutId || entryShortcutId === contract.openerShortcutId;
+    if (isCtrlK && shortcutMatches) {
+      openIndex = index;
+      break;
+    }
+  }
+  if (openIndex < 0) return null;
+
+  const betweenOpenAndType = entries.slice(openIndex + 1);
+  const clearedAfterOpen = betweenOpenAndType.some((entry) =>
+    String(entry?.action || '').trim().toLowerCase() === 'key'
+    && /\b(ctrl\+a|backspace|delete)\b/i.test(String(entry?.message || entry?.reason || ''))
+  );
+  if (clearedAfterOpen) return null;
+
+  const openAttempt = entries[openIndex];
+  const checkpoint = openAttempt?.observationCheckpoint || null;
+  const foreground = checkpoint?.foreground || null;
+  const expectedWindowHandle = Number(checkpoint?.expectedWindowHandle || 0) || 0;
+  const foregroundHandle = Number(foreground?.hwnd || 0) || 0;
+  const processName = String(foreground?.processName || '').trim().toLowerCase();
+  const windowKind = String(foreground?.windowKind || '').trim().toLowerCase();
+  const stillPinnedExpectedWindow = !contract.requirePinnedForeground
+    || !expectedWindowHandle
+    || foregroundHandle === expectedWindowHandle;
+  const processMatched = contract.processNames.includes(processName);
+  const windowKindMatched = contract.windowKinds.length === 0 || contract.windowKinds.includes(windowKind);
+  if (!processMatched || !windowKindMatched || !stillPinnedExpectedWindow) return null;
+
+  const routeText = normalizeShortcutText(
+    checkpoint?.reason
+    || openAttempt?.reason
+    || openAttempt?.message
+    || ''
+  );
+  const routeLooksExpected = routeText.includes(contract.expectedText)
+    || (contract.openerShortcutId && routeText.includes(contract.openerShortcutId.replace(/-/g, ' ')));
+  if (!routeLooksExpected) return null;
+
+  return {
+    openIndex,
+    openAttempt,
+    checkpoint,
+    foreground,
+    expectedWindowHandle,
+    contract,
+    reason: `${contract.appName || 'App'} ${contract.openerKey} auto-focused quick-search input for ${contract.expectedText} query`
+  };
+}
+
 function shouldAllowTradingViewQuickSearchTypeFallback(action, quickSearchPreflight, priorResults = []) {
-  return false;
+  if (!quickSearchPreflight?.applicable || quickSearchPreflight.ready) return false;
+  return !!getQuickSearchAutoFocusedTypingSignal(action, priorResults);
+}
+
+function buildTradingViewQuickSearchAutoFocusPreflight(action, priorResults = []) {
+  const signal = getQuickSearchAutoFocusedTypingSignal(action, priorResults);
+  if (!signal) return null;
+  return {
+    applicable: true,
+    ready: true,
+    emptyConfirmed: false,
+    queryAlreadyPresent: false,
+    fallbackAssumedFocused: true,
+    fallbackReason: signal.reason || 'Proceed with guarded quick-search typing because the opener auto-focused the pinned input',
+    clearedBy: null,
+    expectedText: signal.contract?.expectedText || String(action?.text || '').trim(),
+    initialRead: null,
+    finalRead: null,
+    inputFocus: {
+      focused: true,
+      recoveredBy: 'contracted-auto-focus-opener',
+      foreground: signal.foreground || null
+    },
+    foreground: signal.foreground || null,
+    autoFocusTypingContract: signal.contract || null,
+    autoFocusTypingSignal: {
+      openIndex: signal.openIndex,
+      expectedWindowHandle: signal.expectedWindowHandle || null,
+      reason: signal.reason || null
+    }
+  };
 }
 
 function getTradingViewQuickSearchEnterVerificationFailure(action, priorResults = []) {
@@ -6204,6 +6348,90 @@ function getTradingViewQuickSearchEnterVerificationFailure(action, priorResults 
   };
 }
 
+function getTradingViewQuickSearchRoutePrerequisiteFailure(action, priorResults = []) {
+  const type = String(action?.type || '').trim().toLowerCase();
+  const key = String(action?.key || '').trim().toLowerCase();
+  const route = String(action?.searchSurfaceContract?.route || '').trim().toLowerCase();
+  const routeId = String(action?.searchSurfaceContract?.id || '').trim().toLowerCase();
+  if (route !== 'quick-search' || routeId !== 'open-pine-editor') return null;
+  const isFollowUpRouteStep = (type === 'type')
+    || (type === 'key' && ['ctrl+a', 'backspace', 'enter'].includes(key));
+  if (!isFollowUpRouteStep) return null;
+
+  const priorEntries = Array.isArray(priorResults) ? priorResults.slice().reverse() : [];
+  const priorOpenAttempt = priorEntries.find((entry) =>
+    String(entry?.action || '').trim().toLowerCase() === 'key'
+    && String(entry?.observationCheckpoint?.verifyTarget || '').trim().toLowerCase() === 'quick-search'
+  );
+  const priorOpenAttemptRouteId = getTradingViewSurfaceRouteId(priorOpenAttempt?.effectiveAction || priorOpenAttempt?.actionData || priorOpenAttempt || {});
+  const priorOpenAttemptIsPineRoute = priorOpenAttemptRouteId === 'open-pine-editor'
+    || /pine editor/i.test(String(
+      priorOpenAttempt?.observationCheckpoint?.reason
+      || priorOpenAttempt?.reason
+      || priorOpenAttempt?.message
+      || ''
+    ));
+  if (
+    priorOpenAttempt
+    && priorOpenAttemptIsPineRoute
+    && priorOpenAttempt?.observationCheckpoint?.verified !== true
+    && !priorOpenAttempt?.quickSearchRecovery?.recoveredBy
+    && type === 'type'
+    && getQuickSearchAutoFocusedTypingSignal(action, priorResults)
+  ) {
+    return null;
+  }
+
+  if (
+    priorOpenAttempt
+    && priorOpenAttemptIsPineRoute
+    && priorOpenAttempt?.observationCheckpoint?.verified !== true
+    && !priorOpenAttempt?.quickSearchRecovery?.recoveredBy
+    && type === 'key'
+    && ['ctrl+a', 'backspace'].includes(key)
+  ) {
+    return {
+      error: 'Refusing to clear TradingView quick-search text because the quick-search opener was not verified',
+      failedOpenResult: priorOpenAttempt,
+      observationCheckpoint: priorOpenAttempt.observationCheckpoint || null
+    };
+  }
+
+  if (
+    priorOpenAttempt
+    && priorOpenAttemptIsPineRoute
+    && priorOpenAttempt?.observationCheckpoint?.verified !== true
+    && !priorOpenAttempt?.quickSearchRecovery?.recoveredBy
+    && !/Deferred TradingView quick-search checkpoint failure/i.test(String(priorOpenAttempt?.deferredObservationCheckpoint?.reason || ''))
+    && !/quick search was already open/i.test(String(priorOpenAttempt?.skippedReason || ''))
+  ) {
+    return {
+      error: 'Refusing to continue the TradingView quick-search Pine Editor route because the quick-search opener was not verified',
+      failedOpenResult: priorOpenAttempt,
+      observationCheckpoint: priorOpenAttempt.observationCheckpoint || null
+    };
+  }
+
+  if (priorEntries.some((entry) =>
+    entry?.quickSearchRecovery?.recoveredBy
+    || entry?.quickSearchPreflight?.ready === true
+    || entry?.quickSearchPreflight?.targetSurfaceAlreadyOpen === true
+    || entry?.pineEditorAlreadyOpen
+    || /pine editor opener route was already satisfied|quick search was already open/i.test(String(entry?.skippedReason || ''))
+  )) {
+    return null;
+  }
+
+  if (!priorOpenAttempt) return null;
+  if (!priorOpenAttemptIsPineRoute) return null;
+
+  return {
+    error: 'Refusing to continue the TradingView quick-search Pine Editor route because the quick-search opener was not verified',
+    failedOpenResult: priorOpenAttempt,
+    observationCheckpoint: priorOpenAttempt.observationCheckpoint || null
+  };
+}
+
 function getTradingViewQuickSearchEnterAlreadySatisfiedSignal(action, priorResults = []) {
   if (String(action?.type || '').trim().toLowerCase() !== 'key') return null;
   if (String(action?.key || '').trim().toLowerCase() !== 'enter') return null;
@@ -6218,6 +6446,13 @@ function getTradingViewQuickSearchEnterAlreadySatisfiedSignal(action, priorResul
     quickSearchPreflight: lastQuickSearchTypeResult.quickSearchPreflight,
     quickSearchTypedVerification: lastQuickSearchTypeResult.quickSearchTypedVerification || null
   };
+}
+
+function isTradingViewPineEditorVisibleResultCommitAction(action = {}) {
+  return String(action?.type || '').trim().toLowerCase() === 'key'
+    && String(action?.key || '').trim().toLowerCase() === 'enter'
+    && String(action?.searchSurfaceContract?.route || '').trim().toLowerCase() === 'quick-search-open-result'
+    && getTradingViewSurfaceRouteId(action) === 'open-pine-editor';
 }
 
 function normalizePineClipboardProofText(value = '') {
@@ -6303,6 +6538,28 @@ async function buildPineClipboardProof(action = {}) {
   };
 }
 
+async function verifyTradingViewForegroundForPineClipboardProof() {
+  try {
+    const foreground = await systemAutomation.getForegroundWindowInfo();
+    const processName = String(foreground?.processName || '').trim().toLowerCase();
+    const title = String(foreground?.title || '').trim().toLowerCase();
+    const tradingViewFocused = processName === 'tradingview' || /\btradingview\b|pine editor/.test(title);
+    return {
+      verified: tradingViewFocused,
+      foreground: foreground || null,
+      error: tradingViewFocused
+        ? null
+        : 'Refusing Pine clipboard verification because TradingView is not the proven foreground window.'
+    };
+  } catch (error) {
+    return {
+      verified: false,
+      foreground: null,
+      error: error?.message || String(error || 'Could not verify TradingView foreground before Pine clipboard verification')
+    };
+  }
+}
+
 function getLastVerifiedPineClipboardProof(results = []) {
   if (!Array.isArray(results)) return null;
   for (let index = results.length - 1; index >= 0; index--) {
@@ -6319,6 +6576,17 @@ async function verifyPineClipboardBeforePaste(action = {}, lastPineClipboardProo
     return { applicable: false, verified: true };
   }
 
+  const focusProof = await verifyTradingViewForegroundForPineClipboardProof();
+  if (!focusProof.verified) {
+    return {
+      applicable: true,
+      verified: false,
+      expectedHash: String(action?.pineClipboardContract?.expectedHash || '').trim(),
+      focusProof,
+      error: focusProof.error || 'Refusing to verify or paste Pine code until TradingView focus is proven.'
+    };
+  }
+
   const contract = action.pineClipboardContract || {};
   const expectedHash = String(contract.expectedHash || '').trim();
   const lastHash = String(lastPineClipboardProof?.expectedHash || '').trim();
@@ -6328,6 +6596,7 @@ async function verifyPineClipboardBeforePaste(action = {}, lastPineClipboardProo
       verified: false,
       expectedHash,
       lastPreparedHash: lastHash || null,
+      focusProof,
       error: 'Refusing to paste Pine code because this run has not proven a fresh matching Set-Clipboard payload.'
     };
   }
@@ -6343,7 +6612,10 @@ async function verifyPineClipboardBeforePaste(action = {}, lastPineClipboardProo
     };
   }
 
-  return currentProof;
+  return {
+    ...currentProof,
+    focusProof
+  };
 }
 
 function shouldDeferTradingViewPineEditorCheckpointFailure(action, actionData, actionIndex, observationCheckpoint) {
@@ -6374,6 +6646,28 @@ function shouldDeferTradingViewPineEditorCheckpointFailure(action, actionData, a
   }) || null;
   return String(nextMeaningfulAction?.type || '').trim().toLowerCase() === 'get_text'
     && /pine editor/i.test(String(nextMeaningfulAction?.text || '').trim());
+}
+
+function shouldDeferTradingViewPineSaveAsCheckpointFailure(action, actionData, actionIndex, observationCheckpoint) {
+  if (!observationCheckpoint || observationCheckpoint.verified === true) return false;
+
+  const type = String(action?.type || '').trim().toLowerCase();
+  const key = String(action?.key || '').trim().toLowerCase();
+  const shortcutId = String(action?.tradingViewShortcut?.id || action?.searchSurfaceContract?.id || '').trim().toLowerCase();
+  const verifyTarget = normalizeObservationCheckpointVerifyTarget(observationCheckpoint.verifyTarget);
+  if (type !== 'key' || key !== 'ctrl+shift+s') return false;
+  if (shortcutId !== 'save-as-pine-script') return false;
+  if (verifyTarget !== 'pine-editor') return false;
+
+  const actions = Array.isArray(actionData?.actions) ? actionData.actions : [];
+  const nextMeaningfulAction = actions.slice(actionIndex + 1).find((candidate) => {
+    const candidateType = String(candidate?.type || '').trim().toLowerCase();
+    return !!candidateType && candidateType !== 'wait' && candidateType !== 'screenshot';
+  }) || null;
+
+  return String(nextMeaningfulAction?.type || '').trim().toLowerCase() === 'get_text'
+    && /pine editor/i.test(String(nextMeaningfulAction?.text || '').trim())
+    && String(nextMeaningfulAction?.pineEvidenceMode || '').trim().toLowerCase() === 'save-status';
 }
 
 function shouldAttemptDeferredTradingViewPineEditorReadbackRecovery(action) {
@@ -6536,7 +6830,7 @@ const TRADINGVIEW_PINE_EDITOR_RUNTIME_SKIP_WATCHER_ANCHORS = Object.freeze([
   'save complete',
   'unsaved'
 ]);
-const TRADINGVIEW_RUNTIME_SURFACE_SKIP_MAX_AGE_MS = 2500;
+const TRADINGVIEW_RUNTIME_SURFACE_SKIP_MAX_AGE_MS = 7500;
 
 function getTradingViewSurfaceRouteId(action) {
   return String(
@@ -6579,7 +6873,7 @@ function summarizeWatcherElementForRuntimeSurfaceSkip(element) {
 function getTradingViewPineEditorAlreadyOpenSignal(action, options = {}) {
   if (!isTradingViewPineEditorOpenRouteAction(action)) return null;
   const actionType = String(action?.type || '').trim().toLowerCase();
-  if (actionType === 'key' || action.forceQuickSearchType === true) {
+  if (actionType === 'type' && action.forceQuickSearchType === true) {
     return null;
   }
 
@@ -6605,7 +6899,10 @@ function getTradingViewPineEditorAlreadyOpenSignal(action, options = {}) {
   const activeHwnd = Number(foreground?.hwnd || watcher.cache.activeWindow?.hwnd || 0) || 0;
   const expectedWindowHandle = Number(options.expectedWindowHandle || 0) || 0;
   if (expectedWindowHandle > 0 && activeHwnd > 0 && expectedWindowHandle !== activeHwnd) {
-    return null;
+    const activeWindowKind = String(foreground?.windowKind || watcher.cache.activeWindow?.windowKind || '').trim().toLowerCase();
+    if (activeWindowKind && activeWindowKind !== 'main') {
+      return null;
+    }
   }
 
   const scopedElements = activeHwnd > 0
@@ -6651,6 +6948,35 @@ function getTradingViewPineEditorAlreadyOpenSignal(action, options = {}) {
   }
 
   return null;
+}
+
+function getPriorSatisfiedTradingViewPineEditorRouteSignal(action, priorResults = []) {
+  if (!isTradingViewPineEditorOpenRouteAction(action)) return null;
+  const route = String(action?.searchSurfaceContract?.route || '').trim().toLowerCase();
+  const routeId = getTradingViewSurfaceRouteId(action);
+  if (route !== 'quick-search' || routeId !== 'open-pine-editor') return null;
+
+  const priorEntries = Array.isArray(priorResults) ? priorResults.slice().reverse() : [];
+  const priorSatisfied = priorEntries.find((entry) =>
+    entry?.pineEditorAlreadyOpen
+    || entry?.quickSearchPreflight?.targetSurfaceAlreadyOpen === true
+    || (
+      entry?.observationCheckpoint?.verified === true
+      && String(entry?.observationCheckpoint?.verifyTarget || '').trim().toLowerCase() === 'pine-editor'
+    )
+    || /pine editor surface already satisfied|pine editor was already open|pine editor was already active/i.test(String(entry?.skippedReason || ''))
+  );
+  if (!priorSatisfied) return null;
+
+  return {
+    satisfied: true,
+    source: priorSatisfied?.pineEditorAlreadyOpen?.source || 'prior-route-skip',
+    anchor: priorSatisfied?.pineEditorAlreadyOpen?.anchor || priorSatisfied?.quickSearchPreflight?.inputFocus?.text || null,
+    watcherAgeMs: Number(priorSatisfied?.pineEditorAlreadyOpen?.watcherAgeMs || 0) || null,
+    foreground: priorSatisfied?.pineEditorAlreadyOpen?.foreground || priorSatisfied?.observationCheckpoint?.foreground || null,
+    element: priorSatisfied?.pineEditorAlreadyOpen?.element || priorSatisfied?.quickSearchPreflight?.inputFocus?.element || null,
+    expectedWindowHandle: Number(priorSatisfied?.pineEditorAlreadyOpen?.foreground?.hwnd || priorSatisfied?.observationCheckpoint?.foreground?.hwnd || 0) || null
+  };
 }
 
 function buildSatisfiedTradingViewPineEditorSkipResult(action, surfaceSignal, context = {}) {
@@ -7633,8 +7959,15 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
     }
 
     // Ensure focus-sensitive input goes to the last known target window.
+    const pineReadbackRequiresForegroundLock = action.type === 'get_text'
+      && (
+        String(action?.pineEvidenceMode || '').trim()
+        || /pine editor|pine logs|pine profiler|pine version history/i.test(String(action?.text || action?.criteria?.text || ''))
+      );
+
     const requiresForegroundLock = action.type === 'key'
       || action.type === 'type'
+      || pineReadbackRequiresForegroundLock
       || action.type === 'click_element'
       || ((action.type === 'click' || action.type === 'double_click' || action.type === 'right_click') && action.x !== undefined);
 
@@ -7791,6 +8124,85 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
       }
     }
 
+    if (isTradingViewPineEditorVisibleResultCommitAction(effectiveAction)) {
+      const visibleResult = await detectTradingViewPineEditorQuickSearchResult(lastTargetWindowHandle);
+      if (!visibleResult?.trusted) {
+        const skippedResult = {
+          success: true,
+          action: effectiveAction.type,
+          skipped: true,
+          skippedReason: 'TradingView Pine Editor quick-search result was not visible, so Enter was not sent',
+          message: 'Skipped Enter because no trusted already-visible Pine Editor quick-search result was found',
+          reason: action.reason || '',
+          safety,
+          quickSearchResultProbe: visibleResult || null
+        };
+        results.push(skippedResult);
+        appendRuntimeTraceEvent(runtimeTraceLog, 'action:skipped', {
+          actionIndex: i,
+          action: summarizeActionForTrace(effectiveAction),
+          reason: skippedResult.skippedReason
+        });
+        if (onAction) {
+          onAction(skippedResult, i, actionData.actions.length);
+        }
+        continue;
+      }
+    }
+
+    if (isTradingViewPineEditorVisibleResultCommitAction(effectiveAction)) {
+      const visibleResult = await detectTradingViewPineEditorQuickSearchResult(lastTargetWindowHandle);
+      if (!visibleResult?.trusted) {
+        const skippedResult = {
+          success: true,
+          action: effectiveAction.type,
+          skipped: true,
+          skippedReason: 'TradingView Pine Editor quick-search result was not visible, so Enter was not sent',
+          message: 'Skipped Enter because no trusted already-visible Pine Editor quick-search result was found',
+          reason: action.reason || '',
+          safety: resumeSafety,
+          userConfirmed: isResumeActionUserConfirmed(resumePlan, i),
+          quickSearchResultProbe: visibleResult || null
+        };
+        results.push(skippedResult);
+        appendRuntimeTraceEvent(runtimeTraceLog, 'action:skipped', {
+          actionIndex: pending.actionIndex + i,
+          action: summarizeActionForTrace(effectiveAction),
+          reason: skippedResult.skippedReason
+        });
+        if (onAction) {
+          onAction(skippedResult, pending.actionIndex + i, pending.actionIndex + actionsToResume.length);
+        }
+        continue;
+      }
+    }
+
+    const priorPineEditorRouteAlreadySatisfied = getPriorSatisfiedTradingViewPineEditorRouteSignal(effectiveAction, results);
+    if (priorPineEditorRouteAlreadySatisfied) {
+      const skippedResult = buildSatisfiedTradingViewPineEditorSkipResult(effectiveAction, priorPineEditorRouteAlreadySatisfied, {
+        reason: action.reason || '',
+        safety
+      });
+      skippedResult.skippedReason = 'TradingView Pine Editor opener route was already satisfied, so this quick-search route step was not sent';
+      skippedResult.message = `Skipped ${String(effectiveAction.type || 'action').trim() || 'action'} because the Pine Editor opener route was already satisfied`;
+      results.push(skippedResult);
+      appendRuntimeTraceEvent(runtimeTraceLog, 'action:skipped', {
+        actionIndex: i,
+        action: summarizeActionForTrace(effectiveAction),
+        reason: skippedResult.skippedReason,
+        pineEditorAlreadyOpen: {
+          source: skippedResult.pineEditorAlreadyOpen?.source || null,
+          anchor: skippedResult.pineEditorAlreadyOpen?.anchor || null,
+          watcherAgeMs: skippedResult.pineEditorAlreadyOpen?.watcherAgeMs || null,
+          observedWindowHandle: Number(skippedResult.pineEditorAlreadyOpen?.foreground?.hwnd || 0) || null
+        }
+      });
+      if (onAction) {
+        onAction(skippedResult, i, actionData.actions.length);
+      }
+      continue;
+    }
+
     const pineEditorAlreadyOpen = getTradingViewPineEditorAlreadyOpenSignal(effectiveAction, {
       foreground: checkpointBeforeForeground || preActionForegroundSnapshot || null,
       expectedWindowHandle: lastTargetWindowHandle
@@ -7868,10 +8280,37 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
       continue;
     }
 
-    const quickSearchPreflight = await ensureTradingViewQuickSearchInputClearBeforeTyping(
-      effectiveAction,
-      lastTargetWindowHandle
-    );
+    const preflightQuickSearchRoutePrerequisiteFailure = getTradingViewQuickSearchRoutePrerequisiteFailure(effectiveAction, results);
+    if (preflightQuickSearchRoutePrerequisiteFailure) {
+      const failedResult = {
+        success: false,
+        action: effectiveAction.type,
+        error: preflightQuickSearchRoutePrerequisiteFailure.error,
+        reason: action.reason || '',
+        safety,
+        quickSearchRoutePrerequisite: preflightQuickSearchRoutePrerequisiteFailure
+      };
+      results.push(failedResult);
+      appendRuntimeTraceEvent(runtimeTraceLog, 'action:error', {
+        actionIndex: i,
+        action: summarizeActionForTrace(effectiveAction),
+        error: failedResult.error,
+        quickSearchRoutePrerequisite: {
+          failedVerifyTarget: preflightQuickSearchRoutePrerequisiteFailure.observationCheckpoint?.verifyTarget || null,
+          failedCheckpointError: preflightQuickSearchRoutePrerequisiteFailure.observationCheckpoint?.error || null
+        }
+      });
+      if (onAction) {
+        onAction(failedResult, i, actionData.actions.length);
+      }
+      break;
+    }
+
+    const quickSearchPreflight = buildTradingViewQuickSearchAutoFocusPreflight(effectiveAction, results)
+      || await ensureTradingViewQuickSearchInputClearBeforeTyping(
+        effectiveAction,
+        lastTargetWindowHandle
+      );
     const allowQuickSearchTypeFallback = quickSearchPreflight?.applicable
       && !quickSearchPreflight.ready
       && shouldAllowTradingViewQuickSearchTypeFallback(effectiveAction, quickSearchPreflight, results);
@@ -7879,7 +8318,7 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
       if (allowQuickSearchTypeFallback) {
         quickSearchPreflight.ready = true;
         quickSearchPreflight.fallbackAssumedFocused = true;
-        quickSearchPreflight.fallbackReason = 'Proceed with guarded TradingView quick-search typing after deferred ctrl+k open checkpoint';
+        quickSearchPreflight.fallbackReason = 'Proceed with guarded TradingView quick-search typing because Ctrl+K auto-focused the pinned TradingView quick-search input';
       } else {
       const failedResult = {
         success: false,
@@ -7969,6 +8408,32 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
         action: summarizeActionForTrace(effectiveAction),
         error: failedResult.error,
         quickSearchTypedVerification: failedResult.quickSearchTypedVerification
+      });
+      if (onAction) {
+        onAction(failedResult, i, actionData.actions.length);
+      }
+      break;
+    }
+
+    const quickSearchRoutePrerequisiteFailure = getTradingViewQuickSearchRoutePrerequisiteFailure(effectiveAction, results);
+    if (quickSearchRoutePrerequisiteFailure) {
+      const failedResult = {
+        success: false,
+        action: effectiveAction.type,
+        error: quickSearchRoutePrerequisiteFailure.error,
+        reason: action.reason || '',
+        safety,
+        quickSearchRoutePrerequisite: quickSearchRoutePrerequisiteFailure
+      };
+      results.push(failedResult);
+      appendRuntimeTraceEvent(runtimeTraceLog, 'action:error', {
+        actionIndex: i,
+        action: summarizeActionForTrace(effectiveAction),
+        error: failedResult.error,
+        quickSearchRoutePrerequisite: {
+          failedVerifyTarget: quickSearchRoutePrerequisiteFailure.observationCheckpoint?.verifyTarget || null,
+          failedCheckpointError: quickSearchRoutePrerequisiteFailure.observationCheckpoint?.error || null
+        }
       });
       if (onAction) {
         onAction(failedResult, i, actionData.actions.length);
@@ -8145,7 +8610,19 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
       }
     }
     if (result.success && isPineClipboardPreparationAction(effectiveAction)) {
-      const pineClipboardProof = await buildPineClipboardProof(effectiveAction);
+      const pineClipboardFocusProof = await verifyTradingViewForegroundForPineClipboardProof();
+      const pineClipboardProof = pineClipboardFocusProof.verified
+        ? await buildPineClipboardProof(effectiveAction)
+        : {
+          applicable: true,
+          verified: false,
+          expectedHash: String(effectiveAction?.pineClipboardContract?.expectedHash || '').trim(),
+          focusProof: pineClipboardFocusProof,
+          error: pineClipboardFocusProof.error || 'Refusing Pine clipboard verification because TradingView focus is not proven.'
+        };
+      if (pineClipboardProof && !pineClipboardProof.focusProof) {
+        pineClipboardProof.focusProof = pineClipboardFocusProof;
+      }
       result.pineClipboardProof = pineClipboardProof;
       if (pineClipboardProof?.verified) {
         lastPineClipboardProof = pineClipboardProof;
@@ -8188,7 +8665,7 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
         } else {
           trustedForegroundHandle = 0;
           requirePreInputRefocus = true;
-          result.focusTarget.warning = `Focus verification mismatch: requested ${result.focusTarget?.requestedWindowHandle || action.windowHandle || action.hwnd || 'target'} but foreground was ${result.focusTarget?.actualForegroundHandle || result.actualForegroundHandle || 'unknown'}`;
+          result.focusTarget.warning = `Focus verification failed: requested ${result.focusTarget?.requestedWindowHandle || action.windowHandle || action.hwnd || 'target'} but foreground was ${result.focusTarget?.actualForegroundHandle || result.actualForegroundHandle || 'unknown'}`;
         }
       }
     }
@@ -8272,6 +8749,13 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
           };
           if (!Array.isArray(result.warnings)) result.warnings = [];
           result.warnings.push('Deferred unverified Pine Editor activation checkpoint until Pine Editor get_text verification');
+        } else if (shouldDeferTradingViewPineSaveAsCheckpointFailure(effectiveAction, actionData, i, observationCheckpoint)) {
+          result.deferredObservationCheckpoint = {
+            reason: 'Deferred Pine Save As/new-copy checkpoint failure until the bounded save-status readback step',
+            observationCheckpoint: summarizeObservationCheckpointForProof(observationCheckpoint)
+          };
+          if (!Array.isArray(result.warnings)) result.warnings = [];
+          result.warnings.push('Deferred unverified Pine Save As/new-copy checkpoint until save-status verification');
         } else {
           trustedForegroundHandle = 0;
           result.success = false;
@@ -8282,6 +8766,38 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
 
     if (!result.proof || typeof result.proof !== 'object') {
       result.proof = normalizeProofRecord(result.proof, result);
+    }
+
+    if (
+      result.success !== true
+      && effectiveAction.type === 'get_text'
+      && action.allowPineEditorMissingFallback === true
+      && action.continueActionsByPineEditorState
+      && Array.isArray(action.continueActionsByPineEditorState['*'])
+      && action.continueActionsByPineEditorState['*'].length > 0
+    ) {
+      const continuationActions = action.continueActionsByPineEditorState['*'].map((step) => {
+        try {
+          return JSON.parse(JSON.stringify(step));
+        } catch {
+          return { ...step };
+        }
+      });
+
+      actionData.actions.splice(i + 1, 0, ...continuationActions);
+      result.success = true;
+      result.error = null;
+      result.message = result.message || 'Pine Editor was not found; continuing through the guarded opener fallback';
+      result.pineContinuationInjected = true;
+      result.pineContinuationState = 'missing-pine-editor-fallback';
+      result.pineContinuationCount = continuationActions.length;
+      if (!Array.isArray(result.warnings)) result.warnings = [];
+      result.warnings.push('Pine Editor preflight was not found; injected guarded quick-search fallback route');
+      pineInspectDebugLog('continuation:editor-state:inject-missing-fallback', JSON.stringify({
+        actionIndex: i,
+        continuationCount: continuationActions.length,
+        originalError: result.error || null
+      }));
     }
 
     appendRuntimeTraceEvent(runtimeTraceLog, 'action:complete', {
@@ -8319,7 +8835,29 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
         || (action.continueActionsByPineLifecycleState && typeof action.continueActionsByPineLifecycleState === 'object')
       )
     ) {
-      const observedPineState = String(result?.pineStructuredSummary?.editorVisibleState || '').trim().toLowerCase();
+      const pineVisibleSignals = Array.isArray(result?.pineStructuredSummary?.visibleSignals)
+        ? result.pineStructuredSummary.visibleSignals.map((value) => String(value || '').trim().toLowerCase()).filter(Boolean)
+        : [];
+      const hasSparseOpenStateOnlySignal = pineVisibleSignals.includes('sparse-open-state-fresh-indicator')
+        || pineVisibleSignals.includes('sparse-open-state-existing-script-guard');
+      let observedPineState = String(result?.pineStructuredSummary?.editorVisibleState || '').trim().toLowerCase();
+      if (
+        hasSparseOpenStateOnlySignal
+        && action.assumeSparseOpenStateAsExistingScript === true
+        && observedPineState === 'empty-or-starter'
+      ) {
+        observedPineState = 'existing-script-visible';
+        result.pineStructuredSummary = {
+          ...(result.pineStructuredSummary || {}),
+          editorVisibleState: observedPineState,
+          visibleSignals: Array.from(new Set([
+            ...pineVisibleSignals,
+            'sparse-open-state-existing-script-guard'
+          ])),
+          lifecycleState: null,
+          compactSummary: 'state=existing-script-visible | sparse-open-state=existing-script-guard'
+        };
+      }
       const expectedPineState = String(action?.continueOnPineEditorState || '').trim().toLowerCase();
       const editorStateContinuations = action?.continueActionsByPineEditorState && typeof action.continueActionsByPineEditorState === 'object'
         ? action.continueActionsByPineEditorState
@@ -9022,8 +9560,15 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
       }
     }
 
+    const pineReadbackRequiresForegroundLock = action.type === 'get_text'
+      && (
+        String(action?.pineEvidenceMode || '').trim()
+        || /pine editor|pine logs|pine profiler|pine version history/i.test(String(action?.text || action?.criteria?.text || ''))
+      );
+
     const requiresForegroundLock = action.type === 'key'
       || action.type === 'type'
+      || pineReadbackRequiresForegroundLock
       || action.type === 'click_element'
       || ((action.type === 'click' || action.type === 'double_click' || action.type === 'right_click') && action.x !== undefined);
 
@@ -9178,6 +9723,33 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
       }
     }
 
+    const priorPineEditorRouteAlreadySatisfied = getPriorSatisfiedTradingViewPineEditorRouteSignal(effectiveAction, results);
+    if (priorPineEditorRouteAlreadySatisfied) {
+      const skippedResult = buildSatisfiedTradingViewPineEditorSkipResult(effectiveAction, priorPineEditorRouteAlreadySatisfied, {
+        reason: action.reason || '',
+        safety: resumeSafety
+      });
+      skippedResult.userConfirmed = isResumeActionUserConfirmed(resumePlan, i);
+      skippedResult.skippedReason = 'TradingView Pine Editor opener route was already satisfied, so this quick-search route step was not sent';
+      skippedResult.message = `Skipped ${String(effectiveAction.type || 'action').trim() || 'action'} because the Pine Editor opener route was already satisfied`;
+      results.push(skippedResult);
+      appendRuntimeTraceEvent(runtimeTraceLog, 'action:skipped', {
+        actionIndex: pending.actionIndex + i,
+        action: summarizeActionForTrace(effectiveAction),
+        reason: skippedResult.skippedReason,
+        pineEditorAlreadyOpen: {
+          source: skippedResult.pineEditorAlreadyOpen?.source || null,
+          anchor: skippedResult.pineEditorAlreadyOpen?.anchor || null,
+          watcherAgeMs: skippedResult.pineEditorAlreadyOpen?.watcherAgeMs || null,
+          observedWindowHandle: Number(skippedResult.pineEditorAlreadyOpen?.foreground?.hwnd || 0) || null
+        }
+      });
+      if (onAction) {
+        onAction(skippedResult, pending.actionIndex + i, pending.actionIndex + actionsToResume.length);
+      }
+      continue;
+    }
+
     const pineEditorAlreadyOpen = getTradingViewPineEditorAlreadyOpenSignal(effectiveAction, {
       foreground: checkpointBeforeForeground || null,
       expectedWindowHandle: lastTargetWindowHandle
@@ -9214,10 +9786,37 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
       continue;
     }
 
-    const quickSearchPreflight = await ensureTradingViewQuickSearchInputClearBeforeTyping(
-      effectiveAction,
-      lastTargetWindowHandle
-    );
+    const preflightQuickSearchRoutePrerequisiteFailure = getTradingViewQuickSearchRoutePrerequisiteFailure(effectiveAction, results);
+    if (preflightQuickSearchRoutePrerequisiteFailure) {
+      const failedResult = {
+        success: false,
+        action: effectiveAction.type,
+        error: preflightQuickSearchRoutePrerequisiteFailure.error,
+        reason: action.reason || '',
+        userConfirmed: isResumeActionUserConfirmed(resumePlan, i),
+        quickSearchRoutePrerequisite: preflightQuickSearchRoutePrerequisiteFailure
+      };
+      results.push(failedResult);
+      appendRuntimeTraceEvent(runtimeTraceLog, 'action:error', {
+        actionIndex: pending.actionIndex + i,
+        action: summarizeActionForTrace(effectiveAction),
+        error: failedResult.error,
+        quickSearchRoutePrerequisite: {
+          failedVerifyTarget: preflightQuickSearchRoutePrerequisiteFailure.observationCheckpoint?.verifyTarget || null,
+          failedCheckpointError: preflightQuickSearchRoutePrerequisiteFailure.observationCheckpoint?.error || null
+        }
+      });
+      if (onAction) {
+        onAction(failedResult, pending.actionIndex + i, pending.actionIndex + actionsToResume.length);
+      }
+      break;
+    }
+
+    const quickSearchPreflight = buildTradingViewQuickSearchAutoFocusPreflight(effectiveAction, results)
+      || await ensureTradingViewQuickSearchInputClearBeforeTyping(
+        effectiveAction,
+        lastTargetWindowHandle
+      );
     const allowQuickSearchTypeFallback = quickSearchPreflight?.applicable
       && !quickSearchPreflight.ready
       && shouldAllowTradingViewQuickSearchTypeFallback(effectiveAction, quickSearchPreflight, results);
@@ -9225,7 +9824,7 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
       if (allowQuickSearchTypeFallback) {
         quickSearchPreflight.ready = true;
         quickSearchPreflight.fallbackAssumedFocused = true;
-        quickSearchPreflight.fallbackReason = 'Proceed with guarded TradingView quick-search typing after deferred ctrl+k open checkpoint';
+        quickSearchPreflight.fallbackReason = 'Proceed with guarded TradingView quick-search typing because Ctrl+K auto-focused the pinned TradingView quick-search input';
       } else {
       const failedResult = {
         success: false,
@@ -9433,7 +10032,19 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
       }
     }
     if (result.success && isPineClipboardPreparationAction(effectiveAction)) {
-      const pineClipboardProof = await buildPineClipboardProof(effectiveAction);
+      const pineClipboardFocusProof = await verifyTradingViewForegroundForPineClipboardProof();
+      const pineClipboardProof = pineClipboardFocusProof.verified
+        ? await buildPineClipboardProof(effectiveAction)
+        : {
+          applicable: true,
+          verified: false,
+          expectedHash: String(effectiveAction?.pineClipboardContract?.expectedHash || '').trim(),
+          focusProof: pineClipboardFocusProof,
+          error: pineClipboardFocusProof.error || 'Refusing Pine clipboard verification because TradingView focus is not proven.'
+        };
+      if (pineClipboardProof && !pineClipboardProof.focusProof) {
+        pineClipboardProof.focusProof = pineClipboardFocusProof;
+      }
       result.pineClipboardProof = pineClipboardProof;
       if (pineClipboardProof?.verified) {
         lastPineClipboardProof = pineClipboardProof;
@@ -9556,6 +10167,13 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
           };
           if (!Array.isArray(result.warnings)) result.warnings = [];
           result.warnings.push('Deferred unverified Pine Editor activation checkpoint until Pine Editor get_text verification');
+        } else if (shouldDeferTradingViewPineSaveAsCheckpointFailure(effectiveAction, actionData, pending.actionIndex + i, observationCheckpoint)) {
+          result.deferredObservationCheckpoint = {
+            reason: 'Deferred Pine Save As/new-copy checkpoint failure until the bounded save-status readback step',
+            observationCheckpoint: summarizeObservationCheckpointForProof(observationCheckpoint)
+          };
+          if (!Array.isArray(result.warnings)) result.warnings = [];
+          result.warnings.push('Deferred unverified Pine Save As/new-copy checkpoint until save-status verification');
         } else {
           result.success = false;
           result.error = observationCheckpoint.error;

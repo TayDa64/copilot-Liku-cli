@@ -251,7 +251,7 @@ const TRADINGVIEW_SHORTCUTS = Object.freeze({
       appName: 'TradingView',
       target: 'pine-editor',
       keywords: ['pine', 'pine editor', 'script'],
-      requiresObservedChange: true
+      requiresObservedChange: false
     },
     fallbackPolicy: 'bounded-search-selection'
   }),
@@ -310,6 +310,28 @@ const TRADINGVIEW_SHORTCUTS = Object.freeze({
       titleHints: ['Save', 'Save script', 'Script name', 'Save As', 'Rename script'],
       windowKinds: ['owned', 'palette', 'main'],
       requiresObservedChange: false
+    },
+    fallbackPolicy: 'none'
+  }),
+  'save-as-pine-script': createShortcut({
+    id: 'save-as-pine-script',
+    key: 'ctrl+shift+s',
+    category: 'context-dependent',
+    surface: 'pine-editor',
+    safety: 'safe',
+    automationRoutable: true,
+    aliases: ['save as script', 'save pine script as', 'copy pine script', 'new copy'],
+    notes: ['Bounded Pine Editor Save As/new-copy route used only when a title surface is verified before editing an existing visible script.'],
+    sourceConfidence: 'internal-profile',
+    sourceUrls: [TRADINGVIEW_SHORTCUTS_OFFICIAL_URL],
+    verificationContract: {
+      kind: 'status-visible',
+      appName: 'TradingView',
+      target: 'pine-editor',
+      keywords: ['pine', 'save', 'save script', 'script', 'script name', 'save as', 'rename script'],
+      titleHints: ['Save', 'Save script', 'Script name', 'Save As', 'Rename script'],
+      windowKinds: ['owned', 'palette', 'main'],
+      requiresObservedChange: true
     },
     fallbackPolicy: 'none'
   }),
@@ -618,7 +640,19 @@ function buildTradingViewShortcutRoute(id, overrides = {}) {
 
     const routeMetadata = {
       ...buildTradingViewShortcutMetadata(shortcut),
-      route: 'quick-search'
+      route: 'quick-search',
+      autoFocusTyping: skipQueryClearBeforeType
+        ? {
+            enabled: true,
+            openerShortcutId: 'symbol-search',
+            openerKey: 'ctrl+k',
+            expectedText: overrides.searchText || 'Pine Editor',
+            appName: 'TradingView',
+            processNames: ['tradingview'],
+            windowKinds: ['main'],
+            requirePinnedForeground: true
+          }
+        : undefined
     };
 
     const selectionActionOverrides = overrides.selectionActionOverrides && typeof overrides.selectionActionOverrides === 'object'
@@ -669,7 +703,7 @@ function buildTradingViewShortcutRoute(id, overrides = {}) {
       }, queryActionOverrides)
     );
 
-    const commitWaitMs = Number.isFinite(Number(overrides.commitWaitMs)) ? Number(overrides.commitWaitMs) : 260;
+    const commitWaitMs = Number.isFinite(Number(overrides.commitWaitMs)) ? Number(overrides.commitWaitMs) : 760;
     if (commitWaitMs > 0) {
       routeActions.push({ type: 'wait', ms: commitWaitMs });
     }
@@ -690,7 +724,7 @@ function buildTradingViewShortcutRoute(id, overrides = {}) {
         searchSurfaceContract: routeMetadata,
         tradingViewShortcut: routeMetadata
       }, selectionActionOverrides),
-      { type: 'wait', ms: Number.isFinite(Number(overrides.selectionWaitMs)) ? Number(overrides.selectionWaitMs) : 220 }
+      { type: 'wait', ms: Number.isFinite(Number(overrides.selectionWaitMs)) ? Number(overrides.selectionWaitMs) : 700 }
     );
 
     return routeActions;

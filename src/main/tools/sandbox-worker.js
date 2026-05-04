@@ -14,17 +14,62 @@
 
 const vm = require('vm');
 
+const MAX_LOG_ENTRIES = 40;
+const MAX_LOG_TEXT = 4000;
+
+function createBoundedLogCollector() {
+  const entries = [];
+  let totalLength = 0;
+
+  function trimToBudget() {
+    while (entries.length > MAX_LOG_ENTRIES || totalLength > MAX_LOG_TEXT) {
+      const removed = entries.shift();
+      totalLength -= String(removed?.message || '').length;
+    }
+  }
+
+  return {
+    push(level, values) {
+      const message = values.map((value) => {
+        if (typeof value === 'string') return value;
+        try {
+          return JSON.stringify(value);
+        } catch {
+          return String(value);
+        }
+      }).join(' ');
+      entries.push({ level, message, ts: new Date().toISOString() });
+      totalLength += message.length;
+      trimToBudget();
+    },
+    snapshot() {
+      return entries.slice();
+    }
+  };
+}
+
+function serializeWorkerError(error) {
+  if (!error) return null;
+  return {
+    name: String(error.name || 'Error'),
+    message: String(error.message || error),
+    stack: String(error.stack || '').slice(0, 4000) || null
+  };
+}
+
 process.on('message', (msg) => {
   if (msg.type !== 'execute') return;
 
   const { code, args, timeout } = msg;
+  const logs = createBoundedLogCollector();
+  let phase = 'initialize';
 
   const sandboxContext = {
     args: Object.freeze({ ...(args || {}) }),
     console: {
-      log: (...a) => {}, // Silence console in worker
-      warn: (...a) => {},
-      error: (...a) => {}
+      log: (...a) => { logs.push('log', a); },
+      warn: (...a) => { logs.push('warn', a); },
+      error: (...a) => { logs.push('error', a); }
     },
     JSON: JSON,
     Math: Math,
@@ -48,12 +93,33 @@ process.on('message', (msg) => {
   };
 
   try {
+    phase = 'context';
     const context = vm.createContext(sandboxContext);
+    phase = 'compile';
     const script = new vm.Script(code, { filename: 'dynamic-tool.js' });
+    phase = 'execute';
     script.runInContext(context, { timeout: timeout || 5000 });
-    process.send({ type: 'result', success: true, result: context.result });
+    phase = 'serialize';
+    process.send({
+      type: 'result',
+      success: true,
+      result: context.result,
+      diagnostics: {
+        phase,
+        logs: logs.snapshot()
+      }
+    });
   } catch (err) {
-    process.send({ type: 'result', success: false, error: err.message });
+    process.send({
+      type: 'result',
+      success: false,
+      error: String(err.message || err),
+      diagnostics: {
+        phase,
+        logs: logs.snapshot(),
+        error: serializeWorkerError(err)
+      }
+    });
   }
 });
 

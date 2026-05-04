@@ -226,6 +226,13 @@ function buildPineClipboardContract(action) {
   };
 }
 
+function buildInlinePineClipboardPreparationCommand(text = '') {
+  const payload = sanitizePineScriptText(text).replace(/\r/g, '').trim();
+  if (!payload || !containsPineScriptPayloadText(payload)) return '';
+  const hereStringSafePayload = payload.replace(/^\s*'@\s*$/gm, "' @");
+  return `Set-Clipboard -Value @'\n${hereStringSafePayload}\n'@`;
+}
+
 function attachPineClipboardContracts(steps = []) {
   if (!Array.isArray(steps) || steps.length === 0) return steps;
 
@@ -411,6 +418,95 @@ function buildCanonicalPineReplacementPayloadSteps(actions = []) {
   ];
 }
 
+function buildPineEditorReplacementPrefixSteps(reasonLabel = 'prepared Pine script') {
+  return [
+    {
+      type: 'key',
+      key: 'ctrl+a',
+      reason: `Select the verified Pine Editor starter text before inserting the ${reasonLabel}`
+    },
+    { type: 'wait', ms: 120 },
+    {
+      type: 'key',
+      key: 'backspace',
+      reason: `Remove the verified Pine Editor starter text before pasting the ${reasonLabel}`,
+      safePineStarterReset: true
+    },
+    { type: 'wait', ms: 120 }
+  ];
+}
+
+function buildPineClipboardPayloadStepsFromTypedActions(typingSteps = []) {
+  const sourceText = (Array.isArray(typingSteps) ? typingSteps : [])
+    .map((action) => sanitizePineScriptText(action?.text || ''))
+    .filter((text) => containsPineScriptPayloadText(text))
+    .join('\n\n')
+    .trim();
+  const command = buildInlinePineClipboardPreparationCommand(sourceText);
+  if (!command) return [];
+
+  return [
+    {
+      type: 'run_command',
+      shell: 'powershell',
+      command,
+      reason: 'Load the generated Pine script into the clipboard for efficient verified paste'
+    },
+    { type: 'wait', ms: 120 },
+    {
+      type: 'key',
+      key: 'ctrl+v',
+      reason: 'Paste the generated Pine script into the Pine Editor'
+    }
+  ];
+}
+
+function buildExistingPineScriptFreshIndicatorContinuationSteps(saveFollowUpActions = []) {
+  return [
+    ...(buildTradingViewShortcutRoute('open-pine-editor', {
+      routeStrategy: 'official-direct',
+      routeShortcutId: 'new-pine-indicator',
+      reason: 'Create a fresh Pine indicator from the active Pine Editor before editing the last cloud script',
+      finalWaitMs: 520
+    }) || [
+      {
+        type: 'key',
+        key: 'ctrl+k',
+        reason: 'Open Pine Editor command mode before creating a fresh indicator from the active Pine Editor'
+      },
+      { type: 'wait', ms: 180 },
+      {
+        type: 'key',
+        key: 'ctrl+i',
+        reason: 'Create a fresh Pine indicator from the active Pine Editor before editing the last cloud script',
+        verify: {
+          kind: 'editor-active',
+          appName: 'TradingView',
+          target: 'pine-editor',
+          keywords: ['pine', 'pine editor', 'script'],
+          requiresObservedChange: true
+        }
+      },
+      { type: 'wait', ms: 520 }
+    ]),
+    {
+      type: 'get_text',
+      text: 'Pine Editor',
+      reason: 'Verify TradingView created a fresh Pine indicator starter before replacing the visible script body',
+      pineEvidenceMode: 'safe-authoring-inspect',
+      allowSparseOpenStateFallback: true,
+      continueOnPineEditorState: 'empty-or-starter',
+      continueActions: saveFollowUpActions.map(cloneAction),
+      haltOnPineEditorStateMismatch: true,
+      pineStateMismatchReasons: {
+        'existing-script-visible': 'TradingView did not expose a fresh Pine indicator starter; stop before replacing the last cloud script.',
+        'unknown-visible-state': 'The fresh Pine indicator starter could not be verified; stop before replacing the last cloud script.',
+        '': 'The fresh Pine indicator starter could not be verified; stop before replacing the last cloud script.'
+      }
+    }
+  ];
+}
+
 function shouldAutoAddPineScriptToChart(raw = '', actions = []) {
   if (Array.isArray(actions) && actions.some((action) => isPineAddToChartStep(action))) {
     return true;
@@ -449,6 +545,7 @@ function buildSafePineAuthoringContinuationSteps(actions = [], intent = {}, raw 
   const payloadSteps = canonicalReplacementPayloadSteps ? canonicalReplacementPayloadSteps.slice() : [];
   if (!canonicalReplacementPayloadSteps) {
     if (clipboardPrepSteps.length > 0) {
+      payloadSteps.push(...buildPineEditorReplacementPrefixSteps('prepared Pine script'));
       payloadSteps.push(...clipboardPrepSteps);
       if (pasteSteps.length > 0) {
         payloadSteps.push(...pasteSteps);
@@ -460,7 +557,10 @@ function buildSafePineAuthoringContinuationSteps(actions = [], intent = {}, raw 
         });
       }
     } else if (typingSteps.length > 0) {
-      payloadSteps.push(...typingSteps);
+      payloadSteps.push(
+        ...buildPineEditorReplacementPrefixSteps('generated Pine script'),
+        ...buildPineClipboardPayloadStepsFromTypedActions(typingSteps)
+      );
     } else if (pasteSteps.length > 0) {
       payloadSteps.push(...pasteSteps);
     }
@@ -546,12 +646,14 @@ function buildSafePineAuthoringContinuationSteps(actions = [], intent = {}, raw 
             text: 'Pine Editor',
             reason: 'Re-verify visible Pine save-state evidence after naming the script',
             pineEvidenceMode: 'save-status',
+            expectedPineScriptTitle: derivedScriptName,
             allowSparseSaveStateFallback: true,
             continueOnPineLifecycleState: 'saved-state-verified',
             continueActions: applyContinuationSteps,
             haltOnPineLifecycleStateMismatch: true,
             pineLifecycleMismatchReasons: {
               'save-required-before-apply': 'TradingView still shows save-required state after naming the script; stop before applying it to the chart.',
+              'saved-state-title-mismatch': 'TradingView showed saved state, but the expected Pine script title was not visible after naming; stop before applying the script.',
               'editor-target-corrupt': 'Visible Pine output suggests editor-target corruption during save; stop before applying the script.',
               '': 'The Pine save state could not be verified after naming the script; do not add it to the chart yet.'
             }
@@ -566,6 +668,7 @@ function buildSafePineAuthoringContinuationSteps(actions = [], intent = {}, raw 
       }
     }
   ];
+  const existingScriptFreshIndicatorContinuationSteps = buildExistingPineScriptFreshIndicatorContinuationSteps(saveFollowUpActions);
 
   const freshIndicatorContinuationSteps = [
     { type: 'wait', ms: 220 },
@@ -574,11 +677,17 @@ function buildSafePineAuthoringContinuationSteps(actions = [], intent = {}, raw 
       text: 'Pine Editor',
       reason: 'Verify that the TradingView Desktop Pine Editor is active before inserting the prepared script',
       pineEvidenceMode: 'safe-authoring-inspect',
+      allowSparseOpenStateFallback: true,
+      assumeSparseOpenStateAsExistingScript: true,
       continueOnPineEditorState: 'empty-or-starter',
       continueActions: saveFollowUpActions,
+      continueActionsByPineEditorState: {
+        'empty-or-starter': saveFollowUpActions,
+        'existing-script-visible': existingScriptFreshIndicatorContinuationSteps
+      },
       haltOnPineEditorStateMismatch: true,
       pineStateMismatchReasons: {
-        'existing-script-visible': 'Existing visible Pine script content is already present; not overwriting it without a verified new-script surface.',
+        'existing-script-visible': 'TradingView reopened the last worked Pine script; attempting only the verified fresh-indicator starter path before any replacement.',
         'unknown-visible-state': 'The Pine Editor state is ambiguous; inspect further before inserting the script.',
         '': 'The Pine Editor state is ambiguous; inspect further before inserting the script.'
       }
@@ -596,12 +705,15 @@ function buildSafePineAuthoringContinuationSteps(actions = [], intent = {}, raw 
       text: 'Pine Editor',
       reason: 'Reuse the already-open Pine starter script when it is still clean; otherwise create a fresh Pine indicator before inserting the prepared script',
       pineEvidenceMode: 'safe-authoring-inspect',
+      allowSparseOpenStateFallback: true,
+      assumeSparseOpenStateAsExistingScript: true,
       continueActionsByPineEditorState: {
-        'empty-or-starter': saveFollowUpActions
+        'empty-or-starter': saveFollowUpActions,
+        'existing-script-visible': existingScriptFreshIndicatorContinuationSteps
       },
       haltOnPineEditorStateMismatch: true,
       pineStateMismatchReasons: {
-        'existing-script-visible': 'Existing visible Pine script content is already present; not overwriting it without an explicit replacement request.',
+        'existing-script-visible': 'TradingView reopened the last worked Pine script; attempting only the verified fresh-indicator starter path before any replacement.',
         'unknown-visible-state': 'The current Pine Editor state is ambiguous; inspect further before inserting the script.',
         '': 'The current Pine Editor state is ambiguous; inspect further before inserting the script.'
       }
@@ -1049,6 +1161,7 @@ function buildTradingViewPineWorkflowActions(intent = {}, actions = []) {
     focusAction,
     { type: 'wait', ms: 650 }
   ];
+  let deferredOpenRouteActions = null;
 
   if (intent.surfaceTarget === 'pine-editor') {
     const pineEditorOpenVerify = {
@@ -1076,7 +1189,7 @@ function buildTradingViewPineWorkflowActions(intent = {}, actions = []) {
       const routeActions = buildTradingViewShortcutRoute('open-pine-editor', {
         routeStrategy: prefersOfficialDirectPineOpen ? 'official-direct' : 'quick-search',
         routeShortcutId: prefersOfficialDirectPineOpen ? 'new-pine-indicator' : undefined,
-        skipQueryClearBeforeType: false,
+        skipQueryClearBeforeType: true,
         enterReason: opener?.reason || intent.reason,
         enterActionOverrides: {
           verify: pineEditorOpenVerify,
@@ -1084,15 +1197,23 @@ function buildTradingViewPineWorkflowActions(intent = {}, actions = []) {
         }
       });
 
-      if (Array.isArray(routeActions) && routeActions.length > 0) {
-        rewritten.push(...routeActions);
-      } else {
-        rewritten.push({
+      const openRouteActions = Array.isArray(routeActions) && routeActions.length > 0
+        ? routeActions
+        : [{
           ...opener,
           reason: opener?.reason || intent.reason,
           verify: pineEditorOpenVerify,
           verifyTarget
-        });
+        }];
+
+      if (
+        intent.safeAuthoringDefault
+        && Array.isArray(intent.safeAuthoringContinuationSteps)
+        && intent.safeAuthoringContinuationSteps.length > 0
+      ) {
+        deferredOpenRouteActions = openRouteActions;
+      } else {
+        rewritten.push(...openRouteActions);
       }
     }
   } else {
@@ -1121,10 +1242,76 @@ function buildTradingViewPineWorkflowActions(intent = {}, actions = []) {
     }
 
     if (Array.isArray(intent.safeAuthoringContinuationSteps) && intent.safeAuthoringContinuationSteps.length > 0) {
+      const continuationSteps = intent.safeAuthoringContinuationSteps.map(cloneAction);
+      if (Array.isArray(deferredOpenRouteActions) && deferredOpenRouteActions.length > 0) {
+        const guardedVisibleResultCommitActions = [
+          {
+            type: 'key',
+            key: 'enter',
+            reason: 'Open the already-visible TradingView Pine Editor quick-search result if it is present',
+            searchSurfaceContract: {
+              id: 'open-pine-editor',
+              route: 'quick-search-open-result',
+              surface: 'pine-editor'
+            },
+            verify: {
+              kind: 'editor-active',
+              appName: 'TradingView',
+              target: 'pine-editor',
+              keywords: ['pine', 'pine editor', 'script'],
+              requiresObservedChange: true
+            },
+            verifyTarget
+          },
+          { type: 'wait', ms: 700 }
+        ];
+        const quickSearchCommitActions = [
+          {
+            type: 'key',
+            key: 'enter',
+            reason: 'Open the already-visible TradingView Pine Editor quick-search result',
+            searchSurfaceContract: {
+              id: 'open-pine-editor',
+              route: 'quick-search-open-result',
+              surface: 'pine-editor'
+            },
+            verify: {
+              kind: 'editor-active',
+              appName: 'TradingView',
+              target: 'pine-editor',
+              keywords: ['pine', 'pine editor', 'script'],
+              requiresObservedChange: true
+            },
+            verifyTarget
+          },
+          { type: 'wait', ms: 700 },
+          ...continuationSteps.map(cloneAction)
+        ];
+        return rewritten.concat([{
+          type: 'get_text',
+          text: 'Pine Editor',
+          reason: 'Check whether TradingView Pine Editor is already active before using the quick-search opener',
+          pineEvidenceMode: 'safe-authoring-inspect',
+          allowSparseOpenStateFallback: true,
+          assumeSparseOpenStateAsExistingScript: true,
+          allowPineEditorMissingFallback: true,
+          continueActionsByPineEditorState: {
+            'quick-search-open': quickSearchCommitActions,
+            'empty-or-starter': continuationSteps,
+            'existing-script-visible': continuationSteps,
+            '*': [
+              ...guardedVisibleResultCommitActions.map(cloneAction),
+              ...deferredOpenRouteActions.map(cloneAction),
+              ...continuationSteps.map(cloneAction)
+            ]
+          }
+        }]);
+      }
+
       if (rewritten.length > 0 && rewritten[rewritten.length - 1]?.type !== 'wait') {
         rewritten.push({ type: 'wait', ms: 220 });
       }
-      return rewritten.concat(intent.safeAuthoringContinuationSteps.map(cloneAction));
+      return rewritten.concat(continuationSteps);
     }
 
     const inspectStep = {
@@ -1140,7 +1327,7 @@ function buildTradingViewPineWorkflowActions(intent = {}, actions = []) {
       inspectStep.continueActions = intent.safeAuthoringContinuationSteps.map(cloneAction);
       inspectStep.haltOnPineEditorStateMismatch = true;
       inspectStep.pineStateMismatchReasons = {
-        'existing-script-visible': 'Existing visible Pine script content is already present; not overwriting it without an explicit replacement request.',
+        'existing-script-visible': 'TradingView reopened the last worked Pine script; non-overwrite stop unless the user explicitly requested overwrite or a verified fresh-indicator path is available.',
         'unknown-visible-state': 'The visible Pine Editor state is ambiguous; inspect further or ask before editing.',
         '': 'The visible Pine Editor state is ambiguous; inspect further or ask before editing.'
       };

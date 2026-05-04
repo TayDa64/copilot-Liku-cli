@@ -20,6 +20,7 @@ function createCommandHandler(dependencies) {
     clearSessionIntentState,
     getSessionIntentState,
     setApiKey,
+    setSessionCopilotModel,
     setCopilotModel,
     setProvider,
     slashCommandHelpers,
@@ -237,7 +238,11 @@ function createCommandHandler(dependencies) {
         if (parts.length > 1) {
           const models = getDisplayModels();
           let requested = null;
+          let persistSelection = false;
           if (parts[1] === '--set') {
+            requested = parts.slice(2).join(' ');
+          } else if (parts[1] === '--persist' || parts[1] === '--save') {
+            persistSelection = true;
             requested = parts.slice(2).join(' ');
           } else if (parts[1] === '--current' || parts[1] === 'current') {
             const currentModel = getCurrentCopilotModel();
@@ -252,18 +257,19 @@ function createCommandHandler(dependencies) {
 
           const shortcutModel = resolveModelShortcut(requested, models);
           const model = shortcutModel?.id || slashCommandHelpers.normalizeModelKey(requested);
-          if (setCopilotModel(model)) {
+          const switchModel = persistSelection ? setCopilotModel : (setSessionCopilotModel || setCopilotModel);
+          if (switchModel(model)) {
             const modelInfo = modelRegistry()[model];
             return {
               type: 'system',
-              message: `Switched to ${modelInfo.name}${modelInfo.vision ? ' (supports vision)' : ''}${shortcutModel ? ` via ${String(requested).trim().toLowerCase()} alias` : ''}`
+              message: `Switched to ${modelInfo.name}${modelInfo.vision ? ' (supports vision)' : ''}${shortcutModel ? ` via ${String(requested).trim().toLowerCase()} alias` : ''}${persistSelection ? ' and saved it as your default.' : ' for this session only.'}`
             };
           }
 
           const available = formatGroupedModelList(models);
           return {
             type: 'error',
-            message: `Unknown model. Available models:\n${available}\n\nShortcuts: /model cheap, /model latest-gpt`
+            message: `Unknown model. Available models:\n${available}\n\nShortcuts: /model cheap, /model latest-gpt\nPersist a default with /model --persist <id>`
           };
         }
 
@@ -273,7 +279,7 @@ function createCommandHandler(dependencies) {
         const active = modelRegistry()[currentModel];
         return {
           type: 'info',
-          message: `Current model: ${active?.name || currentModel}\n\nAvailable models:\n${list}\n\nUse /model <id> to switch (you can also paste "id - display name"). Shortcuts: /model cheap, /model latest-gpt`
+          message: `Current model: ${active?.name || currentModel}\n\nAvailable models:\n${list}\n\nUse /model <id> to switch for this session (you can also paste "id - display name"). Use /model --persist <id> to save a default. Shortcuts: /model cheap, /model latest-gpt`
         };
 
       case '/status': {

@@ -193,8 +193,23 @@ test('focus results preserve requested-vs-actual target metadata', () => {
   assert(systemAutomationContent.includes('focusTarget'), 'System automation focus actions should expose structured focus target metadata');
   assert(aiServiceContent.includes('classifyActionFocusTargetResult'), 'ai-service should classify focus outcomes before updating target handles');
   assert(aiServiceContent.includes('result.focusTarget = {'), 'ai-service should enrich focus results with accepted/mismatch outcome metadata');
+  assert(aiServiceContent.includes('requested-tradingview-hwnd-foreground-process-mismatch'), 'TradingView focus classification should reject cross-process title-only foreground matches');
+  assert(aiServiceContent.includes('Focus verification failed: requested'), 'Rejected focus actions should fail before downstream keyboard input can run');
   assert(aiServiceContent.includes("action.type === 'click' ||"), 'ai-service should still snapshot actual foreground handles for click-style actions');
   assert(!aiServiceContent.includes("action.type === 'right_click' ||\n        action.type === 'focus_window' ||\n        action.type === 'bring_window_to_front'"), 'ai-service should no longer treat focus actions as unconditional foreground snapshots');
+});
+
+test('focus-stealing timeout override stays in-memory only', () => {
+  const sysAutoPath = path.join(__dirname, '..', 'src', 'main', 'system-automation.js');
+  const clickPath = path.join(__dirname, '..', 'src', 'main', 'ui-automation', 'mouse', 'click.js');
+  const fs = require('fs');
+
+  const systemAutomationContent = fs.readFileSync(sysAutoPath, 'utf8');
+  const clickContent = fs.readFileSync(clickPath, 'utf8');
+
+  assert(!systemAutomationContent.includes('SPIF_SENDCHANGE'), 'system automation focus helpers should not broadcast WM_SETTINGCHANGE during foreground lock overrides');
+  assert(systemAutomationContent.includes('WM_SETTINGCHANGE broadcast while watcher/UIA threads are spinning up'), 'system automation should document why the foreground lock override stays in-memory only');
+  assert(clickContent.includes('AttachThreadInput(curThread, fgThread, true);'), 'mouse click helper should still retain its AttachThreadInput-based focus fallback');
 });
 
 test('ui-watcher exposes active window capability snapshot', () => {
@@ -616,6 +631,8 @@ test('ai-service gates TradingView follow-up typing on post-key observation chec
   assert(tradingViewPineContent.includes('safe-authoring-inspect'), 'pine workflow should inspect visible Pine Editor state before safe authoring');
   assert(systemPromptContent.includes('safe new-script / bounded-edit paths'), 'system prompt should guide Pine authoring toward safe new-script flows');
   assert(observationCheckpointContent.includes('active Pine Editor surface before continuing'), 'Observation checkpoint failures should explain missing active Pine Editor state');
+  assert(observationCheckpointContent.includes('allowSparseOpenStateFallback: true'), 'Observation checkpoint Pine probes should use bounded sparse open-state proof when TradingView UIA is sparse');
+  assert(tradingViewPineContent.includes('assumeSparseOpenStateAsExistingScript'), 'fresh Pine indicator continuations should route sparse open-state proof through the guarded existing-script path');
   assert(tradingViewPineContent.includes('requiresEditorActivation'), 'TradingView Pine workflows should distinguish editor activation from generic panel visibility');
   assert(tradingViewPineContent.includes("messageMentionsTradingViewShortcut(raw, 'open-pine-editor')"), 'TradingView Pine workflows should use shortcut-profile aliases for Pine Editor phrasing');
   assert(tradingViewPineContent.includes('getPineSurfaceMatchTerms'), 'TradingView Pine workflows should expose alias-aware Pine surface match terms');

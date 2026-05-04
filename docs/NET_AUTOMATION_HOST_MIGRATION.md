@@ -8,11 +8,19 @@ To resolve persistent focus deadlocks, sparse UI automation failures, and clipbo
 ---
 
 ## Phase 0 — Foundation & Scaffolding (Week 1)
-- [ ] **Task 0.1: Create .NET Automation Host Project [P0]** - Create `src/dotnet/AutomationHost/` (net8.0, Native AOT `true`, StreamJsonRpc, win-x64, self-contained).
-- [ ] **Task 0.2: Implement JSON-RPC Server Skeleton [P0]** - `Rpc/RpcServer.cs` mapping stdin/stdout, supporting methods (ping, shutdown) and notifications.
-- [ ] **Task 0.3: Implement Node.js Host Client [P0]** - `src/main/automation-host-client.js`. Singleton, spawns .NET host, auto-restarts on crash, handles JSON-RPC `invoke` / `invokeBatch` / `on`.
-- [ ] **Task 0.4: Create Feature Flag Infrastructure [P0]** - Add `USE_NATIVE_HOST` to config, safely readable without restarts.
+- [x] **Task 0.1: Create .NET Automation Host Project [P0]** - `src/dotnet/AutomationHost/` created with `net8.0`, win-x64, self-contained Native AOT publish settings.
+- [x] **Task 0.2: Implement JSON-RPC Server Skeleton [P0]** - `Rpc/RpcServer.cs` + `AutomationRpcService.cs` added with `ping`, `shutdown`, `invoke`, `invokeBatch`, and host lifecycle notifications.
+- [x] **Task 0.3: Implement Node.js Host Client [P0]** - `src/main/automation-host-client.js` added with singleton access, stdio JSON-RPC framing, notifications, explicit host-path override, and local artifact resolution.
+- [x] **Task 0.4: Create Feature Flag Infrastructure [P0]** - `USE_NATIVE_HOST` / `LIKU_USE_NATIVE_HOST` flag parsing added and surfaced via `system-automation.js` without changing legacy behavior.
 - [ ] **Task 0.5: Create Migration Test Harness [P1]** - `src/test/automation-parity-tests.js` to capture input/outputs from old PS scripts and replay against .NET host to assert byte-for-byte parity.
+
+### Phase 0 Validation Snapshot
+- ✅ `dotnet build src/dotnet/AutomationHost/AutomationHost.csproj` succeeds.
+- ✅ `node scripts/test-automation-host-client.js` succeeds against the managed host build (`dotnet AutomationHost.dll`).
+- ✅ `dotnet publish -c Release -r win-x64 --self-contained true -p:PublishAot=true` succeeds after removing the incompatible `PublishSingleFile` setting.
+- ✅ `node scripts/test-automation-host-client.js` succeeds against the published Native AOT executable (`bin/automation-host-publish-test/AutomationHost.exe`).
+- ✅ The original `StreamJsonRpc` transport was replaced with an AOT-safe manual stdio JSON-RPC implementation; the prior `IL2026` / `IL3050` deployment blocker is removed.
+- ✅ Published executable size observed during validation: `AutomationHost.exe` ≈ `3.1 MB`.
 
 ## Phase 1 — Persistent .NET Host Core Modules (Weeks 2–3)
 - [ ] **Task 1.1: Implement InputModule in .NET Host [P0]** - P/Invoke for `SendInput`, `SetCursorPos`, etc. EXACT key mapping parity with `system-automation.js`.

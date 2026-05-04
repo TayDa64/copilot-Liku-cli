@@ -85,11 +85,14 @@ TradingView workflows add domain contracts on top of generic automation:
 - quick-search opening and clearing
 - Pine Editor activation
 - safe Pine authoring inspection
-- non-overwrite gates for existing visible scripts
+- last-worked-script awareness: TradingView normally reopens the most recent Pine script from account cloud storage when Pine Editor is opened
+- non-overwrite gates for existing visible scripts unless an explicit overwrite request or a verified fresh-indicator/new-copy path is present
 - save and add-to-chart lifecycle verification
 - bounded fallback for sparse open-state only when explicitly allowed
 
 Quick-search replacement must prove stale text is empty before typing. If post-type readback does not match, semantic UIA repair may set the exact query only after the input was already proven empty or already matched the expected query. Enter is blocked unless the query or target Pine surface is proven.
+
+For create-new Pine authoring, visible stale code is not proof of corruption by itself. It is an expected TradingView state. The workflow must still stop before replacing that buffer unless it can prove a fresh starter surface, a new-copy/save-as title flow, or an explicit user overwrite intent. In the TradingView desktop Pine Editor, the preferred source-of-truth path is the official Pine command sequence `Ctrl+K`, then `Ctrl+I`, followed by safe-authoring inspection that verifies the default starter (`indicator("My script")` / `plot(close)`) before any generated script paste. A future flattened representation must keep this distinction because `existing-script-visible` means "expected but unsafe to continue automatically", not "Pine Editor failed to open".
 
 ## Flattened Hybrid Representation Requirements
 
@@ -130,7 +133,7 @@ Use symbolic forms for compact policy expressions:
 ```lisp
 (gate pine-authoring
   (when editor-state empty-or-starter continue save-flow)
-  (when editor-state existing-script-visible stop non-overwrite))
+  (when editor-state existing-script-visible route requires-fresh-indicator-or-overwrite-proof))
 ```
 
 Use XML-like boundaries only for long text or mixed provenance:

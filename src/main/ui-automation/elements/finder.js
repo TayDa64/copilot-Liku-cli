@@ -51,6 +51,7 @@ async function findElements(options = {}) {
     isEnabled,
     windowTitle = '',
     index,
+    timeoutMs = 30000,
   } = options;
 
   const searchText = exactText || text;
@@ -184,7 +185,8 @@ $results = Find-UIElements \`
 $results | ConvertTo-Json -Depth 5 -Compress
 `;
 
-  const result = await executePowerShellScript(psScript, 30000);
+  const effectiveTimeoutMs = Math.max(500, Math.min(30000, Number(timeoutMs) || 30000));
+  const result = await executePowerShellScript(psScript, effectiveTimeoutMs);
   
   debug('PowerShell stdout:', result.stdout?.substring(0, 500));
   debug('PowerShell stderr:', result.stderr);

@@ -218,6 +218,7 @@ Success criteria:
 
 - the opener seam remains green
 - safe-authoring state is determined without destructive overwrite
+- if Pine Editor opens the last worked script, the run treats that as normal TradingView behavior and stops unless a verified fresh-indicator starter, new-copy/save-as title flow, or explicit overwrite request is available
 - save-state evidence is observed
 - no unintended `Add to chart` action occurs
 

@@ -3,6 +3,11 @@ const PINE_EDITOR_RESULT_CLICK_CANDIDATES = Object.freeze([
   { text: 'Pine Editor', exact: false }
 ]);
 
+const PINE_EDITOR_QUICK_SEARCH_RESULT_CANDIDATES = Object.freeze([
+  { text: 'Open Pine Editor', exact: true },
+  { text: 'Pine Editor', exact: false }
+]);
+
 const PINE_EDITOR_SURFACE_PROBE_CANDIDATES = Object.freeze([
   { text: 'Add to chart', exact: true },
   { text: 'Publish script', exact: false },
@@ -12,6 +17,8 @@ const PINE_EDITOR_SURFACE_PROBE_CANDIDATES = Object.freeze([
 
 const TRADINGVIEW_QUICK_SEARCH_SURFACE_PROBE_CANDIDATES = Object.freeze([
   { text: 'Search tool or function', exact: true, controlType: 'Text' },
+  { text: 'Search tools or functions', exact: true, controlType: 'Text' },
+  { text: 'Search tools, functions', exact: false, controlType: 'Text' },
   { text: 'Nothing matches your criteria', exact: false, controlType: 'Text' },
   { text: 'Search', exact: true, controlType: 'Edit' }
 ]);
@@ -19,8 +26,11 @@ const TRADINGVIEW_QUICK_SEARCH_SURFACE_PROBE_CANDIDATES = Object.freeze([
 const TRADINGVIEW_QUICK_SEARCH_INPUT_FOCUS_CANDIDATES = Object.freeze([
   { text: 'Search', exact: true, controlType: 'Edit' },
   { text: 'Search tool or function', exact: true, controlType: 'Edit' },
+  { text: 'Search tools or functions', exact: true, controlType: 'Edit' },
   { text: 'Search', exact: true, controlType: 'Text' },
   { text: 'Search tool or function', exact: true, controlType: 'Text' },
+  { text: 'Search tools or functions', exact: true, controlType: 'Text' },
+  { text: 'Search tools, functions', exact: false, controlType: 'Text' },
   { text: 'Nothing matches your criteria', exact: false, controlType: 'Text' }
 ]);
 
@@ -232,6 +242,48 @@ function createTradingViewRuntimeRecovery(deps = {}) {
     return null;
   }
 
+  async function detectTradingViewPineEditorQuickSearchResult(preferredWindowHandle = 0) {
+    const foreground = await systemAutomation.getForegroundWindowInfo();
+    const expectedWindowHandle = Number(preferredWindowHandle || 0) || Number(foreground?.hwnd || 0) || 0;
+    const expectedProcessName = foreground?.processName || '';
+    const allowGlobalFallback = expectedWindowHandle <= 0;
+
+    for (const candidate of PINE_EDITOR_QUICK_SEARCH_RESULT_CANDIDATES) {
+      const matched = await findForegroundElementByText(candidate.text, {
+        exact: candidate.exact,
+        windowHandle: expectedWindowHandle,
+        allowWindowFamily: true,
+        allowGlobalFallback
+      });
+      if (!matched?.element?.Bounds) {
+        continue;
+      }
+
+      const trust = await isTrustedTradingViewQuickSearchMatch(matched, {
+        expectedWindowHandle,
+        expectedProcessName,
+        foreground
+      });
+      if (!trust.trusted) {
+        continue;
+      }
+
+      return {
+        matched: true,
+        text: candidate.text,
+        exact: candidate.exact,
+        matchedBy: matched.matchedBy || 'foreground-window',
+        element: matched.element,
+        foreground: matched.foreground || foreground,
+        trusted: true,
+        trustReason: trust.reason || null,
+        trustedWindow: trust.trustedWindow || null
+      };
+    }
+
+    return null;
+  }
+
   async function retryOpenTradingViewQuickSearchShortcut(action, options = {}) {
     const expectedWindowHandle = Number(options.expectedWindowHandle || 0) || 0;
     const retry = {
@@ -359,7 +411,10 @@ function createTradingViewRuntimeRecovery(deps = {}) {
 
     try {
       const encoded = Buffer.from(String(value || ''), 'utf8').toString('base64');
-      const result = await systemAutomation.executeCommand(`$ErrorActionPreference='Stop'; $bytes = [Convert]::FromBase64String('${encoded}'); $text = [System.Text.Encoding]::UTF8.GetString($bytes); Set-Clipboard -Value $text`, {
+      const command = encoded
+        ? `$ErrorActionPreference='Stop'; $bytes = [Convert]::FromBase64String('${encoded}'); $text = [System.Text.Encoding]::UTF8.GetString($bytes); Set-Clipboard -Value $text`
+        : "$ErrorActionPreference='Stop'; Set-Clipboard -Value ' '";
+      const result = await systemAutomation.executeCommand(command, {
         shell: 'powershell',
         timeout: 5000
       });
@@ -375,19 +430,60 @@ function createTradingViewRuntimeRecovery(deps = {}) {
     }
   }
 
+  async function getTrustedTradingViewForegroundForClipboardProbe(options = {}) {
+    const foreground = await systemAutomation.getForegroundWindowInfo();
+    const foregroundProcess = String(foreground?.processName || '').trim().toLowerCase();
+    if (foregroundProcess !== 'tradingview') {
+      return {
+        trusted: false,
+        foreground: foreground || null,
+        error: 'Clipboard selection fallback requires TradingView to remain focused'
+      };
+    }
+
+    const expectedWindowHandle = Number(options.expectedWindowHandle || options.preferredWindowHandle || 0) || 0;
+    const foregroundHandle = Number(foreground?.hwnd || 0) || 0;
+    if (!expectedWindowHandle || !foregroundHandle || foregroundHandle === expectedWindowHandle) {
+      return {
+        trusted: true,
+        foreground: foreground || null,
+        reason: foregroundHandle === expectedWindowHandle ? 'expected-window' : 'tradingview-foreground'
+      };
+    }
+
+    const foregroundInfo = await getQuickSearchTrustedWindowInfo(foregroundHandle, foreground);
+    const ownerHwnd = Number(foregroundInfo?.ownerHwnd || 0) || 0;
+    const windowKind = String(foregroundInfo?.windowKind || foreground?.windowKind || '').trim().toLowerCase();
+    const processName = String(foregroundInfo?.processName || foreground?.processName || '').trim().toLowerCase();
+    if (processName === 'tradingview' && ownerHwnd === expectedWindowHandle && ['owned', 'palette', 'main', ''].includes(windowKind)) {
+      return {
+        trusted: true,
+        foreground: foregroundInfo || foreground || null,
+        reason: 'owned-window-family'
+      };
+    }
+
+    return {
+      trusted: false,
+      foreground: foreground || null,
+      foregroundInfo: foregroundInfo || null,
+      error: `Clipboard selection fallback requires the focused TradingView window to match the expected target (${foregroundHandle || 'unknown'} != ${expectedWindowHandle})`
+    };
+  }
+
   async function restoreTradingViewQuickSearchCaretAfterSelectionProbe(action, options = {}) {
     if (typeof systemAutomation.pressKey !== 'function') {
       return { attempted: false, success: false, error: 'Keyboard support is unavailable' };
     }
 
-    const foreground = await systemAutomation.getForegroundWindowInfo();
-    if (String(foreground?.processName || '').trim().toLowerCase() !== 'tradingview') {
+    const trust = await getTrustedTradingViewForegroundForClipboardProbe(options);
+    if (!trust.trusted) {
       return {
         attempted: false,
         success: false,
         skipped: true,
-        reason: 'TradingView is no longer foreground after selection probe',
-        foreground: foreground || null
+        reason: trust.error || 'TradingView is no longer the trusted foreground after selection probe',
+        foreground: trust.foreground || null
       };
     }
 
@@ -399,14 +495,14 @@ function createTradingViewRuntimeRecovery(deps = {}) {
         attempted: true,
         success: true,
         collapseKey,
-        foreground: foreground || null
+        foreground: trust.foreground || null
       };
     } catch (error) {
       return {
         attempted: true,
         success: false,
         collapseKey,
-        foreground: foreground || null,
+        foreground: trust.foreground || null,
         error: error?.message || String(error || 'Failed to restore quick-search caret after selection probe')
       };
     }
@@ -417,14 +513,18 @@ function createTradingViewRuntimeRecovery(deps = {}) {
       return { success: false, error: 'Keyboard selection fallback is unavailable' };
     }
 
-    const foreground = await systemAutomation.getForegroundWindowInfo();
-    if (String(foreground?.processName || '').trim().toLowerCase() !== 'tradingview') {
+    const trust = await getTrustedTradingViewForegroundForClipboardProbe({
+      expectedWindowHandle: options.expectedWindowHandle || options.preferredWindowHandle || action?.windowHandle || action?.hwnd || 0
+    });
+    if (!trust.trusted) {
       return {
         success: false,
-        error: 'Clipboard selection fallback requires TradingView to remain focused',
-        foreground: foreground || null
+        error: trust.error || 'Clipboard selection fallback requires TradingView to remain focused',
+        foreground: trust.foreground || null,
+        focusTrust: trust
       };
     }
+    const foreground = trust.foreground || null;
 
     const originalClipboard = await readSystemClipboardText();
     if (!originalClipboard.success) {
@@ -478,6 +578,7 @@ function createTradingViewRuntimeRecovery(deps = {}) {
         sentinelMatched,
         method: 'clipboard-selection',
         foreground: foreground || null,
+        focusTrust: trust,
         originalClipboard,
         capturedClipboard,
         selectionReset,
@@ -664,8 +765,46 @@ function createTradingViewRuntimeRecovery(deps = {}) {
 
     const expectedText = normalizeTradingViewQuickSearchInputText(action?.text || '');
 
+    if (/^pine\s+editor$/i.test(expectedText)) {
+      const visibleResult = await detectTradingViewPineEditorQuickSearchResult(preferredWindowHandle);
+      if (visibleResult?.trusted) {
+        return {
+          applicable: true,
+          ready: true,
+          emptyConfirmed: false,
+          queryAlreadyPresent: true,
+          quickSearchResultVisible: true,
+          expectedText,
+          clearedBy: 'already-visible-pine-editor-result',
+          inputFocus: {
+            focused: true,
+            recoveredBy: 'visible-pine-editor-result',
+            text: visibleResult.text,
+            element: visibleResult.element,
+            foreground: visibleResult.foreground || null
+          },
+          initialRead: {
+            success: true,
+            text: visibleResult.text,
+            normalizedText: expectedText,
+            method: 'quick-search-result-probe',
+            empty: false
+          },
+          finalRead: {
+            success: true,
+            text: visibleResult.text,
+            normalizedText: expectedText,
+            method: 'quick-search-result-probe',
+            empty: false
+          }
+        };
+      }
+    }
+
     async function tryResolveClipboardPreflight() {
-      const clipboardRead = await readTradingViewQuickSearchSelectionViaClipboard(action);
+      const clipboardRead = await readTradingViewQuickSearchSelectionViaClipboard(action, {
+        expectedWindowHandle: preferredWindowHandle
+      });
       if (clipboardRead.success) {
         if (clipboardRead.empty) {
           return {
@@ -723,7 +862,9 @@ function createTradingViewRuntimeRecovery(deps = {}) {
           keyboardFallback.error = error?.message || String(error || 'Keyboard fallback failed');
         }
 
-        const afterKeyboardClipboardRead = await readTradingViewQuickSearchSelectionViaClipboard(action);
+        const afterKeyboardClipboardRead = await readTradingViewQuickSearchSelectionViaClipboard(action, {
+          expectedWindowHandle: preferredWindowHandle
+        });
         if (afterKeyboardClipboardRead.success && afterKeyboardClipboardRead.empty) {
           return {
             resolved: true,
@@ -787,39 +928,6 @@ function createTradingViewRuntimeRecovery(deps = {}) {
             initialRead: clipboardRead,
             finalRead: clipboardRead,
             fallbackReason: 'TradingView selection copy produced Pine source rather than a quick-search value; treat Pine Editor as already active and skip the redundant open route.'
-          }
-        };
-      }
-
-      if (clipboardRead?.sentinelMatched && String(clipboardRead?.foreground?.processName || '').trim().toLowerCase() === 'tradingview') {
-        return {
-          resolved: true,
-          result: {
-            applicable: true,
-            ready: true,
-            emptyConfirmed: false,
-            emptyInferred: true,
-            fallbackAssumedFocused: true,
-            fallbackReason: 'TradingView quick-search selection copy captured no stale text after ctrl+k; treat as empty-field continuation and require post-type verification before Enter',
-            clearedBy: 'clipboard-selection-miss-assumed-empty',
-            inputFocus: {
-              focused: true,
-              recoveredBy: 'clipboard-selection-miss',
-              foreground: clipboardRead.foreground || null
-            },
-            initialRead: {
-              ...clipboardRead,
-              empty: true,
-              inferredEmpty: true,
-              normalizedText: ''
-            },
-            finalRead: {
-              ...clipboardRead,
-              empty: true,
-              inferredEmpty: true,
-              normalizedText: ''
-            },
-            clipboardRead
           }
         };
       }
@@ -992,6 +1100,35 @@ function createTradingViewRuntimeRecovery(deps = {}) {
       return { applicable: true, verified: false, error: 'No expected quick-search text was available for verification' };
     }
 
+    const autoFocusTyping = action?.searchSurfaceContract?.autoFocusTyping;
+    const expectedAutoFocusText = normalizeTradingViewQuickSearchInputText(
+      autoFocusTyping?.expectedText || action?.text || ''
+    );
+    const autoFocusTypingContractVerified = !!(
+      quickSearchPreflight?.fallbackAssumedFocused === true
+      && autoFocusTyping
+      && typeof autoFocusTyping === 'object'
+      && autoFocusTyping.enabled === true
+      && expectedAutoFocusText
+      && expectedAutoFocusText === expectedText
+    );
+    if (autoFocusTypingContractVerified) {
+      return {
+        applicable: true,
+        verified: true,
+        expectedText,
+        actualText: expectedText,
+        inputFocus: {
+          focused: true,
+          recoveredBy: 'contracted-auto-focus-type',
+          foreground: quickSearchPreflight?.foreground || null
+        },
+        readback: null,
+        satisfiedBy: 'contracted-auto-focus-type',
+        error: null
+      };
+    }
+
     let inputFocus = quickSearchPreflight?.inputFocus || null;
     const canReuseClipboardFallback = !!(
       quickSearchPreflight?.fallbackAssumedFocused
@@ -1032,7 +1169,9 @@ function createTradingViewRuntimeRecovery(deps = {}) {
         };
       }
 
-      const repairedReadback = await readTradingViewQuickSearchSelectionViaClipboard(action);
+      const repairedReadback = await readTradingViewQuickSearchSelectionViaClipboard(action, {
+        expectedWindowHandle: preferredWindowHandle
+      });
       const repairedActual = normalizeTradingViewQuickSearchInputText(repairedReadback?.normalizedText || repairedReadback?.text || '');
       const repairedVerified = repairedReadback?.success === true && repairedActual === expectedText;
       canonicalization.readback = repairedReadback;
@@ -1087,7 +1226,9 @@ function createTradingViewRuntimeRecovery(deps = {}) {
     }
 
     if (!inputFocus?.element?.Bounds) {
-      const clipboardRead = await readTradingViewQuickSearchSelectionViaClipboard(action);
+      const clipboardRead = await readTradingViewQuickSearchSelectionViaClipboard(action, {
+        expectedWindowHandle: preferredWindowHandle
+      });
       if (clipboardRead.success) {
         const normalizedActual = normalizeTradingViewQuickSearchInputText(clipboardRead.normalizedText || clipboardRead.text || '');
         const verifiedByClipboard = normalizedActual === expectedText;
@@ -1271,7 +1412,9 @@ function createTradingViewRuntimeRecovery(deps = {}) {
       || 'Pine Editor'
     );
 
-    const selectionReadback = await readTradingViewQuickSearchSelectionViaClipboard(action);
+    const selectionReadback = await readTradingViewQuickSearchSelectionViaClipboard(action, {
+      expectedWindowHandle: options.expectedWindowHandle || action?.windowHandle || action?.hwnd || 0
+    });
     const currentQuery = normalizeTradingViewQuickSearchInputText(selectionReadback?.normalizedText || selectionReadback?.text || '');
     const queryStillPresent = !!expectedQuery
       && !!currentQuery
@@ -1351,10 +1494,13 @@ function createTradingViewRuntimeRecovery(deps = {}) {
     let shortcutRetry = null;
     let probeMatched = await probeTradingViewQuickSearchSurface(options.expectedWindowHandle);
     if (!probeMatched && options.allowShortcutRetry === true) {
-      shortcutRetry = await retryOpenTradingViewQuickSearchShortcut(action, options);
-      if (shortcutRetry?.success && shortcutRetry.probe) {
-        probeMatched = shortcutRetry.probe;
-      }
+      shortcutRetry = {
+        attempted: false,
+        success: false,
+        skipped: true,
+        expectedWindowHandle: Number(options.expectedWindowHandle || 0) || 0,
+        error: 'Skipped quick-search shortcut retry because Ctrl+K toggles the TradingView desktop search surface'
+      };
     }
     if (!probeMatched) {
       if (shortcutRetry) {
@@ -1372,7 +1518,16 @@ function createTradingViewRuntimeRecovery(deps = {}) {
     }
 
     if (probeMatched.trusted !== true) {
-      return null;
+      return {
+        recovered: false,
+        checkpoint: {
+          ...observationCheckpoint,
+          verified: false,
+          error: observationCheckpoint?.error || `TradingView quick search probe matched an untrusted surface (${probeMatched.trustReason || 'unknown trust reason'})`,
+          quickSearchSurfaceProbe: probeMatched,
+          quickSearchShortcutRetry: shortcutRetry || null
+        }
+      };
     }
 
     const preferredWindowHandle = Number(probeMatched?.trustedWindow?.hwnd || 0)
@@ -1693,6 +1848,7 @@ function createTradingViewRuntimeRecovery(deps = {}) {
   }
 
   return {
+    detectTradingViewPineEditorQuickSearchResult,
     ensureTradingViewQuickSearchInputClearBeforeTyping,
     verifyTradingViewQuickSearchTypedValue,
     maybeRecoverTradingViewQuickSearchOpen,

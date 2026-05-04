@@ -676,6 +676,10 @@ function buildPineEditorSafeAuthoringSummary(text) {
   const targetCorruptionVisible = /\bscript could not be translated from\b/i.test(compactText)
     || (/\|[a-z]\|/i.test(rawText) && /\bpine editor\b/i.test(compactText));
   if (targetCorruptionVisible) addSignal(visibleSignals, 'editor-target-corrupt');
+  const quickSearchOpenVisible = /\bsearch tools? or functions?\b/i.test(compactText)
+    || /\bsearch tool or function\b/i.test(compactText)
+    || /\bopen pine editor\b/i.test(compactText);
+  if (quickSearchOpenVisible) addSignal(visibleSignals, 'quick-search-open');
 
   const starterLike = (
     visibleScriptKind !== 'unknown'
@@ -696,6 +700,8 @@ function buildPineEditorSafeAuthoringSummary(text) {
   let editorVisibleState = 'unknown-visible-state';
   if (targetCorruptionVisible) {
     editorVisibleState = 'unknown-visible-state';
+  } else if (quickSearchOpenVisible) {
+    editorVisibleState = 'quick-search-open';
   } else if (visibleSignals.includes('editor-empty-hint') || starterLike || anchorOnlyStarterLike) {
     editorVisibleState = 'empty-or-starter';
   } else if (
@@ -740,7 +746,7 @@ function inferPineLineBudgetSignal(lineCountEstimate) {
   return 'within-budget-visible';
 }
 
-function buildPineEditorDiagnosticsStructuredSummary(text, evidenceMode = 'generic-status') {
+function buildPineEditorDiagnosticsStructuredSummary(text, evidenceMode = 'generic-status', options = {}) {
   const rawText = String(text || '').replace(/\r/g, '');
   const compactText = normalizeCompactText(rawText, 2400);
   if (!compactText) return null;
@@ -765,6 +771,12 @@ function buildPineEditorDiagnosticsStructuredSummary(text, evidenceMode = 'gener
   const saveConfirmedVisible = /\b(saved(?: successfully)?|script saved|all changes saved|saved version|save complete)\b/i.test(compactText);
   const saveRequiredVisible = /\b(save script|save your script|name your script|script name|save as|rename script)\b/i.test(compactText)
     || /\bunsaved\b/i.test(compactText);
+  const expectedScriptTitle = String(normalizeCompactText(options.expectedScriptTitle, 160) || '');
+  const normalizedExpectedScriptTitle = expectedScriptTitle.toLowerCase();
+  const expectedScriptTitleVisible = !!(
+    normalizedExpectedScriptTitle
+    && compactText.toLowerCase().includes(normalizedExpectedScriptTitle)
+  );
 
   let visibleLineCountEstimate = null;
   const lineCountMatch = rawText.match(/(?:line count|script length|lines used|used)\s*[:=]?\s*(\d{1,4})(?:\s*\/\s*500|\s+of\s+500)?\s*lines?/i)
@@ -798,6 +810,7 @@ function buildPineEditorDiagnosticsStructuredSummary(text, evidenceMode = 'gener
     addSignal(statusSignals, 'line-budget-hint-visible');
   }
   if (saveConfirmedVisible) addSignal(statusSignals, 'save-confirmed-visible');
+  if (expectedScriptTitleVisible) addSignal(statusSignals, 'expected-title-visible');
   if (saveRequiredVisible) addSignal(statusSignals, 'save-required-visible');
   if (evidenceMode === 'diagnostics') addSignal(statusSignals, 'diagnostics-request');
   if (evidenceMode === 'compile-result') addSignal(statusSignals, 'compile-result-request');
@@ -821,11 +834,12 @@ function buildPineEditorDiagnosticsStructuredSummary(text, evidenceMode = 'gener
     Number.isFinite(visibleLineCountEstimate) ? `lines=${visibleLineCountEstimate}` : null,
     lineBudgetSignal !== 'unknown-line-budget' ? `budget=${lineBudgetSignal}` : null
   ].filter(Boolean).join(' | ');
+  const titleProofVisible = evidenceMode === 'save-status' && expectedScriptTitleVisible;
   const lifecycleState = targetCorruptionVisible
     ? 'editor-target-corrupt'
     : evidenceMode === 'save-status'
-      ? (saveConfirmedVisible
-        ? 'saved-state-verified'
+      ? ((saveConfirmedVisible || titleProofVisible)
+        ? (expectedScriptTitle && !expectedScriptTitleVisible ? 'saved-state-title-mismatch' : 'saved-state-verified')
         : (saveRequiredVisible ? 'save-required-before-apply' : 'unknown-save-state'))
       : (compileStatus === 'success' || compileStatus === 'errors-visible' || compileStatus === 'status-only'
         ? 'apply-result-verified'
@@ -841,6 +855,8 @@ function buildPineEditorDiagnosticsStructuredSummary(text, evidenceMode = 'gener
     statusSignals: statusSignals.slice(0, 8),
     topVisibleDiagnostics,
     lifecycleState,
+    expectedScriptTitle: expectedScriptTitle || null,
+    expectedScriptTitleVisible,
     compactSummary: compactSummary || null
   };
 }
@@ -860,14 +876,21 @@ function buildPineEditorFallbackCandidates(evidenceMode = 'generic-status') {
     { text: 'Add to chart', synthetic: true, category: 'surface' },
     { text: 'Update on chart', synthetic: true, category: 'surface' },
     { text: 'Strategy Tester', synthetic: true, category: 'surface' },
-    { text: 'Pine Logs', synthetic: true, category: 'surface' }
+    { text: 'Pine Logs', synthetic: true, category: 'surface' },
+    { text: 'Open Pine Editor', synthetic: true, category: 'quick-search-open' },
+    { text: 'Search tool or function', synthetic: true, category: 'quick-search-open' },
+    { text: 'Search tools or functions', synthetic: true, category: 'quick-search-open' }
   ];
 
   const saveStatusCandidates = [
     { text: 'Save script', synthetic: true, category: 'save-required' },
     { text: 'Script name', synthetic: true, category: 'save-required' },
+    { text: 'Name your script', synthetic: true, category: 'save-required' },
     { text: 'Save as', synthetic: true, category: 'save-required' },
     { text: 'Rename script', synthetic: true, category: 'save-required' },
+    { text: 'Make a copy', synthetic: true, category: 'save-required' },
+    { text: 'Create a copy', synthetic: true, category: 'save-required' },
+    { text: 'Copy script', synthetic: true, category: 'save-required' },
     { text: 'Unsaved', synthetic: true, category: 'save-required' },
     { text: 'All changes saved', synthetic: true, category: 'save-confirmed' },
     { text: 'Saved successfully', synthetic: true, category: 'save-confirmed' },
@@ -937,7 +960,7 @@ async function getPineEditorTextFallback(action = {}) {
   const safeAuthoringInspect = evidenceMode === 'safe-authoring-inspect';
   const sparseSaveStatus = evidenceMode === 'save-status' && densitySignal.sparse;
   const candidateBudget = safeAuthoringInspect && densitySignal.sparse
-    ? 2
+    ? (action.allowPineEditorMissingFallback === true ? 10 : 2)
     : (safeAuthoringInspect ? 6 : fallbackCandidates.length);
   const deadlineMs = safeAuthoringInspect
     ? Date.now() + 6500
@@ -1058,7 +1081,12 @@ async function getPineEditorTextFallback(action = {}) {
     };
   }
 
-  if (evidenceMode === 'safe-authoring-inspect' && densitySignal.sparse && action.allowSparseOpenStateFallback === true) {
+  if (
+    evidenceMode === 'safe-authoring-inspect'
+    && densitySignal.sparse
+    && action.allowSparseOpenStateFallback === true
+    && action.allowPineEditorMissingFallback !== true
+  ) {
     pineInspectDebugLog('text-fallback:sparse-open-state-return', JSON.stringify({
       evidenceMode,
       watcherDensity: densitySignal
@@ -3883,7 +3911,18 @@ async function executeAction(action, runtimeOptions = {}) {
         } else if (gtResult.success && /pine editor/i.test(pineTargetText)) {
           if (effectiveAction?.pineEvidenceMode === 'safe-authoring-inspect') {
             result.pineStructuredSummary = buildPineEditorSafeAuthoringSummary(gtResult.text);
-            if (gtResult.sparseOpenState === true && effectiveAction.assumeSparseOpenStateAsEmptyOrStarter === true) {
+            if (gtResult.sparseOpenState === true && effectiveAction.assumeSparseOpenStateAsExistingScript === true) {
+              result.pineStructuredSummary = {
+                ...result.pineStructuredSummary,
+                editorVisibleState: 'existing-script-visible',
+                visibleSignals: Array.from(new Set([
+                  ...(Array.isArray(result.pineStructuredSummary?.visibleSignals) ? result.pineStructuredSummary.visibleSignals : []),
+                  'sparse-open-state-existing-script-guard'
+                ])),
+                lifecycleState: null,
+                compactSummary: 'state=existing-script-visible | sparse-open-state=existing-script-guard'
+              };
+            } else if (gtResult.sparseOpenState === true && effectiveAction.assumeSparseOpenStateAsEmptyOrStarter === true) {
               result.pineStructuredSummary = {
                 ...result.pineStructuredSummary,
                 editorVisibleState: 'empty-or-starter',
@@ -3902,7 +3941,9 @@ async function executeAction(action, runtimeOptions = {}) {
             || effectiveAction?.pineEvidenceMode === 'save-status'
             || effectiveAction?.pineEvidenceMode === 'generic-status'
           ) {
-            result.pineStructuredSummary = buildPineEditorDiagnosticsStructuredSummary(gtResult.text, effectiveAction.pineEvidenceMode);
+            result.pineStructuredSummary = buildPineEditorDiagnosticsStructuredSummary(gtResult.text, effectiveAction.pineEvidenceMode, {
+              expectedScriptTitle: effectiveAction.expectedPineScriptTitle
+            });
           }
         }
         pineInspectDebugLog('get-text:summary', JSON.stringify({

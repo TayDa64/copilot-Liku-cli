@@ -131,6 +131,8 @@ test('pine editor opener is routed through TradingView quick search instead of a
   const pineEditor = getTradingViewShortcut('open-pine-editor');
   const directAction = buildTradingViewShortcutAction('open-pine-editor');
   const routeActions = buildTradingViewShortcutRoute('open-pine-editor');
+  const firstTypeIndex = routeActions.findIndex((action) => action?.type === 'type' && action?.text === 'Pine Editor');
+  const enterIndex = routeActions.findIndex((action) => action?.type === 'key' && action?.key === 'enter');
 
   assert(pineEditor, 'pine editor shortcut profile should exist');
   assert.strictEqual(pineEditor.key, null, 'pine editor should not claim a stable native shortcut key');
@@ -138,15 +140,14 @@ test('pine editor opener is routed through TradingView quick search instead of a
   assert.strictEqual(directAction, null, 'pine editor should not build a direct key action when there is no stable native shortcut');
   assert(Array.isArray(routeActions) && routeActions.length >= 5, 'pine editor should expose a TradingView-specific route sequence');
   assert.strictEqual(routeActions[0].key, 'ctrl+k');
-  assert.strictEqual(routeActions[2].type, 'type');
-  assert.strictEqual(routeActions[2].text, 'Pine Editor');
-  assert.strictEqual(routeActions[4].type, 'key');
-  assert.strictEqual(routeActions[4].key, 'enter');
+  assert(firstTypeIndex >= 0, 'pine editor route should type the Pine Editor query');
+  assert(enterIndex > firstTypeIndex, 'pine editor route should press Enter after typing the query');
 });
 
 test('pine authoring shortcuts expose normalized capability metadata and chorded sequences', () => {
   const newIndicator = getTradingViewShortcut('new-pine-indicator');
   const saveScript = getTradingViewShortcut('save-pine-script');
+  const saveAsScript = getTradingViewShortcut('save-as-pine-script');
   const addToChart = getTradingViewShortcut('add-pine-to-chart');
 
   assert(newIndicator, 'new pine indicator shortcut should exist');
@@ -158,6 +159,8 @@ test('pine authoring shortcuts expose normalized capability metadata and chorded
   assert.strictEqual(saveScript.verificationContract.kind, 'status-visible');
   assert.strictEqual(saveScript.verificationContract.requiresObservedChange, false);
   assert(saveScript.verificationContract.titleHints.includes('Script name'));
+  assert.strictEqual(saveAsScript.key, 'ctrl+shift+s');
+  assert.strictEqual(saveAsScript.verificationContract.requiresObservedChange, true);
   assert.strictEqual(addToChart.key, 'ctrl+enter');
   assert.strictEqual(addToChart.automationRoutable, true);
 });

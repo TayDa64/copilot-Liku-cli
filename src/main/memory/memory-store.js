@@ -97,6 +97,17 @@ function buildSelectionContext(options = {}) {
   };
 }
 
+function countDefinedSelectionSignals(selectionContext = {}) {
+  return [
+    selectionContext.repoName,
+    selectionContext.projectRoot,
+    selectionContext.appId,
+    selectionContext.processName,
+    selectionContext.taskFamily,
+    selectionContext.compartmentKey
+  ].filter(Boolean).length;
+}
+
 function evaluateScopeSignal(values, currentValue) {
   const candidates = normalizeArray(values).map((value) => String(value || '').trim().toLowerCase());
   const current = String(currentValue || '').trim().toLowerCase();
@@ -113,12 +124,21 @@ function evaluateScopeSignal(values, currentValue) {
 function analyzeNoteScope(scope, selectionContext = {}) {
   const normalizedScope = normalizeScope(scope);
   if (!normalizedScope) {
+    const definedSignalCount = countDefinedSelectionSignals(selectionContext);
+    const unscopedPenalty = selectionContext.compartmentKey
+      ? -2
+      : definedSignalCount >= 3
+        ? -1.5
+        : definedSignalCount >= 1
+          ? -0.75
+          : 0;
     return {
-      score: 0,
+      score: unscopedPenalty,
       matchedSignals: 0,
       mismatchedSignals: 0,
       classification: 'unscoped-fallback',
-      scopeTier: 'unscoped'
+      scopeTier: 'unscoped',
+      penaltyApplied: unscopedPenalty
     };
   }
 

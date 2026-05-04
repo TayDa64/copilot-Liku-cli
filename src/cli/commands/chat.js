@@ -452,6 +452,43 @@ function buildContextSwitchNotice(executionContextEnvelope = null) {
   };
 }
 
+function buildImplicitContextSwitchHandoff(userInput = '', executionContextEnvelope = null, options = {}) {
+  if (!isMinimalContinuationInput(userInput)) return null;
+
+  const transition = executionContextEnvelope?.transition || null;
+  const currentCompartmentKey = String(executionContextEnvelope?.compartmentKey || '').trim();
+  const previousCompartmentKey = String(transition?.previousCompartmentKey || '').trim();
+  if (!currentCompartmentKey || !previousCompartmentKey || previousCompartmentKey === currentCompartmentKey) return null;
+  if (transition?.bridgeEligible) return null;
+
+  const currentContinuity = options.currentContinuity || null;
+  const previousContinuity = options.previousContinuity || null;
+  const previousPendingRequestedTask = options.previousPendingRequestedTask || null;
+
+  if (hasUsableChatContinuity(currentContinuity) && currentContinuity?.continuationReady && !currentContinuity?.degradedReason) {
+    return null;
+  }
+
+  const usePreviousPendingRequestedTask = hasResumablePendingTask(previousPendingRequestedTask);
+  const usePreviousContinuity = !usePreviousPendingRequestedTask && hasUsableChatContinuity(previousContinuity);
+  if (!usePreviousPendingRequestedTask && !usePreviousContinuity) return null;
+
+  const effectiveIntent = usePreviousPendingRequestedTask
+    ? buildPendingTaskContinuationIntent(previousPendingRequestedTask, userInput)
+    : buildContinuationIntentFromState(previousContinuity, userInput);
+  if (!String(effectiveIntent || '').trim()) return null;
+
+  return {
+    signature: `${previousCompartmentKey}=>${currentCompartmentKey}:implicit-handoff`,
+    message: `Implicit context switch detected: carrying the saved task from ${summarizeCompartmentForNotice(previousCompartmentKey)} into ${summarizeCompartmentForNotice(currentCompartmentKey)} for this short continuation turn.`,
+    effectiveIntent,
+    usePendingRequestedTask: usePreviousPendingRequestedTask,
+    useContinuityState: usePreviousContinuity,
+    previousCompartmentKey,
+    currentCompartmentKey
+  };
+}
+
 function announceRuntimeTraceAvailability(ai, execResult, lastAnnouncedSessionId = null) {
   const runtimeTraceSummary = execResult?.runtimeTraceSummary
     || (typeof ai?.getLastRuntimeTraceSummary === 'function' ? ai.getLastRuntimeTraceSummary() : null);
@@ -1069,7 +1106,7 @@ ${highlight('In-chat commands:')}
   /state      Show or clear session intent constraints
   /trace      Show or export the last runtime trace
   /login      Authenticate with GitHub Copilot
-  /model      Interactive model picker (↑/↓ + Enter) or set directly (e.g. /model gpt-4o)
+  /model      Interactive model picker (↑/↓ + Enter) or set directly for this session (e.g. /model gpt-4o)
   /sequence   Toggle guided step-by-step execution (on by default)
   /recipes    Toggle bounded popup follow-up recipes (off by default)
   /provider   Show/set provider
@@ -1393,14 +1430,41 @@ async function runChatLoop(ai, options) {
     const chatContinuity = isContinueLike ? getChatContinuityState({ cwd: process.cwd(), executionContextEnvelope: continuationExecutionContextEnvelope }) : null;
     const pendingRequestedTask = isContinueLike ? getPendingRequestedTask({ cwd: process.cwd(), executionContextEnvelope: continuationExecutionContextEnvelope }) : null;
     const explicitTransitionIntent = isContinueLike && hasExplicitCrossCompartmentTransitionIntent(line);
+    const previousCompartmentKey = String(continuationExecutionContextEnvelope?.transition?.previousCompartmentKey || '').trim();
+    const previousCompartmentContinuity = (isContinueLike && previousCompartmentKey && previousCompartmentKey !== String(continuationExecutionContextEnvelope?.compartmentKey || '').trim())
+      ? getChatContinuityState({ cwd: process.cwd(), executionContextEnvelope: { compartmentKey: previousCompartmentKey } })
+      : null;
+    const previousCompartmentPendingRequestedTask = (isContinueLike && previousCompartmentKey && previousCompartmentKey !== String(continuationExecutionContextEnvelope?.compartmentKey || '').trim())
+      ? getPendingRequestedTask({ cwd: process.cwd(), executionContextEnvelope: { compartmentKey: previousCompartmentKey } })
+      : null;
+    const implicitSwitchHandoff = (isContinueLike && !explicitTransitionIntent)
+      ? buildImplicitContextSwitchHandoff(line, continuationExecutionContextEnvelope, {
+        currentContinuity: chatContinuity,
+        previousContinuity: previousCompartmentContinuity,
+        previousPendingRequestedTask: previousCompartmentPendingRequestedTask
+      })
+      : null;
     const continuationDecision = isContinueLike
       ? (explicitTransitionIntent
         ? { block: false, useContinuityState: false, usePendingRequestedTask: false, effectiveIntent: line, reason: null }
-        : getContinuationDecision(line, chatContinuity, pendingRequestedTask))
+        : implicitSwitchHandoff
+          ? {
+            block: false,
+            useContinuityState: !!implicitSwitchHandoff.useContinuityState,
+            usePendingRequestedTask: !!implicitSwitchHandoff.usePendingRequestedTask,
+            effectiveIntent: implicitSwitchHandoff.effectiveIntent,
+            reason: implicitSwitchHandoff.message
+          }
+          : getContinuationDecision(line, chatContinuity, pendingRequestedTask))
       : { block: false, useContinuityState: false, reason: null };
 
     const contextSwitchNotice = explicitTransitionIntent
       ? buildContextSwitchNotice(continuationExecutionContextEnvelope)
+      : implicitSwitchHandoff
+        ? {
+          signature: implicitSwitchHandoff.signature,
+          message: implicitSwitchHandoff.message
+        }
       : null;
     if (contextSwitchNotice && contextSwitchNotice.signature !== lastContextSwitchNoticeSignature) {
       info(contextSwitchNotice.message);
@@ -2213,4 +2277,12 @@ async function run(args, flags) {
   return { success: true };
 }
 
-module.exports = { run, showHelp };
+module.exports = {
+  run,
+  showHelp,
+  __test: {
+    buildContextSwitchNotice,
+    buildImplicitContextSwitchHandoff,
+    getContinuationDecision
+  }
+};

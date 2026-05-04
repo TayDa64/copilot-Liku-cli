@@ -4,6 +4,8 @@
 
 Turn a real `liku chat` runtime finding into a checked-in, repeatable regression with as little friction as possible.
 
+For TradingView-specific live validation order, opener-first seam selection, and terminal hygiene guardrails, see [TRADINGVIEW_VALIDATION_RUNBOOK.md](./TRADINGVIEW_VALIDATION_RUNBOOK.md).
+
 Important: if a live run disagrees with a green synthetic suite, the live run wins. Convert the live behavior into a transcript or runtime-proof fixture instead of assuming the suite is the deeper truth.
 
 This first N5 slice intentionally reuses the existing inline-proof transcript evaluator instead of introducing a second transcript engine. It now also supports proof-aware runtime trace fixtures. The workflow is:

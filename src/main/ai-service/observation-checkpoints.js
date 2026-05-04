@@ -437,7 +437,7 @@ function createObservationCheckpointRuntime(deps = {}) {
         type: 'get_text',
         text: 'Pine Editor',
         pineEvidenceMode: 'safe-authoring-inspect',
-        allowSparseOpenStateFallback: spec.allowSparsePineEditorTextProbe === true,
+        allowSparseOpenStateFallback: true,
         reason: 'Read bounded Pine Editor surface text for observation checkpoint verification'
       });
       return summarizePineEditorTextProbeResult(probeResult);

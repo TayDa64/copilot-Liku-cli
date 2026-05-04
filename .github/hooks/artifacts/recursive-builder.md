@@ -1,49 +1,49 @@
 Changed Files
-- c:\dev\copilot-Liku-cli\src\main\ai-service.js
-- c:\dev\copilot-Liku-cli\src\main\system-automation.js
-- c:\dev\copilot-Liku-cli\scripts\test-windows-observation-flow.js
-- c:\dev\copilot-Liku-cli\scripts\test-bug-fixes.js
+- `src/main/tools/tradingview-tool.js` — new stable additive facade that re-exports the TradingView helpers currently consumed by `src/main/ai-service.js`.
 
-What was implemented
-- Added TradingView-specific post-key observation checkpoints in `ai-service.js` for critical key actions, scoped to low-UIA TradingView flows.
-- After critical TradingView `alt+...` and `enter` keys, the executor now pauses to observe foreground/window-state changes before continuing.
-- Hard-gated follow-up typing after TradingView dialog-opening keys: if the app surface does not visibly change, execution stops before the next `type` action.
-- Added verification-friendly execution metadata via `observationCheckpoints` on both `executeActions(...)` and `resumeAfterConfirmation(...)` results.
-- Updated checkpoint logic to retarget `lastTargetWindowHandle` to the newly observed dialog window when TradingView opens an owned/palette surface, so later typing goes to the dialog instead of the chart window.
-- Expanded TradingView identity grounding in `APP_NAME_PROFILES` with dialog title hints, chart keywords, dialog keywords, and preferred/dialog window kinds.
-- Kept the broader architecture intact by reusing existing foreground verification and app-identity seams rather than redesigning orchestration.
-- In `system-automation.js`, added a narrowly scoped SendInput path for TradingView-class `Alt` accelerators and `Enter` confirmations, while preserving the prior SendKeys path for unrelated shortcuts.
-- Kept the change advisory-safe: no trade execution behavior was added.
+ai-service.js Import Decision
+- Deferred `ai-service.js` import changes.
+- Reason: a compatibility phase is required right now because `scripts/test-bug-fixes.js` contains direct source-string assertions that `ai-service.js` still includes:
+  - `require('./tradingview/app-profile')`
+  - `require('./tradingview/indicator-workflows')`
+  - `require('./tradingview/alert-workflows')`
+  - `require('./tradingview/chart-verification')`
+  - `require('./tradingview/drawing-workflows')`
+  - `require('./tradingview/pine-workflows')`
+  - `require('./tradingview/paper-workflows')`
+  - `require('./tradingview/dom-workflows')`
+- Switching `ai-service.js` fully to the facade in this step would fail those source-sensitive tests despite unchanged runtime behavior.
+- Result: facade added now, `ai-service.js` left untouched for safe compatibility.
 
-Tests run and results
-- `node scripts/test-windows-observation-flow.js` ✅
-	- Passed: 9
-	- Added coverage proving:
-		- TradingView alert accelerators block blind follow-up typing when no dialog change is observed.
-		- TradingView alert accelerators allow typing only after an observed dialog transition.
-		- Resume/confirmation flows return TradingView checkpoint metadata for timeframe confirmation.
-- `node scripts/test-bug-fixes.js` ✅
-	- Passed: 17
-	- Added coverage for TradingView app-profile verification hints and the new TradingView SendInput key-selection seam.
-- `npm run test:ai-focused` ✅
-	- Passed end-to-end in the current workspace, including the targeted Windows observation tests and shared AI-service suites.
+First Failing Assertions Encountered
+- None in the actual verification run.
+- Note: an initial execution wrapper attempt returned no usable output, but it did not surface any assertion failure text. I reran the checks directly in the terminal and all requested regressions passed.
 
 Local Proofs
-- `node scripts/test-windows-observation-flow.js` → exit 0, summary reported `Passed: 9`, `Failed: 0`.
-- `node scripts/test-bug-fixes.js` → exit 0, summary reported `Passed: 17`, `Failed: 0`.
-- `npm run test:ai-focused` → exit 0, included successful runs of:
-	- `test-windows-observation-flow`
-	- `test-bug-fixes`
-	- `test-chat-actionability`
-	- `test-ai-service-contract`
-	- `test-ai-service-browser-rewrite`
-	- `test-ai-service-state`
+- `node -e "const m=require('./src/main/tools/tradingview-tool'); ..."`
+  PASS — `Facade exports OK: 26`
+- `node scripts/test-ai-service-contract.js`
+  PASS
+- `node scripts/test-ai-service-proof-trace.js`
+  PASS
+- `node scripts/test-ai-service-policy.js`
+  PASS
+- `node scripts/test-bug-fixes.js`
+  PASS — 35 passed, 0 failed
 
-Remaining limitations for the next slice
-- The new checkpoint is intentionally scoped to TradingView-class key flows and only uses foreground/window metadata; it does not yet do screenshot- or OCR-based confirmation of the actual chart interval label.
-- For non-typing TradingView `Enter` flows, the checkpoint is a bounded settle/verification step rather than a hard visual-change requirement, because low-UIA metadata does not always expose a distinct chart-state transition.
-- The SendInput reliability improvement is intentionally narrow (TradingView-like `Alt` and `Enter` flows only) to minimize regression risk; broader Electron-app tuning can be evaluated in a later slice if needed.
+Verification Details
+- The new facade successfully re-exports the TradingView helper functions currently consumed by `ai-service.js`:
+  - app profile helpers
+  - TradingView verification helpers
+  - indicator/alert/chart/drawing rewrite helpers
+  - Pine workflow helpers
+  - Pine script state helpers
+  - paper and DOM rewrite helpers
+- Runtime behavior was preserved by making the change additive only and not rerouting `ai-service.js` yet.
+
+Concise Recommendation for Next Local Step
+- Next safe step: update the source-sensitive assertions in `scripts/test-bug-fixes.js` to accept the facade import path (or dual-path compatibility), then switch `ai-service.js` TradingView imports to `./tools/tradingview-tool` in one focused follow-up change.
 
 Unresolved Risks
-- TradingView surfaces that change internally without any title/window-kind signal can still be only partially observable through foreground metadata alone.
-- If a TradingView dialog opens without changing HWND, title, or window kind, the hard gate may still conservatively stop follow-up typing; that is safer than blind continuation, but may need richer visual confirmation in a later phase.
+- The facade is not yet exercised by `ai-service.js` at runtime because preserving current source-sensitive test expectations required deferring that import swap.
+- Repository working tree contains unrelated pre-existing changes; my implementation scope for Issue 1 was limited to the new facade file.

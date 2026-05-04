@@ -338,6 +338,70 @@ async function main() {
     });
   });
 
+  await test('executeActions replays policy/runtime prelude events before action execution trace entries', async () => {
+    const traceEvents = [];
+    const runtimeTraceLog = {
+      sessionId: 'runtime-policy-prelude-session',
+      filePath: 'C:/tmp/runtime-policy-prelude-session.jsonl',
+      append(event, data) {
+        traceEvents.push({ event, ...data });
+      },
+      close(summary) {
+        traceEvents.push({ event: 'runtime:session:end', summary });
+      }
+    };
+
+    aiService.setUIWatcher(null);
+
+    await withPatchedSystemAutomation({
+      focusWindow: async () => ({ success: true }),
+      executeAction: async (action) => ({ success: true, action: action?.type || 'unknown', message: 'ok' }),
+      getRunningProcessesByNames: async () => [],
+      getForegroundWindowInfo: async () => ({
+        success: true,
+        hwnd: 777001,
+        title: 'Policy Surface - ExampleApp',
+        processName: 'exampleapp',
+        windowKind: 'main'
+      })
+    }, async () => {
+      const execResult = await aiService.executeActions({
+        thought: 'Inspect the focused ExampleApp surface',
+        verification: 'The process list should be available',
+        actions: [{
+          type: 'run_command',
+          command: 'Get-Process | Select-Object -First 1',
+          shell: 'powershell',
+          reason: 'Inspect the focused process context'
+        }]
+      }, null, null, {
+        userMessage: 'inspect the focused process context',
+        runtimeTraceLog,
+        runtimeTracePreludeEvents: [{
+          event: 'plan:policy-check',
+          attempt: 0,
+          processName: 'exampleapp',
+          actionCount: 1,
+          negativeViolationCount: 0,
+          actionViolationCount: 0,
+          capabilityViolationCount: 0
+        }],
+        actionExecutor: async (action) => ({
+          success: true,
+          action: action.type,
+          message: 'inspected'
+        })
+      });
+
+      assert.strictEqual(execResult.success, true);
+      const policyEventIndex = traceEvents.findIndex((entry) => entry.event === 'plan:policy-check');
+      const planEventIndex = traceEvents.findIndex((entry) => entry.event === 'action:plan');
+      assert(policyEventIndex >= 0, 'runtime trace should include the policy prelude event');
+      assert(planEventIndex >= 0, 'runtime trace should include the action plan event');
+      assert(policyEventIndex < planEventIndex, 'policy prelude event should be recorded before action:plan');
+    });
+  });
+
   await test('executeActions records a lightweight last runtime trace summary and exports it on demand', async () => {
     const traceFile = path.join(os.tmpdir(), `liku-runtime-trace-source-${Date.now()}.jsonl`);
     const exportFile = path.join(os.tmpdir(), `liku-runtime-trace-export-${Date.now()}.jsonl`);

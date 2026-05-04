@@ -421,6 +421,25 @@ function createCopilotModelRegistry({ likuHome, modelPrefFile, runtimeStateFile,
     return false;
   }
 
+  function setSessionCopilotModel(model) {
+    const resolvedModel = canonicalizeModelKey(model);
+    const registry = modelRegistry();
+    if (resolvedModel && registry[resolvedModel] && categorizeModel(registry[resolvedModel]).selectable !== false) {
+      currentCopilotModel = resolvedModel;
+      refreshCurrentModelMetadata();
+      runtimeSelection = {
+        ...runtimeSelection,
+        requestedModel: resolvedModel,
+        runtimeModel: null,
+        endpointHost: null,
+        actualModelId: null,
+        lastValidated: null
+      };
+      return true;
+    }
+    return false;
+  }
+
   function resolveCopilotModelKey(requestedModel) {
     const canonicalKey = canonicalizeModelKey(requestedModel);
     const registry = modelRegistry();
@@ -595,6 +614,7 @@ function createCopilotModelRegistry({ likuHome, modelPrefFile, runtimeStateFile,
     recordRuntimeSelection,
     rememberValidatedChatFallback,
     resolveCopilotModelKey,
+    setSessionCopilotModel,
     setCopilotModel,
     setProvider
   };
