@@ -5,15 +5,33 @@ function createObservationCheckpointRuntime(deps = {}) {
     sleepMs,
     evaluateForegroundAgainstTarget,
     inferLaunchVerificationTarget,
-    buildVerifyTargetHintFromAppName,
-    extractTradingViewObservationKeywords,
-    inferTradingViewTradingMode,
-    inferTradingViewObservationSpec,
-    isTradingViewTargetHint,
+    observationProviders = [],
     keyCheckpointSettleMs = 240,
     keyCheckpointTimeoutMs = 1400,
     keyCheckpointMaxPolls = 2
   } = deps;
+
+  const providers = Array.isArray(observationProviders)
+    ? observationProviders
+      .map((entry) => entry?.provider || entry)
+      .filter((provider) => provider && typeof provider === 'object')
+    : [];
+
+  const tradingViewProvider = providers.find((provider) => String(provider.toolName || '').trim().toLowerCase() === 'tradingview') || null;
+
+  function requireTradingViewProvider(methodName) {
+    const method = tradingViewProvider?.[methodName];
+    if (typeof method !== 'function') {
+      throw new Error(`createObservationCheckpointRuntime requires TradingView observation provider method ${methodName}`);
+    }
+    return method;
+  }
+
+  const buildVerifyTargetHintFromAppName = requireTradingViewProvider('buildVerifyTargetHint');
+  const extractTradingViewObservationKeywords = requireTradingViewProvider('extractObservationKeywords');
+  const inferTradingViewTradingMode = requireTradingViewProvider('inferTradingMode');
+  const inferTradingViewObservationSpec = requireTradingViewProvider('inferObservationSpec');
+  const isTradingViewTargetHint = requireTradingViewProvider('isTargetHint');
 
   function normalizeTextForMatch(value) {
     return String(value || '')

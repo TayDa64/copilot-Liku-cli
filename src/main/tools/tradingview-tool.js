@@ -190,12 +190,55 @@ function registerTradingViewSystemContracts(deps = {}) {
   };
 }
 
+function createTradingViewObservationProvider() {
+  return {
+    toolName: TRADINGVIEW_TOOL_NAME,
+    buildVerifyTargetHint: buildVerifyTargetHintFromAppName,
+    extractObservationKeywords: extractTradingViewObservationKeywords,
+    inferTradingMode: inferTradingViewTradingMode,
+    inferObservationSpec: inferTradingViewObservationSpec,
+    isTargetHint: isTradingViewTargetHint,
+    matchesContext(context = {}) {
+      const haystack = [
+        context.userMessage,
+        context.actionData?.thought,
+        context.actionData?.verification,
+        context.focusRecoveryTarget?.title,
+        context.focusRecoveryTarget?.processName
+      ].map((value) => String(value || '')).join(' ');
+      return /tradingview|trading\s+view/i.test(haystack)
+        || isTradingViewTargetHint(context.verifyTarget || context.inferredTarget || null);
+    }
+  };
+}
+
+function registerTradingViewObservationProvider(deps = {}) {
+  const {
+    registerObservationProvider
+  } = deps;
+
+  if (typeof registerObservationProvider !== 'function') {
+    throw new Error('registerTradingViewObservationProvider requires registerObservationProvider');
+  }
+
+  const provider = createTradingViewObservationProvider();
+  const observationProviderEntry = registerObservationProvider(TRADINGVIEW_TOOL_NAME, provider, TRADINGVIEW_TOOL_PRIORITY);
+
+  return {
+    toolName: TRADINGVIEW_TOOL_NAME,
+    priority: TRADINGVIEW_TOOL_PRIORITY,
+    observationProviderEntry
+  };
+}
+
 module.exports = {
   TRADINGVIEW_TOOL_NAME,
   TRADINGVIEW_TOOL_PRIORITY,
   registerTradingViewTool,
   createTradingViewSystemContractProvider,
   registerTradingViewSystemContracts,
+  createTradingViewObservationProvider,
+  registerTradingViewObservationProvider,
   applyTradingViewReliabilityRewrites,
   assessTradingViewRisk,
   buildOpenApplicationActions,
