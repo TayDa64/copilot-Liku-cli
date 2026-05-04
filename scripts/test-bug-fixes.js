@@ -713,8 +713,8 @@ test('ai-service treats TradingView DOM order-entry actions as high risk', () =>
   assert(entryRisk.requiresConfirmation, 'TradingView DOM order-entry actions should require confirmation');
   assert(entryRisk.riskLevel === aiService.ActionRiskLevel.HIGH || entryRisk.riskLevel === aiService.ActionRiskLevel.CRITICAL, 'TradingView DOM order-entry actions should be high risk or higher');
   assert(entryRisk.warnings.some((warning) => /DOM order-entry/i.test(warning)), 'TradingView DOM order-entry risk should be identified explicitly');
-  assert(entryRisk.blockExecution, 'TradingView DOM order-entry actions should be blocked in advisory-only mode');
-  assert(/advisory-only/i.test(entryRisk.blockReason || ''), 'TradingView DOM order-entry block reason should explain the advisory-only safety rail');
+  assert(entryRisk.blockExecution, 'Unknown-mode TradingView DOM order-entry actions should be blocked in advisory-only mode');
+  assert(/advisory-only/i.test(entryRisk.blockReason || ''), 'Unknown-mode TradingView DOM order-entry block reason should explain the advisory-only safety rail');
 });
 
 test('ai-service treats TradingView DOM flatten or reverse controls as critical', () => {

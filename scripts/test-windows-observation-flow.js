@@ -3973,7 +3973,7 @@ async function run() {
     assert.strictEqual(safety.requiresConfirmation, true, 'TradingView DOM flatten actions should require confirmation');
   });
 
-  await testAsync('TradingView DOM order-entry actions are blocked before execution in advisory-only mode', async () => {
+  await testAsync('TradingView Paper Trading DOM order-entry actions require confirmation before execution', async () => {
     let executed = 0;
 
     const execResult = await aiService.executeActions({
@@ -3990,12 +3990,15 @@ async function run() {
       }
     });
 
-    assert.strictEqual(executed, 0, 'Advisory-only DOM order-entry actions should be blocked before execution');
-    assert.strictEqual(execResult.success, false, 'Advisory-only DOM order-entry actions should fail closed');
-    assert.strictEqual(execResult.results[0].blockedByPolicy, true, 'Blocked DOM order-entry should be marked as policy-blocked');
-    assert(/advisory-only/i.test(execResult.results[0].error || ''), 'Blocked DOM order-entry should explain the advisory-only safety rail');
-    assert(/paper trading/i.test(execResult.results[0].error || ''), 'Blocked DOM order-entry should mention Paper Trading guidance when paper mode is referenced');
-    assert.strictEqual(execResult.results[0].safety.tradingMode.mode, 'paper', 'Blocked DOM order-entry should expose paper-trading metadata');
+    assert.strictEqual(executed, 0, 'Paper DOM order-entry actions should pause before execution');
+    assert.strictEqual(execResult.success, false, 'Paper DOM order-entry actions should require confirmation before proceeding');
+    assert.strictEqual(execResult.pendingConfirmation, true, 'Paper DOM order-entry should surface explicit confirmation');
+    assert.strictEqual(execResult.results.length, 0, 'Paper DOM order-entry should pause before producing an execution result');
+    const pending = aiService.getPendingAction();
+    assert(pending, 'Paper DOM order-entry should be stored as a pending action');
+    assert.strictEqual(pending.blockExecution, false, 'Paper DOM order-entry should not set blockExecution');
+    assert.strictEqual(pending.tradingMode.mode, 'paper', 'Paper DOM order-entry should expose paper-trading metadata');
+    aiService.clearPendingAction();
   });
 
   await testAsync('TradingView DOM actions remain blocked when resuming after confirmation', async () => {
@@ -4026,6 +4029,38 @@ async function run() {
       assert.strictEqual(resumed.success, false, 'Advisory-only DOM resume actions should fail closed');
       assert.strictEqual(resumed.results[0].blockedByPolicy, true, 'Blocked DOM resume action should be marked as policy-blocked');
       assert(/advisory-only/i.test(resumed.results[0].error || ''), 'Blocked DOM resume action should explain the advisory-only safety rail');
+    } finally {
+      aiService.clearPendingAction();
+    }
+  });
+
+  await testAsync('TradingView Paper Trading DOM order-entry resumes after explicit confirmation', async () => {
+    let executed = 0;
+    aiService.clearPendingAction();
+    aiService.setPendingAction({
+      actionId: 'action-test-paper-dom-resume',
+      actionIndex: 0,
+      confirmed: true,
+      remainingActions: [
+        { type: 'click', reason: 'Place a limit order in the Paper Trading Depth of Market order book' }
+      ],
+      completedResults: [],
+      thought: 'Place a TradingView Paper Trading DOM order',
+      verification: 'Paper Trading order action should execute only after confirmation',
+      userMessage: 'place a limit order in the TradingView paper trading DOM'
+    });
+
+    try {
+      const resumed = await aiService.resumeAfterConfirmation(null, null, {
+        userMessage: 'yes, place the paper trading limit order in TradingView',
+        actionExecutor: async (action) => {
+          executed++;
+          return { success: true, action: action.type, message: 'executed' };
+        }
+      });
+
+      assert.strictEqual(executed, 1, 'Confirmed Paper Trading DOM order-entry should execute once');
+      assert.strictEqual(resumed.success, true, 'Confirmed Paper Trading DOM order-entry should resume successfully');
     } finally {
       aiService.clearPendingAction();
     }

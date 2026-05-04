@@ -143,8 +143,8 @@ function detectTradingViewDomainActionRisk(text = '', ActionRiskLevel, context =
   if (!domContext) return null;
 
   const paperModeGuidance = tradingMode.mode === 'paper'
-    ? ' Paper Trading was detected, but Liku still blocks order execution; it can help open or verify Paper Trading surfaces and guide the steps instead.'
-    : ' If you are using Paper Trading, Liku can help open or verify the Paper Trading surface and guide the steps instead.';
+    ? ' Paper Trading was detected; order entry requires explicit confirmation and verified paper-mode context before execution.'
+    : ' If you are using Paper Trading, Liku can help open or verify the Paper Trading surface before any order-entry confirmation.';
 
   if (/\b(flatten|reverse|cxl all|cancel all orders|cancel all|close position|reverse position)\b/i.test(normalized)) {
     return {
@@ -158,6 +158,18 @@ function detectTradingViewDomainActionRisk(text = '', ActionRiskLevel, context =
   }
 
   if (/\b(buy mkt|sell mkt|market order|limit order|stop order|limit buy|limit sell|stop buy|stop sell|modify order|place order|qty|quantity)\b/i.test(normalized)) {
+    if (tradingMode.mode === 'paper' && tradingMode.confidence === 'high') {
+      return {
+        riskLevel: ActionRiskLevel?.HIGH || 'high',
+        warning: 'TradingView Paper Trading DOM order-entry action detected',
+        requiresConfirmation: true,
+        blockExecution: false,
+        blockReason: null,
+        paperTradingOrderEntry: true,
+        tradingMode
+      };
+    }
+
     return {
       riskLevel: ActionRiskLevel?.HIGH || 'high',
       warning: 'TradingView DOM order-entry action detected',
