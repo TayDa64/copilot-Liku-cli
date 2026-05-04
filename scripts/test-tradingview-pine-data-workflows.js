@@ -187,12 +187,31 @@ test('open pine editor and read visible status stays verification-first', () => 
 
   assert.strictEqual(rewritten[0].type, 'bring_window_to_front');
   assert.strictEqual(rewritten[2].type, 'key');
-  assert.strictEqual(rewritten[2].key, 'ctrl+k');
+  assert.strictEqual(rewritten[2].key, 'ctrl+e');
   assert.strictEqual(opener.type, 'key');
-  assert.strictEqual(opener.key, 'enter');
+  assert.strictEqual(opener.key, 'ctrl+e');
   assert.strictEqual(opener.verify.target, 'pine-editor');
   assert(readback, 'pine editor status workflow should gather Pine Editor text');
   assert.strictEqual(readback.pineEvidenceMode, 'generic-status');
+});
+
+test('pine editor opener falls back to quick search when chart Ctrl+E intent is not established', () => {
+  const rewritten = buildTradingViewPineWorkflowActions({
+    appName: 'TradingView',
+    surfaceTarget: 'pine-editor',
+    verifyKind: 'panel-visible',
+    openerIndex: 0,
+    wantsEvidenceReadback: true,
+    requiresObservedChange: false
+  }, [
+    { type: 'click_element', text: 'Pine Editor', reason: 'Open Pine Editor from an unknown TradingView surface' }
+  ]);
+
+  const opener = rewritten.find((action) => action?.verify?.target === 'pine-editor');
+  assert.strictEqual(rewritten[2].key, 'ctrl+k');
+  assert.strictEqual(opener.key, 'enter');
+  assert(rewritten.some((action) => String(action?.key || '').toLowerCase() === 'ctrl+a'), 'quick-search fallback should clear stale query text');
+  assert(rewritten.some((action) => String(action?.key || '').toLowerCase() === 'backspace'), 'quick-search fallback should erase stale query text before typing');
 });
 
 test('pine editor activation verification stays anchored to pine-surface keywords instead of generic TradingView chrome', () => {
@@ -237,7 +256,7 @@ test('pine editor authoring workflow demands editor-active verification before t
   ]);
 
   const opener = rewritten.find((action) => action?.verify?.target === 'pine-editor');
-  assert.strictEqual(rewritten[2].key, 'ctrl+k');
+  assert.strictEqual(rewritten[2].key, 'ctrl+e');
   assert.strictEqual(opener.verify.kind, 'editor-active');
   assert.strictEqual(opener.verify.target, 'pine-editor');
   assert.strictEqual(opener.verify.requiresObservedChange, true);
@@ -258,7 +277,7 @@ test('generic pine script creation prefers safe new-script workflow', () => {
   const opener = rewritten.find((action) => action?.verify?.target === 'pine-editor');
   assert(Array.isArray(rewritten), 'workflow should rewrite');
   assert.strictEqual(rewritten[0].type, 'bring_window_to_front');
-  assert.strictEqual(rewritten[2].key, 'ctrl+k');
+  assert.strictEqual(rewritten[2].key, 'ctrl+e');
   assert.strictEqual(opener.verify.kind, 'editor-active');
   assert(rewritten.some((action) => action?.type === 'get_text' && action?.text === 'Pine Editor'), 'safe authoring should inspect visible Pine Editor state first');
   assert(!rewritten.some((action) => String(action?.key || '').toLowerCase() === 'ctrl+a'), 'safe authoring should avoid select-all by default');
@@ -864,7 +883,7 @@ test('open pine editor and check 500-line budget stays verification-first', () =
   const readback = rewritten.find((action) => action?.type === 'get_text' && action?.text === 'Pine Editor');
   assert.strictEqual(rewritten[0].type, 'bring_window_to_front');
   assert.strictEqual(rewritten[2].type, 'key');
-  assert.strictEqual(rewritten[2].key, 'ctrl+k');
+  assert.strictEqual(rewritten[2].key, 'ctrl+e');
   assert.strictEqual(opener.verify.target, 'pine-editor');
   assert(readback, 'line-budget workflow should gather Pine Editor text');
   assert(/line-budget hints/i.test(readback.reason), 'pine editor line-budget readback should mention line-budget hints');
@@ -964,7 +983,7 @@ test('pine editor evidence workflow preserves trailing get_text read step', () =
   const opener = rewritten.find((action) => action?.verify?.target === 'pine-editor');
   assert.strictEqual(readSteps.length, 1, 'explicit pine editor readback step should be preserved without duplication');
   assert.strictEqual(readSteps[0].text, 'Pine Editor');
-  assert.strictEqual(rewritten[2].key, 'ctrl+k');
+  assert.strictEqual(rewritten[2].key, 'ctrl+e');
   assert.strictEqual(opener.verify.target, 'pine-editor');
 });
 

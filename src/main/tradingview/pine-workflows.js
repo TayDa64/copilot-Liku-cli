@@ -930,13 +930,9 @@ function buildTradingViewPineWorkflowActions(intent = {}, actions = []) {
       keywords: expectedKeywords,
       requiresObservedChange: !!intent.requiresObservedChange
     };
-    const prefersOfficialDirectPineOpen = intent.safeAuthoringDefault
-      && !intent.requiresFreshIndicator
-      && !intent.explicitOverwriteAuthoring;
+    const openerUsesChartPineShortcut = String(opener?.key || '').trim().toLowerCase() === 'ctrl+e';
     const routeActions = buildTradingViewShortcutRoute('open-pine-editor', {
-      routeStrategy: prefersOfficialDirectPineOpen ? 'official-direct' : 'quick-search',
-      routeShortcutId: prefersOfficialDirectPineOpen ? 'new-pine-indicator' : undefined,
-      skipQueryClearBeforeType: true,
+      routeStrategy: openerUsesChartPineShortcut ? 'official-direct' : 'quick-search',
       enterReason: opener?.reason || intent.reason,
       enterActionOverrides: {
         verify: pineEditorOpenVerify,
@@ -1134,7 +1130,7 @@ function buildTradingViewPineResumePrerequisites(actions = [], pauseIndex = -1, 
     },
     { type: 'wait', ms: 650 },
     ...((buildTradingViewShortcutRoute('open-pine-editor', {
-      skipQueryClearBeforeType: true,
+      routeStrategy: 'quick-search',
       enterReason: 'Re-open or re-activate TradingView Pine Editor after confirmation before continuing authoring',
       enterActionOverrides: {
         verify: {

@@ -44,6 +44,9 @@ const {
 const {
   maybeRewriteTradingViewDomWorkflow
 } = require('../tradingview/dom-workflows');
+const {
+  isTradingViewPineContextEligible
+} = require('../ai-service/execution-context');
 
 const TRADINGVIEW_TOOL_NAME = 'tradingview';
 const TRADINGVIEW_TOOL_PRIORITY = -1;
@@ -149,10 +152,50 @@ function registerTradingViewTool(deps = {}) {
   };
 }
 
+function createTradingViewSystemContractProvider(deps = {}) {
+  const {
+    buildTradingViewPineAuthoringSystemContract
+  } = deps;
+
+  if (typeof buildTradingViewPineAuthoringSystemContract !== 'function') {
+    throw new Error('createTradingViewSystemContractProvider requires buildTradingViewPineAuthoringSystemContract');
+  }
+
+  return function tradingViewSystemContractProvider(context = {}) {
+    if (!isTradingViewPineContextEligible(context.executionContextEnvelope)) {
+      return [];
+    }
+
+    const contract = buildTradingViewPineAuthoringSystemContract(context.userMessage);
+    return contract ? [contract] : [];
+  };
+}
+
+function registerTradingViewSystemContracts(deps = {}) {
+  const {
+    registerSystemContractProvider
+  } = deps;
+
+  if (typeof registerSystemContractProvider !== 'function') {
+    throw new Error('registerTradingViewSystemContracts requires registerSystemContractProvider');
+  }
+
+  const provider = createTradingViewSystemContractProvider(deps);
+  const systemContractEntry = registerSystemContractProvider(TRADINGVIEW_TOOL_NAME, provider, TRADINGVIEW_TOOL_PRIORITY);
+
+  return {
+    toolName: TRADINGVIEW_TOOL_NAME,
+    priority: TRADINGVIEW_TOOL_PRIORITY,
+    systemContractEntry
+  };
+}
+
 module.exports = {
   TRADINGVIEW_TOOL_NAME,
   TRADINGVIEW_TOOL_PRIORITY,
   registerTradingViewTool,
+  createTradingViewSystemContractProvider,
+  registerTradingViewSystemContracts,
   applyTradingViewReliabilityRewrites,
   assessTradingViewRisk,
   buildOpenApplicationActions,

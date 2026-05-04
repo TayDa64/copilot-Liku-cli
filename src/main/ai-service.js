@@ -120,6 +120,7 @@ const {
   normalizePineScriptSource,
   buildPineScriptState,
   persistPineScriptState,
+  registerTradingViewSystemContracts,
 } = require('./tools/tradingview-tool');
 const {
   applyTradingViewReliabilityRewrites
@@ -140,6 +141,11 @@ const {
 const {
   buildExecutionContextEnvelope
 } = require('./ai-service/execution-context');
+const {
+  buildRegisteredSystemContractMessages,
+  getRegisteredSystemContractProviders,
+  registerSystemContractProvider
+} = require('./ai-service/system-contract-registry');
 const {
   createObservationCheckpointRuntime
 } = require('./ai-service/observation-checkpoints');
@@ -1693,6 +1699,11 @@ const {
   buildTradingViewPineResumePrerequisites
 });
 
+registerTradingViewSystemContracts({
+  registerSystemContractProvider,
+  buildTradingViewPineAuthoringSystemContract
+});
+
 /**
  * Send a message and get AI response with auto-continuation
  */
@@ -1758,10 +1769,7 @@ async function sendMessage(userMessage, options = {}) {
     ...(Array.isArray(extraSystemMessages) ? extraSystemMessages : []),
     ...parsedTags.extraSystemMessages
   ];
-  const tradingViewPineContract = buildTradingViewPineAuthoringSystemContract(enhancedMessage);
-  if (tradingViewPineContract) {
-    baseExtraSystemMessages.push(tradingViewPineContract);
-  }
+  let registeredSystemContractMessages = [];
 
   // Fetch relevant skills (Phase 4 — Semantic Skill Router)
   let skillsContextText = '';
@@ -1818,6 +1826,14 @@ async function sendMessage(userMessage, options = {}) {
   } catch (err) {
     console.warn('[AI] Execution context envelope build error (non-fatal):', err.message);
   }
+
+  registeredSystemContractMessages = buildRegisteredSystemContractMessages({
+    userMessage: enhancedMessage,
+    executionContextEnvelope: selectionExecutionContextEnvelope,
+    sessionState,
+    tags: parsedTags.tags
+  });
+  baseExtraSystemMessages.push(...registeredSystemContractMessages);
 
   try {
     skillSelection = skillRouter.getRelevantSkillsSelection(enhancedMessage, {
@@ -1998,7 +2014,7 @@ async function sendMessage(userMessage, options = {}) {
         (incompleteTradingViewPinePlan
           ? 'Your previous plan was incomplete for a TradingView Pine authoring request. Include the substantive authoring steps, not just focus/window activation.\n\n'
           : '\n') +
-        (tradingViewPineContract ? `${tradingViewPineContract}\n\n` : '') +
+        (registeredSystemContractMessages.length ? `${registeredSystemContractMessages.join('\n\n')}\n\n` : '') +
         `User request:\n${enhancedMessage}`;
       try {
         const forcedMessages = await buildMessages(enforcementPrompt, includeVisualContext, {

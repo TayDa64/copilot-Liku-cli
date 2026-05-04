@@ -421,7 +421,8 @@ test('pine workflow encodes diagnostics and compile-result evidence modes', () =
   assert(shortcutProfileContent.includes("'create-alert'"), 'TradingView shortcut profile should define stable alert guidance');
   assert(shortcutProfileContent.includes("'drawing-tool-binding'"), 'TradingView shortcut profile should mark drawing bindings as customizable');
   assert(shortcutProfileContent.includes("'open-dom-panel'"), 'TradingView shortcut profile should classify DOM shortcuts explicitly');
-  assert(shortcutProfileContent.includes('No dedicated official Pine Editor opener is exposed in the PDF'), 'TradingView shortcut profile should stop treating Pine Editor as a stable native shortcut');
+  assert(shortcutProfileContent.includes('Ctrl+E opens the Pine Script editor when focus is on a TradingView chart'), 'TradingView shortcut profile should ground Pine Editor opening in chart-scoped Ctrl+E behavior');
+  assert(shortcutProfileContent.includes('fall back to quick search when chart focus is not established'), 'TradingView shortcut profile should retain quick-search fallback when chart focus is not established');
   assert(shortcutProfileContent.includes('buildTradingViewShortcutRoute'), 'TradingView shortcut profile should expose TradingView-specific route helpers for non-native shortcuts');
   assert(shortcutProfileContent.includes("'take-snapshot'"), 'TradingView shortcut profile should include grounded reference-only snapshot guidance');
   assert(shortcutProfileContent.includes("'add-symbol-to-watchlist'"), 'TradingView shortcut profile should include grounded watchlist shortcut guidance');
@@ -516,6 +517,7 @@ test('ai-service gates TradingView follow-up typing on post-key observation chec
   const observationCheckpointPath = path.join(__dirname, '..', 'src', 'main', 'ai-service', 'observation-checkpoints.js');
   const rewriteRegistryPath = path.join(__dirname, '..', 'src', 'main', 'ai-service', 'rewrite-registry.js');
   const riskRegistryPath = path.join(__dirname, '..', 'src', 'main', 'ai-service', 'risk-registry.js');
+  const systemContractRegistryPath = path.join(__dirname, '..', 'src', 'main', 'ai-service', 'system-contract-registry.js');
   const tradingViewToolPath = path.join(__dirname, '..', 'src', 'main', 'tools', 'tradingview-tool.js');
   const tradingViewRuntimeRecoveryPath = path.join(__dirname, '..', 'src', 'main', 'tradingview', 'runtime', 'recovery.js');
   const tradingViewRegistryBootstrapPath = path.join(__dirname, '..', 'src', 'main', 'tradingview', 'registry-bootstrap.js');
@@ -541,6 +543,7 @@ test('ai-service gates TradingView follow-up typing on post-key observation chec
   const observationCheckpointContent = fs.readFileSync(observationCheckpointPath, 'utf8');
   const rewriteRegistryContent = fs.readFileSync(rewriteRegistryPath, 'utf8');
   const riskRegistryContent = fs.readFileSync(riskRegistryPath, 'utf8');
+  const systemContractRegistryContent = fs.readFileSync(systemContractRegistryPath, 'utf8');
   const tradingViewToolContent = fs.readFileSync(tradingViewToolPath, 'utf8');
   const tradingViewRuntimeRecoveryContent = fs.readFileSync(tradingViewRuntimeRecoveryPath, 'utf8');
   const tradingViewRegistryBootstrapContent = fs.readFileSync(tradingViewRegistryBootstrapPath, 'utf8');
@@ -570,6 +573,7 @@ test('ai-service gates TradingView follow-up typing on post-key observation chec
   assert(observationCheckpointContent.includes('inferTradingViewTradingMode'), 'Observation checkpoint module should consume the TradingView trading-mode inference helper');
   assert(aiServiceContent.includes("require('./ai-service/rewrite-registry')"), 'ai-service should consume the internal rewrite registry module');
   assert(aiServiceContent.includes("require('./ai-service/risk-registry')"), 'ai-service should consume the internal risk registry module');
+  assert(aiServiceContent.includes("require('./ai-service/system-contract-registry')"), 'ai-service should consume the internal system contract registry module');
   assert(aiServiceContent.includes("require('./tools/tradingview-tool')"), 'ai-service should consume the TradingView facade module');
   assert(aiServiceContent.includes("require('./tradingview/runtime/recovery')"), 'ai-service should consume the extracted TradingView runtime recovery module');
   assert(aiServiceContent.includes("require('./tradingview/registry-bootstrap')"), 'ai-service should consume the extracted TradingView registry bootstrap module');
@@ -583,6 +587,8 @@ test('ai-service gates TradingView follow-up typing on post-key observation chec
   assert(rewriteRegistryContent.includes('applyRegisteredToolRewrites'), 'Rewrite registry module should support ordered rewrite dispatch');
   assert(riskRegistryContent.includes('registerToolRiskAssessor'), 'Risk registry module should support tool risk registration');
   assert(riskRegistryContent.includes('assessRegisteredToolRisk'), 'Risk registry module should support ordered tool risk dispatch');
+  assert(systemContractRegistryContent.includes('registerSystemContractProvider'), 'System contract registry should support tool-scoped contract registration');
+  assert(systemContractRegistryContent.includes('buildRegisteredSystemContractMessages'), 'System contract registry should support ordered contract dispatch');
   assert(tradingViewRuntimeRecoveryContent.includes('createTradingViewRuntimeRecovery'), 'TradingView runtime recovery module should expose a factory for executor helpers');
   assert(tradingViewRuntimeRecoveryContent.includes('ensureTradingViewQuickSearchInputClearBeforeTyping'), 'TradingView runtime recovery module should own quick-search preflight proof helpers');
   assert(tradingViewRuntimeRecoveryContent.includes('maybeRecoverTradingViewQuickSearchOpen'), 'TradingView runtime recovery module should own quick-search recovery helpers');
@@ -600,6 +606,9 @@ test('ai-service gates TradingView follow-up typing on post-key observation chec
   assert(tradingViewToolContent.includes('registerTradingViewTool'), 'TradingView facade should expose canonical tool registration');
   assert(tradingViewToolContent.includes('registerToolRewrites(TRADINGVIEW_TOOL_NAME'), 'TradingView facade should register TradingView rewrite handlers');
   assert(tradingViewToolContent.includes('registerToolRiskAssessor(TRADINGVIEW_TOOL_NAME'), 'TradingView facade should register TradingView risk assessors');
+  assert(tradingViewToolContent.includes('registerTradingViewSystemContracts'), 'TradingView facade should expose canonical system contract registration');
+  assert(tradingViewToolContent.includes('isTradingViewPineContextEligible'), 'TradingView facade should gate Pine system contracts on execution context');
+  assert(!aiServiceContent.includes('const tradingViewPineContract = buildTradingViewPineAuthoringSystemContract(enhancedMessage)'), 'ai-service should not inject Pine contracts directly before execution context is available');
   assert(tradingViewRegistryBootstrapContent.includes('registerTradingViewTool(deps)'), 'TradingView registry bootstrap should delegate to the facade registration helper');
   assert(tradingViewRewriteRunnerContent.includes('applyTradingViewReliabilityRewrites'), 'TradingView rewrite runner module should expose the ordered TradingView rewrite pipeline');
   assert(tradingViewToolContent.includes('maybeRewriteTradingViewPineWorkflow'), 'TradingView facade rewrite pipeline should preserve Pine rewrite participation');
