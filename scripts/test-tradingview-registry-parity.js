@@ -62,6 +62,10 @@ function normalizeRewriteResult(actions, userMessage) {
 }
 
 function rewriteLegacy(actions, userMessage) {
+  return withEnv({ [REWRITE_ENV]: '0' }, () => normalizeRewriteResult(actions, userMessage));
+}
+
+function rewriteDefault(actions, userMessage) {
   return withEnv({ [REWRITE_ENV]: undefined }, () => normalizeRewriteResult(actions, userMessage));
 }
 
@@ -82,6 +86,12 @@ function normalizeSafetyResult(result) {
 }
 
 function safetyLegacy(action, targetInfo) {
+  return withEnv({ [RISK_ENV]: '0' }, () => normalizeSafetyResult(
+    aiService.analyzeActionSafety(cloneJson(action), cloneJson(targetInfo))
+  ));
+}
+
+function safetyDefault(action, targetInfo) {
   return withEnv({ [RISK_ENV]: undefined }, () => normalizeSafetyResult(
     aiService.analyzeActionSafety(cloneJson(action), cloneJson(targetInfo))
   ));
@@ -309,10 +319,12 @@ const rewriteCases = [
 
 for (const fixture of rewriteCases) {
   test(`${fixture.name} rewrite registry output matches legacy`, () => {
-    assert.deepStrictEqual(
-      rewriteRegistry(fixture.actions, fixture.userMessage),
-      rewriteLegacy(fixture.actions, fixture.userMessage)
-    );
+    const legacy = rewriteLegacy(fixture.actions, fixture.userMessage);
+    const defaultRegistry = rewriteDefault(fixture.actions, fixture.userMessage);
+    const explicitRegistry = rewriteRegistry(fixture.actions, fixture.userMessage);
+
+    assert.deepStrictEqual(defaultRegistry, explicitRegistry, 'Default rewrite path should use registered rewrites');
+    assert.deepStrictEqual(explicitRegistry, legacy, 'Registered rewrite path should preserve legacy rewrite behavior');
   });
 }
 
@@ -397,9 +409,11 @@ const riskCases = [
 
 for (const fixture of riskCases) {
   test(`${fixture.name} risk registry output matches legacy`, () => {
-    assert.deepStrictEqual(
-      safetyRegistry(fixture.action, fixture.targetInfo),
-      safetyLegacy(fixture.action, fixture.targetInfo)
-    );
+    const legacy = safetyLegacy(fixture.action, fixture.targetInfo);
+    const defaultRegistry = safetyDefault(fixture.action, fixture.targetInfo);
+    const explicitRegistry = safetyRegistry(fixture.action, fixture.targetInfo);
+
+    assert.deepStrictEqual(defaultRegistry, explicitRegistry, 'Default risk path should use registered risk assessors');
+    assert.deepStrictEqual(explicitRegistry, legacy, 'Registered risk path should preserve legacy risk behavior for parity fixtures');
   });
 }
