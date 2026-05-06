@@ -501,6 +501,7 @@ function buildSafePineAuthoringContinuationSteps(actions = [], intent = {}, raw 
 
 function actionLooksLikePineEditorOpenIntent(action) {
   if (!action || typeof action !== 'object') return false;
+  if (action.tradingViewChartFocusClick === true) return false;
   if (matchesTradingViewShortcutAction(action, 'open-pine-editor')) return true;
   if (String(action?.tradingViewShortcut?.id || '').trim().toLowerCase() === 'open-pine-editor') return true;
 
@@ -598,8 +599,12 @@ function inferPineAuthoringMode(raw = '') {
   const normalized = normalizeTextForMatch(raw);
   if (!normalized) return null;
 
-  const explicitOverwriteIntent = /\b(overwrite|replace|rewrite current|rewrite existing|clear current|clear existing|erase current|erase existing|wipe current|wipe existing|delete current|delete existing)\b/.test(normalized)
-    || (/\bfrom scratch\b/.test(normalized) && /\b(current|existing)\b/.test(normalized));
+  const negatesOverwriteIntent = /\b(?:do\s+not|dont|don't|never|avoid|without)\s+(?:overwriting?|replacing|rewriting|clearing|erasing|wiping|deleting)\b/.test(normalized)
+    || /\b(?:do\s+not|dont|don't|never|avoid|without)\s+(?:the\s+)?(?:current|existing|last|cloud)?\s*(?:script|buffer|file)?\s*(?:overwrite|replacement|rewrite|clear|erase|wipe|delete)\b/.test(normalized)
+    || /\b(?:no|non)\s*-?\s*(?:overwrite|destructive|replacement)\b/.test(normalized);
+  const explicitOverwriteIntent = !negatesOverwriteIntent
+    && (/\b(overwrite|replace|rewrite current|rewrite existing|clear current|clear existing|erase current|erase existing|wipe current|wipe existing|delete current|delete existing)\b/.test(normalized)
+      || (/\bfrom scratch\b/.test(normalized) && /\b(current|existing)\b/.test(normalized)));
 
   const mentionsPineArtifact = /\bpine\b/.test(normalized)
     && /\b(script|indicator|strategy|study)\b/.test(normalized);
@@ -795,7 +800,7 @@ function inferTradingViewPineIntent(userMessage = '', actions = [], context = {}
 
   const openerTypes = new Set(['key', 'click', 'double_click', 'right_click']);
   const openerIndex = Array.isArray(actions)
-    ? actions.findIndex((action) => openerTypes.has(action?.type))
+    ? actions.findIndex((action) => action?.tradingViewChartFocusClick !== true && openerTypes.has(action?.type))
     : -1;
   const surface = inferPineSurfaceTarget(raw);
   const syntheticAuthoringPayload = !!pineAuthoringMode
@@ -930,7 +935,9 @@ function buildTradingViewPineWorkflowActions(intent = {}, actions = []) {
       keywords: expectedKeywords,
       requiresObservedChange: !!intent.requiresObservedChange
     };
-    const openerUsesChartPineShortcut = String(opener?.key || '').trim().toLowerCase() === 'ctrl+e';
+    const preferQuickSearchOpener = intent.syntheticOpener || intent.preferQuickSearchOpener === true;
+    const openerUsesChartPineShortcut = !preferQuickSearchOpener
+      && String(opener?.key || '').trim().toLowerCase() === 'ctrl+e';
     const routeActions = buildTradingViewShortcutRoute('open-pine-editor', {
       routeStrategy: openerUsesChartPineShortcut ? 'official-direct' : 'quick-search',
       enterReason: opener?.reason || intent.reason,
@@ -941,6 +948,19 @@ function buildTradingViewPineWorkflowActions(intent = {}, actions = []) {
     });
 
     if (Array.isArray(routeActions) && routeActions.length > 0) {
+      if (openerUsesChartPineShortcut) {
+        rewritten.push(
+          {
+            type: 'click',
+            x: 0,
+            y: 0,
+            reason: 'Focus the TradingView chart surface before using Ctrl+E to open Pine Editor',
+            tradingViewChartFocusClick: true,
+            allowCoordinateFallback: true
+          },
+          { type: 'wait', ms: 160 }
+        );
+      }
       rewritten.push(...routeActions);
     } else {
       rewritten.push({
@@ -1053,8 +1073,22 @@ function maybeRewriteTradingViewPineWorkflow(actions, context = {}) {
   const intent = inferTradingViewPineIntent(context.userMessage || '', actions, context);
   if (!intent || (!intent.syntheticOpener && intent.openerIndex < 0)) return null;
 
+  const trailingActions = actions.slice(intent.syntheticOpener ? 0 : intent.openerIndex + 1)
+    .filter((action) => action && typeof action === 'object');
+  const preferQuickSearchOpener = intent.surfaceTarget === 'pine-editor'
+    && (
+      intent.syntheticOpener
+      || intent.safeAuthoringDefault
+      || intent.explicitOverwriteAuthoring
+      || trailingActions.some((action) => isPineAuthoringStep(action))
+    );
+  const buildPreferredPineWorkflow = (overrides = {}) => buildTradingViewPineWorkflowActions({
+    ...intent,
+    ...overrides
+  }, actions);
+
   if (intent.syntheticOpener) {
-    return buildTradingViewPineWorkflowActions(intent, actions);
+    return buildPreferredPineWorkflow({ preferQuickSearchOpener: true });
   }
 
   const opener = actions[intent.openerIndex] || null;
@@ -1063,14 +1097,14 @@ function maybeRewriteTradingViewPineWorkflow(actions, context = {}) {
     && actionLooksLikePineEditorOpenIntent(opener);
 
   if (explicitLegacyPineEditorOpen) {
-    return buildTradingViewPineWorkflowActions(intent, actions);
+    return buildPreferredPineWorkflow();
   }
 
   const unsafeUnverifiedAuthoringPlan = intent.safeAuthoringDefault
     && !intent.existingWorkflowSignal
     && actions.some((action) => actionLooksLikeUnverifiedPineAuthoringEdit(action));
   if (unsafeUnverifiedAuthoringPlan) {
-    return buildTradingViewPineWorkflowActions(intent, actions);
+    return buildPreferredPineWorkflow({ preferQuickSearchOpener: true });
   }
 
   if (intent.existingWorkflowSignal) return null;
@@ -1085,7 +1119,7 @@ function maybeRewriteTradingViewPineWorkflow(actions, context = {}) {
     return null;
   }
 
-  return buildTradingViewPineWorkflowActions(intent, actions);
+  return buildPreferredPineWorkflow(preferQuickSearchOpener ? { preferQuickSearchOpener: true } : {});
 }
 
 function buildTradingViewPineResumePrerequisites(actions = [], pauseIndex = -1, context = {}) {

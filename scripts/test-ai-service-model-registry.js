@@ -42,6 +42,26 @@ test('setCopilotModel updates current model and metadata', () => {
   assert.strictEqual(registry.getModelMetadata(false).modelId, 'gpt-4o-mini');
 });
 
+test('setSessionCopilotModel updates in-memory selection without rewriting persisted files', () => {
+  const prefFile = path.join(tempRoot, 'model-preference-session.json');
+  const runtimeFile = path.join(tempRoot, 'copilot-runtime-state-session.json');
+  const sessionRegistry = createCopilotModelRegistry({
+    likuHome: tempRoot,
+    modelPrefFile: prefFile,
+    runtimeStateFile: runtimeFile
+  });
+
+  assert.strictEqual(sessionRegistry.setCopilotModel('gpt-4.1'), true);
+  const prefBefore = fs.readFileSync(prefFile, 'utf-8');
+  const runtimeBefore = fs.readFileSync(runtimeFile, 'utf-8');
+
+  assert.strictEqual(sessionRegistry.setSessionCopilotModel('gpt-4o'), true);
+  assert.strictEqual(sessionRegistry.getCurrentCopilotModel(), 'gpt-4o');
+  assert.strictEqual(sessionRegistry.getModelMetadata(false).modelId, 'gpt-4o');
+  assert.strictEqual(fs.readFileSync(prefFile, 'utf-8'), prefBefore);
+  assert.strictEqual(fs.readFileSync(runtimeFile, 'utf-8'), runtimeBefore);
+});
+
 test('provider sync updates metadata provider', () => {
   registry.setProvider('openai');
   assert.strictEqual(registry.getModelMetadata(false).provider, 'openai');

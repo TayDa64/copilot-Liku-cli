@@ -2802,6 +2802,23 @@ public class ForegroundHandle {
   return Number.isFinite(num) ? num : null;
 }
 
+function parseStructuredAutomationJson(text) {
+  const raw = String(text || '').trim();
+  if (!raw) {
+    throw new Error('No output');
+  }
+
+  try {
+    return JSON.parse(raw);
+  } catch (error) {
+    const sanitized = raw.replace(/[\u0000-\u001F]/g, ' ');
+    if (sanitized && sanitized !== raw) {
+      return JSON.parse(sanitized);
+    }
+    throw error;
+  }
+}
+
 /**
  * Get current foreground window info (HWND, title, pid, process name).
  * Best-effort: returns { success: false, error } on failure.
@@ -2831,6 +2848,9 @@ public class ForegroundInfo {
   [DllImport("user32.dll")]
   public static extern bool IsZoomed(IntPtr hWnd);
 
+  [DllImport("user32.dll")]
+  public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+
   [DllImport("user32.dll", SetLastError = true)]
   public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
 
@@ -2846,6 +2866,9 @@ public class ForegroundInfo {
   public static IntPtr GetStyle(IntPtr handle, int index) {
     return IntPtr.Size == 8 ? GetWindowLongPtr64(handle, index) : GetWindowLongPtr32(handle, index);
   }
+
+  [StructLayout(LayoutKind.Sequential)]
+  public struct RECT { public int Left, Top, Right, Bottom; }
 }
 "@
 
@@ -2880,6 +2903,8 @@ $isToolWindow = (($exStyle -band $WS_EX_TOOLWINDOW) -ne 0)
 $isMinimized = [ForegroundInfo]::IsIconic($hwnd)
 $isMaximized = [ForegroundInfo]::IsZoomed($hwnd)
 $windowKind = if ($ownerHwnd -ne 0 -and $isToolWindow) { 'palette' } elseif ($ownerHwnd -ne 0) { 'owned' } else { 'main' }
+$rect = New-Object ForegroundInfo+RECT
+[void][ForegroundInfo]::GetWindowRect($hwnd, [ref]$rect)
 
 $obj = [PSCustomObject]@{
   success = $true
@@ -2893,6 +2918,12 @@ $obj = [PSCustomObject]@{
   isMinimized = $isMinimized
   isMaximized = $isMaximized
   windowKind = $windowKind
+  bounds = [PSCustomObject]@{
+    x = $rect.Left
+    y = $rect.Top
+    width = $rect.Right - $rect.Left
+    height = $rect.Bottom - $rect.Top
+  }
 }
 $obj | ConvertTo-Json -Compress
 `;
@@ -2903,7 +2934,7 @@ $obj | ConvertTo-Json -Compress
     if (!text) {
       return { success: false, error: result?.stderr?.trim() || result?.error || 'No output' };
     }
-    return JSON.parse(text);
+    return parseStructuredAutomationJson(text);
   } catch (e) {
     return { success: false, error: e.message };
   }
@@ -2943,6 +2974,9 @@ public class WindowInfo {
   [DllImport("user32.dll")]
   public static extern bool IsZoomed(IntPtr hWnd);
 
+  [DllImport("user32.dll")]
+  public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+
   [DllImport("user32.dll", SetLastError = true)]
   public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
 
@@ -2958,6 +2992,9 @@ public class WindowInfo {
   public static IntPtr GetStyle(IntPtr handle, int index) {
     return IntPtr.Size == 8 ? GetWindowLongPtr64(handle, index) : GetWindowLongPtr32(handle, index);
   }
+
+  [StructLayout(LayoutKind.Sequential)]
+  public struct RECT { public int Left, Top, Right, Bottom; }
 }
 "@
 
@@ -2992,6 +3029,8 @@ $isToolWindow = (($exStyle -band $WS_EX_TOOLWINDOW) -ne 0)
 $isMinimized = [WindowInfo]::IsIconic($hwnd)
 $isMaximized = [WindowInfo]::IsZoomed($hwnd)
 $windowKind = if ($ownerHwnd -ne 0 -and $isToolWindow) { 'palette' } elseif ($ownerHwnd -ne 0) { 'owned' } else { 'main' }
+$rect = New-Object WindowInfo+RECT
+[void][WindowInfo]::GetWindowRect($hwnd, [ref]$rect)
 
 $obj = [PSCustomObject]@{
   success = $true
@@ -3005,6 +3044,12 @@ $obj = [PSCustomObject]@{
   isMinimized = $isMinimized
   isMaximized = $isMaximized
   windowKind = $windowKind
+  bounds = [PSCustomObject]@{
+    x = $rect.Left
+    y = $rect.Top
+    width = $rect.Right - $rect.Left
+    height = $rect.Bottom - $rect.Top
+  }
 }
 $obj | ConvertTo-Json -Compress
 `;
@@ -3015,7 +3060,7 @@ $obj | ConvertTo-Json -Compress
     if (!text) {
       return { success: false, error: result?.stderr?.trim() || result?.error || 'No output' };
     }
-    return JSON.parse(text);
+    return parseStructuredAutomationJson(text);
   } catch (e) {
     return { success: false, error: e.message };
   }
@@ -3083,7 +3128,7 @@ if (-not $procs) {
     const result = await executePowerShellScript(script, 10000);
     const text = String(result?.stdout || '').trim();
     if (!text) return [];
-    const parsed = JSON.parse(text);
+    const parsed = parseStructuredAutomationJson(text);
     return Array.isArray(parsed) ? parsed : [parsed];
   } catch {
     return [];

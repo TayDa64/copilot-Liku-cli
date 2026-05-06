@@ -400,13 +400,12 @@ function createCopilotModelRegistry({ likuHome, modelPrefFile, runtimeStateFile,
     currentModelMetadata.lastUpdated = new Date().toISOString();
   }
 
-  function setCopilotModel(model) {
+  function applyCopilotModelSelection(model, { persist = false } = {}) {
     const resolvedModel = canonicalizeModelKey(model);
     const registry = modelRegistry();
     if (resolvedModel && registry[resolvedModel] && categorizeModel(registry[resolvedModel]).selectable !== false) {
       currentCopilotModel = resolvedModel;
       refreshCurrentModelMetadata();
-      saveModelPreference();
       runtimeSelection = {
         ...runtimeSelection,
         requestedModel: resolvedModel,
@@ -415,10 +414,21 @@ function createCopilotModelRegistry({ likuHome, modelPrefFile, runtimeStateFile,
         actualModelId: null,
         lastValidated: null
       };
-      saveRuntimeState();
+      if (persist) {
+        saveModelPreference();
+        saveRuntimeState();
+      }
       return true;
     }
     return false;
+  }
+
+  function setCopilotModel(model) {
+    return applyCopilotModelSelection(model, { persist: true });
+  }
+
+  function setSessionCopilotModel(model) {
+    return applyCopilotModelSelection(model);
   }
 
   function resolveCopilotModelKey(requestedModel) {
@@ -595,6 +605,7 @@ function createCopilotModelRegistry({ likuHome, modelPrefFile, runtimeStateFile,
     recordRuntimeSelection,
     rememberValidatedChatFallback,
     resolveCopilotModelKey,
+    setSessionCopilotModel,
     setCopilotModel,
     setProvider
   };

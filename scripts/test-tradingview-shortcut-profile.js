@@ -127,21 +127,23 @@ test('shortcut profile exposes reusable phrase matching helpers for workflow inf
   assert(messageMentionsTradingViewShortcut('open the pine script editor in tradingview', 'open-pine-editor'));
 });
 
-test('pine editor opener is routed through TradingView quick search instead of a hardcoded native shortcut', () => {
+test('pine editor opener uses chart Ctrl+E and keeps quick-search fallback route', () => {
   const pineEditor = getTradingViewShortcut('open-pine-editor');
   const directAction = buildTradingViewShortcutAction('open-pine-editor');
-  const routeActions = buildTradingViewShortcutRoute('open-pine-editor');
+  const directRouteActions = buildTradingViewShortcutRoute('open-pine-editor', { routeStrategy: 'official-direct' });
+  const fallbackRouteActions = buildTradingViewShortcutRoute('open-pine-editor');
 
   assert(pineEditor, 'pine editor shortcut profile should exist');
-  assert.strictEqual(pineEditor.key, null, 'pine editor should not claim a stable native shortcut key');
-  assert(/quick search|command palette|custom binding/i.test(pineEditor.notes.join(' ')), 'pine editor notes should describe the TradingView-specific opener route');
-  assert.strictEqual(directAction, null, 'pine editor should not build a direct key action when there is no stable native shortcut');
-  assert(Array.isArray(routeActions) && routeActions.length >= 5, 'pine editor should expose a TradingView-specific route sequence');
-  assert.strictEqual(routeActions[0].key, 'ctrl+k');
-  assert.strictEqual(routeActions[2].type, 'type');
-  assert.strictEqual(routeActions[2].text, 'Pine Editor');
-  assert.strictEqual(routeActions[4].type, 'key');
-  assert.strictEqual(routeActions[4].key, 'enter');
+  assert.strictEqual(pineEditor.key, 'ctrl+e', 'chart-focused Pine Editor opener should be Ctrl+E');
+  assert(/Ctrl\+E opens the Pine Script editor/i.test(pineEditor.notes.join(' ')), 'pine editor notes should document the chart-focused opener');
+  assert.strictEqual(directAction.key, 'ctrl+e', 'pine editor direct action should use the chart-focused opener');
+  assert(Array.isArray(directRouteActions) && directRouteActions[0]?.key === 'ctrl+e', 'official-direct route should use Ctrl+E');
+  assert(Array.isArray(fallbackRouteActions) && fallbackRouteActions.length >= 5, 'pine editor should keep a TradingView quick-search fallback route sequence');
+  assert.strictEqual(fallbackRouteActions[0].key, 'ctrl+k');
+  assert.strictEqual(fallbackRouteActions[6].type, 'type');
+  assert.strictEqual(fallbackRouteActions[6].text, 'Pine Editor');
+  assert.strictEqual(fallbackRouteActions[8].type, 'key');
+  assert.strictEqual(fallbackRouteActions[8].key, 'enter');
 });
 
 test('pine authoring shortcuts expose normalized capability metadata and chorded sequences', () => {

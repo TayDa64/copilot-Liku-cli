@@ -30,6 +30,21 @@ function test(name, fn) {
   }
 }
 
+function assertQuickSearchSymbolRoute(actions = [], symbol = '') {
+  const source = Array.isArray(actions) ? actions : [];
+  const ctrlKIndex = source.findIndex((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'ctrl+k');
+  const ctrlAIndex = source.findIndex((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'ctrl+a');
+  const backspaceIndex = source.findIndex((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'backspace');
+  const typeIndex = source.findIndex((action) => action?.type === 'type' && String(action?.text || '').toUpperCase() === String(symbol || '').toUpperCase());
+  const enterIndex = source.findIndex((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'enter');
+
+  assert(ctrlKIndex >= 0, 'symbol workflow should begin by opening TradingView quick search');
+  assert(ctrlAIndex > ctrlKIndex, 'symbol workflow should select any stale quick-search query after quick search opens');
+  assert(backspaceIndex > ctrlAIndex, 'symbol workflow should clear the selected quick-search query before typing the symbol');
+  assert(typeIndex > backspaceIndex, 'symbol workflow should type the requested symbol after the quick-search field is cleared');
+  assert(enterIndex > typeIndex, 'symbol workflow should confirm the selected quick-search symbol after typing it');
+}
+
 test('extractRequestedTimeframe normalizes common TradingView timeframe phrases', () => {
   assert.strictEqual(extractRequestedTimeframe('change the timeframe selector from 1m to 5m in tradingview'), '5m');
   assert.strictEqual(extractRequestedTimeframe('switch tradingview to 1 hour timeframe'), '1h');
@@ -121,12 +136,15 @@ test('maybeRewriteTradingViewTimeframeWorkflow rewrites low-signal timeframe pla
 test('buildTradingViewSymbolWorkflowActions emits bounded symbol confirmation flow', () => {
   const actions = buildTradingViewSymbolWorkflowActions({ appName: 'TradingView', symbol: 'NVDA' });
   assert.strictEqual(actions[0].type, 'bring_window_to_front');
-  assert.strictEqual(actions[2].type, 'type');
-  assert.strictEqual(actions[2].text, 'NVDA');
-  assert.strictEqual(actions[4].type, 'key');
-  assert.strictEqual(actions[4].key, 'enter');
-  assert.strictEqual(actions[4].verify.kind, 'symbol-updated');
-  assert(actions[4].verify.keywords.includes('NVDA'));
+  assertQuickSearchSymbolRoute(actions, 'NVDA');
+  const enterAction = actions.find((action) => action?.type === 'key' && action?.key === 'enter');
+  const trailingWait = actions[actions.length - 1];
+  assert(enterAction, 'symbol workflow should confirm via Enter after quick-search replacement');
+  assert.strictEqual(enterAction.verify.kind, 'symbol-updated');
+  assert(enterAction.verify.keywords.includes('NVDA'));
+  assert.strictEqual(enterAction.reason, 'Apply TradingView symbol NVDA from the verified quick-search selection');
+  assert.strictEqual(trailingWait?.type, 'wait');
+  assert.strictEqual(trailingWait?.ms, 180, 'verified symbol quick-search workflows should use only a light post-confirm settle');
 });
 
 test('maybeRewriteTradingViewSymbolWorkflow rewrites low-signal symbol plans', () => {
@@ -138,9 +156,9 @@ test('maybeRewriteTradingViewSymbolWorkflow rewrites low-signal symbol plans', (
   });
 
   assert(Array.isArray(rewritten), 'low-signal symbol request should rewrite');
-  assert.strictEqual(rewritten[2].text, 'NVDA');
-  assert.strictEqual(rewritten[4].key, 'enter');
-  assert.strictEqual(rewritten[4].verify.target, 'symbol-updated');
+  assertQuickSearchSymbolRoute(rewritten, 'NVDA');
+  const enterAction = rewritten.find((action) => action?.type === 'key' && action?.key === 'enter');
+  assert.strictEqual(enterAction?.verify?.target, 'symbol-updated');
 });
 
 test('maybeRewriteTradingViewSymbolWorkflow rewrites low-signal quick-search alias plans', () => {
@@ -152,10 +170,10 @@ test('maybeRewriteTradingViewSymbolWorkflow rewrites low-signal quick-search ali
   });
 
   assert(Array.isArray(rewritten), 'quick-search alias request should rewrite');
-  assert.strictEqual(rewritten[2].text, 'MSFT');
-  assert.strictEqual(rewritten[4].key, 'enter');
-  assert(rewritten[4].verify.keywords.includes('quick-search'));
-  assert(rewritten[4].verify.keywords.includes('command palette'));
+  assertQuickSearchSymbolRoute(rewritten, 'MSFT');
+  const enterAction = rewritten.find((action) => action?.type === 'key' && action?.key === 'enter');
+  assert(enterAction?.verify?.keywords.includes('quick-search'));
+  assert(enterAction?.verify?.keywords.includes('command palette'));
 });
 
 test('maybeRewriteTradingViewSymbolWorkflow does not replace plans already using symbol-search shortcut', () => {

@@ -29,6 +29,11 @@ function getArgValue(flagName) {
   return null;
 }
 
+function getEnvValue(name) {
+  const value = process.env[name];
+  return typeof value === 'string' && value.trim() ? value : null;
+}
+
 function hasFlag(flagName) {
   if (process.argv.includes(flagName)) return true;
   const envName = `npm_config_${String(flagName || '').replace(/^--/, '').replace(/-/g, '_')}`;
@@ -126,6 +131,52 @@ function normalizeText(value) {
   return String(value || '').trim().toLowerCase();
 }
 
+function isBrowserHostedWindowProcess(processName = '') {
+  return /^(msedge|chrome|brave|firefox|opera|vivaldi|arc|iexplore|safari)$/i.test(String(processName || '').trim());
+}
+
+function titleLooksLikeTradingViewReferencePage(title = '') {
+  return /\b(keyboard shortcuts?|shortcut(?: keys?)?|hotkey list|help center|support|docs?|documentation|learn|tutorial|blog|wiki|pricing|about|careers?|jobs?|download)\b/i.test(String(title || ''));
+}
+
+function titleLooksLikeTradingViewActiveSurface(title = '') {
+  return /\b(supercharts?|chart(?:s|ing)?|watchlist|paper trading|depth of market|pine editor|object tree|trading panel|strategy tester|stock screener|heatmap|alerts?|screener|ideas)\b/i.test(String(title || ''));
+}
+
+function classifyTradingViewWindow(windowInfo = {}, foregroundHwnd = 0) {
+  const title = normalizeText(windowInfo?.title);
+  const processName = normalizeText(windowInfo?.processName);
+  const windowKind = normalizeText(windowInfo?.windowKind);
+  const isForeground = Number(windowInfo?.hwnd || 0) === Number(foregroundHwnd || 0);
+  const isDedicatedTradingViewProcess = processName === 'tradingview';
+  const isBrowserHosted = isBrowserHostedWindowProcess(processName);
+  const looksLikeReferencePage = isBrowserHosted
+    && titleLooksLikeTradingViewReferencePage(title)
+    && !titleLooksLikeTradingViewActiveSurface(title);
+  const looksLikeActiveSurface = isDedicatedTradingViewProcess
+    || titleLooksLikeTradingViewActiveSurface(title);
+
+  let score = 0;
+  if (isDedicatedTradingViewProcess) score += 180;
+  if (looksLikeActiveSurface) score += isDedicatedTradingViewProcess ? 40 : 70;
+  if (/tradingview|trading\s+view/.test(title)) score += 18;
+  if (/tradingview/.test(processName)) score += 12;
+  if (!windowInfo?.isMinimized) score += 20;
+  if (windowKind === 'main') score += 15;
+  if (windowKind === 'owned' || windowKind === 'palette') score += 6;
+  if (isForeground) score += isDedicatedTradingViewProcess ? 30 : (looksLikeActiveSurface ? 12 : 4);
+  if (looksLikeReferencePage) score -= 220;
+
+  return {
+    score,
+    isForeground,
+    isDedicatedTradingViewProcess,
+    isBrowserHosted,
+    looksLikeReferencePage,
+    looksLikeActiveSurface
+  };
+}
+
 function windowLooksLikeTradingView(windowInfo = {}) {
   const title = normalizeText(windowInfo?.title);
   const processName = normalizeText(windowInfo?.processName);
@@ -141,6 +192,11 @@ function windowLooksLikeTradingView(windowInfo = {}) {
     return false;
   }
   if (/\.pdf\b|\bword\b|\blast saved by\b/.test(title) && processName !== 'tradingview') {
+    return false;
+  }
+  if (isBrowserHostedWindowProcess(processName)
+    && titleLooksLikeTradingViewReferencePage(title)
+    && !titleLooksLikeTradingViewActiveSurface(title)) {
     return false;
   }
   return /tradingview|trading\s+view|pine editor|paper trading|depth of market|object tree|trading panel/.test(haystack);
@@ -160,26 +216,32 @@ function dedupeWindows(windows = []) {
 
 function pickPreferredTradingViewWindow(windows = [], foreground = null) {
   const foregroundHwnd = Number(foreground?.hwnd || 0) || 0;
-  if (foregroundHwnd > 0) {
-    const exactForeground = windows.find((win) => Number(win?.hwnd || 0) === foregroundHwnd);
-    if (exactForeground) return exactForeground;
-  }
 
   const scored = windows
     .map((win) => {
       const title = normalizeText(win?.title);
-      const processName = normalizeText(win?.processName);
-      const windowKind = normalizeText(win?.windowKind);
-      let score = 0;
-      if (Number(win?.hwnd || 0) === foregroundHwnd) score += 50;
-      if (!win?.isMinimized) score += 20;
-      if (windowKind === 'main') score += 15;
-      if (/tradingview/.test(title)) score += 12;
-      if (/tradingview/.test(processName)) score += 10;
+      const classification = classifyTradingViewWindow(win, foregroundHwnd);
+      let score = classification.score;
       if (/pine editor|paper trading|depth of market|trading panel|object tree/.test(title)) score += 6;
-      return { win, score };
+      return {
+        win,
+        score,
+        classification
+      };
     })
-    .sort((a, b) => b.score - a.score);
+    .sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      if (a.classification.isDedicatedTradingViewProcess !== b.classification.isDedicatedTradingViewProcess) {
+        return a.classification.isDedicatedTradingViewProcess ? -1 : 1;
+      }
+      if (a.classification.looksLikeReferencePage !== b.classification.looksLikeReferencePage) {
+        return a.classification.looksLikeReferencePage ? 1 : -1;
+      }
+      if (a.classification.isForeground !== b.classification.isForeground) {
+        return a.classification.isForeground ? -1 : 1;
+      }
+      return 0;
+    });
 
   return scored[0]?.win || null;
 }
@@ -249,6 +311,24 @@ function bindScenarioToDetectedWindow(scenario, detectedWindow = null) {
   bound.actionData.actions = bound.actionData.actions.map((action) => {
     if (!action || typeof action !== 'object') return action;
     const type = String(action.type || '').trim().toLowerCase();
+    if (action.tradingViewChartFocusClick === true) {
+      const bounds = detectedWindow.bounds && typeof detectedWindow.bounds === 'object'
+        ? detectedWindow.bounds
+        : null;
+      const x = Number(bounds?.x || 0);
+      const y = Number(bounds?.y || 0);
+      const width = Number(bounds?.width || 0);
+      const height = Number(bounds?.height || 0);
+      if (Number.isFinite(x) && Number.isFinite(y) && width > 0 && height > 0) {
+        return {
+          ...action,
+          x: Math.round(x + width * 0.5),
+          y: Math.round(y + height * 0.45),
+          windowHandle: targetWindowHandle || action.windowHandle || action.hwnd || undefined,
+          hwnd: targetWindowHandle || action.hwnd || action.windowHandle || undefined
+        };
+      }
+    }
     if (type !== 'bring_window_to_front' && type !== 'focus_window') {
       return action;
     }
@@ -316,7 +396,83 @@ function buildClipboardSetCommand(value = '') {
   return `$ErrorActionPreference='Stop'; Set-Clipboard -Value @'\n${normalized}\n'@`;
 }
 
-function buildLiveSaveProbeSource(scriptName = DEFAULT_PINE_CREATE_SAVE_NAME) {
+function buildVwapTpoAtrConfidenceSource(scriptName = DEFAULT_PINE_CREATE_SAVE_NAME) {
+  const safeName = String(scriptName || DEFAULT_PINE_CREATE_SAVE_NAME).trim() || DEFAULT_PINE_CREATE_SAVE_NAME;
+  return [
+    '//@version=6',
+    `indicator(${JSON.stringify(safeName)}, overlay=true, max_labels_count=50)`,
+    '',
+    'src = input.source(hlc3, "VWAP Source")',
+    'atrLen = input.int(14, "ATR Length", minval=1)',
+    'tpoLen = input.int(48, "TPO Lookback", minval=10)',
+    'atrMultiplier = input.float(1.5, "ATR Confirmation Multiplier", minval=0.1, step=0.1)',
+    'showZones = input.bool(true, "Show TPO Value Zones")',
+    'showSignals = input.bool(true, "Show Confidence Signals")',
+    '',
+    'sessionVwap = ta.vwap(src)',
+    'atr = ta.atr(atrLen)',
+    'atrMean = ta.sma(atr, atrLen)',
+    'atrExpanded = atr > atrMean',
+    'upperAtrBand = sessionVwap + atr * atrMultiplier',
+    'lowerAtrBand = sessionVwap - atr * atrMultiplier',
+    '',
+    'profileHigh = ta.highest(high, tpoLen)',
+    'profileLow = ta.lowest(low, tpoLen)',
+    'profileMid = (profileHigh + profileLow) / 2.0',
+    'profileRange = math.max(profileHigh - profileLow, syminfo.mintick)',
+    'valueAreaHigh = profileMid + profileRange * 0.2',
+    'valueAreaLow = profileMid - profileRange * 0.2',
+    '',
+    'vwapSlopeUp = sessionVwap > sessionVwap[1]',
+    'vwapSlopeDown = sessionVwap < sessionVwap[1]',
+    'aboveVwap = close > sessionVwap',
+    'belowVwap = close < sessionVwap',
+    'aboveValue = close > valueAreaHigh',
+    'belowValue = close < valueAreaLow',
+    'insideValue = close <= valueAreaHigh and close >= valueAreaLow',
+    '',
+    'bullScore = (aboveVwap ? 1 : 0) + (vwapSlopeUp ? 1 : 0) + (aboveValue ? 1 : 0) + (atrExpanded ? 1 : 0)',
+    'bearScore = (belowVwap ? 1 : 0) + (vwapSlopeDown ? 1 : 0) + (belowValue ? 1 : 0) + (atrExpanded ? 1 : 0)',
+    'bias = bullScore > bearScore ? "Bullish" : bearScore > bullScore ? "Bearish" : "Balanced"',
+    'confidence = math.max(bullScore, bearScore)',
+    '',
+    'vwapPlot = plot(sessionVwap, "Session VWAP", color=color.new(color.blue, 0), linewidth=2)',
+    'upperPlot = plot(upperAtrBand, "VWAP + ATR Confirmation", color=color.new(color.green, 25))',
+    'lowerPlot = plot(lowerAtrBand, "VWAP - ATR Confirmation", color=color.new(color.red, 25))',
+    'vahPlot = plot(showZones ? valueAreaHigh : na, "TPO Value Area High", color=color.new(color.orange, 0), style=plot.style_linebr)',
+    'valPlot = plot(showZones ? valueAreaLow : na, "TPO Value Area Low", color=color.new(color.orange, 0), style=plot.style_linebr)',
+    'midPlot = plot(showZones ? profileMid : na, "TPO Point of Control Proxy", color=color.new(color.yellow, 0), style=plot.style_linebr)',
+    'fill(vahPlot, valPlot, color=color.new(color.orange, 88), title="TPO Value Area")',
+    '',
+    'longConfirm = showSignals and bullScore >= 3 and close > upperAtrBand',
+    'shortConfirm = showSignals and bearScore >= 3 and close < lowerAtrBand',
+    'plotshape(longConfirm, title="Bullish Confirmation", style=shape.triangleup, location=location.belowbar, color=color.new(color.green, 0), size=size.small, text="CONF")',
+    'plotshape(shortConfirm, title="Bearish Confirmation", style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 0), size=size.small, text="CONF")',
+    'bgcolor(insideValue ? color.new(color.gray, 92) : na, title="Inside TPO Value Area")',
+    '',
+    'var table dashboard = table.new(position.top_right, 2, 5, border_width=1)',
+    'if barstate.islast',
+    '    table.cell(dashboard, 0, 0, "Bias", bgcolor=color.new(color.black, 0), text_color=color.white)',
+    '    table.cell(dashboard, 1, 0, bias, text_color=bullScore > bearScore ? color.lime : bearScore > bullScore ? color.red : color.yellow)',
+    '    table.cell(dashboard, 0, 1, "Confidence", text_color=color.white)',
+    '    table.cell(dashboard, 1, 1, str.tostring(confidence) + "/4", text_color=confidence >= 3 ? color.lime : color.yellow)',
+    '    table.cell(dashboard, 0, 2, "VWAP", text_color=color.white)',
+    '    table.cell(dashboard, 1, 2, aboveVwap ? "Above" : "Below", text_color=aboveVwap ? color.lime : color.red)',
+    '    table.cell(dashboard, 0, 3, "TPO Zone", text_color=color.white)',
+    '    table.cell(dashboard, 1, 3, aboveValue ? "Above VAH" : belowValue ? "Below VAL" : "Inside Value", text_color=insideValue ? color.yellow : color.white)',
+    '    table.cell(dashboard, 0, 4, "ATR", text_color=color.white)',
+    '    table.cell(dashboard, 1, 4, atrExpanded ? "Expanded" : "Normal", text_color=atrExpanded ? color.lime : color.silver)',
+    '',
+    'alertcondition(longConfirm, "Bullish VWAP/TPO/ATR Confirmation", "Bullish confirmation: price is above VWAP, above value, and ATR confirms expansion.")',
+    'alertcondition(shortConfirm, "Bearish VWAP/TPO/ATR Confirmation", "Bearish confirmation: price is below VWAP, below value, and ATR confirms expansion.")'
+  ].join('\n');
+}
+
+function buildLiveSaveProbeSource(scriptName = DEFAULT_PINE_CREATE_SAVE_NAME, prompt = '') {
+  const normalizedPrompt = String(prompt || '').toLowerCase();
+  if (/\bvwap\b/.test(normalizedPrompt) && /\btpo\b/.test(normalizedPrompt) && /\batr\b/.test(normalizedPrompt)) {
+    return buildVwapTpoAtrConfidenceSource(scriptName);
+  }
   const safeName = String(scriptName || DEFAULT_PINE_CREATE_SAVE_NAME).trim() || DEFAULT_PINE_CREATE_SAVE_NAME;
   return [
     '//@version=6',
@@ -328,7 +484,7 @@ function buildLiveSaveProbeSource(scriptName = DEFAULT_PINE_CREATE_SAVE_NAME) {
 function buildPineCreateSaveScenario(prompt, scriptName) {
   const effectivePrompt = String(prompt || DEFAULT_PINE_CREATE_SAVE_PROMPT).trim() || DEFAULT_PINE_CREATE_SAVE_PROMPT;
   const effectiveScriptName = String(scriptName || DEFAULT_PINE_CREATE_SAVE_NAME).trim() || DEFAULT_PINE_CREATE_SAVE_NAME;
-  const scriptSource = buildLiveSaveProbeSource(effectiveScriptName);
+  const scriptSource = buildLiveSaveProbeSource(effectiveScriptName, effectivePrompt);
   const sourceActions = [
     {
       type: 'run_command',
@@ -562,11 +718,11 @@ async function main() {
   const artifactDir = path.resolve(process.cwd(), getArgValue('--artifact-dir') || DEFAULT_ARTIFACT_DIR);
   const pollInterval = Math.max(100, Number(getArgValue('--poll-interval') || DEFAULT_POLL_INTERVAL_MS) || DEFAULT_POLL_INTERVAL_MS);
   const options = {
-    scenarios: getArgValue('--scenarios') || 'focus,pine-editor',
-    symbol: getArgValue('--symbol') || '',
-    timeframe: getArgValue('--timeframe') || '',
-    pinePrompt: getArgValue('--pine-prompt') || DEFAULT_PINE_CREATE_SAVE_PROMPT,
-    pineScriptName: getArgValue('--pine-script-name') || DEFAULT_PINE_CREATE_SAVE_NAME,
+    scenarios: getArgValue('--scenarios') || getEnvValue('LIKU_LIVE_TV_SCENARIOS') || 'focus,pine-editor',
+    symbol: getArgValue('--symbol') || getEnvValue('LIKU_LIVE_TV_SYMBOL') || '',
+    timeframe: getArgValue('--timeframe') || getEnvValue('LIKU_LIVE_TV_TIMEFRAME') || '',
+    pinePrompt: getArgValue('--pine-prompt') || getEnvValue('LIKU_LIVE_TV_PINE_PROMPT') || DEFAULT_PINE_CREATE_SAVE_PROMPT,
+    pineScriptName: getArgValue('--pine-script-name') || getEnvValue('LIKU_LIVE_TV_PINE_SCRIPT_NAME') || DEFAULT_PINE_CREATE_SAVE_NAME,
     allowSymbolChange: hasFlag('--allow-symbol-change'),
     allowTimeframeChange: hasFlag('--allow-timeframe-change')
   };
@@ -680,7 +836,15 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  console.error(error.stack || error.message);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((error) => {
+    console.error(error.stack || error.message);
+    process.exit(1);
+  });
+} else {
+  module.exports = {
+    windowLooksLikeTradingView,
+    pickPreferredTradingViewWindow,
+    findTradingViewContext
+  };
+}

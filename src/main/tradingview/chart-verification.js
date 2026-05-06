@@ -39,6 +39,9 @@ const TIMEFRAME_UNIT_MAP = new Map([
   ['months', 'M']
 ]);
 
+const TRADINGVIEW_POST_CONFIRMATION_SETTLE_MS = 450;
+const TRADINGVIEW_POST_VERIFIED_SYMBOL_SETTLE_MS = 180;
+
 function normalizeTextForMatch(value) {
   return String(value || '')
     .toLowerCase()
@@ -292,7 +295,7 @@ function buildTradingViewTimeframeWorkflowActions(intent = {}) {
       },
       verifyTarget
     },
-    { type: 'wait', ms: 900 }
+    { type: 'wait', ms: TRADINGVIEW_POST_CONFIRMATION_SETTLE_MS }
   ];
 }
 
@@ -371,7 +374,7 @@ function buildTradingViewSymbolWorkflowActions(intent = {}) {
       type: 'key',
       key: 'enter',
       reason: symbol
-        ? `Confirm TradingView symbol ${symbol} after verified quick-search replacement`
+        ? `Apply TradingView symbol ${symbol} from the verified quick-search selection`
         : 'Confirm the requested TradingView symbol',
       verify: {
         kind: 'symbol-updated',
@@ -384,7 +387,11 @@ function buildTradingViewSymbolWorkflowActions(intent = {}) {
       searchSurfaceContract: quickSearchRouteMetadata,
       tradingViewShortcut: quickSearchRouteMetadata
     },
-    { type: 'wait', ms: 900 }
+    {
+      type: 'wait',
+      ms: TRADINGVIEW_POST_VERIFIED_SYMBOL_SETTLE_MS,
+      reason: 'Allow the verified TradingView symbol change to settle before the next action'
+    }
   ];
 }
 
@@ -433,7 +440,7 @@ function buildTradingViewWatchlistWorkflowActions(intent = {}) {
       },
       verifyTarget
     },
-    { type: 'wait', ms: 900 }
+    { type: 'wait', ms: TRADINGVIEW_POST_CONFIRMATION_SETTLE_MS }
   ];
 }
 

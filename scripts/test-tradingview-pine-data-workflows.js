@@ -31,6 +31,68 @@ function test(name, fn) {
   }
 }
 
+function collectWorkflowActions(actions = [], visited = new Set()) {
+  const collected = [];
+  const visit = (items) => {
+    if (!Array.isArray(items)) return;
+    for (const action of items) {
+      if (!action || typeof action !== 'object' || visited.has(action)) continue;
+      visited.add(action);
+      collected.push(action);
+      visit(action.continueActions);
+      if (action.continueActionsByPineEditorState && typeof action.continueActionsByPineEditorState === 'object') {
+        Object.values(action.continueActionsByPineEditorState).forEach(visit);
+      }
+      if (action.continueActionsByPineLifecycleState && typeof action.continueActionsByPineLifecycleState === 'object') {
+        Object.values(action.continueActionsByPineLifecycleState).forEach(visit);
+      }
+    }
+  };
+  visit(actions);
+  return collected;
+}
+
+function findPineEditorOpenKey(actions = []) {
+  return (Array.isArray(actions) ? actions : []).find((action) =>
+    action?.type === 'key'
+    && String(action?.key || '').toLowerCase() === 'ctrl+e'
+    && String(action?.verify?.target || '').toLowerCase() === 'pine-editor'
+  );
+}
+
+function assertChartFocusBeforeCtrlE(actions = []) {
+  const chartFocusIndex = (Array.isArray(actions) ? actions : []).findIndex((action) =>
+    action?.type === 'click'
+    && action?.tradingViewChartFocusClick === true
+  );
+  const openIndex = (Array.isArray(actions) ? actions : []).findIndex((action) =>
+    action?.type === 'key'
+    && String(action?.key || '').toLowerCase() === 'ctrl+e'
+    && String(action?.verify?.target || '').toLowerCase() === 'pine-editor'
+  );
+  assert(chartFocusIndex >= 0, 'workflow should focus the TradingView chart surface before Ctrl+E');
+  assert(openIndex > chartFocusIndex, 'Ctrl+E should run only after the chart surface focus click');
+}
+
+function assertQuickSearchPineEditorRoute(actions = []) {
+  const source = Array.isArray(actions) ? actions : [];
+  const ctrlKIndex = source.findIndex((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'ctrl+k');
+  const ctrlAIndex = source.findIndex((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'ctrl+a');
+  const backspaceIndex = source.findIndex((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'backspace');
+  const typeIndex = source.findIndex((action) => action?.type === 'type' && action?.text === 'Pine Editor');
+  const enterIndex = source.findIndex((action) =>
+    action?.type === 'key'
+    && String(action?.key || '').toLowerCase() === 'enter'
+    && String(action?.verify?.target || '').toLowerCase() === 'pine-editor'
+  );
+
+  assert(ctrlKIndex >= 0, 'workflow should open TradingView quick search before selecting Pine Editor');
+  assert(ctrlAIndex > ctrlKIndex, 'workflow should select any stale quick-search text after opening quick search');
+  assert(backspaceIndex > ctrlAIndex, 'workflow should clear the selected quick-search text before typing Pine Editor');
+  assert(typeIndex > backspaceIndex, 'workflow should type Pine Editor after clearing stale quick-search text');
+  assert(enterIndex > typeIndex, 'workflow should confirm the Pine Editor quick-search result after typing it');
+}
+
 test('pine workflow recognizes pine logs evidence-gathering requests', () => {
   const intent = inferTradingViewPineIntent('open pine logs in tradingview and read the output', [
     { type: 'key', key: 'ctrl+shift+l' }
@@ -186,8 +248,7 @@ test('open pine editor and read visible status stays verification-first', () => 
   const readback = rewritten.find((action) => action?.type === 'get_text' && action?.text === 'Pine Editor');
 
   assert.strictEqual(rewritten[0].type, 'bring_window_to_front');
-  assert.strictEqual(rewritten[2].type, 'key');
-  assert.strictEqual(rewritten[2].key, 'ctrl+e');
+  assertChartFocusBeforeCtrlE(rewritten);
   assert.strictEqual(opener.type, 'key');
   assert.strictEqual(opener.key, 'ctrl+e');
   assert.strictEqual(opener.verify.target, 'pine-editor');
@@ -256,7 +317,7 @@ test('pine editor authoring workflow demands editor-active verification before t
   ]);
 
   const opener = rewritten.find((action) => action?.verify?.target === 'pine-editor');
-  assert.strictEqual(rewritten[2].key, 'ctrl+e');
+  assertChartFocusBeforeCtrlE(rewritten);
   assert.strictEqual(opener.verify.kind, 'editor-active');
   assert.strictEqual(opener.verify.target, 'pine-editor');
   assert.strictEqual(opener.verify.requiresObservedChange, true);
@@ -275,13 +336,44 @@ test('generic pine script creation prefers safe new-script workflow', () => {
   });
 
   const opener = rewritten.find((action) => action?.verify?.target === 'pine-editor');
+  const postOpenActions = rewritten.slice(rewritten.indexOf(opener) + 1);
   assert(Array.isArray(rewritten), 'workflow should rewrite');
   assert.strictEqual(rewritten[0].type, 'bring_window_to_front');
-  assert.strictEqual(rewritten[2].key, 'ctrl+e');
+  assertQuickSearchPineEditorRoute(rewritten);
   assert.strictEqual(opener.verify.kind, 'editor-active');
   assert(rewritten.some((action) => action?.type === 'get_text' && action?.text === 'Pine Editor'), 'safe authoring should inspect visible Pine Editor state first');
-  assert(!rewritten.some((action) => String(action?.key || '').toLowerCase() === 'ctrl+a'), 'safe authoring should avoid select-all by default');
-  assert(!rewritten.some((action) => String(action?.key || '').toLowerCase() === 'backspace'), 'safe authoring should avoid destructive clear-first behavior');
+  assert(!postOpenActions.some((action) => String(action?.key || '').toLowerCase() === 'ctrl+a'), 'safe authoring should avoid select-all inside Pine Editor by default');
+  assert(!postOpenActions.some((action) => String(action?.key || '').toLowerCase() === 'backspace'), 'safe authoring should avoid destructive clear-first behavior inside Pine Editor');
+});
+
+test('negated overwrite language keeps TradingView Pine authoring on the safe fresh-script path', () => {
+  const sourceActions = [
+    {
+      type: 'run_command',
+      shell: 'powershell',
+      command: "Set-Clipboard -Value @'\n//@version=6\nindicator(\"VWAP TPO ATR Confidence Confirmation Suite\", overlay=false)\nplot(close)\n'@",
+      reason: 'Copy the prepared Pine script to the clipboard'
+    }
+  ];
+  const prompt = 'TradingView is open. Create a new interactive Pine Script indicator that shows VWAP, TPO, and ATR confirmations. Use the fresh indicator flow and do not overwrite the last cloud script.';
+  const intent = inferTradingViewPineIntent(prompt, sourceActions);
+  const rewritten = buildTradingViewPineWorkflowActions(intent, sourceActions);
+  const allActions = collectWorkflowActions(rewritten);
+  const safeInspect = allActions.find((action) =>
+    action?.type === 'get_text'
+    && action?.pineEvidenceMode === 'safe-authoring-inspect'
+    && (
+      action?.continueActionsByPineEditorState
+      || Array.isArray(action?.continueActions)
+    )
+  );
+
+  assert(intent, 'intent should be inferred');
+  assert.strictEqual(intent.explicitOverwriteAuthoring, false, 'do-not-overwrite language must not become explicit overwrite intent');
+  assert.strictEqual(intent.safeAuthoringDefault, true, 'create-new Pine request should keep safe authoring enabled');
+  assert(Array.isArray(intent.safeAuthoringContinuationSteps) && intent.safeAuthoringContinuationSteps.length > 0, 'clipboard payload should produce safe paste/save continuation steps');
+  assert(safeInspect, 'workflow should include safe-authoring inspection before paste/save');
+  assert(allActions.some((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'ctrl+v'), 'workflow should paste the prepared Pine payload after proof');
 });
 
 test('clipboard-only pine authoring plan rewrites into guarded continuation after safe inspection', () => {
@@ -301,7 +393,7 @@ test('clipboard-only pine authoring plan rewrites into guarded continuation afte
 
   assert(Array.isArray(rewritten), 'workflow should rewrite');
   assert.strictEqual(rewritten[0].type, 'bring_window_to_front');
-  assert.strictEqual(rewritten[2].key, 'ctrl+k');
+  assertQuickSearchPineEditorRoute(rewritten);
   assert.strictEqual(opener.verify.kind, 'editor-active');
   assert(inspectStep, 'safe authoring should inspect Pine Editor state first');
   assert.strictEqual(inspectStep.continueOnPineEditorState, 'empty-or-starter');
@@ -882,8 +974,7 @@ test('open pine editor and check 500-line budget stays verification-first', () =
   const opener = rewritten.find((action) => action?.verify?.target === 'pine-editor');
   const readback = rewritten.find((action) => action?.type === 'get_text' && action?.text === 'Pine Editor');
   assert.strictEqual(rewritten[0].type, 'bring_window_to_front');
-  assert.strictEqual(rewritten[2].type, 'key');
-  assert.strictEqual(rewritten[2].key, 'ctrl+e');
+  assertChartFocusBeforeCtrlE(rewritten);
   assert.strictEqual(opener.verify.target, 'pine-editor');
   assert(readback, 'line-budget workflow should gather Pine Editor text');
   assert(/line-budget hints/i.test(readback.reason), 'pine editor line-budget readback should mention line-budget hints');
@@ -983,7 +1074,7 @@ test('pine editor evidence workflow preserves trailing get_text read step', () =
   const opener = rewritten.find((action) => action?.verify?.target === 'pine-editor');
   assert.strictEqual(readSteps.length, 1, 'explicit pine editor readback step should be preserved without duplication');
   assert.strictEqual(readSteps[0].text, 'Pine Editor');
-  assert.strictEqual(rewritten[2].key, 'ctrl+e');
+  assertChartFocusBeforeCtrlE(rewritten);
   assert.strictEqual(opener.verify.target, 'pine-editor');
 });
 

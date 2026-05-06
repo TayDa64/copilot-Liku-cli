@@ -20,6 +20,52 @@ function test(name, fn) {
   }
 }
 
+function findVerifiedPineEditorOpener(actions = []) {
+  return (Array.isArray(actions) ? actions : []).find((action) =>
+    action?.verify?.target === 'pine-editor'
+  );
+}
+
+function assertChartFocusBeforeCtrlE(actions = []) {
+  const chartFocusIndex = (Array.isArray(actions) ? actions : []).findIndex((action) =>
+    action?.type === 'click' && action?.tradingViewChartFocusClick === true
+  );
+  const openIndex = (Array.isArray(actions) ? actions : []).findIndex((action) =>
+    action?.type === 'key'
+    && String(action?.key || '').toLowerCase() === 'ctrl+e'
+    && String(action?.verify?.target || '').toLowerCase() === 'pine-editor'
+  );
+
+  assert(chartFocusIndex >= 0, 'direct Ctrl+E workflow should prove chart focus before opening Pine Editor');
+  assert(openIndex > chartFocusIndex, 'verified Ctrl+E opener should occur after the chart-focus step');
+}
+
+function assertQuickSearchPineEditorRoute(actions = []) {
+  const source = Array.isArray(actions) ? actions : [];
+  const ctrlKIndex = source.findIndex((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'ctrl+k');
+  const ctrlAIndex = source.findIndex((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'ctrl+a');
+  const backspaceIndex = source.findIndex((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'backspace');
+  const typeIndex = source.findIndex((action) => action?.type === 'type' && action?.text === 'Pine Editor');
+  const openerIndex = source.findIndex((action) =>
+    action?.type === 'key'
+    && String(action?.key || '').toLowerCase() === 'enter'
+    && String(action?.verify?.target || '').toLowerCase() === 'pine-editor'
+  );
+  const quickSearchOpener = ctrlKIndex >= 0 ? source[ctrlKIndex] : null;
+
+  assert(ctrlKIndex >= 0, 'default Pine opener should begin with TradingView quick search');
+  assert(quickSearchOpener?.verify?.target === 'quick-search', 'quick-search opener should verify the TradingView search surface first');
+  assert(ctrlAIndex > ctrlKIndex, 'quick-search route should select any stale query after the search surface opens');
+  assert(backspaceIndex > ctrlAIndex, 'quick-search route should clear any stale query after selecting it');
+  assert(typeIndex > backspaceIndex, 'quick-search route should type Pine Editor after clearing stale query text');
+  assert(openerIndex > typeIndex, 'quick-search route should confirm the Pine Editor selection after typing it');
+  assert.strictEqual(
+    source.some((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'ctrl+e' && String(action?.verify?.target || '').toLowerCase() === 'pine-editor'),
+    false,
+    'default quick-search Pine opener should not keep a verified Ctrl+E opener in the rewritten route'
+  );
+}
+
 test('inferTradingViewPineIntent recognizes Pine Editor surface requests', () => {
   const intent = inferTradingViewPineIntent('open pine editor in tradingview', [
     { type: 'key', key: 'ctrl+e' }
@@ -46,7 +92,7 @@ test('inferTradingViewPineIntent preserves explicit Pine requests outside Tradin
   assert.strictEqual(intent.surfaceTarget, 'pine-editor');
 });
 
-test('buildTradingViewPineWorkflowActions wraps the opener with panel verification', () => {
+test('buildTradingViewPineWorkflowActions keeps explicit Ctrl+E openers chart-focused and verified', () => {
   const actions = buildTradingViewPineWorkflowActions({
     appName: 'TradingView',
     surfaceTarget: 'pine-editor',
@@ -58,29 +104,39 @@ test('buildTradingViewPineWorkflowActions wraps the opener with panel verificati
     { type: 'type', text: 'strategy("test")', reason: 'Type script' }
   ]);
 
-  const opener = actions.find((action) => action?.verify?.target === 'pine-editor');
+  const opener = findVerifiedPineEditorOpener(actions);
   const typed = actions.find((action) => action?.type === 'type' && action?.text === 'strategy("test")');
-  const quickSearchOpener = actions.find((action) => action?.type === 'key' && action?.key === 'ctrl+k');
-  const selectExistingQuery = actions.find((action) => action?.type === 'key' && action?.key === 'ctrl+a');
-  const clearExistingQuery = actions.find((action) => action?.type === 'key' && action?.key === 'backspace');
-  const ctrlKIndex = actions.findIndex((action) => action?.type === 'key' && action?.key === 'ctrl+k');
-  const ctrlAIndex = actions.findIndex((action) => action?.type === 'key' && action?.key === 'ctrl+a');
-  const backspaceIndex = actions.findIndex((action) => action?.type === 'key' && action?.key === 'backspace');
-  const typeIndex = actions.findIndex((action) => action?.type === 'type' && action?.text === 'Pine Editor');
 
   assert.strictEqual(actions[0].type, 'bring_window_to_front');
-  assert.strictEqual(actions[2].type, 'key');
-  assert.strictEqual(actions[2].key, 'ctrl+k');
-  assert.strictEqual(quickSearchOpener.verify.kind, 'dialog-visible');
-  assert.strictEqual(quickSearchOpener.verify.target, 'quick-search');
-  assert(selectExistingQuery, 'quick-search route should select any stale query text before typing');
-  assert(clearExistingQuery, 'quick-search route should explicitly clear the selected stale query before typing');
-  assert(ctrlAIndex > ctrlKIndex && ctrlAIndex < backspaceIndex, 'query selection should occur after quick-search opens and before the stale query is cleared');
-  assert(backspaceIndex > ctrlAIndex && backspaceIndex < typeIndex, 'stale query clearing should occur after selection and before Pine Editor is typed');
+  assertChartFocusBeforeCtrlE(actions);
+  assert.strictEqual(opener.type, 'key');
+  assert.strictEqual(opener.key, 'ctrl+e');
   assert.strictEqual(opener.verify.kind, 'panel-visible');
   assert.strictEqual(opener.verify.target, 'pine-editor');
   assert.strictEqual(opener.verify.requiresObservedChange, true);
   assert(typed, 'typing should remain after the Pine Editor opener route');
+});
+
+test('buildTradingViewPineWorkflowActions routes synthetic Pine openers through verified quick search', () => {
+  const actions = buildTradingViewPineWorkflowActions({
+    appName: 'TradingView',
+    surfaceTarget: 'pine-editor',
+    verifyKind: 'panel-visible',
+    syntheticOpener: true,
+    requiresObservedChange: true
+  }, [
+    { type: 'type', text: 'strategy("test")', reason: 'Type script' }
+  ]);
+
+  const opener = findVerifiedPineEditorOpener(actions);
+  const typed = actions.find((action) => action?.type === 'type' && action?.text === 'strategy("test")');
+
+  assert.strictEqual(actions[0].type, 'bring_window_to_front');
+  assertQuickSearchPineEditorRoute(actions);
+  assert.strictEqual(opener.verify.kind, 'panel-visible');
+  assert.strictEqual(opener.verify.target, 'pine-editor');
+  assert.strictEqual(opener.verify.requiresObservedChange, true);
+  assert(typed, 'synthetic workflows should keep their trailing Pine action after the quick-search opener route');
 });
 
 test('maybeRewriteTradingViewPineWorkflow rewrites low-signal Pine Editor opener plans', () => {
@@ -96,8 +152,7 @@ test('maybeRewriteTradingViewPineWorkflow rewrites low-signal Pine Editor opener
 
   assert(Array.isArray(rewritten), 'pine rewrite should return an action array');
   assert.strictEqual(rewritten[0].type, 'bring_window_to_front');
-  assert.strictEqual(rewritten[2].type, 'key');
-  assert.strictEqual(rewritten[2].key, 'ctrl+k');
+  assertQuickSearchPineEditorRoute(rewritten);
   assert.strictEqual(opener.verify.target, 'pine-editor');
   assert.strictEqual(opener.verify.requiresObservedChange, true);
   assert(typed, 'typing should remain after the Pine Editor opener route');
@@ -137,6 +192,7 @@ test('maybeRewriteTradingViewPineWorkflow synthesizes a Pine Editor opener from 
 
   assert(Array.isArray(rewritten), 'focus-only control prompt should synthesize a canonical Pine route');
   assert.strictEqual(rewritten[0].type, 'bring_window_to_front');
+  assertQuickSearchPineEditorRoute(rewritten);
   assert.strictEqual(pineSearchActions.length, 1, 'synthetic Pine route should search for Pine Editor exactly once');
   assert(opener, 'synthetic Pine route should retain a verified Pine Editor opener');
 });
@@ -179,8 +235,7 @@ test('TradingView Pine workflow rewrites generic authoring prompts into safe ins
 
   assert(Array.isArray(rewritten), 'authoring prompts should rewrite into a bounded safe authoring flow');
   assert.strictEqual(rewritten[0].type, 'bring_window_to_front');
-  assert.strictEqual(rewritten[2].type, 'key');
-  assert.strictEqual(rewritten[2].key, 'ctrl+k');
+  assertQuickSearchPineEditorRoute(rewritten);
   assert.strictEqual(opener.verify.target, 'pine-editor');
   assert(inspectStep, 'safe authoring should inspect Pine Editor state after opening via quick search');
 });

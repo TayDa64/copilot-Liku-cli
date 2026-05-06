@@ -24,7 +24,7 @@ Tool rewrite/risk registries are default-on. Use `LIKU_USE_TOOL_REGISTRY_REWRITE
 4. Keep generated outputs and local artifacts out of commits.
 5. Implement locally, run focused validation first, commit/push passing changes, open the implementation PR, and merge/close it promptly once validated.
 
-For GPT-5.2 coding/cloud-agent work, choose GPT-5.2 for the parent/session model. Do not rely only on subagent `model:` frontmatter.
+For GPT-5.2 coding/cloud-agent work, choose GPT-5.2 for the parent/session model. Do not rely only on subagent `model:` frontmatter. For Pine create/save live validation or operator-guidance runs that explicitly consult model guidance, prefer `gpt-4o` only for that validation lane instead of changing broader repo defaults.
 
 ## Validation layers
 

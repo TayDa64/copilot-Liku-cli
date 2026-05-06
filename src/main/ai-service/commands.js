@@ -16,11 +16,13 @@ function createCommandHandler(dependencies) {
     loadCopilotTokenIfNeeded,
     logoutCopilot,
     modelRegistry,
+    preferSessionCopilotModelChanges,
     resetBrowserSessionState,
     clearSessionIntentState,
     getSessionIntentState,
     setApiKey,
     setCopilotModel,
+    setSessionCopilotModel,
     setProvider,
     slashCommandHelpers,
     startCopilotOAuth
@@ -109,6 +111,13 @@ function createCommandHandler(dependencies) {
       sections.push('');
     }
     return sections.join('\n').trim();
+  }
+
+  function applyCopilotModelChange(model) {
+    const setter = preferSessionCopilotModelChanges && typeof setSessionCopilotModel === 'function'
+      ? setSessionCopilotModel
+      : setCopilotModel;
+    return setter(model);
   }
 
   function handleCommand(command) {
@@ -252,7 +261,7 @@ function createCommandHandler(dependencies) {
 
           const shortcutModel = resolveModelShortcut(requested, models);
           const model = shortcutModel?.id || slashCommandHelpers.normalizeModelKey(requested);
-          if (setCopilotModel(model)) {
+          if (applyCopilotModelChange(model)) {
             const modelInfo = modelRegistry()[model];
             return {
               type: 'system',

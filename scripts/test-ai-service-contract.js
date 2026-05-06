@@ -147,6 +147,11 @@ test('status payload shape remains stable', () => {
   assert.ok(status.copilotModels.length > 0);
 });
 
+test('test entrypoints default Copilot model selection to gpt-4o', () => {
+  assert.strictEqual(aiService.getCurrentCopilotModel(), 'gpt-4o');
+  assert.strictEqual(aiService.getModelMetadata().modelId, 'gpt-4o');
+});
+
 testAsync('handleCommand status response shape remains stable', async () => {
   const result = await aiService.handleCommand('/status');
   assert.ok(result);
@@ -176,7 +181,7 @@ testAsync('handleCommand model shortcuts resolve through the live ai-service pat
     assert.strictEqual(latestResult.type, 'system');
     assert.strictEqual(aiService.getCurrentCopilotModel(), latestGptModel.id);
   } finally {
-    aiService.setCopilotModel(originalModel);
+    aiService.setSessionCopilotModel(originalModel);
   }
 });
 

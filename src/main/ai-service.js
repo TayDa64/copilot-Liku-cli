@@ -653,6 +653,16 @@ const MAX_HISTORY = 20;
 const HISTORY_FILE = path.join(LIKU_HOME, 'conversation-history.json');
 const MODEL_PREF_FILE = path.join(LIKU_HOME, 'model-preference.json');
 const MODEL_RUNTIME_FILE = path.join(LIKU_HOME, 'copilot-runtime-state.json');
+const REPO_ROOT = path.resolve(__dirname, '..', '..');
+const TEST_ENTRYPOINT_PATTERN = /^scripts\/test-[^/]+\.js$/i;
+
+function isTestScriptEntrypoint(scriptPath = process.argv[1]) {
+  if (!scriptPath) return false;
+  const relativeScriptPath = path.relative(REPO_ROOT, path.resolve(scriptPath)).replace(/\\/g, '/');
+  return TEST_ENTRYPOINT_PATTERN.test(relativeScriptPath);
+}
+
+const preferSessionCopilotModelChanges = isTestScriptEntrypoint();
 
 const copilotModelRegistry = createCopilotModelRegistry({
   likuHome: LIKU_HOME,
@@ -696,6 +706,9 @@ const slashCommandHelpers = createSlashCommandHelpers({ modelRegistry });
 // Restore history on module load
 historyStore.loadConversationHistory();
 loadModelPreference();
+if (preferSessionCopilotModelChanges) {
+  setSessionCopilotModelInRegistry('gpt-4o');
+}
 
 // Visual context for AI awareness
 const visualContextStore = createVisualContextStore({ maxVisualContext: 5 });
@@ -869,6 +882,7 @@ const commandHandler = createCommandHandler({
     } catch (error) {}
   },
   modelRegistry,
+  preferSessionCopilotModelChanges,
   resetBrowserSessionState,
   clearSessionIntentState,
   getSessionIntentState,
@@ -986,6 +1000,126 @@ function prevalidateActionTarget(action) {
   }
 
   return { success: true, liveElement };
+}
+
+function isTradingViewChartFocusClickAction(action) {
+  return !!(action && typeof action === 'object' && action.tradingViewChartFocusClick === true);
+}
+
+function shouldAdoptForegroundHandleAfterClickAction(action, result = {}, currentTrackedWindowHandle = 0) {
+  const type = String(action?.type || '').trim().toLowerCase();
+  if (!['click', 'double_click', 'right_click'].includes(type)) {
+    return false;
+  }
+
+  if (result?.success !== true) {
+    return false;
+  }
+
+  const explicitCoordinates = Number.isFinite(Number(action?.x)) && Number.isFinite(Number(action?.y));
+  const explicitWindowHandle = Number(action?.windowHandle || action?.hwnd || action?.targetWindowHandle || 0) || 0;
+  const trackedWindowHandle = Number(currentTrackedWindowHandle || 0) || 0;
+  const inspectTargetedClick = !!(action?.targetId || result?.resolvedTarget?.targetId);
+
+  return explicitCoordinates || explicitWindowHandle > 0 || trackedWindowHandle > 0 || inspectTargetedClick;
+}
+
+function getUsableWindowBounds(windowInfo = {}) {
+  const bounds = windowInfo?.bounds && typeof windowInfo.bounds === 'object'
+    ? windowInfo.bounds
+    : null;
+  if (!bounds) return null;
+  const x = Number(bounds.x);
+  const y = Number(bounds.y);
+  const width = Number(bounds.width);
+  const height = Number(bounds.height);
+  if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(width) || !Number.isFinite(height)) {
+    return null;
+  }
+  if (width <= 80 || height <= 80) return null;
+  return { x, y, width, height };
+}
+
+function computeTradingViewChartFocusPoint(bounds = {}) {
+  const usable = getUsableWindowBounds({ bounds });
+  if (!usable) return null;
+  return {
+    x: Math.round(usable.x + usable.width * 0.5),
+    y: Math.round(usable.y + usable.height * 0.38)
+  };
+}
+
+function windowInfoLooksLikeTradingView(windowInfo = {}) {
+  const haystack = [
+    windowInfo?.processName,
+    windowInfo?.title,
+    windowInfo?.className
+  ]
+    .map((value) => String(value || '').trim().toLowerCase())
+    .filter(Boolean)
+    .join(' ');
+  return /\btradingview\b|\btrading view\b/.test(haystack);
+}
+
+async function resolveTradingViewChartFocusClickAction(action, context = {}) {
+  if (!isTradingViewChartFocusClickAction(action)) {
+    return { ok: true, action };
+  }
+
+  const explicitPoint = Number.isFinite(Number(action.x))
+    && Number.isFinite(Number(action.y))
+    && !(Math.round(Number(action.x)) === 0 && Math.round(Number(action.y)) === 0);
+  if (explicitPoint) {
+    return { ok: true, action };
+  }
+
+  const requestedHandle = Number(
+    action.windowHandle
+    || action.hwnd
+    || action.targetWindowHandle
+    || context.lastTargetWindowHandle
+    || 0
+  ) || 0;
+
+  let windowInfo = null;
+  if (requestedHandle > 0 && typeof systemAutomation.getWindowInfoByHandle === 'function') {
+    try {
+      const candidate = await systemAutomation.getWindowInfoByHandle(requestedHandle);
+      if (candidate?.success && windowInfoLooksLikeTradingView(candidate)) {
+        windowInfo = candidate;
+      }
+    } catch {}
+  }
+
+  if (!windowInfo && typeof systemAutomation.getForegroundWindowInfo === 'function') {
+    try {
+      const foreground = await systemAutomation.getForegroundWindowInfo();
+      if (foreground?.success && windowInfoLooksLikeTradingView(foreground)) {
+        windowInfo = foreground;
+      }
+    } catch {}
+  }
+
+  const point = computeTradingViewChartFocusPoint(windowInfo?.bounds || null);
+  if (!point) {
+    return {
+      ok: false,
+      error: 'Could not resolve a bounded TradingView chart click point before Ctrl+E; refusing to click the desktop origin.'
+    };
+  }
+
+  const hwnd = Number(windowInfo?.hwnd || requestedHandle || 0) || 0;
+  return {
+    ok: true,
+    action: {
+      ...action,
+      x: point.x,
+      y: point.y,
+      ...(hwnd > 0 ? { windowHandle: hwnd, hwnd } : {}),
+      resolvedTradingViewChartFocusPoint: true
+    },
+    windowInfo
+  };
 }
 
 // ===== GITHUB COPILOT OAUTH =====
@@ -6077,6 +6211,45 @@ function summarizeObservationCheckpointForProof(observationCheckpoint) {
   };
 }
 
+function shouldDeferTradingViewQuickSearchCheckpointFailure(action = {}, actionData = {}, actionIndex = -1) {
+  const key = String(action?.key || '').trim().toLowerCase();
+  const verifyTarget = String(action?.verify?.target || '').trim().toLowerCase();
+  const shortcutId = String(action?.tradingViewShortcut?.id || '').trim().toLowerCase();
+  const route = String(action?.searchSurfaceContract?.route || '').trim().toLowerCase();
+  if (key !== 'ctrl+k' || verifyTarget !== 'quick-search') return false;
+  if (shortcutId !== 'symbol-search' && route !== 'quick-search') return false;
+
+  const actions = Array.isArray(actionData?.actions) ? actionData.actions : [];
+  const lookahead = actions.slice(Math.max(0, actionIndex + 1), Math.max(0, actionIndex + 8));
+  return lookahead.some((candidate) => {
+    const type = String(candidate?.type || '').trim().toLowerCase();
+    const candidateRoute = String(candidate?.searchSurfaceContract?.route || '').trim().toLowerCase();
+    return type === 'type'
+      && candidateRoute === 'quick-search'
+      && String(candidate?.text || '').trim().length > 0;
+  });
+}
+
+function shouldDeferTradingViewPineEditorActivationCheckpointFailure(action = {}, actionData = {}, actionIndex = -1) {
+  const key = String(action?.key || '').trim().toLowerCase();
+  const verifyTarget = String(action?.verify?.target || '').trim().toLowerCase();
+  const shortcutId = String(action?.tradingViewShortcut?.id || '').trim().toLowerCase();
+  const routeId = String(action?.searchSurfaceContract?.id || '').trim().toLowerCase();
+  const directShortcutActivation = key === 'ctrl+e' && shortcutId === 'open-pine-editor';
+  const quickSearchActivation = key === 'enter' && routeId === 'open-pine-editor';
+  if (verifyTarget !== 'pine-editor' || (!directShortcutActivation && !quickSearchActivation)) {
+    return false;
+  }
+
+  const actions = Array.isArray(actionData?.actions) ? actionData.actions : [];
+  const lookahead = actions.slice(Math.max(0, actionIndex + 1), Math.max(0, actionIndex + 6));
+  return lookahead.some((candidate) =>
+    String(candidate?.type || '').trim().toLowerCase() === 'get_text'
+    && /pine editor/i.test(String(candidate?.text || candidate?.criteria?.text || ''))
+    && String(candidate?.pineEvidenceMode || '').trim().toLowerCase() === 'safe-authoring-inspect'
+  );
+}
+
 function mergeObservationCheckpointIntoProof(result, observationCheckpoint, context = {}) {
   const proof = normalizeProofRecord(result?.proof, result);
   const classification = String(observationCheckpoint?.classification || 'postcondition').trim().toLowerCase() || 'postcondition';
@@ -6379,6 +6552,33 @@ function scopeActionToTargetWindow(action, lastTargetWindowHandle, lastTargetWin
   }
 
   return action;
+}
+
+function isTradingViewPineReadbackAction(action = {}) {
+  const type = String(action?.type || '').trim().toLowerCase();
+  if (type !== 'get_text') return false;
+
+  const pineEvidenceMode = String(action?.pineEvidenceMode || '').trim().toLowerCase();
+  if (!pineEvidenceMode) return false;
+
+  return /tradingview/.test(String(action?.processName || '').trim().toLowerCase())
+    || /tradingview/.test(String(action?.verifyTarget?.appName || '').trim().toLowerCase())
+    || /tradingview/.test(String(action?.searchSurfaceContract?.appName || '').trim().toLowerCase())
+    || /tradingview/.test(String(action?.criteria?.windowTitle || '').trim().toLowerCase())
+    || /pine/.test(String(action?.text || action?.criteria?.text || '').trim().toLowerCase());
+}
+
+function requiresForegroundLockForAction(action = {}) {
+  const type = String(action?.type || '').trim().toLowerCase();
+  return type === 'key'
+    || type === 'type'
+    || type === 'click_element'
+    || isTradingViewPineReadbackAction(action)
+    || ((type === 'click' || type === 'double_click' || type === 'right_click') && action.x !== undefined);
+}
+
+function shouldForceRefocusBeforeAction(action = {}) {
+  return isTradingViewPineReadbackAction(action);
 }
 
 function buildPopupFollowUpRecipe(target) {
@@ -6799,7 +6999,7 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
   });
 
   for (let i = 0; i < actionData.actions.length; i++) {
-    const action = actionData.actions[i];
+    let action = actionData.actions[i];
     let preActionForegroundSnapshot = null;
     const actionWindowHandle = Number(action?.windowHandle || action?.hwnd || action?.targetWindowHandle || 0) || 0;
     if (actionWindowHandle > 0) {
@@ -6850,6 +7050,34 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
         title: action.title || undefined,
         processName: action.processName || undefined
       };
+    }
+
+    const chartFocusClickResolution = await resolveTradingViewChartFocusClickAction(action, {
+      lastTargetWindowHandle,
+      lastTargetWindowProfile
+    });
+    if (!chartFocusClickResolution.ok) {
+      const blockedResult = {
+        success: false,
+        action: action.type,
+        error: chartFocusClickResolution.error,
+        reason: action.reason || '',
+        blockedByFocusLock: true
+      };
+      results.push(blockedResult);
+      if (onAction) {
+        onAction(blockedResult, i, actionData.actions.length);
+      }
+      break;
+    }
+    action = chartFocusClickResolution.action;
+    if (chartFocusClickResolution.windowInfo) {
+      const hwnd = Number(chartFocusClickResolution.windowInfo.hwnd || 0) || 0;
+      if (hwnd) {
+        lastTargetWindowHandle = hwnd;
+        trustedForegroundHandle = hwnd;
+      }
+      lastTargetWindowProfile = buildWindowProfileFromForeground(chartFocusClickResolution.windowInfo, lastTargetWindowProfile);
     }
     
     // Handle screenshot requests specially
@@ -6980,7 +7208,11 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
     // AUTO-FOCUS: Check if this is an interaction that requires window focus (click/type)
     // and if the target window is in the background.
     if ((action.type === 'click' || action.type === 'double_click' || action.type === 'right_click') && action.x !== undefined) {
-      const prevalidation = prevalidateActionTarget(action);
+      const skipCoordinatePrevalidation = isTradingViewChartFocusClickAction(action)
+        && action.resolvedTradingViewChartFocusPoint === true;
+      const prevalidation = skipCoordinatePrevalidation
+        ? { success: true }
+        : prevalidateActionTarget(action);
       if (!prevalidation.success) {
         const blockedResult = {
           success: false,
@@ -6997,7 +7229,11 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
       }
 
       const watcher = getUIWatcher();
-      if (watcher && watcher.isPolling) {
+      if (isTradingViewChartFocusClickAction(action) && lastTargetWindowHandle) {
+        console.log(`[AI-SERVICE] Focusing pinned TradingView window ${lastTargetWindowHandle} for chart click at (${action.x}, ${action.y})`);
+        await systemAutomation.focusWindow(lastTargetWindowHandle);
+        await new Promise(r => setTimeout(r, 450));
+      } else if (watcher && watcher.isPolling) {
         const elementAtPoint = watcher.getElementAtPoint(action.x, action.y);
         if (elementAtPoint && elementAtPoint.windowHandle) {
           lastTargetWindowHandle = elementAtPoint.windowHandle;
@@ -7012,10 +7248,8 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
     }
 
     // Ensure focus-sensitive input goes to the last known target window.
-    const requiresForegroundLock = action.type === 'key'
-      || action.type === 'type'
-      || action.type === 'click_element'
-      || ((action.type === 'click' || action.type === 'double_click' || action.type === 'right_click') && action.x !== undefined);
+    const requiresForegroundLock = requiresForegroundLockForAction(action);
+    const forceActionRefocus = shouldForceRefocusBeforeAction(action);
 
     if (requiresForegroundLock && (action.type === 'click' || action.type === 'double_click' || action.type === 'right_click') && action.x !== undefined && !lastTargetWindowHandle) {
       const blockedResult = {
@@ -7048,10 +7282,10 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
       console.log(`[AI-SERVICE] Verifying locked focus on target window ${lastTargetWindowHandle} before ${action.type}`);
       const focusLock = await ensureFocusLockedBeforeInputAction(action, {
         lastTargetWindowHandle,
-        preverifiedForegroundHandle: trustedForegroundHandle,
+        preverifiedForegroundHandle: forceActionRefocus ? 0 : trustedForegroundHandle,
         lastTargetWindowProfile,
         focusRecoveryTarget,
-        forceRefocus: requirePreInputRefocus
+        forceRefocus: requirePreInputRefocus || forceActionRefocus
       });
       lastTargetWindowHandle = focusLock.lastTargetWindowHandle;
       lastTargetWindowProfile = focusLock.lastTargetWindowProfile;
@@ -7261,9 +7495,25 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
       }
 
       if (!observationCheckpoint.verified) {
-        trustedForegroundHandle = 0;
-        result.success = false;
-        result.error = observationCheckpoint.error;
+        if (shouldDeferTradingViewQuickSearchCheckpointFailure(effectiveAction, actionData, i)) {
+          result.deferredObservationCheckpoint = {
+            reason: 'Deferred TradingView quick-search checkpoint failure until the contracted query typing step',
+            observationCheckpoint: summarizeObservationCheckpointForProof(observationCheckpoint)
+          };
+          if (!Array.isArray(result.warnings)) result.warnings = [];
+          result.warnings.push('Deferred unverified TradingView quick-search open checkpoint until query typing');
+        } else if (shouldDeferTradingViewPineEditorActivationCheckpointFailure(effectiveAction, actionData, i)) {
+          result.deferredObservationCheckpoint = {
+            reason: 'Deferred Pine Editor activation checkpoint failure until the bounded safe-authoring readback step',
+            observationCheckpoint: summarizeObservationCheckpointForProof(observationCheckpoint)
+          };
+          if (!Array.isArray(result.warnings)) result.warnings = [];
+          result.warnings.push('Deferred unverified Pine Editor activation checkpoint until Pine Editor get_text verification');
+        } else {
+          trustedForegroundHandle = 0;
+          result.success = false;
+          result.error = observationCheckpoint.error;
+        }
       }
     }
 
@@ -7395,16 +7645,13 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
 
     // If we just performed a step that likely changed focus, snapshot the actual foreground HWND.
     // This is especially important when uiWatcher isn't polling (can't infer windowHandle).
-    if (typeof systemAutomation.getForegroundWindowHandle === 'function') {
-      if (
-        action.type === 'click' ||
-        action.type === 'double_click' ||
-        action.type === 'right_click'
-      ) {
-        const fg = await systemAutomation.getForegroundWindowHandle();
-        if (fg) {
-          lastTargetWindowHandle = fg;
-        }
+    if (
+      typeof systemAutomation.getForegroundWindowHandle === 'function'
+      && shouldAdoptForegroundHandleAfterClickAction(action, result, lastTargetWindowHandle)
+    ) {
+      const fg = await systemAutomation.getForegroundWindowHandle();
+      if (fg) {
+        lastTargetWindowHandle = fg;
       }
     }
 
@@ -7823,7 +8070,7 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
   
   // Execute the confirmed action and remaining actions
   for (let i = 0; i < actionsToResume.length; i++) {
-    const action = actionsToResume[i];
+    let action = actionsToResume[i];
 
     if (action.type === 'focus_window' || action.type === 'bring_window_to_front') {
       try {
@@ -7859,6 +8106,34 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
         title: action.title || undefined,
         processName: action.processName || undefined
       };
+    }
+
+    const chartFocusClickResolution = await resolveTradingViewChartFocusClickAction(action, {
+      lastTargetWindowHandle,
+      lastTargetWindowProfile
+    });
+    if (!chartFocusClickResolution.ok) {
+      const blockedResult = {
+        success: false,
+        action: action.type,
+        error: chartFocusClickResolution.error,
+        reason: action.reason || '',
+        userConfirmed: isResumeActionConfirmed(resumePlan, i),
+        blockedByFocusLock: true
+      };
+      results.push(blockedResult);
+      if (onAction) {
+        onAction(blockedResult, pending.actionIndex + i, pending.actionIndex + actionsToResume.length);
+      }
+      break;
+    }
+    action = chartFocusClickResolution.action;
+    if (chartFocusClickResolution.windowInfo) {
+      const hwnd = Number(chartFocusClickResolution.windowInfo.hwnd || 0) || 0;
+      if (hwnd) {
+        lastTargetWindowHandle = hwnd;
+      }
+      lastTargetWindowProfile = buildWindowProfileFromForeground(chartFocusClickResolution.windowInfo, lastTargetWindowProfile);
     }
     
     if (action.type === 'screenshot') {
@@ -7898,7 +8173,11 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
     }
 
     if ((action.type === 'click' || action.type === 'double_click' || action.type === 'right_click') && action.x !== undefined) {
-      const prevalidation = prevalidateActionTarget(action);
+      const skipCoordinatePrevalidation = isTradingViewChartFocusClickAction(action)
+        && action.resolvedTradingViewChartFocusPoint === true;
+      const prevalidation = skipCoordinatePrevalidation
+        ? { success: true }
+        : prevalidateActionTarget(action);
       if (!prevalidation.success) {
         const blockedResult = {
           success: false,
@@ -7915,7 +8194,11 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
       }
 
       const watcherResume = getUIWatcher();
-      if (watcherResume && watcherResume.isPolling) {
+      if (isTradingViewChartFocusClickAction(action) && lastTargetWindowHandle) {
+        console.log(`[AI-SERVICE] (resume) Focusing pinned TradingView window ${lastTargetWindowHandle} for chart click at (${action.x}, ${action.y})`);
+        await systemAutomation.focusWindow(lastTargetWindowHandle);
+        await new Promise(r => setTimeout(r, 450));
+      } else if (watcherResume && watcherResume.isPolling) {
         const elementAtPoint = watcherResume.getElementAtPoint(action.x, action.y);
         if (elementAtPoint && elementAtPoint.windowHandle) {
           lastTargetWindowHandle = elementAtPoint.windowHandle;
@@ -7926,10 +8209,8 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
       }
     }
 
-    const requiresForegroundLock = action.type === 'key'
-      || action.type === 'type'
-      || action.type === 'click_element'
-      || ((action.type === 'click' || action.type === 'double_click' || action.type === 'right_click') && action.x !== undefined);
+    const requiresForegroundLock = requiresForegroundLockForAction(action);
+    const forceActionRefocus = shouldForceRefocusBeforeAction(action);
 
     if (requiresForegroundLock && (action.type === 'click' || action.type === 'double_click' || action.type === 'right_click') && action.x !== undefined && !lastTargetWindowHandle) {
       const blockedResult = {
@@ -7964,7 +8245,7 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
         lastTargetWindowHandle,
         lastTargetWindowProfile,
         focusRecoveryTarget,
-        forceRefocus: requirePreInputRefocus
+        forceRefocus: requirePreInputRefocus || forceActionRefocus
       });
       lastTargetWindowHandle = focusLock.lastTargetWindowHandle;
       lastTargetWindowProfile = focusLock.lastTargetWindowProfile;
@@ -8169,8 +8450,24 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
       }
 
       if (!observationCheckpoint.verified) {
-        result.success = false;
-        result.error = observationCheckpoint.error;
+        if (shouldDeferTradingViewQuickSearchCheckpointFailure(effectiveAction, actionData, pending.actionIndex + i)) {
+          result.deferredObservationCheckpoint = {
+            reason: 'Deferred TradingView quick-search checkpoint failure until the contracted query typing step',
+            observationCheckpoint: summarizeObservationCheckpointForProof(observationCheckpoint)
+          };
+          if (!Array.isArray(result.warnings)) result.warnings = [];
+          result.warnings.push('Deferred unverified TradingView quick-search open checkpoint until query typing');
+        } else if (shouldDeferTradingViewPineEditorActivationCheckpointFailure(effectiveAction, actionData, pending.actionIndex + i)) {
+          result.deferredObservationCheckpoint = {
+            reason: 'Deferred Pine Editor activation checkpoint failure until the bounded safe-authoring readback step',
+            observationCheckpoint: summarizeObservationCheckpointForProof(observationCheckpoint)
+          };
+          if (!Array.isArray(result.warnings)) result.warnings = [];
+          result.warnings.push('Deferred unverified Pine Editor activation checkpoint until Pine Editor get_text verification');
+        } else {
+          result.success = false;
+          result.error = observationCheckpoint.error;
+        }
       }
     }
 
@@ -8204,16 +8501,13 @@ async function resumeAfterConfirmation(onAction = null, onScreenshot = null, opt
       });
     }
 
-    if (typeof systemAutomation.getForegroundWindowHandle === 'function') {
-      if (
-        action.type === 'click' ||
-        action.type === 'double_click' ||
-        action.type === 'right_click'
-      ) {
-        const fg = await systemAutomation.getForegroundWindowHandle();
-        if (fg) {
-          lastTargetWindowHandle = fg;
-        }
+    if (
+      typeof systemAutomation.getForegroundWindowHandle === 'function'
+      && shouldAdoptForegroundHandleAfterClickAction(action, result, lastTargetWindowHandle)
+    ) {
+      const fg = await systemAutomation.getForegroundWindowHandle();
+      if (fg) {
+        lastTargetWindowHandle = fg;
       }
     }
     
