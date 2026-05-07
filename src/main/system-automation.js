@@ -164,6 +164,19 @@ function isTradingViewLikeWindowContext(options = {}) {
   return /tradingview|trading\s+view/.test(haystack);
 }
 
+function shouldPreferSendKeysForTradingViewShortcut(keyCombo, options = {}) {
+  const normalizedCombo = String(keyCombo || '').trim().toLowerCase();
+  const shortcutId = String(
+    options?.tradingViewShortcut?.id
+    || options?.searchSurfaceContract?.id
+    || ''
+  ).trim().toLowerCase();
+
+  // Live TradingView validation showed Ctrl+E opening Pine Editor only when
+  // delivered through SendKeys; the broader SendInput path was a no-op there.
+  return shortcutId === 'open-pine-editor' && normalizedCombo === 'ctrl+e';
+}
+
 function shouldUseSendInputForKeyCombo(keyCombo, options = {}) {
   if (process.platform !== 'win32') return false;
 
@@ -181,6 +194,10 @@ function shouldUseSendInputForKeyCombo(keyCombo, options = {}) {
     options?.tradingViewShortcut
     || options?.searchSurfaceContract
   );
+
+  if (hasTradingViewShortcutContext && shouldPreferSendKeysForTradingViewShortcut(keyCombo, options)) {
+    return false;
+  }
 
   if (!hasAlt && !isEnterOnly && !(hasTradingViewShortcutContext && (hasCtrl || hasShift))) {
     return false;
@@ -856,6 +873,582 @@ function buildPineEditorFallbackCandidates(evidenceMode = 'generic-status') {
   return baseCandidates;
 }
 
+const TRADINGVIEW_PINE_EDITOR_SURFACE_HOST_ANCHORS = Object.freeze([
+  { text: 'Untitled script', exact: false, priority: 220, category: 'starter' },
+  { text: 'My Script', exact: false, priority: 210, category: 'starter' },
+  { text: 'My Strategy', exact: false, priority: 205, category: 'starter' },
+  { text: 'My Library', exact: false, priority: 200, category: 'starter' },
+  { text: 'Save script', exact: false, priority: 190, category: 'save-required' },
+  { text: 'Script name', exact: false, priority: 188, category: 'save-required' },
+  { text: 'Save as', exact: false, priority: 186, category: 'save-required' },
+  { text: 'Rename script', exact: false, priority: 184, category: 'save-required' },
+  { text: 'All changes saved', exact: false, priority: 182, category: 'save-confirmed' },
+  { text: 'Saved successfully', exact: false, priority: 180, category: 'save-confirmed' },
+  { text: 'Save complete', exact: false, priority: 178, category: 'save-confirmed' },
+  { text: 'Add to chart', exact: true, priority: 170, category: 'surface' },
+  { text: 'Update on chart', exact: true, priority: 168, category: 'surface' },
+  { text: 'Publish script', exact: false, priority: 166, category: 'surface' },
+  { text: 'Pine Logs', exact: false, priority: 162, category: 'surface' },
+  { text: 'Strategy Tester', exact: false, priority: 160, category: 'surface' }
+]);
+
+function normalizeBoundsRect(bounds = null) {
+  if (!bounds || typeof bounds !== 'object') return null;
+
+  const rawX = bounds.x ?? bounds.X ?? bounds.left ?? bounds.Left;
+  const rawY = bounds.y ?? bounds.Y ?? bounds.top ?? bounds.Top;
+  const rawWidth = bounds.width ?? bounds.Width;
+  const rawHeight = bounds.height ?? bounds.Height;
+  const rawRight = bounds.right ?? bounds.Right;
+  const rawBottom = bounds.bottom ?? bounds.Bottom;
+
+  const x = Number(rawX);
+  const y = Number(rawY);
+  let width = Number(rawWidth);
+  let height = Number(rawHeight);
+
+  if (!Number.isFinite(width) && Number.isFinite(Number(rawRight)) && Number.isFinite(x)) {
+    width = Number(rawRight) - x;
+  }
+  if (!Number.isFinite(height) && Number.isFinite(Number(rawBottom)) && Number.isFinite(y)) {
+    height = Number(rawBottom) - y;
+  }
+
+  if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(width) || !Number.isFinite(height)) {
+    return null;
+  }
+  if (width <= 0 || height <= 0) return null;
+
+  return {
+    x: Math.round(x),
+    y: Math.round(y),
+    width: Math.round(width),
+    height: Math.round(height)
+  };
+}
+
+function buildTradingViewLowerPanelBounds(windowInfo = {}) {
+  const bounds = normalizeBoundsRect(windowInfo?.bounds || windowInfo?.Bounds || null);
+  if (!bounds || bounds.width < 320 || bounds.height < 240) {
+    return null;
+  }
+
+  const insetX = Math.max(20, Math.round(bounds.width * 0.02));
+  const insetBottom = Math.max(12, Math.round(bounds.height * 0.03));
+  const topOffset = Math.max(120, Math.round(bounds.height * 0.56));
+  const height = Math.max(120, bounds.height - topOffset - insetBottom);
+
+  return {
+    x: bounds.x + insetX,
+    y: bounds.y + topOffset,
+    width: Math.max(120, bounds.width - (insetX * 2)),
+    height
+  };
+}
+
+function normalizeTradingViewPineAnchorText(value = '') {
+  return String(value || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+function collectTradingViewPineEditorHostAnchors(elements = []) {
+  const matches = [];
+  const seen = new Set();
+
+  for (const element of Array.isArray(elements) ? elements : []) {
+    if (!element || typeof element !== 'object') continue;
+
+    const name = normalizeCompactText(element?.Name || element?.name || '', 160) || '';
+    const automationId = normalizeCompactText(element?.AutomationId || element?.automationId || '', 120) || '';
+    const className = normalizeCompactText(element?.ClassName || element?.className || '', 120) || '';
+    const controlType = normalizeCompactText(element?.ControlType || element?.controlType || '', 120) || '';
+    const exactHaystack = normalizeTradingViewPineAnchorText(name);
+    const containsHaystack = normalizeTradingViewPineAnchorText([name, automationId, className, controlType].join(' '));
+    if (!exactHaystack && !containsHaystack) continue;
+
+    for (const anchor of TRADINGVIEW_PINE_EDITOR_SURFACE_HOST_ANCHORS) {
+      const anchorText = normalizeTradingViewPineAnchorText(anchor.text);
+      const matched = anchor.exact
+        ? exactHaystack === anchorText
+        : containsHaystack.includes(anchorText);
+      if (!matched) continue;
+
+      const displayText = name || anchor.text;
+      const dedupeKey = `${anchor.category}:${normalizeTradingViewPineAnchorText(displayText)}`;
+      if (seen.has(dedupeKey)) break;
+      seen.add(dedupeKey);
+      matches.push({
+        text: displayText,
+        element,
+        category: anchor.category,
+        priority: anchor.priority
+      });
+      break;
+    }
+  }
+
+  return matches.sort((left, right) => {
+    if (right.priority !== left.priority) {
+      return right.priority - left.priority;
+    }
+    return String(left.text || '').localeCompare(String(right.text || ''));
+  });
+}
+
+async function probeTradingViewPineEditorSurface(options = {}) {
+  const explicitWindowHandle = Number(options?.windowHandle || options?.hwnd || 0) || 0;
+  const timeout = Number.isFinite(Number(options?.timeout || options?.timeoutMs))
+    ? Math.max(250, Math.min(Math.round(Number(options.timeout || options.timeoutMs)), 2500))
+    : 1400;
+
+  let foreground = null;
+  let windowInfo = null;
+
+  if (explicitWindowHandle > 0) {
+    try {
+      const candidate = await getWindowInfoByHandle(explicitWindowHandle);
+      if (candidate?.success) {
+        windowInfo = candidate;
+      }
+    } catch {}
+  }
+
+  try {
+    foreground = await getForegroundWindowInfo();
+  } catch {}
+
+  if (!windowInfo?.success && foreground?.success) {
+    windowInfo = foreground;
+  }
+
+  if (!windowInfo?.success || !isTradingViewForegroundWindow(windowInfo)) {
+    return {
+      active: false,
+      foreground: foreground?.success ? foreground : windowInfo?.success ? windowInfo : null,
+      reason: 'foreground-not-tradingview'
+    };
+  }
+
+  const hwnd = Number(windowInfo?.hwnd || explicitWindowHandle || 0) || 0;
+  if (!hwnd) {
+    return {
+      active: false,
+      foreground: windowInfo,
+      reason: 'missing-window-handle'
+    };
+  }
+
+  const scanBounds = buildTradingViewLowerPanelBounds(windowInfo);
+  if (!scanBounds) {
+    return {
+      active: false,
+      foreground: windowInfo,
+      reason: 'missing-lower-panel-bounds'
+    };
+  }
+
+  const scanOptions = {
+    windowHandle: hwnd,
+    timeout,
+    maxResults: 120,
+    maxDepth: 18,
+    maxVisited: 1600,
+    includeDisabled: true,
+    bounds: scanBounds
+  };
+
+  const scanAttempts = [];
+  const seenElements = new Set();
+  const collectedElements = [];
+
+  for (const view of ['control', 'raw']) {
+    const scanResult = await findElementsByWindowWithHost('', {
+      ...scanOptions,
+      view
+    });
+    scanAttempts.push({
+      view,
+      success: scanResult?.success === true,
+      count: Number(scanResult?.count || 0) || 0,
+      stats: scanResult?.stats || null,
+      error: scanResult?.error || null
+    });
+
+    if (!scanResult?.success || !Array.isArray(scanResult.elements)) {
+      continue;
+    }
+
+    for (const element of scanResult.elements) {
+      const bounds = element?.Bounds || {};
+      const dedupeKey = [
+        normalizeTradingViewPineAnchorText(element?.Name || ''),
+        Number(element?.WindowHandle || 0) || 0,
+        Number(bounds?.X || 0) || 0,
+        Number(bounds?.Y || 0) || 0,
+        Number(bounds?.Width || 0) || 0,
+        Number(bounds?.Height || 0) || 0
+      ].join('|');
+      if (seenElements.has(dedupeKey)) continue;
+      seenElements.add(dedupeKey);
+      collectedElements.push(element);
+    }
+
+    if (collectedElements.length >= 24) {
+      break;
+    }
+  }
+
+  const anchors = collectTradingViewPineEditorHostAnchors(collectedElements);
+  if (!anchors.length) {
+    return {
+      active: false,
+      foreground: windowInfo,
+      windowInfo,
+      searchBounds: scanBounds,
+      scanAttempts,
+      visibleAnchors: []
+    };
+  }
+
+  return {
+    active: true,
+    foreground: windowInfo,
+    windowInfo,
+    searchBounds: scanBounds,
+    scanAttempts,
+    matchedBy: 'uia-host-lower-panel-scan',
+    element: anchors[0].element,
+    anchorText: anchors[0].text,
+    visibleAnchors: anchors.map((entry) => entry.text).slice(0, 8)
+  };
+}
+
+function normalizeProcessNameForForeground(value = '') {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\.exe$/i, '')
+    .replace(/[^a-z0-9]+/g, '');
+}
+
+function isTradingViewForegroundWindow(foreground = {}) {
+  const processNorm = normalizeProcessNameForForeground(foreground?.processName || '');
+  return !!(processNorm && processNorm.startsWith('tradingview'));
+}
+
+function isPineEditorReadbackAction(action = {}) {
+  const targetText = String(action?.text || action?.criteria?.text || '').trim();
+  const evidenceMode = String(action?.pineEvidenceMode || '').trim().toLowerCase();
+  return !!evidenceMode && /pine editor/i.test(targetText);
+}
+
+function isPineEditorCommandText(value = '') {
+  const normalized = String(value || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+  return /\bpine editor\b/.test(normalized);
+}
+
+function isUnsafeForegroundForPineEditorCommandText(foreground = {}) {
+  if (!foreground?.success) return false;
+  if (isTradingViewForegroundWindow(foreground)) return false;
+
+  const processNorm = normalizeProcessNameForForeground(foreground?.processName || '');
+  const titleNorm = String(foreground?.title || '').trim().toLowerCase();
+  if (processNorm === 'code') return true;
+  if (['powershell', 'pwsh', 'cmd', 'windowsterminal', 'conhost'].includes(processNorm)) return true;
+  if (/^(msedge|msedgewebview2|chrome|firefox|brave|opera|vivaldi|arc|browser|webview)/.test(processNorm)) return true;
+  return /\bcopilot\b|\bchat\b|\bterminal\b/.test(titleNorm);
+}
+
+async function guardPineEditorCommandTextInsertion(action = {}) {
+  if (action?.allowOffTargetPineEditorText === true) {
+    return { allowed: true, applicable: false };
+  }
+
+  if (!isPineEditorCommandText(action?.text || '')) {
+    return { allowed: true, applicable: false };
+  }
+
+  let foreground = null;
+  try {
+    foreground = await getForegroundWindowInfo();
+  } catch (error) {
+    return {
+      allowed: false,
+      applicable: true,
+      error: `Refusing to type Pine Editor because foreground verification failed: ${error?.message || error}`
+    };
+  }
+
+  if (!isTradingViewForegroundWindow(foreground)) {
+    return {
+      allowed: false,
+      applicable: true,
+      foreground,
+      error: `Refusing to type Pine Editor while ${formatForegroundWindowSummary(foreground)} is foreground; literal Pine Editor text is only allowed inside verified TradingView command quick-search.`
+    };
+  }
+
+  return { allowed: true, applicable: true, foreground };
+}
+
+function formatForegroundWindowSummary(foreground = {}) {
+  const processName = String(foreground?.processName || '').trim() || 'unknown';
+  const title = String(foreground?.title || '').trim() || 'untitled';
+  return `${processName} | ${title}`;
+}
+
+function normalizeQuickSearchInputText(value = '') {
+  return String(value || '')
+    .replace(/[\u200B-\u200D\uFEFF]/g, '')
+    .replace(/\r/g, '')
+    .trim();
+}
+
+const DEFAULT_PINE_READBACK_TIMEOUT_MS = 8000;
+
+function getPineReadbackTimeoutMs(action = {}) {
+  const actionTimeout = Number(action?.pineReadbackTimeoutMs || 0);
+  if (Number.isFinite(actionTimeout) && actionTimeout >= 100) {
+    return Math.round(actionTimeout);
+  }
+
+  const envTimeout = Number(process.env.LIKU_PINE_READBACK_TIMEOUT_MS || 0);
+  if (Number.isFinite(envTimeout) && envTimeout >= 100) {
+    return Math.round(envTimeout);
+  }
+
+  return DEFAULT_PINE_READBACK_TIMEOUT_MS;
+}
+
+async function runWithTimeout(factory, timeoutMs, label = 'Operation') {
+  const boundedTimeoutMs = Number.isFinite(Number(timeoutMs)) && Number(timeoutMs) > 0
+    ? Math.round(Number(timeoutMs))
+    : DEFAULT_PINE_READBACK_TIMEOUT_MS;
+
+  let timer = null;
+  try {
+    return await Promise.race([
+      Promise.resolve().then(() => factory()),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          const error = new Error(`${label} timed out after ${boundedTimeoutMs}ms`);
+          error.timedOut = true;
+          reject(error);
+        }, boundedTimeoutMs);
+      })
+    ]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
+}
+
+function createTimedOutActionResult(error, fallbackMessage = 'Operation timed out') {
+  const message = String(error?.message || '').trim() || fallbackMessage;
+  return {
+    success: false,
+    error: message,
+    method: 'TimeoutGuard',
+    timedOut: true
+  };
+}
+
+function getQuickSearchSemanticInputBounds(action = {}) {
+  const sources = [
+    action?.quickSearchPreflight?.inputFocus?.element,
+    action?.quickSearchPreflight?.focusRecovery?.element,
+    action?.quickSearchPreflight?.focusRecovery?.surfaceProbe?.element,
+    action?.quickSearchPreflight?.inputFocus?.surfaceProbe?.element
+  ];
+
+  for (const element of sources) {
+    const bounds = element?.Bounds || element?.bounds || null;
+    if (!bounds) continue;
+    const centerX = Number(bounds.CenterX ?? (((bounds.X ?? bounds.x ?? 0) + ((bounds.Width ?? bounds.width ?? 0) / 2)))) || 0;
+    const centerY = Number(bounds.CenterY ?? (((bounds.Y ?? bounds.y ?? 0) + ((bounds.Height ?? bounds.height ?? 0) / 2)))) || 0;
+    if (centerX > 0 || centerY > 0) {
+      return {
+        bounds,
+        centerX,
+        centerY,
+        windowHandle: Number(element?.WindowHandle || element?.windowHandle || 0) || 0
+      };
+    }
+  }
+
+  return null;
+}
+
+function isTradingViewQuickSearchTypeAction(action = {}) {
+  const type = String(action?.type || '').trim().toLowerCase();
+  if (type !== 'type') return false;
+
+  const route = String(action?.searchSurfaceContract?.route || '').trim().toLowerCase();
+  if (route !== 'quick-search') return false;
+
+  if (action?.quickSearchPreflight?.applicable !== true) return false;
+
+  const appName = String(action?.searchSurfaceContract?.appName || '').trim().toLowerCase();
+  const shortcutSurface = String(action?.tradingViewShortcut?.surface || '').trim().toLowerCase();
+  const processName = String(action?.processName || '').trim().toLowerCase();
+  return /tradingview/.test(appName)
+    || /tradingview/.test(processName)
+    || shortcutSurface === 'quick-search'
+    || shortcutSurface === 'pine-editor';
+}
+
+async function attemptTradingViewQuickSearchSemanticWrite(action = {}) {
+  if (!isTradingViewQuickSearchTypeAction(action)) {
+    return {
+      applicable: false,
+      success: false,
+      fallbackRecommended: true,
+      method: null,
+      error: null
+    };
+  }
+
+  const boundsTarget = getQuickSearchSemanticInputBounds(action);
+  if (!boundsTarget) {
+    return {
+      applicable: true,
+      success: false,
+      fallbackRecommended: true,
+      method: null,
+      error: 'Trusted TradingView quick-search input bounds were not available for semantic write'
+    };
+  }
+
+  try {
+    const ui = require('./ui-automation');
+    const host = ui.getSharedUIAHost();
+    const intendedText = String(action?.text || '');
+    const setValueResponse = await host.setValue(boundsTarget.centerX, boundsTarget.centerY, intendedText);
+    const readbackResponse = await host.getText(boundsTarget.centerX, boundsTarget.centerY);
+    const readbackText = String(readbackResponse?.text || '');
+    const normalizedReadback = normalizeQuickSearchInputText(readbackText);
+    const normalizedIntended = normalizeQuickSearchInputText(intendedText);
+
+    if (normalizedReadback !== normalizedIntended) {
+      try {
+        await host.setValue(boundsTarget.centerX, boundsTarget.centerY, '');
+      } catch {}
+      return {
+        applicable: true,
+        success: false,
+        fallbackRecommended: false,
+        method: 'ValuePattern',
+        boundsTarget,
+        setValueResponse,
+        readback: {
+          text: readbackText,
+          normalizedText: normalizedReadback,
+          method: readbackResponse?.method || 'UIAHost.getText'
+        },
+        error: `TradingView quick-search semantic write read back \"${normalizedReadback}\" instead of \"${normalizedIntended}\"`
+      };
+    }
+
+    return {
+      applicable: true,
+      success: true,
+      fallbackRecommended: false,
+      method: 'ValuePattern',
+      boundsTarget,
+      setValueResponse,
+      readback: {
+        text: readbackText,
+        normalizedText: normalizedReadback,
+        method: readbackResponse?.method || 'UIAHost.getText'
+      },
+      error: null
+    };
+  } catch (error) {
+    return {
+      applicable: true,
+      success: false,
+      fallbackRecommended: true,
+      method: null,
+      error: error?.message || String(error || 'TradingView quick-search semantic write failed')
+    };
+  }
+}
+
+async function preparePineEditorReadbackAction(action = {}) {
+  if (!isPineEditorReadbackAction(action)) {
+    return {
+      action,
+      foreground: null,
+      error: null,
+      scopedWindowTitle: ''
+    };
+  }
+
+  let foreground = null;
+  try {
+    foreground = await getForegroundWindowInfo();
+  } catch {}
+
+  const targetWindowHandle = Number(action?.windowHandle || 0) || 0;
+  if (foreground?.success && !isTradingViewForegroundWindow(foreground) && targetWindowHandle > 0) {
+    try {
+      const focusWindowFn = typeof module.exports.focusWindow === 'function'
+        ? module.exports.focusWindow
+        : focusWindow;
+      await focusWindowFn(targetWindowHandle);
+      await sleep(150);
+      foreground = await getForegroundWindowInfo();
+    } catch {}
+  }
+
+  const foregroundProcessName = String(foreground?.processName || '').trim();
+  if (foreground?.success && foregroundProcessName && !isTradingViewForegroundWindow(foreground)) {
+    return {
+      action,
+      foreground,
+      error: `Pine Editor readback requires TradingView to remain foreground; current foreground was ${formatForegroundWindowSummary(foreground)}`,
+      scopedWindowTitle: ''
+    };
+  }
+
+  const existingCriteria = action.criteria && typeof action.criteria === 'object'
+    ? action.criteria
+    : null;
+  const existingWindowTitle = String(existingCriteria?.windowTitle || '').trim();
+  const foregroundTitle = String(foreground?.title || '').trim();
+
+  if (foreground?.success && isTradingViewForegroundWindow(foreground) && foregroundTitle && !existingWindowTitle) {
+    return {
+      action: {
+        ...action,
+        criteria: {
+          text: action.text,
+          automationId: action.automationId,
+          controlType: action.controlType,
+          ...(existingCriteria || {}),
+          windowTitle: foregroundTitle
+        }
+      },
+      foreground,
+      error: null,
+      scopedWindowTitle: foregroundTitle
+    };
+  }
+
+  return {
+    action,
+    foreground,
+    error: null,
+    scopedWindowTitle: existingWindowTitle
+  };
+}
+
 async function getPineEditorTextFallback(action = {}) {
   const targetText = String(action?.text || action?.criteria?.text || '').trim();
   if (!/pine editor/i.test(targetText)) return null;
@@ -866,9 +1459,24 @@ async function getPineEditorTextFallback(action = {}) {
     ? { ...action.criteria }
     : {};
   const evidenceMode = String(action?.pineEvidenceMode || 'generic-status').trim().toLowerCase();
+  const targetWindowHandle = Number(action?.windowHandle || action?.hwnd || 0) || 0;
   const fallbackCandidates = buildPineEditorFallbackCandidates(evidenceMode);
   const syntheticAnchors = [];
   const seenSyntheticAnchors = new Set();
+
+  const hostSurfaceProbe = await probeTradingViewPineEditorSurface({
+    windowHandle: targetWindowHandle,
+    timeout: Math.min(1800, Math.max(350, Math.round(getPineReadbackTimeoutMs(action) * 0.25)))
+  });
+  if (hostSurfaceProbe?.active && Array.isArray(hostSurfaceProbe.visibleAnchors) && hostSurfaceProbe.visibleAnchors.length > 0) {
+    return {
+      success: true,
+      text: hostSurfaceProbe.visibleAnchors.join('\n'),
+      method: 'UIAHostScan (pine-editor-fallback)',
+      element: hostSurfaceProbe.element || null,
+      pineEditorSurfaceProbe: hostSurfaceProbe
+    };
+  }
 
   for (const candidate of fallbackCandidates) {
     const text = String(candidate?.text || '').trim();
@@ -1024,6 +1632,44 @@ function getPineEditorWatcherFallback(action = {}) {
     element: {
       name: collected[0]
     }
+  };
+}
+
+function isTradingViewPineEditorOpenShortcutAction(action = {}) {
+  if (!action || typeof action !== 'object') return false;
+  const type = String(action?.type || '').trim().toLowerCase();
+  const key = String(action?.key || '').trim().toLowerCase();
+  const shortcutId = String(action?.tradingViewShortcut?.id || '').trim().toLowerCase();
+  return type === 'key' && key === 'ctrl+e' && shortcutId === 'open-pine-editor';
+}
+
+async function maybeBypassTradingViewPineEditorOpenShortcut(action = {}) {
+  if (!isTradingViewPineEditorOpenShortcutAction(action)) {
+    return {
+      bypass: false,
+      probe: null
+    };
+  }
+
+  const probe = await probeTradingViewPineEditorSurface({
+    windowHandle: Number(action?.windowHandle || action?.hwnd || 0) || 0,
+    timeout: 1200
+  });
+
+  if (!probe?.active) {
+    return {
+      bypass: false,
+      probe: probe || null
+    };
+  }
+
+  return {
+    bypass: true,
+    probe,
+    skippedReason: 'pine-editor-already-active',
+    message: probe?.anchorText
+      ? `Skipped ctrl+e because Pine Editor was already active (${probe.anchorText})`
+      : 'Skipped ctrl+e because Pine Editor was already active'
   };
 }
 
@@ -1418,18 +2064,50 @@ public class ClickThrough {
  * Focus a specific window by its handle
  */
 async function focusWindow(hwnd) {
-    if (!hwnd) {
-      return {
-        success: false,
-        requestedWindowHandle: 0,
-        actualForegroundHandle: 0,
-        actualForeground: null,
-        exactMatch: false,
-        outcome: 'missing-target'
-      };
-    }
-    
-    const script = `
+  const numericHandle = Number(hwnd || 0);
+  if (!Number.isFinite(numericHandle) || numericHandle <= 0) {
+    return {
+      success: false,
+      requestedWindowHandle: 0,
+      actualForegroundHandle: 0,
+      actualForeground: null,
+      exactMatch: false,
+      outcome: 'missing-target'
+    };
+  }
+
+  const hostAttempt = await tryAutomationHostSystemCall('focusWindow', (host) => host.focusWindow(numericHandle));
+  if (hostAttempt.used) {
+    const actualForeground = hostAttempt.result?.actualForeground && typeof hostAttempt.result.actualForeground === 'object'
+      ? {
+          success: true,
+          hwnd: Number(hostAttempt.result.actualForeground.hwnd || 0) || 0,
+          pid: Number(hostAttempt.result.actualForeground.pid || hostAttempt.result.actualForeground.processId || 0) || 0,
+          processName: String(hostAttempt.result.actualForeground.processName || ''),
+          title: String(hostAttempt.result.actualForeground.title || ''),
+          ownerHwnd: Number(hostAttempt.result.actualForeground.ownerHwnd || 0) || 0,
+          isTopmost: hostAttempt.result.actualForeground.isTopmost === true,
+          isToolWindow: hostAttempt.result.actualForeground.isToolWindow === true,
+          isMinimized: hostAttempt.result.actualForeground.isMinimized === true,
+          isMaximized: hostAttempt.result.actualForeground.isMaximized === true,
+          windowKind: String(hostAttempt.result.actualForeground.windowKind || 'main'),
+          bounds: hostAttempt.result.actualForeground.bounds || null,
+          source: 'uia-host'
+        }
+      : null;
+    return {
+      success: true,
+      requestedWindowHandle: Number(hostAttempt.result?.requestedWindowHandle || numericHandle) || numericHandle,
+      actualForegroundHandle: Number(hostAttempt.result?.actualForegroundHandle || actualForeground?.hwnd || 0) || 0,
+      actualForeground,
+      exactMatch: hostAttempt.result?.exactMatch === true,
+      restored: hostAttempt.result?.restored === true,
+      focusAttempted: hostAttempt.result?.focusAttempted !== false,
+      outcome: String(hostAttempt.result?.outcome || (hostAttempt.result?.exactMatch ? 'exact' : 'mismatch'))
+    };
+  }
+
+  const script = `
 Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
@@ -1511,45 +2189,46 @@ public class WindowFocus {
     }
 }
 "@
-[WindowFocus]::Focus([IntPtr]::new(${hwnd}))
+[WindowFocus]::Focus([IntPtr]::new(${numericHandle}))
 `;
-    await executePowerShell(script);
+  await executePowerShell(script);
 
-    // Poll to verify focus actually stuck (SetForegroundWindow can be racy / blocked)
-    let verified = false;
-    for (let attempt = 0; attempt < 10; attempt++) {
-      const fg = await getForegroundWindowHandle();
-      if (fg === hwnd) {
-        verified = true;
-        break;
-      }
-      await sleep(50);
+  // Poll to verify focus actually stuck (SetForegroundWindow can be racy / blocked)
+  let verified = false;
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const fg = await getForegroundWindowHandle();
+    if (fg === numericHandle) {
+      verified = true;
+      break;
     }
+    await sleep(50);
+  }
 
-    let actualForeground = null;
-    try {
-      actualForeground = await getForegroundWindowInfo();
-    } catch {
-      actualForeground = null;
-    }
+  let actualForeground = null;
+  try {
+    actualForeground = await getForegroundWindowInfo();
+  } catch {
+    actualForeground = null;
+  }
 
-    const actualForegroundHandle = Number(actualForeground?.hwnd || 0) || 0;
+  const actualForegroundHandle = Number(actualForeground?.hwnd || 0) || 0;
 
-    if (verified) {
-      console.log(`[AUTOMATION] Focused window handle (verified): ${hwnd}`);
-    } else {
-      const fg = await getForegroundWindowHandle();
-      console.warn(`[AUTOMATION] Focus requested for ${hwnd} but foreground is ${fg}`);
-    }
+  if (verified) {
+    console.log(`[AUTOMATION] Focused window handle (verified): ${numericHandle}`);
+  } else {
+    const fg = await getForegroundWindowHandle();
+    console.warn(`[AUTOMATION] Focus requested for ${numericHandle} but foreground is ${fg}`);
+  }
 
-    return {
-      success: true,
-      requestedWindowHandle: hwnd,
-      actualForegroundHandle,
-      actualForeground: actualForeground?.success ? actualForeground : null,
-      exactMatch: verified,
-      outcome: verified ? 'exact' : 'mismatch'
-    };
+  return {
+    success: true,
+    requestedWindowHandle: numericHandle,
+    actualForegroundHandle,
+    actualForeground: actualForeground?.success ? actualForeground : null,
+    exactMatch: verified,
+    outcome: verified ? 'exact' : 'mismatch',
+    hostError: hostAttempt.error || undefined
+  };
 }
 
 /**
@@ -1571,6 +2250,34 @@ async function resolveWindowHandle(action = {}) {
 
   if (!title && !processName && !className) {
     return null;
+  }
+
+  const hostAttempt = await tryAutomationHostSystemCall('findWindow', (host) => host.findWindow({
+    title: titleValue,
+    titleMode,
+    processName: String(action.processName || '').trim(),
+    className: String(action.className || '').trim()
+  }));
+  if (hostAttempt.used) {
+    const hostHandle = Number(hostAttempt.result?.hwnd || 0);
+    if (Number.isFinite(hostHandle) && hostHandle > 0) {
+      return hostHandle;
+    }
+  }
+
+  if (processName) {
+    const hostProcessFallback = await tryAutomationHostSystemCall('findWindow', (host) => host.findWindow({
+      title: '',
+      titleMode,
+      processName: String(action.processName || '').trim(),
+      className: String(action.className || '').trim()
+    }));
+    if (hostProcessFallback.used) {
+      const hostHandle = Number(hostProcessFallback.result?.hwnd || 0);
+      if (Number.isFinite(hostHandle) && hostHandle > 0) {
+        return hostHandle;
+      }
+    }
   }
 
   const buildResolverScript = ({ includeTitle = true } = {}) => `
@@ -1729,6 +2436,41 @@ public class WinMin {
 }
 
 async function restoreWindow(hwnd) {
+  const numericHandle = Number(hwnd || 0);
+  if (!Number.isFinite(numericHandle) || numericHandle <= 0) {
+    return {
+      success: false,
+      error: 'Invalid window handle'
+    };
+  }
+
+  const hostAttempt = await tryAutomationHostSystemCall('restoreWindow', (host) => host.restoreWindow(numericHandle));
+  if (hostAttempt.used) {
+    return {
+      success: true,
+      hwnd: Number(hostAttempt.result?.hwnd || numericHandle) || numericHandle,
+      restored: hostAttempt.result?.restored === true,
+      window: hostAttempt.result?.window
+        ? {
+            success: true,
+            hwnd: Number(hostAttempt.result.window.hwnd || 0) || 0,
+            pid: Number(hostAttempt.result.window.pid || hostAttempt.result.window.processId || 0) || 0,
+            processName: String(hostAttempt.result.window.processName || ''),
+            title: String(hostAttempt.result.window.title || ''),
+            ownerHwnd: Number(hostAttempt.result.window.ownerHwnd || 0) || 0,
+            isTopmost: hostAttempt.result.window.isTopmost === true,
+            isToolWindow: hostAttempt.result.window.isToolWindow === true,
+            isMinimized: hostAttempt.result.window.isMinimized === true,
+            isMaximized: hostAttempt.result.window.isMaximized === true,
+            windowKind: String(hostAttempt.result.window.windowKind || 'main'),
+            bounds: hostAttempt.result.window.bounds || null,
+            source: 'uia-host'
+          }
+        : null,
+      source: 'uia-host'
+    };
+  }
+
   const script = `
 Add-Type @'
 using System;
@@ -1737,9 +2479,15 @@ public class WinRestore {
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
 }
 '@
-[WinRestore]::ShowWindow([IntPtr]::new(${hwnd}), 9) | Out-Null
+[WinRestore]::ShowWindow([IntPtr]::new(${numericHandle}), 9) | Out-Null
 `;
   await executePowerShell(script);
+  return {
+    success: true,
+    hwnd: numericHandle,
+    source: hostAttempt.error ? 'powershell-fallback' : 'powershell',
+    hostError: hostAttempt.error || undefined
+  };
 }
 
 async function sendWindowToBack(hwnd) {
@@ -2294,6 +3042,184 @@ function executePowerShellScript(scriptContent, timeoutMs = 10000) {
 }
 
 /**
+ * Search a known window with the persistent UIA host. This is bounded and
+ * fail-open to the legacy PowerShell finder when the host is unavailable.
+ */
+async function findElementsByWindowWithHost(searchText, options = {}) {
+  const {
+    controlType = '',
+    exact = false,
+    windowHandle = 0,
+    foregroundOnly = false,
+    timeout = 15000,
+    bounds = null,
+    view = 'control',
+    maxResults = 1,
+    maxDepth = 16,
+    maxVisited = 1000,
+    includeOffscreen = false,
+    includeDisabled = true
+  } = options;
+
+  let hwnd = Number(windowHandle) || 0;
+  try {
+    const ui = require('./ui-automation');
+    const host = ui.getSharedUIAHost();
+    if (!hwnd && foregroundOnly) {
+      const foreground = await host.getForegroundWindowInfo();
+      hwnd = Number(foreground?.hwnd || 0) || 0;
+    }
+    if (!hwnd) return null;
+
+    const boundedTimeout = Number.isFinite(Number(timeout)) && Number(timeout) >= 100
+      ? Math.min(Math.round(Number(timeout)), 6500)
+      : 2500;
+
+    const response = await host.findElementsByWindow(hwnd, {
+      text: searchText,
+      textMode: exact ? 'exact' : 'contains',
+      controlType,
+      view,
+      bounds,
+      maxResults,
+      maxDepth,
+      maxVisited,
+      timeoutMs: boundedTimeout,
+      includeOffscreen,
+      includeDisabled
+    });
+
+    const elements = (Array.isArray(response?.elements) ? response.elements : [])
+      .map(normalizeHostElementForFind)
+      .filter(Boolean);
+
+    return {
+      success: true,
+      elements,
+      count: elements.length,
+      element: elements.length > 0 ? elements[0] : null,
+      source: 'uia-host',
+      stats: response?.stats || null
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: error?.message || String(error || 'UIA host find failed'),
+      elements: [],
+      source: 'uia-host'
+    };
+  }
+}
+
+function normalizeHostElementForFind(element) {
+  if (!element || typeof element !== 'object') return null;
+  const bounds = element.Bounds || element.bounds || {};
+  const x = Number(bounds.X ?? bounds.x ?? 0);
+  const y = Number(bounds.Y ?? bounds.y ?? 0);
+  const width = Number(bounds.Width ?? bounds.width ?? 0);
+  const height = Number(bounds.Height ?? bounds.height ?? 0);
+  if (!Number.isFinite(x) || !Number.isFinite(y) || width <= 0 || height <= 0) return null;
+
+  const controlType = String(
+    element.ControlType
+    || element.controlType
+    || element.role
+    || ''
+  );
+
+  return {
+    Name: element.Name || element.name || '',
+    ControlType: controlType.startsWith('ControlType.') ? controlType : `ControlType.${controlType || 'Custom'}`,
+    AutomationId: element.AutomationId || element.automationId || '',
+    ClassName: element.ClassName || element.className || '',
+    Value: element.Value || element.value || '',
+    WindowHandle: Number(element.WindowHandle || element.windowHandle || 0) || 0,
+    NativeWindowHandle: Number(element.NativeWindowHandle || element.nativeWindowHandle || 0) || 0,
+    Patterns: element.Patterns || element.patterns || [],
+    IsEnabled: element.IsEnabled !== undefined ? element.IsEnabled : element.isEnabled,
+    IsOffscreen: element.IsOffscreen !== undefined ? element.IsOffscreen : element.isOffscreen,
+    IsFocusable: element.IsFocusable !== undefined ? element.IsFocusable : element.isFocusable,
+    IsClickable: element.IsClickable !== undefined ? element.IsClickable : element.isClickable,
+    Bounds: {
+      X: Math.round(x),
+      Y: Math.round(y),
+      Width: Math.round(width),
+      Height: Math.round(height),
+      CenterX: Math.round(Number(bounds.CenterX ?? bounds.centerX ?? (x + width / 2))),
+      CenterY: Math.round(Number(bounds.CenterY ?? bounds.centerY ?? (y + height / 2)))
+    }
+  };
+}
+
+async function invokeElementByWindowWithHost(searchText, options = {}) {
+  const {
+    controlType = '',
+    exact = false,
+    windowHandle = 0,
+    foregroundOnly = false,
+    timeout = 15000,
+    bounds = null,
+    view = 'control',
+    maxDepth = 16,
+    maxVisited = 1000,
+    includeOffscreen = false,
+    includeDisabled = false
+  } = options;
+
+  let hwnd = Number(windowHandle) || 0;
+  try {
+    const ui = require('./ui-automation');
+    const host = ui.getSharedUIAHost();
+    if (!hwnd && foregroundOnly) {
+      const foreground = await host.getForegroundWindowInfo();
+      hwnd = Number(foreground?.hwnd || 0) || 0;
+    }
+    if (!hwnd) {
+      return {
+        success: false,
+        error: 'Host semantic invoke requires windowHandle or foregroundOnly',
+        method: 'uia-host-invoke',
+        source: 'uia-host'
+      };
+    }
+
+    const boundedTimeout = Number.isFinite(Number(timeout)) && Number(timeout) >= 100
+      ? Math.min(Math.round(Number(timeout)), 6500)
+      : 3000;
+
+    const response = await host.invokeElementByWindow(hwnd, {
+      text: searchText,
+      textMode: exact ? 'exact' : 'contains',
+      controlType,
+      view,
+      bounds,
+      maxDepth,
+      maxVisited,
+      timeoutMs: boundedTimeout,
+      includeOffscreen,
+      includeDisabled
+    });
+
+    return {
+      success: true,
+      method: response?.method || 'Invoke',
+      source: 'uia-host',
+      message: `Invoked "${searchText}" via UIA host ${response?.method || 'Invoke'} pattern`,
+      element: normalizeHostElementForFind(response?.element) || response?.element || null,
+      stats: response?.stats || null,
+      hostResponse: response
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: error?.message || String(error || 'UIA host invoke failed'),
+      method: 'uia-host-invoke',
+      source: 'uia-host'
+    };
+  }
+}
+
+/**
  * Find UI element by text content using Windows UI Automation
  * Searches the entire UI tree for elements containing the specified text
  * 
@@ -2310,8 +3236,21 @@ async function findElementByText(searchText, options = {}) {
     controlType = '',
     exact = false,
     windowHandle = 0,
-    foregroundOnly = false
+    foregroundOnly = false,
+    timeout = 15000
   } = options;
+
+  const hostFindResult = await findElementsByWindowWithHost(searchText, {
+    controlType,
+    exact,
+    windowHandle,
+    foregroundOnly,
+    timeout
+  });
+  if (hostFindResult?.success && hostFindResult.elements.length > 0) {
+    console.log(`[AUTOMATION] Host found ${hostFindResult.elements.length} elements matching "${searchText}"`);
+    return hostFindResult;
+  }
   
   const psScript = `
 $ErrorActionPreference = 'Stop'
@@ -2487,7 +3426,11 @@ try {
 }
 `;
 
-  const result = await executePowerShellScript(psScript, 15000);
+  const boundedTimeout = Number.isFinite(Number(timeout)) && Number(timeout) >= 100
+    ? Math.round(Number(timeout))
+    : 15000;
+
+  const result = await executePowerShellScript(psScript, boundedTimeout);
   
   if (result.error) {
     return { error: result.error, elements: [] };
@@ -2563,7 +3506,24 @@ async function clickElementByText(searchText, options = {}) {
     if (invokeResult.success) {
       return invokeResult;
     }
+    if (options.allowCoordinateFallback === false) {
+      return {
+        success: false,
+        error: invokeResult.error || `Invoke failed for "${searchText}" and coordinate fallback is disabled`,
+        element: el,
+        method: 'invoke-only'
+      };
+    }
     console.log(`[AUTOMATION] Invoke failed, falling back to mouse click`);
+  }
+
+  if (options.allowCoordinateFallback === false) {
+    return {
+      success: false,
+      error: `Element "${searchText}" was found but is not invokable without coordinate fallback`,
+      element: el,
+      method: 'invoke-only'
+    };
   }
   
   // Click the center of the element
@@ -2584,6 +3544,26 @@ async function clickElementByText(searchText, options = {}) {
 async function invokeElementByText(searchText, options = {}) {
   const controlType = options.controlType || '';
   const exact = options.exact === true;
+  const hostInvokeResult = await invokeElementByWindowWithHost(searchText, {
+    ...options,
+    controlType,
+    exact
+  });
+  if (hostInvokeResult?.success) {
+    console.log(`[AUTOMATION] Invoked element using UIA host ${hostInvokeResult.method} pattern`);
+    return hostInvokeResult;
+  }
+
+  if (options.allowCoordinateFallback === false) {
+    return {
+      success: false,
+      error: hostInvokeResult?.error
+        ? `${hostInvokeResult.error}; coordinate fallback is disabled`
+        : `Host semantic invoke failed for "${searchText}" and coordinate fallback is disabled`,
+      method: 'uia-host-invoke-only',
+      hostInvoke: hostInvokeResult || null
+    };
+  }
   
   const psScript = `
 $ErrorActionPreference = 'Stop'
@@ -2783,6 +3763,12 @@ public class WindowInfo {
  * Get current foreground window handle (HWND)
  */
 async function getForegroundWindowHandle() {
+  const hostAttempt = await tryAutomationHostSystemCall('getForegroundWindowInfo', (host) => host.getForegroundWindowInfo());
+  if (hostAttempt.used) {
+    const hostHandle = Number(hostAttempt.result?.hwnd || 0);
+    return Number.isFinite(hostHandle) && hostHandle > 0 ? hostHandle : null;
+  }
+
   const script = `
 Add-Type -TypeDefinition @"
 using System;
@@ -2819,11 +3805,59 @@ function parseStructuredAutomationJson(text) {
   }
 }
 
+function useAutomationHostForSystemOps() {
+  if (process.platform !== 'win32') return false;
+  const flag = String(process.env.LIKU_USE_AUTOMATION_HOST || '').trim().toLowerCase();
+  return flag === '1' || flag === 'true' || flag === 'yes' || flag === 'on';
+}
+
+function getAutomationHostInstance() {
+  const ui = require('./ui-automation');
+  return ui.getSharedUIAHost();
+}
+
+async function tryAutomationHostSystemCall(callName, invoke) {
+  if (!useAutomationHostForSystemOps()) {
+    return { used: false, result: null, error: null };
+  }
+
+  try {
+    const host = getAutomationHostInstance();
+    const result = await invoke(host);
+    return { used: true, result, error: null };
+  } catch (error) {
+    return {
+      used: false,
+      result: null,
+      error: error?.message || String(error || `${callName} failed`)
+    };
+  }
+}
+
 /**
  * Get current foreground window info (HWND, title, pid, process name).
  * Best-effort: returns { success: false, error } on failure.
  */
 async function getForegroundWindowInfo() {
+  const hostAttempt = await tryAutomationHostSystemCall('getForegroundWindowInfo', (host) => host.getForegroundWindowInfo());
+  if (hostAttempt.used) {
+    return {
+      success: true,
+      hwnd: Number(hostAttempt.result?.hwnd || 0) || 0,
+      pid: Number(hostAttempt.result?.pid || hostAttempt.result?.processId || 0) || 0,
+      processName: String(hostAttempt.result?.processName || ''),
+      title: String(hostAttempt.result?.title || ''),
+      ownerHwnd: Number(hostAttempt.result?.ownerHwnd || 0) || 0,
+      isTopmost: hostAttempt.result?.isTopmost === true,
+      isToolWindow: hostAttempt.result?.isToolWindow === true,
+      isMinimized: hostAttempt.result?.isMinimized === true,
+      isMaximized: hostAttempt.result?.isMaximized === true,
+      windowKind: String(hostAttempt.result?.windowKind || 'main'),
+      bounds: hostAttempt.result?.bounds || null,
+      source: 'uia-host'
+    };
+  }
+
   const script = `
 Add-Type -TypeDefinition @"
 using System;
@@ -2932,11 +3966,16 @@ $obj | ConvertTo-Json -Compress
     const result = await executePowerShellScript(script, 8000);
     const text = String(result?.stdout || '').trim();
     if (!text) {
-      return { success: false, error: result?.stderr?.trim() || result?.error || 'No output' };
+      return { success: false, error: result?.stderr?.trim() || result?.error || 'No output', hostError: hostAttempt.error || undefined };
     }
-    return parseStructuredAutomationJson(text);
+    const parsed = parseStructuredAutomationJson(text);
+    if (hostAttempt.error) {
+      parsed.hostError = hostAttempt.error;
+      parsed.source = 'powershell-fallback';
+    }
+    return parsed;
   } catch (e) {
-    return { success: false, error: e.message };
+    return { success: false, error: e.message, hostError: hostAttempt.error || undefined };
   }
 }
 
@@ -2948,6 +3987,25 @@ async function getWindowInfoByHandle(hwnd) {
   const numericHandle = Number(hwnd || 0);
   if (!Number.isFinite(numericHandle) || numericHandle <= 0) {
     return { success: false, error: 'Invalid window handle' };
+  }
+
+  const hostAttempt = await tryAutomationHostSystemCall('getWindowInfoByHandle', (host) => host.getWindowInfoByHandle(numericHandle));
+  if (hostAttempt.used) {
+    return {
+      success: true,
+      hwnd: Number(hostAttempt.result?.hwnd || 0) || 0,
+      pid: Number(hostAttempt.result?.pid || hostAttempt.result?.processId || 0) || 0,
+      processName: String(hostAttempt.result?.processName || ''),
+      title: String(hostAttempt.result?.title || ''),
+      ownerHwnd: Number(hostAttempt.result?.ownerHwnd || 0) || 0,
+      isTopmost: hostAttempt.result?.isTopmost === true,
+      isToolWindow: hostAttempt.result?.isToolWindow === true,
+      isMinimized: hostAttempt.result?.isMinimized === true,
+      isMaximized: hostAttempt.result?.isMaximized === true,
+      windowKind: String(hostAttempt.result?.windowKind || 'main'),
+      bounds: hostAttempt.result?.bounds || null,
+      source: 'uia-host'
+    };
   }
 
   const script = `
@@ -3058,11 +4116,138 @@ $obj | ConvertTo-Json -Compress
     const result = await executePowerShellScript(script, 8000);
     const text = String(result?.stdout || '').trim();
     if (!text) {
-      return { success: false, error: result?.stderr?.trim() || result?.error || 'No output' };
+      return { success: false, error: result?.stderr?.trim() || result?.error || 'No output', hostError: hostAttempt.error || undefined };
     }
-    return parseStructuredAutomationJson(text);
+    const parsed = parseStructuredAutomationJson(text);
+    if (hostAttempt.error) {
+      parsed.hostError = hostAttempt.error;
+      parsed.source = 'powershell-fallback';
+    }
+    return parsed;
   } catch (e) {
-    return { success: false, error: e.message };
+    return { success: false, error: e.message, hostError: hostAttempt.error || undefined };
+  }
+}
+
+/**
+ * Get current clipboard text.
+ * Uses the persistent automation host when LIKU_USE_AUTOMATION_HOST is enabled,
+ * and falls back to PowerShell otherwise.
+ */
+async function getClipboardText() {
+  const hostAttempt = await tryAutomationHostSystemCall('getClipboardText', (host) => host.getClipboardText());
+  if (hostAttempt.used) {
+    return {
+      success: true,
+      text: String(hostAttempt.result?.text || ''),
+      error: null,
+      source: 'uia-host'
+    };
+  }
+
+  if (process.platform !== 'win32') {
+    return {
+      success: false,
+      text: '',
+      error: hostAttempt.error || 'Clipboard text is only supported on Windows',
+      source: 'unsupported'
+    };
+  }
+
+  const script = `
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+try {
+  $value = Get-Clipboard -Raw
+  if ($null -eq $value) { $value = '' }
+  [Console]::Out.Write((@{ success = $true; text = [string]$value; error = $null } | ConvertTo-Json -Compress -Depth 4))
+} catch {
+  [Console]::Out.Write((@{ success = $false; text = ''; error = $_.Exception.Message } | ConvertTo-Json -Compress -Depth 4))
+}
+`;
+
+  try {
+    const result = await executePowerShellScript(script, 8000);
+    const text = String(result?.stdout || '').trim();
+    if (!text) {
+      return {
+        success: false,
+        text: '',
+        error: result?.stderr?.trim() || result?.error || 'No output',
+        hostError: hostAttempt.error || undefined,
+        source: 'powershell-fallback'
+      };
+    }
+    const parsed = parseStructuredAutomationJson(text);
+    parsed.source = hostAttempt.error ? 'powershell-fallback' : 'powershell';
+    if (hostAttempt.error) parsed.hostError = hostAttempt.error;
+    return parsed;
+  } catch (error) {
+    return {
+      success: false,
+      text: '',
+      error: error?.message || String(error || 'Clipboard read failed'),
+      hostError: hostAttempt.error || undefined,
+      source: 'powershell-fallback'
+    };
+  }
+}
+
+/**
+ * Set current clipboard text.
+ * Uses the persistent automation host when LIKU_USE_AUTOMATION_HOST is enabled,
+ * and falls back to PowerShell otherwise.
+ */
+async function setClipboardText(text = '') {
+  const normalizedText = String(text ?? '');
+  const hostAttempt = await tryAutomationHostSystemCall('setClipboardText', (host) => host.setClipboardText(normalizedText));
+  if (hostAttempt.used) {
+    return {
+      success: true,
+      error: null,
+      source: 'uia-host'
+    };
+  }
+
+  if (process.platform !== 'win32') {
+    return {
+      success: false,
+      error: hostAttempt.error || 'Clipboard text is only supported on Windows',
+      source: 'unsupported'
+    };
+  }
+
+  const encoded = Buffer.from(normalizedText, 'utf8').toString('base64');
+  const script = `
+$ErrorActionPreference = 'Stop'
+$value = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('${encoded}'))
+Set-Clipboard -Value $value
+`;
+
+  try {
+    const result = await executePowerShellScript(script, 8000);
+    if (result?.failed) {
+      return {
+        success: false,
+        error: result?.stderr || result?.error || 'Clipboard write failed',
+        hostError: hostAttempt.error || undefined,
+        source: 'powershell-fallback'
+      };
+    }
+
+    return {
+      success: true,
+      error: null,
+      hostError: hostAttempt.error || undefined,
+      source: hostAttempt.error ? 'powershell-fallback' : 'powershell'
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: error?.message || String(error || 'Clipboard write failed'),
+      hostError: hostAttempt.error || undefined,
+      source: 'powershell-fallback'
+    };
   }
 }
 
@@ -3196,6 +4381,8 @@ async function executeAction(action, runtimeOptions = {}) {
   const clickImpl = typeof runtimeOptions.click === 'function' ? runtimeOptions.click : click;
   const doubleClickImpl = typeof runtimeOptions.doubleClick === 'function' ? runtimeOptions.doubleClick : doubleClick;
   const moveMouseImpl = typeof runtimeOptions.moveMouse === 'function' ? runtimeOptions.moveMouse : moveMouse;
+  const typeTextImpl = typeof runtimeOptions.typeText === 'function' ? runtimeOptions.typeText : typeText;
+  const pressKeyImpl = typeof runtimeOptions.pressKey === 'function' ? runtimeOptions.pressKey : pressKey;
 
   const withInferredProcessName = (a) => {
     if (!a || typeof a !== 'object') return a;
@@ -3265,13 +4452,63 @@ async function executeAction(action, runtimeOptions = {}) {
         break;
         
       case ACTION_TYPES.TYPE:
-        await typeText(effectiveAction.text);
-        result.message = `Typed "${effectiveAction.text.substring(0, 30)}${effectiveAction.text.length > 30 ? '...' : ''}"`;
+        {
+          const pineEditorTextGuard = await guardPineEditorCommandTextInsertion(effectiveAction);
+          if (!pineEditorTextGuard.allowed) {
+            result.success = false;
+            result.error = pineEditorTextGuard.error || 'Pine Editor command text insertion blocked by foreground guard';
+            result.blockedByActiveInputSurface = true;
+            result.activeInputSurfaceGuard = {
+              reason: 'unsafe-pine-editor-command-text-foreground',
+              foreground: pineEditorTextGuard.foreground || null
+            };
+            result.message = `Typing failed: ${result.error}`;
+            break;
+          }
+
+          const quickSearchSemanticWrite = await attemptTradingViewQuickSearchSemanticWrite(effectiveAction);
+          if (quickSearchSemanticWrite.applicable && quickSearchSemanticWrite.success) {
+            result.quickSearchSemanticWrite = quickSearchSemanticWrite;
+            result.method = quickSearchSemanticWrite.method;
+            result.message = `Typed "${effectiveAction.text.substring(0, 30)}${effectiveAction.text.length > 30 ? '...' : ''}" via ${quickSearchSemanticWrite.method}`;
+            break;
+          }
+
+          if (quickSearchSemanticWrite.applicable && !quickSearchSemanticWrite.fallbackRecommended) {
+            result.success = false;
+            result.error = quickSearchSemanticWrite.error || 'TradingView quick-search semantic write failed verification';
+            result.quickSearchSemanticWrite = quickSearchSemanticWrite;
+            result.message = `Typing failed: ${result.error}`;
+            break;
+          }
+
+          await typeTextImpl(effectiveAction.text);
+          if (quickSearchSemanticWrite.applicable) {
+            result.quickSearchSemanticWrite = quickSearchSemanticWrite;
+            result.fallback = true;
+            result.method = 'SendKeys';
+            result.message = `Typed "${effectiveAction.text.substring(0, 30)}${effectiveAction.text.length > 30 ? '...' : ''}" via SendKeys fallback`;
+          } else {
+            result.message = `Typed "${effectiveAction.text.substring(0, 30)}${effectiveAction.text.length > 30 ? '...' : ''}"`;
+          }
+        }
         break;
         
       case ACTION_TYPES.KEY:
-        await pressKey(effectiveAction.key, effectiveAction);
-        result.message = `Pressed ${effectiveAction.key}`;
+        {
+          const pineEditorShortcutBypass = await maybeBypassTradingViewPineEditorOpenShortcut(effectiveAction);
+          if (pineEditorShortcutBypass?.bypass) {
+            result.skipped = true;
+            result.skippedReason = pineEditorShortcutBypass.skippedReason || 'pine-editor-already-active';
+            result.method = 'UIAHostScan';
+            result.pineEditorSurfaceProbe = pineEditorShortcutBypass.probe || null;
+            result.message = pineEditorShortcutBypass.message || `Skipped ${effectiveAction.key}`;
+            break;
+          }
+
+          await pressKeyImpl(effectiveAction.key, effectiveAction);
+          result.message = `Pressed ${effectiveAction.key}`;
+        }
         break;
         
       case ACTION_TYPES.SCROLL:
@@ -3323,7 +4560,8 @@ async function executeAction(action, runtimeOptions = {}) {
             controlType: effectiveAction.controlType || '',
             exact: effectiveAction.exact || false,
             windowHandle: effectiveAction.windowHandle || effectiveAction.hwnd || 0,
-            foregroundOnly: !!effectiveAction.foregroundOnly
+            foregroundOnly: !!effectiveAction.foregroundOnly,
+            allowCoordinateFallback: effectiveAction.allowCoordinateFallback !== false
           });
           result = { ...result, ...clickResult };
         }
@@ -3514,41 +4752,106 @@ async function executeAction(action, runtimeOptions = {}) {
 
       case ACTION_TYPES.GET_TEXT: {
         const uia = require('./ui-automation');
-        let gtResult = await uia.getElementText(
-          effectiveAction.criteria || { text: effectiveAction.text, automationId: effectiveAction.automationId, controlType: effectiveAction.controlType }
-        );
+        const pineReadbackPreparation = await preparePineEditorReadbackAction(effectiveAction);
+        if (pineReadbackPreparation?.error) {
+          result = {
+            ...result,
+            success: false,
+            error: pineReadbackPreparation.error,
+            message: `Get text failed: ${pineReadbackPreparation.error}`,
+            method: 'ForegroundGuard',
+            foreground: pineReadbackPreparation.foreground || null
+          };
+          break;
+        }
+
+        const getTextAction = pineReadbackPreparation?.action || effectiveAction;
+        const getTextCriteria = getTextAction.criteria || {
+          text: getTextAction.text,
+          automationId: getTextAction.automationId,
+          controlType: getTextAction.controlType
+        };
+        const pineReadbackAction = isPineEditorReadbackAction(getTextAction);
+        const pineReadbackTimeoutMs = pineReadbackAction
+          ? getPineReadbackTimeoutMs(getTextAction)
+          : 0;
+        let gtResult;
+
+        if (pineReadbackAction) {
+          try {
+            gtResult = await runWithTimeout(
+              () => uia.getElementText(getTextCriteria),
+              pineReadbackTimeoutMs,
+              'Pine Editor primary readback'
+            );
+          } catch (error) {
+            gtResult = createTimedOutActionResult(error, 'Pine Editor primary readback timed out');
+          }
+        } else {
+          gtResult = await uia.getElementText(getTextCriteria);
+        }
+
         if (!gtResult?.success) {
-          const pineFallbackResult = await getPineEditorTextFallback(effectiveAction);
-          if (pineFallbackResult?.success) {
-            gtResult = pineFallbackResult;
-          } else {
-            const pineWatcherFallbackResult = getPineEditorWatcherFallback(effectiveAction);
+          const pineWatcherFallbackResult = getPineEditorWatcherFallback(getTextAction);
+
+          if (gtResult?.timedOut) {
             if (pineWatcherFallbackResult?.success) {
               gtResult = pineWatcherFallbackResult;
+            } else {
+              gtResult = {
+                ...gtResult,
+                error: `${gtResult.error}. Pine Editor was not confirmed active and no watcher-backed Pine anchors were visible.`
+              };
+            }
+          } else {
+            let pineFallbackResult = null;
+            if (pineReadbackAction) {
+              try {
+                pineFallbackResult = await runWithTimeout(
+                  () => getPineEditorTextFallback(getTextAction),
+                  pineReadbackTimeoutMs,
+                  'Pine Editor fallback readback'
+                );
+              } catch (error) {
+                pineFallbackResult = createTimedOutActionResult(error, 'Pine Editor fallback readback timed out');
+              }
+            } else {
+              pineFallbackResult = await getPineEditorTextFallback(getTextAction);
+            }
+
+            if (pineFallbackResult?.success) {
+              gtResult = pineFallbackResult;
+            } else if (pineWatcherFallbackResult?.success) {
+              gtResult = pineWatcherFallbackResult;
+            } else if (pineFallbackResult?.timedOut) {
+              gtResult = {
+                ...pineFallbackResult,
+                error: `${pineFallbackResult.error}. No watcher-backed Pine anchors were visible.`
+              };
             }
           }
         }
         result = { ...result, ...gtResult };
-        const pineTargetText = String(effectiveAction?.text || effectiveAction?.criteria?.text || '');
+        const pineTargetText = String(getTextAction?.text || getTextAction?.criteria?.text || '');
         if (gtResult.success
-          && effectiveAction?.pineEvidenceMode === 'provenance-summary'
+          && getTextAction?.pineEvidenceMode === 'provenance-summary'
           && /pine version history/i.test(pineTargetText)) {
-          result.pineStructuredSummary = buildPineVersionHistoryStructuredSummary(gtResult.text, effectiveAction.pineSummaryFields);
+          result.pineStructuredSummary = buildPineVersionHistoryStructuredSummary(gtResult.text, getTextAction.pineSummaryFields);
         } else if (gtResult.success && /pine logs/i.test(pineTargetText)) {
           result.pineStructuredSummary = buildPineLogsStructuredSummary(gtResult.text);
         } else if (gtResult.success && /pine profiler/i.test(pineTargetText)) {
           result.pineStructuredSummary = buildPineProfilerStructuredSummary(gtResult.text);
         } else if (gtResult.success && /pine editor/i.test(pineTargetText)) {
-          if (effectiveAction?.pineEvidenceMode === 'safe-authoring-inspect') {
+          if (getTextAction?.pineEvidenceMode === 'safe-authoring-inspect') {
             result.pineStructuredSummary = buildPineEditorSafeAuthoringSummary(gtResult.text);
           } else if (
-            effectiveAction?.pineEvidenceMode === 'compile-result'
-            || effectiveAction?.pineEvidenceMode === 'diagnostics'
-            || effectiveAction?.pineEvidenceMode === 'line-budget'
-            || effectiveAction?.pineEvidenceMode === 'save-status'
-            || effectiveAction?.pineEvidenceMode === 'generic-status'
+            getTextAction?.pineEvidenceMode === 'compile-result'
+            || getTextAction?.pineEvidenceMode === 'diagnostics'
+            || getTextAction?.pineEvidenceMode === 'line-budget'
+            || getTextAction?.pineEvidenceMode === 'save-status'
+            || getTextAction?.pineEvidenceMode === 'generic-status'
           ) {
-            result.pineStructuredSummary = buildPineEditorDiagnosticsStructuredSummary(gtResult.text, effectiveAction.pineEvidenceMode);
+            result.pineStructuredSummary = buildPineEditorDiagnosticsStructuredSummary(gtResult.text, getTextAction.pineEvidenceMode);
           }
         }
         result.message = gtResult.success
@@ -3936,6 +5239,8 @@ module.exports = {
   getForegroundWindowHandle,
   getForegroundWindowInfo,
   getWindowInfoByHandle,
+  getClipboardText,
+  setClipboardText,
   getRunningProcessesByNames,
   resolveWindowHandle,
   minimizeWindow,
@@ -3943,6 +5248,9 @@ module.exports = {
   sendWindowToBack,
   // Semantic element-based automation (preferred approach)
   findElementByText,
+  findElementsByWindowWithHost,
+  invokeElementByWindowWithHost,
+  probeTradingViewPineEditorSurface,
   clickElementByText,
   // v0.0.5: Command execution
   DANGEROUS_COMMAND_PATTERNS,
