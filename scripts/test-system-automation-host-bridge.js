@@ -98,16 +98,34 @@ function createJsonResponse(payload, status = 200) {
   };
 }
 
-function createMockWebSocket(handler) {
+function createMockWebSocket(handler, options = {}) {
+  let openCount = 0;
   return class MockWebSocket {
     constructor(url) {
       this.url = url;
       this.readyState = 0;
       this._listeners = new Map();
-      queueMicrotask(() => {
+      const currentOpenCount = openCount + 1;
+      openCount = currentOpenCount;
+      const openDelayMs = typeof options?.getOpenDelayMs === 'function'
+        ? Math.max(0, Number(options.getOpenDelayMs({
+            openCount: currentOpenCount,
+            url
+          }) || 0) || 0)
+        : Math.max(0, Number(options?.openDelayMs || 0) || 0);
+      const emitOpen = () => {
+        if (this.readyState === 3) return;
         this.readyState = 1;
         this._emit('open', {});
-      });
+      };
+      if (openDelayMs > 0) {
+        const timer = setTimeout(emitOpen, openDelayMs);
+        if (typeof timer.unref === 'function') {
+          timer.unref();
+        }
+      } else {
+        queueMicrotask(emitOpen);
+      }
     }
 
     addEventListener(eventName, listener) {
@@ -304,7 +322,7 @@ function buildTradingViewCdpDependencies(options = {}) {
             result: {}
           };
       }
-    })
+    }, options?.webSocketOptions || {})
   };
 }
 
@@ -318,7 +336,7 @@ function buildUnavailableTradingViewCdpDependencies() {
         commandLine: 'TradingView.exe',
         ports: []
       }]
-    })
+    }, options?.webSocketOptions || {})
   };
 }
 
@@ -362,7 +380,8 @@ function buildTradingViewPineEditorCdpMock(options = {}) {
     focusCalls: 0,
     readCalls: 0,
     inputInsertCalls: 0,
-    forceSetCalls: 0
+    forceSetCalls: 0,
+    monacoWriteCalls: 0
   };
   const countLines = (text = '') => {
     const normalized = String(text || '').replace(/\r/g, '');
@@ -463,6 +482,153 @@ function buildTradingViewPineEditorCdpMock(options = {}) {
           };
         case 'Runtime.evaluate': {
           const payload = extractRuntimeEvaluatePayload(message?.params?.expression || '');
+          if (String(payload?.surface || '').trim().toLowerCase() === 'monaco-model') {
+            const monacoOperation = String(payload?.operation || 'inspect').trim().toLowerCase();
+            if (options?.monacoEditorAvailable !== true) {
+              return {
+                id: message.id,
+                result: {
+                  result: {
+                    type: 'object',
+                    value: {
+                      surface: 'monaco-model',
+                      found: false,
+                      operation: monacoOperation,
+                      success: false,
+                      inspected: 24,
+                      candidateCount: 0,
+                      candidates: [],
+                      editor: null,
+                      model: null,
+                      text: '',
+                      textLength: 0,
+                      previousValueLength: 0,
+                      appliedTextLength: 0,
+                      method: null,
+                      error: 'TradingView Pine Monaco editor handle was not discoverable.'
+                    }
+                  }
+                }
+              };
+            }
+
+            if (monacoOperation === 'write') {
+              state.monacoWriteCalls += 1;
+              const desiredText = String(payload?.text || '');
+              const previousValueLength = state.editorText.length;
+              let monacoMutation = null;
+              let monacoMethod = 'editor-executeEdits';
+              if (typeof options?.onMonacoWrite === 'function') {
+                const hookResult = options.onMonacoWrite({
+                  desiredText,
+                  payload,
+                  state: { ...state }
+                });
+                if (hookResult && typeof hookResult === 'object') {
+                  monacoMutation = hookResult.mutation || hookResult;
+                  if (hookResult.method) {
+                    monacoMethod = String(hookResult.method);
+                  }
+                }
+              } else {
+                monacoMutation = {
+                  editorText: desiredText,
+                  renderedText: desiredText
+                };
+              }
+              applyMutationResult(monacoMutation);
+              return {
+                id: message.id,
+                result: {
+                  result: {
+                    type: 'object',
+                    value: {
+                      surface: 'monaco-model',
+                      found: true,
+                      operation: monacoOperation,
+                      success: String(state.editorText || '') === desiredText,
+                      inspected: 64,
+                      candidateCount: 2,
+                      candidates: [
+                        {
+                          kind: 'editor',
+                          path: 'root[2].__reactContainer$mock.child.memoizedState.memoizedState.current._editor',
+                          score: 980,
+                          ctor: 'MockMonacoEditor',
+                          methods: ['getModel', 'getValue', 'executeEdits', 'focus'],
+                          ownKeys: ['_editor', '_monaco']
+                        },
+                        {
+                          kind: 'model',
+                          path: 'root[2].__reactContainer$mock.child.memoizedState.memoizedState.current._editor.model',
+                          score: 760,
+                          ctor: 'MockMonacoModel',
+                          methods: ['getValue', 'setValue', 'getFullModelRange'],
+                          ownKeys: ['uri']
+                        }
+                      ],
+                      editor: {
+                        path: 'root[2].__reactContainer$mock.child.memoizedState.memoizedState.current._editor',
+                        ctor: 'MockMonacoEditor',
+                        methods: ['getModel', 'getValue', 'executeEdits', 'focus'],
+                        hasModel: true,
+                        selectionCount: 1
+                      },
+                      model: {
+                        path: 'root[2].__reactContainer$mock.child.memoizedState.memoizedState.current._editor.model',
+                        ctor: 'MockMonacoModel',
+                        methods: ['getValue', 'setValue', 'getFullModelRange'],
+                        lineCount: countLines(state.editorText)
+                      },
+                      text: state.editorText,
+                      textLength: state.editorText.length,
+                      previousValueLength,
+                      appliedTextLength: desiredText.length,
+                      method: monacoMethod,
+                      error: null
+                    }
+                  }
+                }
+              };
+            }
+
+            return {
+              id: message.id,
+              result: {
+                result: {
+                  type: 'object',
+                  value: {
+                    surface: 'monaco-model',
+                    found: true,
+                    operation: monacoOperation,
+                    success: true,
+                    inspected: 64,
+                    candidateCount: 2,
+                    candidates: [],
+                    editor: {
+                      path: 'root[2].__reactContainer$mock.child.memoizedState.memoizedState.current._editor',
+                      ctor: 'MockMonacoEditor',
+                      methods: ['getModel', 'getValue', 'executeEdits', 'focus'],
+                      hasModel: true,
+                      selectionCount: 1
+                    },
+                    model: {
+                      path: 'root[2].__reactContainer$mock.child.memoizedState.memoizedState.current._editor.model',
+                      ctor: 'MockMonacoModel',
+                      methods: ['getValue', 'setValue', 'getFullModelRange'],
+                      lineCount: countLines(state.editorText)
+                    },
+                    text: state.editorText,
+                    textLength: state.editorText.length,
+                    previousValueLength: state.editorText.length,
+                    appliedTextLength: 0,
+                    method: null,
+                    error: null
+                  }
+                }
+              }
+            };
+          }
           const operation = String(payload?.operation || 'read').trim().toLowerCase();
 
           if (operation === 'focus-select-all') {
@@ -1338,6 +1504,662 @@ async function main() {
     assert.strictEqual(invokeResult?.reason, 'renderer-required-text-missing');
   });
 
+  await test('invokeTradingViewRendererButtonWithCDP can open the current Pine script menu and choose Create new without Ctrl+I', async () => {
+    let callFunctionOnCount = 0;
+    const initialAxNodes = [
+      {
+        nodeId: '51000',
+        ignored: false,
+        role: { value: 'generic' },
+        name: { value: 'Pine Editor My Script Add to chart Publish script More' }
+      },
+      {
+        nodeId: '51001',
+        ignored: false,
+        role: { value: 'button' },
+        name: { value: 'My Script' },
+        backendDOMNodeId: 51001
+      },
+      {
+        nodeId: '51002',
+        ignored: false,
+        role: { value: 'button' },
+        name: { value: 'Add to chart' },
+        backendDOMNodeId: 51002
+      },
+      {
+        nodeId: '51003',
+        ignored: false,
+        role: { value: 'button' },
+        name: { value: 'Publish script' },
+        backendDOMNodeId: 51003
+      },
+      {
+        nodeId: '51004',
+        ignored: false,
+        role: { value: 'button' },
+        name: { value: 'More' },
+        backendDOMNodeId: 51004
+      }
+    ];
+    const menuAxNodes = [
+      ...initialAxNodes,
+      {
+        nodeId: '52001',
+        ignored: false,
+        role: { value: 'menuitem' },
+        name: { value: 'Save script' },
+        backendDOMNodeId: 52001
+      },
+      {
+        nodeId: '52002',
+        ignored: false,
+        role: { value: 'menuitem' },
+        name: { value: 'Make a copy…' },
+        backendDOMNodeId: 52002
+      },
+      {
+        nodeId: '52003',
+        ignored: false,
+        role: { value: 'menuitem' },
+        name: { value: 'Rename…' },
+        backendDOMNodeId: 52003
+      },
+      {
+        nodeId: '52004',
+        ignored: false,
+        role: { value: 'menuitem' },
+        name: { value: 'Create new' },
+        backendDOMNodeId: 52004
+      }
+    ];
+
+    const invokeResult = await systemAutomation.invokeTradingViewRendererButtonWithCDP({
+      windowInfo: buildWindowInfo({
+        hwnd: 460832,
+        title: 'MN / Unnamed'
+      }),
+      resolveWindowState: false,
+      kind: 'pine-current-script-menu-item',
+      buttonText: 'Create new',
+      menuItemText: 'Create new',
+      requiredTexts: [
+        'Add to chart',
+        'Publish script'
+      ],
+      cdpDependencies: buildTradingViewCdpDependencies({
+        port: 9565,
+        axNodes: initialAxNodes,
+        onCallFunctionOn: () => {
+          callFunctionOnCount += 1;
+          if (callFunctionOnCount === 1) {
+            return {
+              callFunctionOnValue: {
+                text: 'Add to chart',
+                title: 'Add to chart',
+                tagName: 'BUTTON',
+                rect: { x: 348, y: 62, width: 145, height: 34 }
+              }
+            };
+          }
+          if (callFunctionOnCount === 2) {
+            return {
+              callFunctionOnValue: {
+                text: 'My Script',
+                tagName: 'DIV',
+                role: 'button',
+                rect: { x: 75, y: 62, width: 220, height: 34 }
+              }
+            };
+          }
+          if (callFunctionOnCount === 3) {
+            return {
+              axNodes: menuAxNodes,
+              callFunctionOnValue: {
+                clicked: true,
+                text: 'My Script',
+                tagName: 'DIV',
+                rect: { x: 75, y: 62, width: 220, height: 34 }
+              }
+            };
+          }
+          return {
+            callFunctionOnValue: {
+              clicked: true,
+              text: 'Create new',
+              tagName: 'DIV',
+              rect: { x: 102, y: 204, width: 160, height: 32 }
+            }
+          };
+        }
+      })
+    });
+
+    assert.strictEqual(invokeResult?.success, true);
+    assert.strictEqual(invokeResult?.available, true);
+    assert.strictEqual(invokeResult?.method, 'chromium-cdp-ax-dom-click');
+    assert.strictEqual(invokeResult?.titleButton?.name, 'My Script');
+    assert.strictEqual(invokeResult?.axNode?.name, 'Create new');
+    assert.strictEqual(invokeResult?.clickResult?.text, 'Create new');
+    assert.strictEqual(invokeResult?.effectProof?.postClickPineRendererProof?.active, true);
+  });
+
+  await test('invokeTradingViewRendererButtonWithCDP can expand Create new and choose Indicator from the Pine submenu', async () => {
+    let titleClicked = false;
+    let createNewHovered = false;
+    const initialAxNodes = [
+      {
+        nodeId: '71000',
+        ignored: false,
+        role: { value: 'generic' },
+        name: { value: 'Pine Editor Liku Live Save Probe Add to chart Publish script More' }
+      },
+      {
+        nodeId: '71001',
+        ignored: false,
+        role: { value: 'button' },
+        name: { value: 'Liku Live Save Probe' },
+        backendDOMNodeId: 71001
+      },
+      {
+        nodeId: '71002',
+        ignored: false,
+        role: { value: 'button' },
+        name: { value: 'Add to chart' },
+        backendDOMNodeId: 71002
+      },
+      {
+        nodeId: '71003',
+        ignored: false,
+        role: { value: 'button' },
+        name: { value: 'Publish script' },
+        backendDOMNodeId: 71003
+      }
+    ];
+    const menuAxNodes = [
+      ...initialAxNodes,
+      {
+        nodeId: '72001',
+        ignored: false,
+        role: { value: 'menuitem' },
+        name: { value: 'Save script' },
+        backendDOMNodeId: 72001
+      },
+      {
+        nodeId: '72002',
+        ignored: false,
+        role: { value: 'menuitem' },
+        name: { value: 'Create new' },
+        backendDOMNodeId: 72002
+      },
+      {
+        nodeId: '72003',
+        ignored: false,
+        role: { value: 'menuitem' },
+        name: { value: 'Open script' },
+        backendDOMNodeId: 72003
+      }
+    ];
+    const submenuAxNodes = [
+      ...menuAxNodes,
+      {
+        nodeId: '73001',
+        ignored: false,
+        role: { value: 'menuitem' },
+        name: { value: 'Indicator' },
+        backendDOMNodeId: 73001
+      },
+      {
+        nodeId: '73002',
+        ignored: false,
+        role: { value: 'menuitem' },
+        name: { value: 'Strategy' },
+        backendDOMNodeId: 73002
+      },
+      {
+        nodeId: '73003',
+        ignored: false,
+        role: { value: 'menuitem' },
+        name: { value: 'Library' },
+        backendDOMNodeId: 73003
+      },
+      {
+        nodeId: '73004',
+        ignored: false,
+        role: { value: 'menuitem' },
+        name: { value: 'Built-in...' },
+        backendDOMNodeId: 73004
+      }
+    ];
+
+    const invokeResult = await systemAutomation.invokeTradingViewRendererButtonWithCDP({
+      windowInfo: buildWindowInfo({
+        hwnd: 460837,
+        title: 'MN / Liku Live Save Probe'
+      }),
+      resolveWindowState: false,
+      kind: 'pine-current-script-menu-item',
+      buttonText: 'Create new',
+      menuItemText: 'Create new',
+      submenuItemText: 'Indicator',
+      requiredTexts: [
+        'Add to chart',
+        'Publish script'
+      ],
+      cdpDependencies: buildTradingViewCdpDependencies({
+        port: 9573,
+        axNodes: initialAxNodes,
+        onGetFullAXTree: () => ({
+          axNodes: titleClicked
+            ? (createNewHovered ? submenuAxNodes : menuAxNodes)
+            : initialAxNodes
+        }),
+        onCallFunctionOn: ({ message }) => {
+          const fnDecl = String(message?.params?.functionDeclaration || '');
+          if (fnDecl.includes('pointerover') || fnDecl.includes('mouseover')) {
+            createNewHovered = true;
+            return {
+              callFunctionOnValue: {
+                hovered: true,
+                text: 'Create new',
+                tagName: 'DIV',
+                rect: { x: 102, y: 296, width: 156, height: 30 }
+              }
+            };
+          }
+
+          if (fnDecl.includes('this.click')) {
+            if (!titleClicked) {
+              titleClicked = true;
+              return {
+                callFunctionOnValue: {
+                  clicked: true,
+                  text: 'Liku Live Save Probe',
+                  tagName: 'DIV',
+                  rect: { x: 67, y: 102, width: 266, height: 32 }
+                }
+              };
+            }
+            return {
+              callFunctionOnValue: {
+                clicked: true,
+                text: createNewHovered ? 'Indicator' : 'Create new',
+                tagName: 'DIV',
+                rect: createNewHovered
+                  ? { x: 443, y: 296, width: 188, height: 32 }
+                  : { x: 102, y: 296, width: 156, height: 30 }
+              }
+            };
+          }
+
+          return {
+            callFunctionOnValue: {
+              text: titleClicked ? 'Create new' : 'Liku Live Save Probe',
+              tagName: 'DIV',
+              role: 'button',
+              rect: { x: 67, y: 102, width: 266, height: 32 }
+            }
+          };
+        }
+      })
+    });
+
+    assert.strictEqual(invokeResult?.success, true);
+    assert.strictEqual(invokeResult?.available, true);
+    assert.strictEqual(invokeResult?.method, 'chromium-cdp-ax-dom-click');
+    assert.strictEqual(invokeResult?.titleButton?.name, 'Liku Live Save Probe');
+    assert.strictEqual(invokeResult?.parentMenuItem?.name, 'Create new');
+    assert.strictEqual(invokeResult?.axNode?.name, 'Indicator');
+    assert.strictEqual(invokeResult?.clickResult?.text, 'Indicator');
+    assert(Array.isArray(invokeResult?.submenuDiscovery?.attempts));
+    assert(invokeResult.submenuDiscovery.attempts.some((attempt) => attempt?.hoveredParentMenuItem === true));
+    assert(invokeResult.submenuDiscovery.attempts.some((attempt) => attempt?.foundExactSubmenuItem === true));
+  });
+
+  await test('invokeTradingViewRendererButtonWithCDP tolerates delayed Pine menu exposure after clicking the current script title', async () => {
+    let callFunctionOnCount = 0;
+    let titleClicked = false;
+    let axReadsAfterTitleClick = 0;
+    const initialAxNodes = [
+      {
+        nodeId: '61001',
+        ignored: false,
+        role: { value: 'button' },
+        name: { value: 'Unnamed' },
+        backendDOMNodeId: 61001
+      },
+      {
+        nodeId: '61002',
+        ignored: false,
+        role: { value: 'button' },
+        name: { value: 'Add to chart' },
+        backendDOMNodeId: 61002
+      },
+      {
+        nodeId: '61003',
+        ignored: false,
+        role: { value: 'button' },
+        name: { value: 'Publish script' },
+        backendDOMNodeId: 61003
+      }
+    ];
+    const delayedMenuAxNodes = [
+      ...initialAxNodes,
+      {
+        nodeId: '62001',
+        ignored: false,
+        role: { value: 'menuitem' },
+        name: { value: 'Save script' },
+        backendDOMNodeId: 62001
+      },
+      {
+        nodeId: '62002',
+        ignored: false,
+        role: { value: 'menuitem' },
+        name: { value: 'Create new' },
+        backendDOMNodeId: 62002
+      }
+    ];
+
+    const invokeResult = await systemAutomation.invokeTradingViewRendererButtonWithCDP({
+      windowInfo: buildWindowInfo({
+        hwnd: 460833,
+        title: 'MN / Unnamed'
+      }),
+      resolveWindowState: false,
+      kind: 'pine-current-script-menu-item',
+      buttonText: 'Create new',
+      menuItemText: 'Create new',
+      requiredTexts: [
+        'Add to chart',
+        'Publish script'
+      ],
+      cdpDependencies: buildTradingViewCdpDependencies({
+        port: 9566,
+        axNodes: initialAxNodes,
+        onGetFullAXTree: () => {
+          if (!titleClicked) {
+            return {
+              axNodes: initialAxNodes
+            };
+          }
+          axReadsAfterTitleClick += 1;
+          return {
+            axNodes: axReadsAfterTitleClick >= 2 ? delayedMenuAxNodes : initialAxNodes
+          };
+        },
+        onCallFunctionOn: () => {
+          callFunctionOnCount += 1;
+          if (callFunctionOnCount === 1) {
+            return {
+              callFunctionOnValue: {
+                text: 'Add to chart',
+                tagName: 'BUTTON',
+                rect: { x: 348, y: 62, width: 145, height: 34 }
+              }
+            };
+          }
+          if (callFunctionOnCount === 2) {
+            return {
+              callFunctionOnValue: {
+                text: 'Unnamed',
+                tagName: 'DIV',
+                role: 'button',
+                rect: { x: 75, y: 62, width: 220, height: 34 }
+              }
+            };
+          }
+          if (callFunctionOnCount === 3) {
+            titleClicked = true;
+            return {
+              callFunctionOnValue: {
+                clicked: true,
+                text: 'Unnamed',
+                tagName: 'DIV',
+                rect: { x: 75, y: 62, width: 220, height: 34 }
+              }
+            };
+          }
+          return {
+            callFunctionOnValue: {
+              clicked: true,
+              text: 'Create new',
+              tagName: 'DIV',
+              rect: { x: 102, y: 204, width: 160, height: 32 }
+            }
+          };
+        }
+      })
+    });
+
+    assert.strictEqual(invokeResult?.success, true);
+    assert.strictEqual(invokeResult?.currentTitleHint, 'unnamed');
+    assert(Array.isArray(invokeResult?.menuDiscovery?.attempts));
+    assert(invokeResult.menuDiscovery.attempts.some((attempt) => attempt?.foundExactMenuItem === false));
+    assert(invokeResult.menuDiscovery.attempts.some((attempt) => attempt?.foundExactMenuItem === true));
+  });
+
+  await test('invokeTradingViewRendererButtonWithCDP retries Pine title-menu attach after an initial CDP open timeout', async () => {
+    let callFunctionOnCount = 0;
+    const initialAxNodes = [
+      {
+        nodeId: '81001',
+        ignored: false,
+        role: { value: 'button' },
+        name: { value: 'Unnamed' },
+        backendDOMNodeId: 81001
+      },
+      {
+        nodeId: '81002',
+        ignored: false,
+        role: { value: 'button' },
+        name: { value: 'Add to chart' },
+        backendDOMNodeId: 81002
+      },
+      {
+        nodeId: '81003',
+        ignored: false,
+        role: { value: 'button' },
+        name: { value: 'Publish script' },
+        backendDOMNodeId: 81003
+      }
+    ];
+    const menuAxNodes = [
+      ...initialAxNodes,
+      {
+        nodeId: '82001',
+        ignored: false,
+        role: { value: 'menuitem' },
+        name: { value: 'Create new' },
+        backendDOMNodeId: 82001
+      }
+    ];
+
+    const invokeResult = await systemAutomation.invokeTradingViewRendererButtonWithCDP({
+      windowInfo: buildWindowInfo({
+        hwnd: 460835,
+        title: 'MN / Unnamed'
+      }),
+      resolveWindowState: false,
+      kind: 'pine-current-script-menu-item',
+      buttonText: 'Create new',
+      menuItemText: 'Create new',
+      requiredTexts: [
+        'Add to chart',
+        'Publish script'
+      ],
+      cdpDependencies: buildTradingViewCdpDependencies({
+        port: 9568,
+        axNodes: initialAxNodes,
+        webSocketOptions: {
+          getOpenDelayMs: ({ openCount }) => openCount === 1 ? 900 : 0
+        },
+        onCallFunctionOn: () => {
+          callFunctionOnCount += 1;
+          if (callFunctionOnCount === 1) {
+            return {
+              callFunctionOnValue: {
+                text: 'Add to chart',
+                title: 'Add to chart',
+                tagName: 'BUTTON',
+                rect: { x: 348, y: 62, width: 145, height: 34 }
+              }
+            };
+          }
+          if (callFunctionOnCount === 2) {
+            return {
+              callFunctionOnValue: {
+                text: 'Unnamed',
+                tagName: 'DIV',
+                role: 'button',
+                rect: { x: 75, y: 62, width: 220, height: 34 }
+              }
+            };
+          }
+          if (callFunctionOnCount === 3) {
+            return {
+              axNodes: menuAxNodes,
+              callFunctionOnValue: {
+                clicked: true,
+                text: 'Unnamed',
+                tagName: 'DIV',
+                rect: { x: 75, y: 62, width: 220, height: 34 }
+              }
+            };
+          }
+          return {
+            callFunctionOnValue: {
+              clicked: true,
+              text: 'Create new',
+              tagName: 'DIV',
+              rect: { x: 102, y: 204, width: 160, height: 32 }
+            }
+          };
+        }
+      })
+    });
+
+    assert.strictEqual(invokeResult?.success, true);
+    assert(Array.isArray(invokeResult?.cdpAttachAttempts), 'attach diagnostics should be returned');
+    assert.strictEqual(invokeResult.cdpAttachAttempts.length, 2);
+    assert.strictEqual(invokeResult.cdpAttachAttempts[0]?.success, false);
+    assert.strictEqual(invokeResult.cdpAttachAttempts[1]?.success, true);
+    assert(/timed out/i.test(String(invokeResult.cdpAttachAttempts[0]?.error || '')));
+  });
+
+  await test('invokeTradingViewRendererButtonWithCDP can succeed on a third Pine title-menu attach after two transient CDP open timeouts', async () => {
+    let callFunctionOnCount = 0;
+    const initialAxNodes = [
+      {
+        nodeId: '91001',
+        ignored: false,
+        role: { value: 'button' },
+        name: { value: 'Unnamed' },
+        backendDOMNodeId: 91001
+      },
+      {
+        nodeId: '91002',
+        ignored: false,
+        role: { value: 'button' },
+        name: { value: 'Add to chart' },
+        backendDOMNodeId: 91002
+      },
+      {
+        nodeId: '91003',
+        ignored: false,
+        role: { value: 'button' },
+        name: { value: 'Publish script' },
+        backendDOMNodeId: 91003
+      }
+    ];
+    const menuAxNodes = [
+      ...initialAxNodes,
+      {
+        nodeId: '92001',
+        ignored: false,
+        role: { value: 'menuitem' },
+        name: { value: 'Create new' },
+        backendDOMNodeId: 92001
+      }
+    ];
+
+    const invokeResult = await systemAutomation.invokeTradingViewRendererButtonWithCDP({
+      windowInfo: buildWindowInfo({
+        hwnd: 460836,
+        title: 'MN / Unnamed'
+      }),
+      resolveWindowState: false,
+      kind: 'pine-current-script-menu-item',
+      buttonText: 'Create new',
+      menuItemText: 'Create new',
+      requiredTexts: [
+        'Add to chart',
+        'Publish script'
+      ],
+      cdpDependencies: buildTradingViewCdpDependencies({
+        port: 9572,
+        axNodes: initialAxNodes,
+        webSocketOptions: {
+          getOpenDelayMs: ({ openCount }) => {
+            if (openCount === 1) return 900;
+            if (openCount === 2) return 1400;
+            return 0;
+          }
+        },
+        onCallFunctionOn: () => {
+          callFunctionOnCount += 1;
+          if (callFunctionOnCount === 1) {
+            return {
+              callFunctionOnValue: {
+                text: 'Add to chart',
+                title: 'Add to chart',
+                tagName: 'BUTTON',
+                rect: { x: 348, y: 62, width: 145, height: 34 }
+              }
+            };
+          }
+          if (callFunctionOnCount === 2) {
+            return {
+              callFunctionOnValue: {
+                text: 'Unnamed',
+                tagName: 'DIV',
+                role: 'button',
+                rect: { x: 75, y: 62, width: 220, height: 34 }
+              }
+            };
+          }
+          if (callFunctionOnCount === 3) {
+            return {
+              axNodes: menuAxNodes,
+              callFunctionOnValue: {
+                clicked: true,
+                text: 'Unnamed',
+                tagName: 'DIV',
+                rect: { x: 75, y: 62, width: 220, height: 34 }
+              }
+            };
+          }
+          return {
+            callFunctionOnValue: {
+              clicked: true,
+              text: 'Create new',
+              tagName: 'DIV',
+              rect: { x: 102, y: 204, width: 160, height: 32 }
+            }
+          };
+        }
+      })
+    });
+
+    assert.strictEqual(invokeResult?.success, true);
+    assert(Array.isArray(invokeResult?.cdpAttachAttempts), 'attach diagnostics should be returned');
+    assert.strictEqual(invokeResult.cdpAttachAttempts.length, 3);
+    assert.strictEqual(invokeResult.cdpAttachAttempts[0]?.success, false);
+    assert.strictEqual(invokeResult.cdpAttachAttempts[1]?.success, false);
+    assert.strictEqual(invokeResult.cdpAttachAttempts[2]?.success, true);
+    assert(/timed out/i.test(String(invokeResult.cdpAttachAttempts[1]?.error || '')));
+  });
+
   await test('invokeTradingViewRendererButtonWithCDP verifies that the first-save Cancel path actually clears the dialog', async () => {
     let axReadCount = 0;
     const initialAxNodes = [
@@ -1577,6 +2399,80 @@ async function main() {
     assert(axReadCount >= 2, 'AX tree should be read before and after the click');
   });
 
+  await test('invokeTradingViewRendererButtonWithCDP can click first-save Save even when companion dialog text is no longer exposed', async () => {
+    let axReadCount = 0;
+    const initialAxNodes = [
+      {
+        nodeId: '34500',
+        ignored: false,
+        role: { value: 'generic' },
+        name: { value: 'Untitled script Save' }
+      },
+      {
+        nodeId: '34510',
+        ignored: false,
+        role: { value: 'button' },
+        name: { value: 'Save' },
+        backendDOMNodeId: 34510
+      }
+    ];
+    const afterClickAxNodes = [
+      {
+        nodeId: '34600',
+        ignored: false,
+        role: { value: 'generic' },
+        name: { value: 'Pine Editor Add to chart Publish script' }
+      }
+    ];
+
+    const invokeResult = await systemAutomation.invokeTradingViewRendererButtonWithCDP({
+      windowInfo: buildWindowInfo({
+        hwnd: 460833,
+        title: 'MN / Untitled'
+      }),
+      resolveWindowState: false,
+      kind: 'pine-first-save-confirmation',
+      buttonText: 'Save',
+      requiredTexts: [
+        'Save script',
+        'New script name'
+      ],
+      cdpDependencies: buildTradingViewCdpDependencies({
+        port: 9560,
+        axNodes: initialAxNodes,
+        domResolveResult: {
+          object: {
+            objectId: 'mock-node-save-only'
+          }
+        },
+        onGetFullAXTree: () => {
+          axReadCount += 1;
+          return null;
+        },
+        onCallFunctionOn: ({ message }) => {
+          assert.strictEqual(String(message?.params?.objectId || ''), 'mock-node-save-only');
+          return {
+            axNodes: afterClickAxNodes,
+            callFunctionOnValue: {
+              clicked: true,
+              text: 'Save',
+              tagName: 'BUTTON'
+            }
+          };
+        }
+      })
+    });
+
+    assert.strictEqual(invokeResult?.success, true);
+    assert.strictEqual(invokeResult?.available, true);
+    assert.strictEqual(invokeResult?.reason, null);
+    assert.strictEqual(invokeResult?.clickResult?.clicked, true);
+    assert.deepStrictEqual(invokeResult?.matchedRequiredTexts, []);
+    assert.strictEqual(invokeResult?.effectProof?.success, true);
+    assert.strictEqual(invokeResult?.effectProof?.cleared, true);
+    assert(axReadCount >= 2, 'AX tree should be read before and after the click');
+  });
+
   await test('invokeTradingViewRendererButtonWithCDP captures a post-click Pine surface proof after replace confirmation clears', async () => {
     const initialAxNodes = [
       {
@@ -1732,6 +2628,113 @@ async function main() {
     assert.strictEqual(state.readCalls >= 1, true);
   });
 
+  await test('setTradingViewPineEditorContentWithCDP prefers the Monaco model-aware route when the editor handle is discoverable', async () => {
+    const starterScript = [
+      '//@version=6',
+      'indicator("My script")',
+      'plot(close)'
+    ].join('\n');
+    const expectedScript = [
+      '//@version=6',
+      'indicator("Liku Live Save Probe", overlay=false)',
+      'plot(close, title="Close")'
+    ].join('\n');
+    const { deps, state } = buildTradingViewPineEditorCdpMock({
+      initialText: starterScript,
+      monacoEditorAvailable: true
+    });
+
+    const result = await systemAutomation.setTradingViewPineEditorContentWithCDP({
+      windowInfo: buildWindowInfo({
+        hwnd: 460832,
+        title: 'MN / Unnamed'
+      }),
+      resolveWindowState: false,
+      text: expectedScript,
+      pinePreparedScriptName: 'Liku Live Save Probe',
+      cdpDependencies: deps
+    });
+
+    assert.strictEqual(result?.success, true);
+    assert.strictEqual(result?.method, 'ChromiumCDPMonacoExecuteEdits');
+    assert.strictEqual(state.monacoWriteCalls, 1);
+    assert.strictEqual(state.inputInsertCalls, 0);
+    assert.strictEqual(state.forceSetCalls, 0);
+    assert.strictEqual(result?.proof?.exactMatch, true);
+    assert.strictEqual(result?.renderedProof?.exactMatch, true);
+    assert.strictEqual(String(state.editorText || '').replace(/\r/g, ''), expectedScript);
+  });
+
+  await test('setTradingViewPineEditorContentWithCDP verifies Monaco writes from model readback even when the textarea shim stays truncated', async () => {
+    const starterScript = [
+      '//@version=6',
+      'indicator("My script")',
+      'plot(close)'
+    ].join('\n');
+    const expectedScript = [
+      '//@version=6',
+      'indicator("ATR VWAP MACD RSI Confidence", overlay=false, max_labels_count=100)',
+      '',
+      'atrLen = input.int(14, "ATR Length", minval=1)',
+      'rsiLen = input.int(14, "RSI Length", minval=1)',
+      'macdFast = input.int(12, "MACD Fast", minval=1)',
+      'macdSlow = input.int(26, "MACD Slow", minval=1)',
+      'macdSignal = input.int(9, "MACD Signal", minval=1)',
+      'showSignals = input.bool(true, "Show Confidence Signals")',
+      'plot(close)'
+    ].join('\n');
+    const truncatedTextarea = expectedScript.slice(0, 180);
+    const { deps, state } = buildTradingViewPineEditorCdpMock({
+      initialText: starterScript,
+      monacoEditorAvailable: true,
+      onRead: () => ({
+        payloadOverrides: {
+          textarea: {
+            tagName: 'TEXTAREA',
+            className: 'inputarea monaco-mouse-cursor-text',
+            ariaLabel: 'Editor content;Press Alt+F1 for Accessibility Options.',
+            value: truncatedTextarea,
+            valueLength: truncatedTextarea.length,
+            selectionStart: 0,
+            selectionEnd: truncatedTextarea.length,
+            visible: true,
+            focused: true,
+            selectedAll: false,
+            rect: { x: 1100, y: 490, width: 780, height: 320 },
+            score: 999
+          },
+          rendered: {
+            text: 'ATR VWAP MACD RSI Confidence',
+            lineCount: 1,
+            source: 'view-lines',
+            visible: true,
+            score: 820
+          }
+        }
+      })
+    });
+
+    const result = await systemAutomation.setTradingViewPineEditorContentWithCDP({
+      windowInfo: buildWindowInfo({
+        hwnd: 460832,
+        title: 'MN / Unnamed'
+      }),
+      resolveWindowState: false,
+      text: expectedScript,
+      pinePreparedScriptName: 'ATR VWAP MACD RSI Confidence',
+      cdpDependencies: deps
+    });
+
+    assert.strictEqual(result?.success, true);
+    assert.strictEqual(result?.method, 'ChromiumCDPMonacoExecuteEdits');
+    assert.strictEqual(state.monacoWriteCalls, 1);
+    assert.strictEqual(state.inputInsertCalls, 0);
+    assert.strictEqual(result?.proof?.exactMatch, true);
+    assert.strictEqual(result?.renderedProof?.expectedTitleVisible, true);
+    assert.strictEqual(String(result?.text || '').replace(/\r/g, ''), expectedScript);
+    assert.strictEqual(String(state.editorText || '').replace(/\r/g, ''), expectedScript);
+  });
+
   await test('setTradingViewPineEditorContentWithCDP prefers Input.insertText when renderer verification succeeds', async () => {
     const starterScript = [
       '//@version=6',
@@ -1806,6 +2809,122 @@ async function main() {
     assert.strictEqual(String(state.editorText || '').replace(/\r/g, ''), expectedScript);
   });
 
+  await test('setTradingViewPineEditorContentWithCDP retries CDP attach after an initial open timeout', async () => {
+    const starterScript = [
+      '//@version=6',
+      'indicator("My script")',
+      'plot(close)'
+    ].join('\n');
+    const expectedScript = [
+      '//@version=6',
+      'indicator("Liku Live Save Probe", overlay=false)',
+      'plot(close, title="Close")'
+    ].join('\n');
+    const { deps, state } = buildTradingViewPineEditorCdpMock({
+      initialText: starterScript,
+      webSocketOptions: {
+        getOpenDelayMs: ({ openCount }) => openCount === 1 ? 1600 : 0
+      }
+    });
+
+    const result = await systemAutomation.setTradingViewPineEditorContentWithCDP({
+      windowInfo: buildWindowInfo({
+        hwnd: 460832,
+        title: 'MN / Unnamed'
+      }),
+      resolveWindowState: false,
+      text: expectedScript,
+      pinePreparedScriptName: 'Liku Live Save Probe',
+      cdpDependencies: deps
+    });
+
+    assert.strictEqual(result?.success, true);
+    assert.strictEqual(result?.method, 'ChromiumCDPInputInsertText');
+    assert.strictEqual(state.inputInsertCalls, 1);
+    assert(Array.isArray(result?.cdpAttachAttempts), 'attach diagnostics should be returned');
+    assert.strictEqual(result.cdpAttachAttempts.length, 2);
+    assert.strictEqual(result.cdpAttachAttempts[0]?.success, false);
+    assert.strictEqual(result.cdpAttachAttempts[1]?.success, true);
+    assert(/timed out/i.test(String(result.cdpAttachAttempts[0]?.error || '')));
+  });
+
+  await test('setTradingViewPineEditorContentWithCDP uses Monaco chunked input when a one-shot insert truncates a large script', async () => {
+    const starterScript = [
+      '//@version=6',
+      'indicator("My script")',
+      'plot(close)'
+    ].join('\n');
+    const expectedScript = [
+      '//@version=6',
+      'indicator("ATR VWAP MACD RSI Confidence", overlay=false, max_labels_count=100)',
+      '',
+      'atrLen = input.int(14, "ATR Length", minval=1)',
+      'rsiLen = input.int(14, "RSI Length", minval=1)',
+      'macdFast = input.int(12, "MACD Fast", minval=1)',
+      'macdSlow = input.int(26, "MACD Slow", minval=1)',
+      'macdSignal = input.int(9, "MACD Signal", minval=1)',
+      'showSignals = input.bool(true, "Show Confidence Signals")',
+      '',
+      'sessionVwap = ta.vwap(hlc3)',
+      'atr = ta.atr(atrLen)',
+      'rsiValue = ta.rsi(close, rsiLen)',
+      '[macdLine, signalLine, histLine] = ta.macd(close, macdFast, macdSlow, macdSignal)',
+      'plot(close)'
+    ].join('\n');
+    let selectionAll = false;
+    const { deps, state } = buildTradingViewPineEditorCdpMock({
+      initialText: starterScript,
+      onFocus: () => {
+        selectionAll = true;
+        return null;
+      },
+      onInputInsertText: ({ text, state: currentState }) => {
+        if (text.length > 400) {
+          selectionAll = false;
+          return {
+            editorText: String(currentState.editorText || '').slice(-200),
+            renderedText: String(currentState.renderedText || '').slice(-200)
+          };
+        }
+
+        const nextValue = selectionAll
+          ? text
+          : `${String(currentState.editorText || '')}${text}`;
+        selectionAll = false;
+        return {
+          editorText: nextValue,
+          renderedText: nextValue
+        };
+      },
+      onForceSet: ({ state: currentState }) => ({
+        editorText: String(currentState.editorText || ''),
+        renderedText: String(currentState.renderedText || '')
+      })
+    });
+
+    const result = await systemAutomation.setTradingViewPineEditorContentWithCDP({
+      windowInfo: buildWindowInfo({
+        hwnd: 460832,
+        title: 'MN / Unnamed'
+      }),
+      resolveWindowState: false,
+      text: expectedScript,
+      pinePreparedScriptName: 'ATR VWAP MACD RSI Confidence',
+      cdpDependencies: deps
+    });
+
+    assert.strictEqual(result?.success, true);
+    assert.strictEqual(result?.method, 'ChromiumCDPInputInsertTextChunks');
+    assert.strictEqual(state.inputInsertCalls > 1, true, 'chunked strategy should issue multiple Input.insertText calls');
+    const chunkAttempt = Array.isArray(result?.strategyAttempts)
+      ? result.strategyAttempts.find((attempt) => attempt?.strategy === 'monaco-input-chunks')
+      : null;
+    assert(chunkAttempt, 'chunked Monaco input diagnostics should be recorded');
+    assert.strictEqual(chunkAttempt?.success, true);
+    assert.strictEqual(result?.proof?.exactMatch, true);
+    assert.strictEqual(String(state.editorText || '').replace(/\r/g, ''), expectedScript);
+  });
+
   await test('executeAction prefers the Pine authoring CDP route before keyboard paste fallback', async () => {
     const starterScript = [
       '//@version=6',
@@ -1852,6 +2971,13 @@ async function main() {
       assert.strictEqual(result?.method, 'ChromiumCDPInputInsertText');
       assert.strictEqual(result?.pineAuthoringCdpWrite?.success, true);
       assert.strictEqual(result?.pineAuthoringPasteProof?.proof?.exactMatch, true);
+      assert.strictEqual(result?.pineAuthoringWriteTelemetry?.primarySucceeded, true);
+      assert.strictEqual(result?.pineAuthoringWriteTelemetry?.fallbackUsed, false);
+      assert.strictEqual(result?.pineAuthoringWriteTelemetry?.selectedMethod, 'ChromiumCDPInputInsertText');
+      assert.strictEqual(result?.pineAuthoringWriteTelemetry?.primaryStrategy, 'input-insert-text');
+      assert.strictEqual(result?.pineAuthoringWriteTelemetry?.primaryAttemptSummary, 'input-insert-text:ok');
+      assert(Array.isArray(result?.pineAuthoringWriteTelemetry?.primaryAttempts));
+      assert(result.pineAuthoringWriteTelemetry.primaryAttempts.some((attempt) => attempt?.strategy === 'monaco-editor-model'));
       assert(/ChromiumCDPInputInsertText/.test(String(result?.message || '')));
     });
   });
@@ -2110,6 +3236,478 @@ async function main() {
     }
   });
 
+  await test('executeAction GET_TEXT save-status accepts the Pine header title button as saved-title proof', async () => {
+    const originalGetElementText = uiAutomation.getElementText;
+    const originalFindElement = uiAutomation.findElement;
+    let callFunctionOnCount = 0;
+
+    uiAutomation.getElementText = async () => ({
+      success: false,
+      error: 'Element not found'
+    });
+    uiAutomation.findElement = async () => ({
+      success: false,
+      error: 'Element not found'
+    });
+
+    try {
+      await withAutomationHost({
+        getForegroundWindowInfo: async () => buildWindowInfo({
+          hwnd: 460832,
+          title: 'MN / Unnamed'
+        }),
+        findElementsByWindow: async () => ({
+          elements: [],
+          count: 0,
+          stats: { visited: 8, timedOut: false }
+        })
+      }, async () => {
+        const result = await systemAutomation.executeAction({
+          type: 'get_text',
+          text: 'Pine Editor',
+          pineEvidenceMode: 'save-status',
+          pineExpectedScriptName: 'Liku Live Save Probe',
+          windowHandle: 460832,
+          cdpDependencies: buildTradingViewCdpDependencies({
+            port: 9569,
+            domPayload: {
+              matched: true,
+              anchorText: 'All changes saved',
+              signals: [
+                {
+                  text: 'All changes saved',
+                  observedText: 'All changes saved',
+                  source: 'dom-node',
+                  ariaLabel: 'All changes saved',
+                  category: 'save-confirmed'
+                },
+                {
+                  text: 'Add to chart',
+                  observedText: 'Add to chart',
+                  source: 'dom-node',
+                  category: 'surface'
+                },
+                {
+                  text: 'Publish script',
+                  observedText: 'Publish script',
+                  source: 'dom-node',
+                  category: 'surface'
+                }
+              ],
+              scannedNodes: 24,
+              usedBodyInnerText: false
+            },
+            axNodes: [
+              {
+                nodeId: '53001',
+                ignored: false,
+                role: { value: 'button' },
+                name: { value: 'Liku Live Save Probe' },
+                backendDOMNodeId: 53001
+              },
+              {
+                nodeId: '53002',
+                ignored: false,
+                role: { value: 'button' },
+                name: { value: 'Add to chart' },
+                backendDOMNodeId: 53002
+              },
+              {
+                nodeId: '53003',
+                ignored: false,
+                role: { value: 'button' },
+                name: { value: 'Publish script' },
+                backendDOMNodeId: 53003
+              }
+            ],
+            onCallFunctionOn: () => {
+              callFunctionOnCount += 1;
+              if (callFunctionOnCount === 1) {
+                return {
+                  callFunctionOnValue: {
+                    text: 'Add to chart',
+                    title: 'Add to chart',
+                    tagName: 'BUTTON',
+                    rect: { x: 348, y: 62, width: 145, height: 34 }
+                  }
+                };
+              }
+              return {
+                callFunctionOnValue: {
+                  text: 'Liku Live Save Probe',
+                  tagName: 'DIV',
+                  role: 'button',
+                  rect: { x: 75, y: 62, width: 220, height: 34 }
+                }
+              };
+            }
+          })
+        });
+
+        assert.strictEqual(result?.success, true);
+        assert.strictEqual(result?.pineStructuredSummary?.expectedScriptNameProofVisible, true);
+        assert.strictEqual(result?.pineStructuredSummary?.lifecycleState, 'saved-state-verified');
+      });
+    } finally {
+      uiAutomation.getElementText = originalGetElementText;
+      uiAutomation.findElement = originalFindElement;
+    }
+  });
+
+  await test('executeAction GET_TEXT treats generic saved Pine chrome as starter-safe only when the verified Create new inspection explicitly allows it', async () => {
+    const originalGetElementText = uiAutomation.getElementText;
+    const originalFindElement = uiAutomation.findElement;
+
+    uiAutomation.getElementText = async () => ({
+      success: false,
+      error: 'Element not found'
+    });
+    uiAutomation.findElement = async () => ({
+      success: false,
+      error: 'Element not found'
+    });
+
+    try {
+      await withAutomationHost({
+        getForegroundWindowInfo: async () => buildWindowInfo({
+          hwnd: 460832,
+          title: 'MN / Unnamed'
+        }),
+        findElementsByWindow: async () => ({
+          elements: [],
+          count: 0,
+          stats: { visited: 8, timedOut: false }
+        })
+      }, async () => {
+        const result = await systemAutomation.executeAction({
+          type: 'get_text',
+          text: 'Pine Editor',
+          pineEvidenceMode: 'safe-authoring-inspect',
+          acceptGenericSavedSurfaceAsStarter: true,
+          cdpDependencies: buildTradingViewCdpDependencies({
+            port: 9568,
+            domPayload: {
+              matched: true,
+              anchorText: 'All changes saved',
+              signals: [
+                {
+                  text: 'All changes saved',
+                  observedText: 'All changes saved',
+                  source: 'dom-node',
+                  ariaLabel: 'All changes saved',
+                  category: 'save-confirmed'
+                },
+                {
+                  text: 'Add to chart',
+                  observedText: 'Add to chart',
+                  source: 'dom-node',
+                  category: 'surface'
+                },
+                {
+                  text: 'Publish script',
+                  observedText: 'Publish script',
+                  source: 'dom-node',
+                  category: 'surface'
+                }
+              ],
+              scannedNodes: 24,
+              usedBodyInnerText: false
+            }
+          })
+        });
+
+        assert.strictEqual(result?.success, true);
+        assert(/ChromiumCDP/i.test(String(result?.method || '')));
+        assert.strictEqual(result?.pineStructuredSummary?.evidenceMode, 'safe-authoring-inspect');
+        assert.strictEqual(result?.pineStructuredSummary?.editorVisibleState, 'empty-or-starter');
+        assert(result?.pineStructuredSummary?.visibleSignals?.includes('fresh-create-generic-surface'));
+      });
+    } finally {
+      uiAutomation.getElementText = originalGetElementText;
+      uiAutomation.findElement = originalFindElement;
+    }
+  });
+
+  await test('executeAction GET_TEXT rejects generic saved Pine chrome as starter-safe when the header title button still exposes an existing script title', async () => {
+    const originalGetElementText = uiAutomation.getElementText;
+    const originalFindElement = uiAutomation.findElement;
+    let callFunctionOnCount = 0;
+
+    uiAutomation.getElementText = async () => ({
+      success: false,
+      error: 'Element not found'
+    });
+    uiAutomation.findElement = async () => ({
+      success: false,
+      error: 'Element not found'
+    });
+
+    try {
+      await withAutomationHost({
+        getForegroundWindowInfo: async () => buildWindowInfo({
+          hwnd: 460832,
+          title: 'MN / Unnamed'
+        }),
+        findElementsByWindow: async () => ({
+          elements: [],
+          count: 0,
+          stats: { visited: 8, timedOut: false }
+        })
+      }, async () => {
+        const result = await systemAutomation.executeAction({
+          type: 'get_text',
+          text: 'Pine Editor',
+          pineEvidenceMode: 'safe-authoring-inspect',
+          acceptGenericSavedSurfaceAsStarter: true,
+          windowHandle: 460832,
+          cdpDependencies: buildTradingViewCdpDependencies({
+            port: 9570,
+            domPayload: {
+              matched: true,
+              anchorText: 'All changes saved',
+              signals: [
+                {
+                  text: 'All changes saved',
+                  observedText: 'All changes saved',
+                  source: 'dom-node',
+                  ariaLabel: 'All changes saved',
+                  category: 'save-confirmed'
+                },
+                {
+                  text: 'Add to chart',
+                  observedText: 'Add to chart',
+                  source: 'dom-node',
+                  category: 'surface'
+                },
+                {
+                  text: 'Publish script',
+                  observedText: 'Publish script',
+                  source: 'dom-node',
+                  category: 'surface'
+                }
+              ],
+              scannedNodes: 24,
+              usedBodyInnerText: false
+            },
+            axNodes: [
+              {
+                nodeId: '54001',
+                ignored: false,
+                role: { value: 'button' },
+                name: { value: 'Add to chart' },
+                backendDOMNodeId: 54001
+              },
+              {
+                nodeId: '54002',
+                ignored: false,
+                role: { value: 'button' },
+                name: { value: 'Liku Live Save Probe' },
+                backendDOMNodeId: 54002
+              }
+            ],
+            onCallFunctionOn: () => {
+              callFunctionOnCount += 1;
+              if (callFunctionOnCount === 1) {
+                return {
+                  callFunctionOnValue: {
+                    text: 'Add to chart',
+                    title: 'Add to chart',
+                    tagName: 'BUTTON',
+                    rect: { x: 348, y: 62, width: 145, height: 34 }
+                  }
+                };
+              }
+              return {
+                callFunctionOnValue: {
+                  text: 'Liku Live Save Probe',
+                  tagName: 'DIV',
+                  role: 'button',
+                  rect: { x: 75, y: 62, width: 220, height: 34 }
+                }
+              };
+            }
+          })
+        });
+
+        assert.strictEqual(result?.success, true);
+        assert(/ChromiumCDP/i.test(String(result?.method || '')));
+        assert.strictEqual(result?.pineStructuredSummary?.evidenceMode, 'safe-authoring-inspect');
+        assert.strictEqual(result?.pineStructuredSummary?.editorVisibleState, 'existing-script-visible');
+        assert.strictEqual(
+          result?.pineStructuredSummary?.visibleSignals?.includes('fresh-create-generic-surface'),
+          false,
+          'a visible stale script title must block starter-safe generic surface acceptance'
+        );
+      });
+    } finally {
+      uiAutomation.getElementText = originalGetElementText;
+      uiAutomation.findElement = originalFindElement;
+    }
+  });
+
+  await test('executeAction GET_TEXT escalates ambiguous Pine chrome to renderer editor readback before classifying safe-authoring state', async () => {
+    const originalGetElementText = uiAutomation.getElementText;
+    const originalFindElement = uiAutomation.findElement;
+    const ambiguousProbe = {
+      active: true,
+      matchedBy: 'chromium-cdp-dom',
+      anchorText: 'Add to chart',
+      visibleAnchors: ['Add to chart', 'Publish script'],
+      visibleAnchorEntries: [
+        {
+          text: 'Add to chart',
+          observedText: 'Add to chart',
+          category: 'surface',
+          source: 'dom-node'
+        },
+        {
+          text: 'Publish script',
+          observedText: 'Publish script',
+          category: 'surface',
+          source: 'dom-node'
+        }
+      ],
+      rendererProof: {
+        available: true,
+        active: true,
+        matchedBy: 'chromium-cdp-dom',
+        anchorText: 'Add to chart',
+        signals: [
+          {
+            text: 'Add to chart',
+            observedText: 'Add to chart',
+            category: 'surface',
+            source: 'dom-node'
+          },
+          {
+            text: 'Publish script',
+            observedText: 'Publish script',
+            category: 'surface',
+            source: 'dom-node'
+          }
+        ]
+      }
+    };
+
+    uiAutomation.getElementText = async () => ({
+      success: false,
+      error: 'Element not found'
+    });
+    uiAutomation.findElement = async () => ({
+      success: false,
+      error: 'Element not found'
+    });
+
+    try {
+      const pineEditorCdp = buildTradingViewPineEditorCdpMock({
+        port: 9571,
+        initialText: '//@version=6\nindicator("Liku Existing Script", overlay=false)\nplot(close, title="Close")',
+        initialRenderedText: '//@version=6\nindicator("Liku Existing Script", overlay=false)\nplot(close, title="Close")'
+      });
+
+      await withAutomationHost({
+        getForegroundWindowInfo: async () => buildWindowInfo({
+          hwnd: 460832,
+          title: 'MN / Unnamed'
+        }),
+        findElementsByWindow: async () => ({
+          elements: [],
+          count: 0,
+          stats: { visited: 8, timedOut: false }
+        })
+      }, async () => {
+        const result = await systemAutomation.executeAction({
+          type: 'get_text',
+          text: 'Pine Editor',
+          pineEvidenceMode: 'safe-authoring-inspect',
+          acceptGenericSavedSurfaceAsStarter: true,
+          pineEditorSurfaceProbe: ambiguousProbe,
+          windowHandle: 460832,
+          cdpDependencies: pineEditorCdp.deps
+        });
+
+        assert.strictEqual(result?.success, true);
+        assert(/ChromiumCDP/i.test(String(result?.method || '')));
+        assert(String(result?.text || '').includes('indicator("Liku Existing Script"'), 'renderer editor readback should surface the actual Pine buffer');
+        assert.strictEqual(result?.pineStructuredSummary?.editorVisibleState, 'existing-script-visible');
+      });
+    } finally {
+      uiAutomation.getElementText = originalGetElementText;
+      uiAutomation.findElement = originalFindElement;
+    }
+  });
+
+  await test('executeAction CLICK_ELEMENT reuses runtime-level CDP context for TradingView Pine opener bypass proof', async () => {
+    await withAutomationHost({
+      getForegroundWindowInfo: async () => buildWindowInfo({
+        hwnd: 460832,
+        title: 'MN / Unnamed'
+      }),
+      getWindowInfoByHandle: async (handle) => buildWindowInfo({
+        hwnd: Number(handle || 460832) || 460832,
+        title: 'MN / Unnamed'
+      }),
+      findElementsByWindow: async () => ({
+        elements: [],
+        count: 0,
+        stats: { visited: 8, timedOut: false }
+      })
+    }, async () => {
+      const result = await systemAutomation.executeAction({
+        type: 'click_element',
+        text: 'Pine',
+        controlType: 'Button',
+        exact: true,
+        foregroundOnly: true,
+        allowCoordinateFallback: false,
+        windowHandle: 460832,
+        tradingViewShortcut: {
+          id: 'open-pine-editor',
+          route: 'semantic-icon'
+        },
+        searchSurfaceContract: {
+          id: 'open-pine-editor',
+          route: 'semantic-icon'
+        },
+        verify: {
+          kind: 'editor-active',
+          target: 'pine-editor'
+        }
+      }, {
+        cdpDependencies: buildTradingViewCdpDependencies({
+          port: 9572,
+          domPayload: {
+            matched: true,
+            anchorText: 'Add to chart',
+            signals: [
+              {
+                text: 'Add to chart',
+                observedText: 'Add to chart',
+                source: 'dom-node',
+                category: 'surface'
+              },
+              {
+                text: 'Publish script',
+                observedText: 'Publish script',
+                source: 'dom-node',
+                category: 'surface'
+              }
+            ],
+            scannedNodes: 24,
+            usedBodyInnerText: false
+          }
+        })
+      });
+
+      assert.strictEqual(result?.success, true);
+      assert.strictEqual(result?.skipped, true);
+      assert.strictEqual(result?.skippedReason, 'pine-editor-already-active');
+      assert.strictEqual(result?.pineEditorSurfaceProbe?.active, true);
+      assert.strictEqual(result?.pineEditorSurfaceProbe?.matchedBy, 'chromium-cdp-dom');
+      assert(/already active/i.test(String(result?.message || '')));
+    });
+  });
+
   await test('probeTradingViewPineEditorSurface promotes a bounded CDP DOM proof before running slower UIA scans', async () => {
     const probe = await systemAutomation.probeTradingViewPineEditorSurface({
       windowHandle: 460832,
@@ -2135,6 +3733,55 @@ async function main() {
     assert.strictEqual(probe?.rendererProof?.available, true);
     assert.strictEqual(probe?.rendererProof?.matchedBy, 'chromium-cdp-dom');
     assert.deepStrictEqual(probe?.scanAttempts, []);
+  });
+
+  await test('probeTradingViewPineEditorSurface rejects save-confirmed-only CDP proof so chart chrome does not impersonate Pine', async () => {
+    await withAutomationHost({
+      getWindowInfoByHandle: async (hwnd) => buildWindowInfo({
+        hwnd,
+        title: 'INTC / Unnamed',
+        bounds: { x: 911, y: 8, width: 1016, height: 956 }
+      }),
+      getForegroundWindowInfo: async () => buildWindowInfo({
+        hwnd: 460832,
+        title: 'INTC / Unnamed',
+        bounds: { x: 911, y: 8, width: 1016, height: 956 }
+      }),
+      findElementsByWindow: async () => ({
+        elements: [],
+        count: 0,
+        stats: { visited: 12, timedOut: false }
+      })
+    }, async () => {
+      const probe = await systemAutomation.probeTradingViewPineEditorSurface({
+        windowHandle: 460832,
+        timeout: 1200,
+        cdpDependencies: buildTradingViewCdpDependencies({
+          domPayload: {
+            matched: true,
+            anchorText: 'All changes saved',
+            signals: [{
+              text: 'All changes saved',
+              observedText: 'All changes saved',
+              source: 'dom-node',
+              category: 'save-confirmed'
+            }],
+            scannedNodes: 36,
+            usedBodyInnerText: false
+          }
+        })
+      });
+
+      assert.strictEqual(probe?.active, false, 'generic chart save chrome must not prove Pine by itself');
+      assert.strictEqual(probe?.reason, 'no-visible-pine-anchor');
+      assert.strictEqual(probe?.rendererProof?.available, true);
+      assert.strictEqual(probe?.rendererProof?.active, false);
+      assert.strictEqual(probe?.rendererProof?.reason, 'save-confirmed-only-insufficient');
+      assert.deepStrictEqual(
+        probe?.rendererProof?.signals?.map((entry) => entry?.text),
+        ['All changes saved']
+      );
+    });
   });
 
   await test('probeTradingViewPineEditorSurface keeps scanning for the expected saved title when CDP only proves a generic Pine surface anchor', async () => {

@@ -13,6 +13,10 @@ const {
   buildExecutionContextEnvelope,
   isTradingViewPineContextEligible
 } = require('../ai-service/execution-context');
+const {
+  sanitizePineScriptName,
+  synthesizePineScriptTitleContract
+} = require('./pine-title-synthesis');
 const PINE_SURFACE_ALIASES = Object.freeze({
   'pine-logs': ['pine logs', 'compiler logs'],
   'pine-profiler': ['pine profiler', 'performance profiler'],
@@ -224,39 +228,34 @@ function isPineSaveStep(action) {
     || /\bsave\b.{0,20}\bscript\b/i.test(combined);
 }
 
-function extractPineDeclarationTitle(text = '') {
-  const match = String(text || '').match(/\b(?:indicator|strategy|library)\s*\(\s*["'`](.*?)["'`]/i);
-  return String(match?.[1] || '').trim();
-}
-
-function sanitizePineScriptName(value = '') {
-  return String(value || '')
-    .replace(/\s+/g, ' ')
-    .replace(/[<>:"/\\|?*\u0000-\u001f]+/g, ' ')
-    .trim()
-    .slice(0, 120);
-}
-
 function inferSafePineScriptName(actions = [], raw = '') {
   const source = Array.isArray(actions) ? actions : [];
   for (const action of source) {
-    const canonicalTitle = sanitizePineScriptName(action?.pineCanonicalState?.scriptTitle || '');
-    if (canonicalTitle) return canonicalTitle;
-    const type = getNormalizedActionType(action);
-    if (type === 'type') {
-      const title = sanitizePineScriptName(extractPineDeclarationTitle(sanitizePineScriptText(action.text)));
-      if (title) return title;
-    }
-    if (type === 'run_command') {
-      const title = sanitizePineScriptName(extractPineDeclarationTitle(sanitizePineScriptText(action.command)));
-      if (title) return title;
+    const explicitPreparedName = sanitizePineScriptName(
+      action?.pinePreparedScriptName || action?.pineExpectedScriptName || action?.scriptName || ''
+    );
+    if (explicitPreparedName) {
+      return explicitPreparedName;
     }
   }
 
-  const messageTitle = sanitizePineScriptName(String(raw || '').match(/\b(?:called|named)\s+["'`](.*?)["'`]/i)?.[1] || '');
-  if (messageTitle) return messageTitle;
+  const canonicalState = extractPineCanonicalState(actions);
+  const preparedScriptText = extractPreparedPineScriptText(actions);
+  const titleContract = synthesizePineScriptTitleContract({
+    userMessage: raw,
+    source: preparedScriptText,
+    canonicalTitle: canonicalState?.scriptTitle || ''
+  });
+  if (titleContract?.title) {
+    return titleContract.title;
+  }
 
-  return 'Liku Pine Script';
+  for (const action of source) {
+    const canonicalTitle = sanitizePineScriptName(action?.pineCanonicalState?.scriptTitle || '');
+    if (canonicalTitle) return canonicalTitle;
+  }
+
+  return titleContract?.title || 'Liku Pine Script';
 }
 
 function normalizePreparedPineScriptText(value = '') {
@@ -639,11 +638,34 @@ function buildTradingViewFirstSaveDialogCancelAction(reason = 'Dismiss the exact
   };
 }
 
+function buildTradingViewPineCreateNewAction(reason = 'Open the current Pine script menu and choose Create new > Indicator before inserting the prepared script') {
+  return {
+    type: 'click_element',
+    text: 'Create new',
+    controlType: 'MenuItem',
+    exact: true,
+    foregroundOnly: true,
+    allowCoordinateFallback: false,
+    tradingViewRendererInvoke: {
+      kind: 'pine-current-script-menu-item',
+      buttonText: 'Create new',
+      menuItemText: 'Create new',
+      submenuItemText: 'Indicator',
+      requiredTexts: [
+        'Add to chart',
+        'Publish script'
+      ]
+    },
+    reason
+  };
+}
+
 function buildSafePineAuthoringInspectAction({
   reason = 'Verify that a fresh Pine script surface is active before inserting the prepared script',
   continueOnPineEditorState = '',
   continueActions = [],
   continueActionsByPineEditorState = null,
+  acceptGenericSavedSurfaceAsStarter = false,
   pineStateMismatchReasons = null,
   includeConfirmationRecovery = false,
   disabledPineEditorRecoveryStates = [],
@@ -661,6 +683,9 @@ function buildSafePineAuthoringInspectAction({
     pineEvidenceMode: 'safe-authoring-inspect',
     haltOnPineEditorStateMismatch: true
   };
+  if (acceptGenericSavedSurfaceAsStarter === true) {
+    inspectAction.acceptGenericSavedSurfaceAsStarter = true;
+  }
 
   if (continueOnPineEditorState) {
     inspectAction.continueOnPineEditorState = continueOnPineEditorState;
@@ -1013,20 +1038,19 @@ function buildSafePineAuthoringContinuationSteps(actions = [], intent = {}, raw 
   }
 
   return [
-    ...(buildTradingViewShortcutRoute('new-pine-indicator', {
-      reason: 'Create a fresh Pine indicator before inserting the prepared script'
-    }) || []),
+    buildTradingViewPineCreateNewAction(),
     { type: 'wait', ms: 220 },
     buildSafePineAuthoringInspectAction({
-      reason: 'Verify that a fresh Pine script surface is active before inserting the prepared script',
+      reason: 'Verify that the Pine Create new route exposed a fresh starter surface before inserting the prepared script',
       continueOnPineEditorState: 'empty-or-starter',
+      acceptGenericSavedSurfaceAsStarter: true,
       continueActions: saveFollowUpActions,
       includeConfirmationRecovery: true,
       pineStateMismatchReasons: {
         'confirmation-blocking': 'TradingView is showing an unsaved-changes confirmation modal; resolve the modal before inserting the prepared script.',
         'replace-confirmation-blocking': 'TradingView is showing a replace-script confirmation modal from an earlier save flow; resolve it before inserting the prepared script.',
         'save-required-blocking': 'TradingView is already showing a Pine save-name dialog from an earlier save flow; resolve it before inserting the prepared script.',
-        'existing-script-visible': 'Creating a fresh Pine indicator did not yield a clean starter script; stop rather than overwrite visible script content.',
+        'existing-script-visible': 'The Pine Create new route did not yield a clean starter script; stop rather than overwrite visible script content.',
         'unknown-visible-state': 'The fresh Pine indicator state is ambiguous; inspect further before inserting the script.',
         '': 'The fresh Pine indicator state is ambiguous; inspect further before inserting the script.'
       }
@@ -1243,7 +1267,10 @@ function inferPineAuthoringMode(raw = '') {
 
   const mentionsPineArtifact = /\bpine\b/.test(normalized)
     && /\b(script|indicator|strategy|study)\b/.test(normalized);
-  const mentionsAuthoringIntent = /\b(write|create|generate|build|draft|make)\b/.test(normalized) && mentionsPineArtifact;
+  const mentionsTradingViewAuthoringArtifact = /\btradingview\b/.test(normalized)
+    && /\b(indicator|strategy|library)\b/.test(normalized);
+  const mentionsAuthoringIntent = /\b(write|create|generate|build|draft|make)\b/.test(normalized)
+    && (mentionsPineArtifact || mentionsTradingViewAuthoringArtifact);
   if (!mentionsAuthoringIntent && !explicitOverwriteIntent) return null;
 
   return explicitOverwriteIntent ? 'explicit-overwrite' : 'safe-new-script';
@@ -1426,6 +1453,13 @@ function inferPineSurfaceTarget(raw = '') {
     return { target: 'pine-version-history', kind: 'panel-visible' };
   }
   if (messageMentionsPineSurface(normalized, 'pine-editor') || /\bpine editor\b|\bpine\b|\bscript\b|\bscripts\b/.test(normalized)) {
+    return { target: 'pine-editor', kind: 'panel-visible' };
+  }
+  if (
+    /\btradingview\b/.test(normalized)
+    && /\b(write|create|generate|build|draft|make)\b/.test(normalized)
+    && /\b(indicator|strategy|library)\b/.test(normalized)
+  ) {
     return { target: 'pine-editor', kind: 'panel-visible' };
   }
 

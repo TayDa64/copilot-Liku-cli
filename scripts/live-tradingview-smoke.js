@@ -5,6 +5,7 @@ const path = require('path');
 
 const aiService = require(path.join(__dirname, '..', 'src', 'main', 'ai-service.js'));
 const { getUIWatcher } = require(path.join(__dirname, '..', 'src', 'main', 'ui-watcher.js'));
+const { shutdownSharedUIAHost } = require(path.join(__dirname, '..', 'src', 'main', 'ui-automation'));
 const windowManager = require(path.join(__dirname, '..', 'src', 'main', 'ui-automation', 'window', 'manager.js'));
 const { buildVerifyTargetHintFromAppName } = require(path.join(__dirname, '..', 'src', 'main', 'tradingview', 'app-profile.js'));
 const {
@@ -12,14 +13,34 @@ const {
   inferTradingViewPineIntent
 } = require(path.join(__dirname, '..', 'src', 'main', 'tradingview', 'pine-workflows.js'));
 const {
+  synthesizePineScriptTitleContract
+} = require(path.join(__dirname, '..', 'src', 'main', 'tradingview', 'pine-title-synthesis.js'));
+const {
   buildTradingViewSymbolWorkflowActions,
   buildTradingViewTimeframeWorkflowActions
 } = require(path.join(__dirname, '..', 'src', 'main', 'tradingview', 'chart-verification.js'));
+const {
+  writeFailureArtifactBundle
+} = require(path.join(__dirname, 'lib', 'failure-artifacts.js'));
 
 const DEFAULT_ARTIFACT_DIR = path.join(__dirname, '..', 'artifacts', 'live-validation');
 const DEFAULT_POLL_INTERVAL_MS = 250;
 const DEFAULT_PINE_CREATE_SAVE_NAME = 'Liku Live Save Probe';
 const DEFAULT_PINE_CREATE_SAVE_PROMPT = `TradingView is already open. Create a new Pine script called "${DEFAULT_PINE_CREATE_SAVE_NAME}", save the script, and report the visible save status. Do not add it to the chart.`;
+const PROFILED_SYSTEM_AUTOMATION_METHODS = Object.freeze([
+  'focusWindow',
+  'getForegroundWindowInfo',
+  'findElementByText',
+  'pressKey',
+  'typeText',
+  'click',
+  'doubleClick',
+  'drag',
+  'scroll',
+  'getClipboardText',
+  'setClipboardText',
+  'getRunningProcessesByNames'
+]);
 
 function getArgValue(flagName) {
   const index = process.argv.indexOf(flagName);
@@ -42,6 +63,39 @@ function hasFlag(flagName) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function flushStream(stream) {
+  if (!stream || typeof stream.write !== 'function') {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    try {
+      stream.write('', () => resolve());
+    } catch {
+      resolve();
+    }
+  });
+}
+
+async function flushProcessOutput() {
+  await flushStream(process.stdout);
+  await flushStream(process.stderr);
+}
+
+function withTimeout(promise, timeoutMs, label = 'operation') {
+  const boundedTimeoutMs = Math.max(1, Number(timeoutMs) || 1);
+  return Promise.race([
+    Promise.resolve(promise),
+    new Promise((_, reject) => {
+      const timer = setTimeout(() => {
+        reject(new Error(`${label} timed out after ${boundedTimeoutMs}ms`));
+      }, boundedTimeoutMs);
+      if (typeof timer?.unref === 'function') {
+        timer.unref();
+      }
+    })
+  ]);
 }
 
 function ensureDir(dirPath) {
@@ -75,6 +129,145 @@ function summarizeAction(action = {}) {
   return detail ? `${type} (${detail})` : type;
 }
 
+function summarizePineActivationSnapshot(snapshot = null) {
+  if (!snapshot || typeof snapshot !== 'object') return null;
+
+  if (snapshot.captured !== true) {
+    return {
+      captured: false,
+      reason: snapshot.reason || null,
+      windowHandle: Number(snapshot.windowHandle || 0) || null,
+      foreground: snapshot.foreground
+        ? {
+            hwnd: Number(snapshot.foreground.hwnd || 0) || null,
+            processName: snapshot.foreground.processName || null,
+            title: snapshot.foreground.title || null,
+            windowKind: snapshot.foreground.windowKind || null
+          }
+        : null
+    };
+  }
+
+  return {
+    captured: true,
+    windowHandle: Number(snapshot.windowHandle || 0) || null,
+    foreground: snapshot.foreground
+      ? {
+          hwnd: Number(snapshot.foreground.hwnd || 0) || null,
+          processName: snapshot.foreground.processName || null,
+          title: snapshot.foreground.title || null,
+          windowKind: snapshot.foreground.windowKind || null
+        }
+      : null,
+    pineSurface: snapshot.pineSurface
+      ? {
+          active: snapshot.pineSurface.active === true,
+          anchorText: snapshot.pineSurface.anchorText || null,
+          matchedBy: snapshot.pineSurface.matchedBy || null
+        }
+      : null,
+    focusedElement: snapshot.focusedElement
+      ? (
+        snapshot.focusedElement.Name
+        || snapshot.focusedElement.AutomationId
+        || snapshot.focusedElement.ClassName
+        || snapshot.focusedElement.ControlType
+        || null
+      )
+      : null,
+    structureElementCount: Array.isArray(snapshot.structure?.elements) ? snapshot.structure.elements.length : 0,
+    watcherElementCount: Number(snapshot.watcher?.elementCount || 0) || 0,
+    watcherWaitTimedOut: snapshot.watcher?.waitedForFreshState?.timedOut === true
+  };
+}
+
+function summarizePineActivationProof(proof = null) {
+  if (!proof || typeof proof !== 'object') return null;
+
+  return {
+    applicable: proof.applicable === true,
+    route: proof.route || null,
+    expectedSurface: proof.expectedSurface || null,
+    windowHandle: Number(proof.windowHandle || 0) || null,
+    proofStrategy: proof.proofStrategy || null,
+    actionSucceeded: proof.actionSucceeded === true,
+    observedChange: proof.observedChange === true,
+    pineSurfaceObserved: proof.pineSurfaceObserved === true,
+    disposition: proof.disposition || null,
+    likelyMeaning: proof.likelyMeaning || null,
+    error: proof.error || null,
+    durationMs: Number.isFinite(Number(proof.durationMs)) ? Number(proof.durationMs) : null,
+    hostRevalidation: proof.hostRevalidation
+      ? {
+          attempted: proof.hostRevalidation.attempted === true,
+          reason: proof.hostRevalidation.reason || null
+        }
+      : null,
+    signals: Array.isArray(proof.signals)
+      ? proof.signals.slice(0, 8).map((signal) => ({
+          kind: signal?.kind || null,
+          before: signal?.before || null,
+          after: signal?.after || null,
+          anchorText: signal?.anchorText || null,
+          matchedBy: signal?.matchedBy || null,
+          updateDelta: Number.isFinite(Number(signal?.updateDelta)) ? Number(signal.updateDelta) : null,
+          beforeElementCount: Number.isFinite(Number(signal?.beforeElementCount)) ? Number(signal.beforeElementCount) : null,
+          afterElementCount: Number.isFinite(Number(signal?.afterElementCount)) ? Number(signal.afterElementCount) : null,
+          added: Array.isArray(signal?.added)
+            ? signal.added.slice(0, 6).map((entry) => entry?.label || entry?.automationId || entry?.controlType || null).filter(Boolean)
+            : [],
+          removed: Array.isArray(signal?.removed)
+            ? signal.removed.slice(0, 6).map((entry) => entry?.label || entry?.automationId || entry?.controlType || null).filter(Boolean)
+            : []
+        }))
+      : [],
+    before: summarizePineActivationSnapshot(proof.before),
+    after: summarizePineActivationSnapshot(proof.after)
+  };
+}
+
+function summarizePineAuthoringStrategyAttempt(attempt = null) {
+  if (!attempt || typeof attempt !== 'object') return null;
+  return {
+    strategy: attempt.strategy || null,
+    success: attempt.success === true,
+    method: attempt.method || null,
+    error: attempt.error || null,
+    compactSummary: attempt.compactSummary || null
+  };
+}
+
+function summarizePineAuthoringWrite(result = null) {
+  if (!result || typeof result !== 'object') return null;
+  return {
+    applicable: result.applicable === true,
+    success: result.success === true,
+    method: result.method || null,
+    reason: result.reason || null,
+    error: result.error || null,
+    compactSummary: result.compactSummary || null,
+    proof: result.proof
+      ? {
+          exactMatch: result.proof.exactMatch === true,
+          lifecycleState: result.proof.lifecycleState || null,
+          mismatchReason: result.proof.mismatchReason || null,
+          compactSummary: result.proof.compactSummary || null
+        }
+      : null,
+    renderedProof: result.renderedProof
+      ? {
+          exactMatch: result.renderedProof.exactMatch === true,
+          lifecycleState: result.renderedProof.lifecycleState || null,
+          mismatchReason: result.renderedProof.mismatchReason || null,
+          compactSummary: result.renderedProof.compactSummary || null
+        }
+      : null,
+    strategyAttempts: Array.isArray(result.strategyAttempts)
+      ? result.strategyAttempts.map(summarizePineAuthoringStrategyAttempt).filter(Boolean).slice(0, 4)
+      : []
+  };
+}
+
 function summarizeResult(result = {}) {
   return {
     success: result?.success === true,
@@ -83,6 +276,7 @@ function summarizeResult(result = {}) {
     skipped: result?.skipped === true,
     skippedReason: result?.skippedReason || null,
     error: result?.error || null,
+    blockedByFocusLock: result?.blockedByFocusLock === true,
     proof: result?.proof
       ? {
           level: result.proof.level ?? null,
@@ -93,17 +287,39 @@ function summarizeResult(result = {}) {
     text: typeof result?.text === 'string' ? result.text.slice(0, 4000) : null,
     pineStructuredSummary: result?.pineStructuredSummary || null,
     focusTarget: result?.focusTarget || null,
+    focusVerification: result?.focusVerification || null,
     observationCheckpoint: result?.observationCheckpoint || null,
+    quickSearchSemanticWrite: result?.quickSearchSemanticWrite
+      ? {
+          applicable: result.quickSearchSemanticWrite.applicable === true,
+          success: result.quickSearchSemanticWrite.success === true,
+          method: result.quickSearchSemanticWrite.method || null,
+          error: result.quickSearchSemanticWrite.error || null,
+          readback: result.quickSearchSemanticWrite.readback || null
+        }
+      : null,
     quickSearchPreflight: result?.quickSearchPreflight
       ? {
           applicable: result.quickSearchPreflight.applicable === true,
           ready: result.quickSearchPreflight.ready === true,
+          timedOut: result.quickSearchPreflight.timedOut === true,
           emptyConfirmed: result.quickSearchPreflight.emptyConfirmed === true,
           queryAlreadyPresent: result.quickSearchPreflight.queryAlreadyPresent === true,
           fallbackAssumedFocused: result.quickSearchPreflight.fallbackAssumedFocused === true,
           fallbackReason: result.quickSearchPreflight.fallbackReason || null,
           clearedBy: result.quickSearchPreflight.clearedBy || null,
           expectedText: result.quickSearchPreflight.expectedText || null,
+          inputFocus: result.quickSearchPreflight.inputFocus
+            ? {
+                recoveredBy: result.quickSearchPreflight.inputFocus.recoveredBy || null,
+                controlType: result.quickSearchPreflight.inputFocus.controlType || null,
+                matchedBy: result.quickSearchPreflight.inputFocus.matchedBy || null,
+                trustReason: result.quickSearchPreflight.inputFocus.trustReason || null,
+                candidateScore: Number.isFinite(Number(result.quickSearchPreflight.inputFocus.candidateScore))
+                  ? Number(result.quickSearchPreflight.inputFocus.candidateScore)
+                  : null
+              }
+            : null,
           initialRead: result.quickSearchPreflight.initialRead || null,
           finalRead: result.quickSearchPreflight.finalRead || null,
           error: result.quickSearchPreflight.error || null
@@ -119,12 +335,369 @@ function summarizeResult(result = {}) {
           error: result.quickSearchTypedVerification.error || null,
           readback: result.quickSearchTypedVerification.readback || null
         }
-      : null
+      : null,
+    tradingViewPineActivationProof: summarizePineActivationProof(result?.tradingViewPineActivationProof),
+    pineAuthoringCdpWrite: summarizePineAuthoringWrite(result?.pineAuthoringCdpWrite),
+    pineAuthoringPasteProof: summarizePineAuthoringWrite(result?.pineAuthoringPasteProof),
+    pineAuthoringWriteTelemetry: result?.pineAuthoringWriteTelemetry
+      ? {
+          selectedMethod: result.pineAuthoringWriteTelemetry.selectedMethod || null,
+          primaryMethod: result.pineAuthoringWriteTelemetry.primaryMethod || null,
+          primarySucceeded: result.pineAuthoringWriteTelemetry.primarySucceeded === true,
+          primaryReason: result.pineAuthoringWriteTelemetry.primaryReason || null,
+          primaryStrategy: result.pineAuthoringWriteTelemetry.primaryStrategy || null,
+          primaryAttemptSummary: result.pineAuthoringWriteTelemetry.primaryAttemptSummary || null,
+          fallbackUsed: result.pineAuthoringWriteTelemetry.fallbackUsed === true,
+          fallbackMethod: result.pineAuthoringWriteTelemetry.fallbackMethod || null,
+          fallbackRetryAttempted: result.pineAuthoringWriteTelemetry.fallbackRetryAttempted === true,
+          proofVerified: result.pineAuthoringWriteTelemetry.proofVerified === true,
+          compactSummary: result.pineAuthoringWriteTelemetry.compactSummary || null,
+          primaryAttempts: Array.isArray(result.pineAuthoringWriteTelemetry.primaryAttempts)
+            ? result.pineAuthoringWriteTelemetry.primaryAttempts.map(summarizePineAuthoringStrategyAttempt).filter(Boolean).slice(0, 4)
+            : []
+        }
+      : null,
+    quickSearchRecovery: result?.quickSearchRecovery || null,
+    pineEditorRecovery: result?.pineEditorRecovery || null
   };
 }
 
 function cloneJson(value) {
   return JSON.parse(JSON.stringify(value));
+}
+
+function summarizeRuntimeTraceTerminalEvent(entry = null) {
+  if (!entry || typeof entry !== 'object') return null;
+  const nestedSummary = entry.summary && typeof entry.summary === 'object'
+    ? entry.summary
+    : null;
+  return {
+    ts: entry.ts || entry.recordedAt || null,
+    sessionId: entry.session || entry.sessionId || null,
+    event: entry.event || null,
+    mode: entry.mode || nestedSummary?.mode || null,
+    success: entry.success === true || nestedSummary?.success === true,
+    error: entry.error || nestedSummary?.error || null
+  };
+}
+
+function readRuntimeTraceTerminalEvent(traceFilePath) {
+  const normalizedPath = typeof traceFilePath === 'string' ? traceFilePath.trim() : '';
+  if (!normalizedPath) return null;
+
+  try {
+    const content = fs.readFileSync(normalizedPath, 'utf8');
+    const lines = content.split(/\r?\n/);
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      const rawLine = String(lines[index] || '').trim();
+      if (!rawLine) continue;
+      let parsed = null;
+      try {
+        parsed = JSON.parse(rawLine);
+      } catch {
+        continue;
+      }
+      if (parsed?.event === 'runtime:session:end') {
+        return summarizeRuntimeTraceTerminalEvent(parsed);
+      }
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+function deriveScenarioOutcome(options = {}) {
+  const scenarioError = options.scenarioError || null;
+  const execResult = options.execResult && typeof options.execResult === 'object' ? options.execResult : null;
+  const runtimeTraceSummary = options.runtimeTraceSummary && typeof options.runtimeTraceSummary === 'object'
+    ? options.runtimeTraceSummary
+    : null;
+  const runtimeTraceTerminalEvent = options.runtimeTraceTerminalEvent && typeof options.runtimeTraceTerminalEvent === 'object'
+    ? options.runtimeTraceTerminalEvent
+    : null;
+
+  const execSuccess = execResult?.success === true;
+  const hasExecOutcome = typeof execResult?.success === 'boolean';
+  const traceSummarySuccess = runtimeTraceSummary?.success === true;
+  const hasTraceSummaryOutcome = typeof runtimeTraceSummary?.success === 'boolean';
+  const terminalSuccess = runtimeTraceTerminalEvent?.success === true;
+  const hasTerminalOutcome = typeof runtimeTraceTerminalEvent?.success === 'boolean';
+
+  const consistency = {
+    execResultSuccess: hasExecOutcome ? execSuccess : null,
+    runtimeTraceSummarySuccess: hasTraceSummaryOutcome ? traceSummarySuccess : null,
+    runtimeTraceTerminalSuccess: hasTerminalOutcome ? terminalSuccess : null,
+    mismatch: false
+  };
+
+  if (hasExecOutcome && hasTraceSummaryOutcome && execSuccess !== traceSummarySuccess) {
+    consistency.mismatch = true;
+  }
+  if (hasTerminalOutcome && hasExecOutcome && terminalSuccess !== execSuccess) {
+    consistency.mismatch = true;
+  }
+  if (hasTerminalOutcome && hasTraceSummaryOutcome && terminalSuccess !== traceSummarySuccess) {
+    consistency.mismatch = true;
+  }
+
+  if (scenarioError) {
+    return {
+      success: false,
+      error: String(scenarioError?.message || scenarioError || 'Scenario execution failed'),
+      source: 'scenario-error',
+      consistency
+    };
+  }
+
+  if (hasTerminalOutcome) {
+    return {
+      success: terminalSuccess,
+      error: terminalSuccess ? null : (runtimeTraceTerminalEvent?.error || runtimeTraceSummary?.error || execResult?.error || 'One or more actions failed'),
+      source: 'runtime-trace-terminal',
+      consistency
+    };
+  }
+
+  if (hasTraceSummaryOutcome) {
+    return {
+      success: traceSummarySuccess,
+      error: traceSummarySuccess ? null : (runtimeTraceSummary?.error || execResult?.error || 'One or more actions failed'),
+      source: 'runtime-trace-summary',
+      consistency
+    };
+  }
+
+  return {
+    success: execSuccess,
+    error: execSuccess ? null : (execResult?.error || 'One or more actions failed'),
+    source: hasExecOutcome ? 'execute-actions' : 'unknown',
+    consistency
+  };
+}
+
+function createSystemAutomationProfiler(systemAutomation, expectedWindow = null) {
+  const originals = new Map();
+  const methodStats = new Map();
+  const callLog = [];
+  const foregroundSamples = [];
+  const expectedWindowHandle = Number(expectedWindow?.hwnd || 0) || 0;
+  const expectedProcessName = normalizeText(expectedWindow?.processName || '');
+
+  function getMethodStat(methodName) {
+    if (!methodStats.has(methodName)) {
+      methodStats.set(methodName, {
+        methodName,
+        callCount: 0,
+        successCount: 0,
+        errorCount: 0,
+        totalMs: 0,
+        maxMs: 0
+      });
+    }
+    return methodStats.get(methodName);
+  }
+
+  function appendForegroundSample(methodName, startedAtMs, result = null) {
+    if (!result || typeof result !== 'object') {
+      return;
+    }
+
+    const hwnd = Number(result?.hwnd || 0) || 0;
+    const sample = {
+      methodName,
+      recordedAt: new Date(startedAtMs).toISOString(),
+      hwnd,
+      title: result?.title || null,
+      processName: result?.processName || null,
+      windowKind: result?.windowKind || null,
+      expectedWindowHandle: expectedWindowHandle || null,
+      expectedProcessName: expectedProcessName || null,
+      offExpectedWindow: expectedWindowHandle > 0 ? hwnd !== expectedWindowHandle : null,
+      offExpectedProcess: expectedProcessName ? normalizeText(result?.processName || '') !== expectedProcessName : null
+    };
+
+    const previous = foregroundSamples[foregroundSamples.length - 1] || null;
+    if (
+      previous
+      && previous.hwnd === sample.hwnd
+      && previous.title === sample.title
+      && previous.processName === sample.processName
+      && previous.windowKind === sample.windowKind
+    ) {
+      return;
+    }
+
+    foregroundSamples.push(sample);
+  }
+
+  return {
+    async run(fn) {
+      const targets = PROFILED_SYSTEM_AUTOMATION_METHODS.filter((methodName) => typeof systemAutomation?.[methodName] === 'function');
+
+      for (const methodName of targets) {
+        const original = systemAutomation[methodName];
+        originals.set(methodName, original);
+        systemAutomation[methodName] = async (...args) => {
+          const startedAtMs = Date.now();
+          const stat = getMethodStat(methodName);
+          stat.callCount += 1;
+          try {
+            const result = await original.apply(systemAutomation, args);
+            const durationMs = Math.max(0, Date.now() - startedAtMs);
+            stat.successCount += 1;
+            stat.totalMs += durationMs;
+            stat.maxMs = Math.max(stat.maxMs, durationMs);
+            callLog.push({ methodName, durationMs, success: true, recordedAt: new Date(startedAtMs).toISOString() });
+            if (methodName === 'getForegroundWindowInfo') {
+              appendForegroundSample(methodName, startedAtMs, result);
+            }
+            return result;
+          } catch (error) {
+            const durationMs = Math.max(0, Date.now() - startedAtMs);
+            stat.errorCount += 1;
+            stat.totalMs += durationMs;
+            stat.maxMs = Math.max(stat.maxMs, durationMs);
+            callLog.push({
+              methodName,
+              durationMs,
+              success: false,
+              recordedAt: new Date(startedAtMs).toISOString(),
+              error: String(error?.message || error || 'automation call failed')
+            });
+            throw error;
+          }
+        };
+      }
+
+      try {
+        return await fn();
+      } finally {
+        for (const [methodName, original] of originals.entries()) {
+          systemAutomation[methodName] = original;
+        }
+      }
+    },
+    summarize() {
+      const methods = Array.from(methodStats.values())
+        .map((entry) => ({
+          ...entry,
+          avgMs: entry.callCount > 0 ? Number((entry.totalMs / entry.callCount).toFixed(2)) : 0
+        }))
+        .sort((left, right) => {
+          if (right.totalMs !== left.totalMs) return right.totalMs - left.totalMs;
+          return right.maxMs - left.maxMs;
+        });
+
+      const distinctForegrounds = Array.from(new Map(
+        foregroundSamples.map((sample) => [
+          `${sample.hwnd}:${sample.processName || ''}:${sample.title || ''}`,
+          {
+            hwnd: sample.hwnd,
+            processName: sample.processName,
+            title: sample.title,
+            windowKind: sample.windowKind
+          }
+        ])
+      ).values());
+
+      let offAppTransitions = 0;
+      for (let index = 1; index < foregroundSamples.length; index += 1) {
+        const previous = foregroundSamples[index - 1];
+        const current = foregroundSamples[index];
+        if (previous?.offExpectedProcess !== true && current?.offExpectedProcess === true) {
+          offAppTransitions += 1;
+        }
+      }
+
+      return {
+        totalCallCount: methods.reduce((sum, entry) => sum + entry.callCount, 0),
+        totalDurationMs: methods.reduce((sum, entry) => sum + entry.totalMs, 0),
+        methods,
+        topSlowCalls: callLog
+          .slice()
+          .sort((left, right) => right.durationMs - left.durationMs)
+          .slice(0, 10),
+        foregroundTelemetry: {
+          sampleCount: foregroundSamples.length,
+          distinctForegroundCount: distinctForegrounds.length,
+          distinctForegrounds: distinctForegrounds.slice(0, 12),
+          offAppSampleCount: foregroundSamples.filter((sample) => sample.offExpectedProcess === true).length,
+          offHandleSampleCount: foregroundSamples.filter((sample) => sample.offExpectedWindow === true).length,
+          offAppTransitions,
+          recentSamples: foregroundSamples.slice(-12)
+        }
+      };
+    }
+  };
+}
+
+function incrementCounter(target, key) {
+  if (!key) return;
+  target[key] = (target[key] || 0) + 1;
+}
+
+function buildScenarioMetrics(results = [], actionTimeline = [], automationProfile = null) {
+  const recoveryPathCounts = {};
+  let quickSearchPreflightCount = 0;
+  let quickSearchPreflightTimeoutCount = 0;
+  let quickSearchFallbackAssumedCount = 0;
+  let quickSearchTypedVerificationCount = 0;
+  let quickSearchTypedVerificationFailureCount = 0;
+
+  for (const result of Array.isArray(results) ? results : []) {
+    const preflight = result?.quickSearchPreflight || null;
+    const typedVerification = result?.quickSearchTypedVerification || null;
+    const quickSearchRecovery = result?.quickSearchRecovery || null;
+    const pineEditorRecovery = result?.pineEditorRecovery || null;
+
+    if (preflight?.applicable) {
+      quickSearchPreflightCount += 1;
+      if (preflight.timedOut === true) {
+        quickSearchPreflightTimeoutCount += 1;
+      }
+      if (preflight.fallbackAssumedFocused === true) {
+        quickSearchFallbackAssumedCount += 1;
+      }
+      incrementCounter(recoveryPathCounts, preflight.clearedBy || preflight.fallbackReason || null);
+    }
+
+    if (typedVerification?.applicable) {
+      quickSearchTypedVerificationCount += 1;
+      if (typedVerification.verified !== true) {
+        quickSearchTypedVerificationFailureCount += 1;
+      }
+      incrementCounter(recoveryPathCounts, typedVerification.satisfiedBy || null);
+    }
+
+    incrementCounter(recoveryPathCounts, quickSearchRecovery?.recoveredBy || null);
+    incrementCounter(recoveryPathCounts, pineEditorRecovery?.recoveredBy || null);
+  }
+
+  const clipboardTouchCount = (automationProfile?.methods || [])
+    .filter((entry) => entry?.methodName === 'getClipboardText' || entry?.methodName === 'setClipboardText')
+    .reduce((sum, entry) => sum + (Number(entry?.callCount || 0) || 0), 0);
+
+  const topActionGaps = (Array.isArray(actionTimeline) ? actionTimeline : [])
+    .filter((entry) => Number.isFinite(Number(entry?.sincePreviousMs)) && Number(entry.sincePreviousMs) > 0)
+    .slice()
+    .sort((left, right) => Number(right.sincePreviousMs) - Number(left.sincePreviousMs))
+    .slice(0, 5);
+
+  return {
+    clipboardTouchCount,
+    quickSearchPreflightCount,
+    quickSearchPreflightTimeoutCount,
+    quickSearchFallbackAssumedCount,
+    quickSearchTypedVerificationCount,
+    quickSearchTypedVerificationFailureCount,
+    recoveryPathCounts,
+    actionTimeline,
+    topActionGaps,
+    systemAutomationProfile: automationProfile,
+    foregroundTelemetry: automationProfile?.foregroundTelemetry || null
+  };
 }
 
 function normalizeText(value) {
@@ -468,8 +1041,72 @@ function buildVwapTpoAtrConfidenceSource(scriptName = DEFAULT_PINE_CREATE_SAVE_N
   ].join('\n');
 }
 
+function buildAtrVwapMacdRsiConfidenceSource(scriptName = DEFAULT_PINE_CREATE_SAVE_NAME) {
+  const safeName = String(scriptName || DEFAULT_PINE_CREATE_SAVE_NAME).trim() || DEFAULT_PINE_CREATE_SAVE_NAME;
+  return [
+    '//@version=6',
+    `indicator(${JSON.stringify(safeName)}, overlay=false, max_labels_count=100)`,
+    '',
+    'atrLen = input.int(14, "ATR Length", minval=1)',
+    'rsiLen = input.int(14, "RSI Length", minval=1)',
+    'macdFast = input.int(12, "MACD Fast", minval=1)',
+    'macdSlow = input.int(26, "MACD Slow", minval=1)',
+    'macdSignal = input.int(9, "MACD Signal", minval=1)',
+    'showSignals = input.bool(true, "Show Confidence Signals")',
+    '',
+    'sessionVwap = ta.vwap(hlc3)',
+    'atr = ta.atr(atrLen)',
+    'rsiValue = ta.rsi(close, rsiLen)',
+    '[macdLine, signalLine, histLine] = ta.macd(close, macdFast, macdSlow, macdSignal)',
+    '',
+    'aboveVwap = close > sessionVwap',
+    'atrExpanding = atr > ta.sma(atr, atrLen)',
+    'rsiBullish = rsiValue >= 55',
+    'rsiBearish = rsiValue <= 45',
+    'macdBullish = macdLine > signalLine and histLine >= 0',
+    'macdBearish = macdLine < signalLine and histLine <= 0',
+    '',
+    'bullScore = (aboveVwap ? 1 : 0) + (atrExpanding ? 1 : 0) + (rsiBullish ? 1 : 0) + (macdBullish ? 1 : 0)',
+    'bearScore = (aboveVwap ? 0 : 1) + (atrExpanding ? 1 : 0) + (rsiBearish ? 1 : 0) + (macdBearish ? 1 : 0)',
+    'confidenceScore = math.max(bullScore, bearScore)',
+    'confidencePct = confidenceScore / 4.0 * 100.0',
+    'bias = bullScore > bearScore ? "Bullish" : bearScore > bullScore ? "Bearish" : "Balanced"',
+    '',
+    'plot(sessionVwap, "VWAP", color=color.new(color.blue, 0), linewidth=2)',
+    'upperAtr = plot(sessionVwap + atr, "VWAP + ATR", color=color.new(color.green, 55))',
+    'lowerAtr = plot(sessionVwap - atr, "VWAP - ATR", color=color.new(color.red, 55))',
+    'fill(upperAtr, lowerAtr, color=color.new(color.blue, 92), title="ATR Envelope")',
+    '',
+    'plot(confidencePct, "Confidence %", color=bias == "Bullish" ? color.lime : bias == "Bearish" ? color.red : color.yellow, linewidth=2, display=display.pane)',
+    'hline(75, "High Confidence", color=color.new(color.green, 60), linestyle=hline.style_dashed)',
+    'hline(50, "Neutral Confidence", color=color.new(color.gray, 70), linestyle=hline.style_dotted)',
+    '',
+    'plotshape(showSignals and bullScore >= 3, title="Bullish Confidence", style=shape.labelup, location=location.belowbar, color=color.new(color.green, 0), text="CONF+")',
+    'plotshape(showSignals and bearScore >= 3, title="Bearish Confidence", style=shape.labeldown, location=location.abovebar, color=color.new(color.red, 0), text="CONF-")',
+    '',
+    'var table dashboard = table.new(position.top_right, 2, 5, border_width=1)',
+    'if barstate.islast',
+    '    table.cell(dashboard, 0, 0, "Bias", text_color=color.white, bgcolor=color.new(color.black, 0))',
+    '    table.cell(dashboard, 1, 0, bias, text_color=bias == "Bullish" ? color.lime : bias == "Bearish" ? color.red : color.yellow)',
+    '    table.cell(dashboard, 0, 1, "Confidence", text_color=color.white)',
+    '    table.cell(dashboard, 1, 1, str.tostring(math.round(confidencePct)) + "%", text_color=confidencePct >= 75 ? color.lime : color.yellow)',
+    '    table.cell(dashboard, 0, 2, "VWAP", text_color=color.white)',
+    '    table.cell(dashboard, 1, 2, aboveVwap ? "Above" : "Below", text_color=aboveVwap ? color.lime : color.red)',
+    '    table.cell(dashboard, 0, 3, "RSI", text_color=color.white)',
+    '    table.cell(dashboard, 1, 3, str.tostring(math.round(rsiValue, 1)), text_color=rsiBullish ? color.lime : rsiBearish ? color.red : color.yellow)',
+    '    table.cell(dashboard, 0, 4, "MACD", text_color=color.white)',
+    '    table.cell(dashboard, 1, 4, macdBullish ? "Bullish" : macdBearish ? "Bearish" : "Flat", text_color=macdBullish ? color.lime : macdBearish ? color.red : color.silver)',
+    '',
+    'alertcondition(bullScore >= 3, "Bullish Confidence", "ATR/VWAP/MACD/RSI confidence has turned bullish.")',
+    'alertcondition(bearScore >= 3, "Bearish Confidence", "ATR/VWAP/MACD/RSI confidence has turned bearish.")'
+  ].join('\n');
+}
+
 function buildLiveSaveProbeSource(scriptName = DEFAULT_PINE_CREATE_SAVE_NAME, prompt = '') {
   const normalizedPrompt = String(prompt || '').toLowerCase();
+  if (/\batr\b/.test(normalizedPrompt) && /\bvwap\b/.test(normalizedPrompt) && /\bmacd\b/.test(normalizedPrompt) && /\brsi\b/.test(normalizedPrompt)) {
+    return buildAtrVwapMacdRsiConfidenceSource(scriptName);
+  }
   if (/\bvwap\b/.test(normalizedPrompt) && /\btpo\b/.test(normalizedPrompt) && /\batr\b/.test(normalizedPrompt)) {
     return buildVwapTpoAtrConfidenceSource(scriptName);
   }
@@ -481,15 +1118,26 @@ function buildLiveSaveProbeSource(scriptName = DEFAULT_PINE_CREATE_SAVE_NAME, pr
   ].join('\n');
 }
 
+function buildDefaultPineCreateSavePrompt(scriptName = DEFAULT_PINE_CREATE_SAVE_NAME) {
+  const safeName = String(scriptName || DEFAULT_PINE_CREATE_SAVE_NAME).trim() || DEFAULT_PINE_CREATE_SAVE_NAME;
+  return `TradingView is already open. Create a new Pine script called "${safeName}", save the script, and report the visible save status. Do not add it to the chart.`;
+}
+
 function buildPineCreateSaveScenario(prompt, scriptName) {
-  const effectivePrompt = String(prompt || DEFAULT_PINE_CREATE_SAVE_PROMPT).trim() || DEFAULT_PINE_CREATE_SAVE_PROMPT;
-  const effectiveScriptName = String(scriptName || DEFAULT_PINE_CREATE_SAVE_NAME).trim() || DEFAULT_PINE_CREATE_SAVE_NAME;
+  const synthesizedTitle = synthesizePineScriptTitleContract({
+    userMessage: prompt || ''
+  }).title;
+  const effectiveScriptName = String(scriptName || synthesizedTitle || DEFAULT_PINE_CREATE_SAVE_NAME).trim() || DEFAULT_PINE_CREATE_SAVE_NAME;
+  const effectivePrompt = String(prompt || buildDefaultPineCreateSavePrompt(effectiveScriptName)).trim()
+    || buildDefaultPineCreateSavePrompt(effectiveScriptName);
   const scriptSource = buildLiveSaveProbeSource(effectiveScriptName, effectivePrompt);
   const sourceActions = [
     {
       type: 'run_command',
       shell: 'powershell',
       command: buildClipboardSetCommand(scriptSource),
+      pinePreparedScriptName: effectiveScriptName,
+      pineExpectedScriptName: effectiveScriptName,
       reason: `Copy the prepared Pine script (${effectiveScriptName}) to the clipboard for live create/save validation`
     }
   ];
@@ -497,6 +1145,8 @@ function buildPineCreateSaveScenario(prompt, scriptName) {
   if (!inferredIntent) {
     throw new Error('Could not infer a TradingView Pine create/save intent from the provided prompt.');
   }
+  inferredIntent.requiresFreshIndicator = true;
+  inferredIntent.safeAuthoringDefault = true;
 
   return {
     id: `pine-create-save-${sanitizeFileSegment(effectiveScriptName, 'pine-save')}`,
@@ -642,6 +1292,40 @@ async function startWatcher(pollInterval) {
   return { watcher, startedHere };
 }
 
+async function shutdownWatcherRuntime(watcherRuntime = null) {
+  const ownedWatcher = watcherRuntime?.startedHere === true ? watcherRuntime?.watcher || null : null;
+  const connectedWatcher = typeof aiService.getUIWatcher === 'function'
+    ? aiService.getUIWatcher()
+    : null;
+  const watcher = ownedWatcher || connectedWatcher || null;
+
+  if (watcher === connectedWatcher && typeof aiService.setUIWatcher === 'function') {
+    aiService.setUIWatcher(null);
+  }
+
+  if (!ownedWatcher) {
+    return;
+  }
+
+  if (typeof ownedWatcher.shutdown === 'function') {
+    await withTimeout(ownedWatcher.shutdown(), 2000, 'watcher shutdown').catch((error) => {
+      console.warn(`[LIVE-SMOKE] ${error.message}`);
+    });
+    return;
+  }
+
+  if (typeof ownedWatcher.destroy === 'function') {
+    await withTimeout(Promise.resolve(ownedWatcher.destroy()), 2000, 'watcher destroy').catch((error) => {
+      console.warn(`[LIVE-SMOKE] ${error.message}`);
+    });
+    return;
+  }
+
+  if (typeof ownedWatcher.stop === 'function') {
+    ownedWatcher.stop();
+  }
+}
+
 async function gatherPreflight() {
   return findTradingViewContext();
 }
@@ -650,25 +1334,83 @@ async function runScenario(scenario, context) {
   const { runTag, artifactDir } = context;
   const effectiveScenario = bindScenarioToDetectedWindow(scenario, context.detectedWindow);
   const scenarioTag = `${runTag}-${sanitizeFileSegment(scenario.id)}`;
+  const scenarioStartedAtMs = Date.now();
+  let lastActionCompletedAtMs = null;
+  const actionTimeline = [];
+  const automationProfiler = createSystemAutomationProfiler(aiService.systemAutomation, context.detectedWindow);
 
   console.log(`\n=== Scenario: ${effectiveScenario.id} ===`);
   console.log(effectiveScenario.description);
   console.log(`Actions: ${(effectiveScenario.actionData.actions || []).map(summarizeAction).join(' -> ')}`);
 
-  const execResult = await aiService.executeActions(
-    effectiveScenario.actionData,
-    (result, index, total) => {
-      const label = `${index + 1}/${total}`;
-      const summary = result?.success
-        ? (result?.message || 'ok')
-        : (result?.error || 'failed');
-      console.log(`[${label}] ${result?.action || 'action'}: ${summary}`);
-    },
-    null,
-    {
-      userMessage: effectiveScenario.userMessage
-    }
-  );
+  let execResult = null;
+  let scenarioError = null;
+
+  try {
+    execResult = await automationProfiler.run(() => aiService.executeActions(
+      effectiveScenario.actionData,
+      (result, index, total) => {
+        const completedAtMs = Date.now();
+        const label = `${index + 1}/${total}`;
+        const summary = result?.success
+          ? (result?.message || 'ok')
+          : (result?.error || 'failed');
+        actionTimeline.push({
+          index,
+          total,
+          action: result?.action || null,
+          success: result?.success === true,
+          completedAt: new Date(completedAtMs).toISOString(),
+          elapsedMs: Math.max(0, completedAtMs - scenarioStartedAtMs),
+          sincePreviousMs: lastActionCompletedAtMs === null ? null : Math.max(0, completedAtMs - lastActionCompletedAtMs),
+          message: result?.message || null,
+          error: result?.error || null,
+          quickSearchPreflight: result?.quickSearchPreflight?.applicable
+            ? {
+                ready: result.quickSearchPreflight.ready === true,
+                timedOut: result.quickSearchPreflight.timedOut === true,
+                clearedBy: result.quickSearchPreflight.clearedBy || null,
+                fallbackAssumedFocused: result.quickSearchPreflight.fallbackAssumedFocused === true
+              }
+            : null,
+          quickSearchTypedVerification: result?.quickSearchTypedVerification?.applicable
+            ? {
+                verified: result.quickSearchTypedVerification.verified === true,
+                satisfiedBy: result.quickSearchTypedVerification.satisfiedBy || null
+              }
+            : null
+        });
+        lastActionCompletedAtMs = completedAtMs;
+
+        console.log(`[${label}] ${result?.action || 'action'}: ${summary}`);
+
+        if (result?.quickSearchPreflight?.applicable) {
+          const preflight = result.quickSearchPreflight;
+          console.log(
+            `    quick-search preflight: ready=${preflight.ready === true} clearedBy=${preflight.clearedBy || 'n/a'} fallbackAssumedFocused=${preflight.fallbackAssumedFocused === true} expected=${JSON.stringify(preflight.expectedText || '')}${preflight.error ? ` error=${JSON.stringify(preflight.error)}` : ''}`
+          );
+        }
+
+        if (result?.quickSearchTypedVerification?.applicable) {
+          const typedVerification = result.quickSearchTypedVerification;
+          console.log(
+            `    quick-search typed-check: verified=${typedVerification.verified === true} via=${typedVerification.satisfiedBy || 'n/a'} expected=${JSON.stringify(typedVerification.expectedText || '')} actual=${JSON.stringify(typedVerification.actualText || '')}${typedVerification.error ? ` error=${JSON.stringify(typedVerification.error)}` : ''}`
+          );
+        }
+      },
+      null,
+      {
+        userMessage: effectiveScenario.userMessage
+      }
+    ));
+  } catch (error) {
+    scenarioError = error;
+  }
+
+  const automationProfile = automationProfiler.summarize();
+  const fallbackRuntimeTraceSummary = typeof aiService.getLastRuntimeTraceSummary === 'function'
+    ? aiService.getLastRuntimeTraceSummary()
+    : null;
 
   let exportedTrace = null;
   try {
@@ -676,27 +1418,83 @@ async function runScenario(scenario, context) {
   } catch (error) {
     exportedTrace = { error: String(error?.message || error || 'Failed to export runtime trace') };
   }
+  const runtimeTraceFilePath = exportedTrace?.filePath || fallbackRuntimeTraceSummary?.filePath || execResult?.runtimeTrace?.filePath || null;
+  const runtimeTraceTerminalEvent = readRuntimeTraceTerminalEvent(runtimeTraceFilePath);
+  const scenarioOutcome = deriveScenarioOutcome({
+    scenarioError,
+    execResult,
+    runtimeTraceSummary: execResult?.runtimeTraceSummary || fallbackRuntimeTraceSummary || null,
+    runtimeTraceTerminalEvent
+  });
 
   const postForeground = await aiService.systemAutomation.getForegroundWindowInfo();
+  const summarizedResults = Array.isArray(execResult?.results) ? execResult.results.map(summarizeResult) : [];
+  const metrics = buildScenarioMetrics(summarizedResults, actionTimeline, automationProfile);
+  let failureArtifact = null;
+
+  if (scenarioOutcome.success !== true) {
+    failureArtifact = await writeFailureArtifactBundle({
+      artifactDir,
+      suiteName: 'live-tradingview-smoke',
+      failureName: `${effectiveScenario.id}-failure`,
+      phase: 'scenario',
+      scenarioId: effectiveScenario.id,
+      error: scenarioError || new Error(scenarioOutcome.error || execResult?.error || 'One or more actions failed'),
+      aiService,
+      systemAutomation: aiService.systemAutomation,
+      watcher: typeof aiService.getUIWatcher === 'function' ? aiService.getUIWatcher() : null,
+      captureTargetWindowHandle: context.detectedWindow?.hwnd || null,
+      captureForegroundWindow: true,
+      tradingViewContextFn: findTradingViewContext,
+      extra: {
+        runTag,
+        scenarioTag,
+        boundWindow: context.detectedWindow || null,
+        actionSummary: (effectiveScenario.actionData.actions || []).map(summarizeAction),
+        actionTimeline,
+        metrics,
+        postForeground,
+        runtimeTraceSummary: execResult?.runtimeTraceSummary || fallbackRuntimeTraceSummary || null,
+        results: summarizedResults
+      }
+    });
+  }
+
   const summary = {
     id: effectiveScenario.id,
     description: effectiveScenario.description,
     userMessage: effectiveScenario.userMessage,
     thought: effectiveScenario.actionData.thought,
     verification: effectiveScenario.actionData.verification,
-    success: execResult?.success === true,
-    error: execResult?.error || null,
+    success: scenarioOutcome.success === true,
+    error: scenarioOutcome.error || null,
     pendingConfirmation: execResult?.pendingConfirmation === true,
     boundWindow: context.detectedWindow || null,
     actionSummary: (effectiveScenario.actionData.actions || []).map(summarizeAction),
     observationCheckpointCount: Array.isArray(execResult?.observationCheckpoints)
       ? execResult.observationCheckpoints.length
       : 0,
-    runtimeTrace: execResult?.runtimeTrace || null,
-    runtimeTraceSummary: execResult?.runtimeTraceSummary || null,
+    runtimeTrace: execResult?.runtimeTrace || (fallbackRuntimeTraceSummary?.sessionId
+      ? {
+          sessionId: fallbackRuntimeTraceSummary.sessionId,
+          filePath: fallbackRuntimeTraceSummary.filePath
+        }
+      : null),
+    runtimeTraceSummary: execResult?.runtimeTraceSummary || fallbackRuntimeTraceSummary || null,
+    runtimeTraceTerminalEvent,
+    reportingConsistency: {
+      outcomeSource: scenarioOutcome.source || 'unknown',
+      mismatch: scenarioOutcome.consistency?.mismatch === true,
+      execResultSuccess: scenarioOutcome.consistency?.execResultSuccess ?? null,
+      runtimeTraceSummarySuccess: scenarioOutcome.consistency?.runtimeTraceSummarySuccess ?? null,
+      runtimeTraceTerminalSuccess: scenarioOutcome.consistency?.runtimeTraceTerminalSuccess ?? null
+    },
     exportedTrace,
     postForeground,
-    results: Array.isArray(execResult?.results) ? execResult.results.map(summarizeResult) : []
+    actionTimeline,
+    metrics,
+    failureArtifact,
+    results: summarizedResults
   };
 
   const summaryPath = path.join(artifactDir, `${scenarioTag}.summary.json`);
@@ -704,6 +1502,9 @@ async function runScenario(scenario, context) {
   console.log(`Summary: ${summaryPath}`);
   if (exportedTrace?.filePath) {
     console.log(`Trace:   ${exportedTrace.filePath}`);
+  }
+  if (failureArtifact?.filePath) {
+    console.log(`Failure: ${failureArtifact.filePath}`);
   }
 
   return summary;
@@ -721,8 +1522,8 @@ async function main() {
     scenarios: getArgValue('--scenarios') || getEnvValue('LIKU_LIVE_TV_SCENARIOS') || 'focus,pine-editor',
     symbol: getArgValue('--symbol') || getEnvValue('LIKU_LIVE_TV_SYMBOL') || '',
     timeframe: getArgValue('--timeframe') || getEnvValue('LIKU_LIVE_TV_TIMEFRAME') || '',
-    pinePrompt: getArgValue('--pine-prompt') || getEnvValue('LIKU_LIVE_TV_PINE_PROMPT') || DEFAULT_PINE_CREATE_SAVE_PROMPT,
-    pineScriptName: getArgValue('--pine-script-name') || getEnvValue('LIKU_LIVE_TV_PINE_SCRIPT_NAME') || DEFAULT_PINE_CREATE_SAVE_NAME,
+    pinePrompt: getArgValue('--pine-prompt') || getEnvValue('LIKU_LIVE_TV_PINE_PROMPT') || '',
+    pineScriptName: getArgValue('--pine-script-name') || getEnvValue('LIKU_LIVE_TV_PINE_SCRIPT_NAME') || '',
     allowSymbolChange: hasFlag('--allow-symbol-change'),
     allowTimeframeChange: hasFlag('--allow-timeframe-change')
   };
@@ -746,6 +1547,20 @@ async function main() {
 
   ensureDir(artifactDir);
   const runTag = buildTimestampTag();
+  const manifest = {
+    runTag,
+    startedAt: new Date().toISOString(),
+    artifactDir,
+    pollInterval,
+    scenarios: [],
+    preflight: null,
+    fatalFailureArtifact: null,
+    error: null,
+    success: false
+  };
+  let watcherRuntime = { watcher: null, startedHere: false };
+  let fatalError = null;
+  let selectedWindow = null;
 
   console.log('========================================');
   console.log(' TradingView Live Smoke Harness');
@@ -755,71 +1570,92 @@ async function main() {
   console.log(`Scenarios:    ${scenarios.map((scenario) => scenario.id).join(', ')}`);
   console.log(`Watcher poll: ${pollInterval}ms`);
 
-  const preflight = await gatherPreflight();
-  const { processes, foreground, windows, selectedWindow } = preflight;
-  if (!selectedWindow) {
-    throw new Error('No TradingView-like window was detected via UIA/window discovery. Make sure an actual TradingView desktop window or browser tab is open and visible, then rerun the live smoke harness.');
-  }
-
-  console.log(`TradingView-like windows detected: ${Array.isArray(windows) ? windows.length : 0}`);
-  (windows || []).slice(0, 5).forEach((win, index) => {
-    console.log(`  [${index}] hwnd=${win.hwnd} process=${win.processName} kind=${win.windowKind} title=${JSON.stringify(win.title || '')}`);
-  });
-  console.log(`Selected window: ${JSON.stringify({
-    hwnd: selectedWindow?.hwnd || null,
-    title: selectedWindow?.title || null,
-    processName: selectedWindow?.processName || null,
-    windowKind: selectedWindow?.windowKind || null,
-    isMinimized: !!selectedWindow?.isMinimized
-  })}`);
-  if (Array.isArray(processes) && processes.length > 0) {
-    console.log(`Backing processes detected: ${processes.length}`);
-    processes.slice(0, 5).forEach((proc, index) => {
-      console.log(`  [${index}] pid=${proc.pid} process=${proc.processName} title=${JSON.stringify(proc.mainWindowTitle || '')}`);
-    });
-  }
-  console.log(`Initial foreground: ${JSON.stringify({
-    title: foreground?.title || null,
-    processName: foreground?.processName || null,
-    hwnd: foreground?.hwnd || null,
-    windowKind: foreground?.windowKind || null
-  })}`);
-
-  const watcherRuntime = await startWatcher(pollInterval);
-  const manifest = {
-    runTag,
-    startedAt: new Date().toISOString(),
-    artifactDir,
-    pollInterval,
-    scenarios: [],
-    preflight: {
+  try {
+    const preflight = await gatherPreflight();
+    const { processes, foreground, windows, selectedWindow: detectedWindow } = preflight;
+    selectedWindow = detectedWindow || null;
+    manifest.preflight = {
       processes,
       processNames: Array.isArray(preflight?.processNames) ? preflight.processNames : [],
       windows,
-      selectedWindow,
+      selectedWindow: detectedWindow,
       foreground
-    }
-  };
+    };
 
-  try {
+    if (!detectedWindow) {
+      throw new Error('No TradingView-like window was detected via UIA/window discovery. Make sure an actual TradingView desktop window or browser tab is open and visible, then rerun the live smoke harness.');
+    }
+
+    console.log(`TradingView-like windows detected: ${Array.isArray(windows) ? windows.length : 0}`);
+    (windows || []).slice(0, 5).forEach((win, index) => {
+      console.log(`  [${index}] hwnd=${win.hwnd} process=${win.processName} kind=${win.windowKind} title=${JSON.stringify(win.title || '')}`);
+    });
+    console.log(`Selected window: ${JSON.stringify({
+      hwnd: detectedWindow?.hwnd || null,
+      title: detectedWindow?.title || null,
+      processName: detectedWindow?.processName || null,
+      windowKind: detectedWindow?.windowKind || null,
+      isMinimized: !!detectedWindow?.isMinimized
+    })}`);
+    if (Array.isArray(processes) && processes.length > 0) {
+      console.log(`Backing processes detected: ${processes.length}`);
+      processes.slice(0, 5).forEach((proc, index) => {
+        console.log(`  [${index}] pid=${proc.pid} process=${proc.processName} title=${JSON.stringify(proc.mainWindowTitle || '')}`);
+      });
+    }
+    console.log(`Initial foreground: ${JSON.stringify({
+      title: foreground?.title || null,
+      processName: foreground?.processName || null,
+      hwnd: foreground?.hwnd || null,
+      windowKind: foreground?.windowKind || null
+    })}`);
+
+    watcherRuntime = await startWatcher(pollInterval);
     await sleep(Math.max(300, pollInterval * 2));
 
     for (const scenario of scenarios) {
       const summary = await runScenario(scenario, {
         runTag,
         artifactDir,
-        detectedWindow: selectedWindow
+        detectedWindow
       });
       manifest.scenarios.push(summary);
     }
-  } finally {
-    if (watcherRuntime.startedHere && watcherRuntime.watcher?.isPolling) {
-      watcherRuntime.watcher.stop();
+  } catch (error) {
+    fatalError = error;
+    manifest.error = String(error?.message || error || 'TradingView live smoke failed before completion');
+    manifest.fatalFailureArtifact = await writeFailureArtifactBundle({
+      artifactDir,
+      suiteName: 'live-tradingview-smoke',
+      failureName: 'main-failure',
+      phase: 'main',
+      error,
+      aiService,
+      systemAutomation: aiService.systemAutomation,
+      watcher: watcherRuntime?.watcher || (typeof aiService.getUIWatcher === 'function' ? aiService.getUIWatcher() : null),
+      captureTargetWindowHandle: selectedWindow?.hwnd || null,
+      captureForegroundWindow: true,
+      tradingViewContextFn: findTradingViewContext,
+      extra: {
+        runTag,
+        pollInterval,
+        options,
+        manifest: cloneJson(manifest)
+      }
+    });
+    console.error(error.stack || error.message);
+    if (manifest.fatalFailureArtifact?.filePath) {
+      console.error(`Failure artifact: ${manifest.fatalFailureArtifact.filePath}`);
     }
+  } finally {
+    await shutdownWatcherRuntime(watcherRuntime).catch(() => {});
+    await withTimeout(shutdownSharedUIAHost().catch(() => {}), 2000, 'UIA host shutdown').catch((error) => {
+      console.warn(`[LIVE-SMOKE] ${error.message}`);
+    });
   }
 
   manifest.finishedAt = new Date().toISOString();
-  manifest.success = manifest.scenarios.every((scenario) => scenario.success === true);
+  manifest.success = !fatalError && manifest.scenarios.every((scenario) => scenario.success === true);
   const manifestPath = path.join(artifactDir, `${runTag}-tradingview-live-smoke.manifest.json`);
   fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
 
@@ -829,22 +1665,36 @@ async function main() {
   manifest.scenarios.forEach((scenario) => {
     console.log(`- ${scenario.id}: ${scenario.success ? 'PASS' : 'FAIL'}${scenario.error ? ` (${scenario.error})` : ''}`);
   });
+  if (manifest.error) {
+    console.log(`- fatal: ${manifest.error}`);
+  }
   console.log(`Manifest: ${manifestPath}`);
 
-  if (!manifest.success) {
-    process.exitCode = 1;
-  }
+  return manifest.success ? 0 : 1;
 }
 
 if (require.main === module) {
-  main().catch((error) => {
-    console.error(error.stack || error.message);
-    process.exit(1);
-  });
+  main()
+    .then(async (exitCode) => {
+      await flushProcessOutput().catch(() => {});
+      process.exit(Number.isFinite(Number(exitCode)) ? Number(exitCode) : 0);
+    })
+    .catch(async (error) => {
+      console.error(error.stack || error.message);
+      await flushProcessOutput().catch(() => {});
+      process.exit(1);
+    });
 } else {
   module.exports = {
     windowLooksLikeTradingView,
     pickPreferredTradingViewWindow,
-    findTradingViewContext
+    findTradingViewContext,
+    summarizeResult,
+    buildScenarioMetrics,
+    buildPineCreateSaveScenario,
+    buildScenarioPlan,
+    readRuntimeTraceTerminalEvent,
+    deriveScenarioOutcome,
+    shutdownWatcherRuntime
   };
 }

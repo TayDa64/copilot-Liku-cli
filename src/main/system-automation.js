@@ -783,6 +783,7 @@ function buildPineEditorSafeAuthoringSummary(text, options = {}) {
   const compactText = normalizeCompactText(rawText, 2400);
   if (!compactText) return null;
   const surfaceState = extractPineEditorSafeAuthoringSurfaceState(options?.pineEditorSurfaceProbe || null);
+  const allowGenericSavedSurfaceAsStarter = options?.acceptGenericSavedSurfaceAsStarter === true;
 
   const visibleLines = rawText
     .split('\n')
@@ -857,6 +858,21 @@ function buildPineEditorSafeAuthoringSummary(text, options = {}) {
     )
     && visibleSignals.includes('starter-default-name')
   );
+  const genericSavedSurfaceOnly = surfaceState.genericSavedSurfaceVisible
+    && visibleScriptKind === 'unknown'
+    && !visibleSignals.includes('script-body-visible')
+    && !surfaceState.saveTitleVisible
+    && !surfaceState.renameSurfaceVisible
+    && !saveRequiredSurfaceVisible
+    && !saveConfirmationVisible
+    && !saveReplaceConfirmationVisible
+    && !targetCorruptionVisible
+    && visibleSignals.length > 0
+    && visibleSignals.every((signal) => signal === 'existing-script-saved-surface');
+  const acceptFreshCreateGenericSavedSurface = allowGenericSavedSurfaceAsStarter && genericSavedSurfaceOnly;
+  if (acceptFreshCreateGenericSavedSurface) {
+    addSignal(visibleSignals, 'fresh-create-generic-surface');
+  }
 
   let editorVisibleState = 'unknown-visible-state';
   if (saveReplaceConfirmationVisible) {
@@ -867,7 +883,12 @@ function buildPineEditorSafeAuthoringSummary(text, options = {}) {
     editorVisibleState = 'save-required-blocking';
   } else if (targetCorruptionVisible) {
     editorVisibleState = 'unknown-visible-state';
-  } else if (visibleSignals.includes('editor-empty-hint') || starterLike || surfaceState.starterVisible) {
+  } else if (
+    visibleSignals.includes('editor-empty-hint')
+    || starterLike
+    || surfaceState.starterVisible
+    || acceptFreshCreateGenericSavedSurface
+  ) {
     editorVisibleState = 'empty-or-starter';
   } else if (
     surfaceState.saveTitleVisible
@@ -956,6 +977,12 @@ function buildPineEditorDiagnosticsStructuredSummary(text, evidenceMode = 'gener
     options?.pineEditorSurfaceProbe || null,
     expectedScriptName
   );
+  const observedTitleButtonText = normalizeCompactText(
+    options?.pineEditorSurfaceProbe?.titleButton?.text
+      || options?.pineEditorSurfaceProbe?.rendererProof?.titleButton?.text
+      || '',
+    180
+  ) || null;
   const expectedScriptNameProofVisible = expectedScriptNameProbe.visible === true || expectedScriptNameLineVisible;
   const expectedScriptNameEvidence = expectedScriptNameProbe.visible === true
     ? expectedScriptNameProbe.source || 'surface-anchor'
@@ -1105,6 +1132,7 @@ function buildPineEditorDiagnosticsStructuredSummary(text, evidenceMode = 'gener
     expectedScriptNameLineVisible,
     expectedScriptNameProofVisible,
     expectedScriptNameEvidence,
+    observedTitleButtonText,
     renameSurfaceVisible,
     saveConfirmationBlockingVisible,
     saveReplaceConfirmationVisible,
@@ -1222,7 +1250,7 @@ const TRADINGVIEW_PINE_EDITOR_DIAGNOSTIC_HOST_REGEX = [
   .sort((left, right) => right.length - left.length)
   .join('|');
 
-const DEFAULT_TRADINGVIEW_PINE_ACTIVATION_PROOF_TIMEOUT_MS = 1000;
+const DEFAULT_TRADINGVIEW_PINE_ACTIVATION_PROOF_TIMEOUT_MS = 1400;
 const MIN_TRADINGVIEW_PINE_ACTIVATION_PROOF_TIMEOUT_MS = 350;
 const DEFAULT_TRADINGVIEW_PINE_RENDERER_PROOF_TIMEOUT_MS = 700;
 const MIN_TRADINGVIEW_PINE_RENDERER_PROOF_TIMEOUT_MS = 240;
@@ -1616,6 +1644,17 @@ function summarizeTradingViewPineVisibleAnchorEntries(entries = [], fallbackSour
     .slice(0, 8);
 }
 
+function isTradingViewPineSaveConfirmedOnlyAnchorSet(entries = []) {
+  const summaries = summarizeTradingViewPineVisibleAnchorEntries(entries);
+  if (summaries.length === 0) {
+    return false;
+  }
+
+  return summaries.every((entry) =>
+    normalizeTradingViewPineAnchorText(entry?.category || '') === 'save-confirmed'
+  );
+}
+
 function synthesizeTradingViewPineVisibleAnchorEntriesFromTexts(anchorTexts = [], fallbackSource = null) {
   const inferredEntries = [];
   const knownAnchors = buildTradingViewPineSurfaceHostAnchors();
@@ -1675,10 +1714,37 @@ function extractTradingViewPineExpectedTitleProof(probe = null, expectedScriptNa
     };
   }
 
+  const titleButtonEntry = probe?.titleButton && typeof probe.titleButton === 'object'
+    ? {
+        text: probe.titleButton.text || '',
+        observedText: probe.titleButton.observedText || probe.titleButton.text || '',
+        category: probe.titleButton.category || 'save-title',
+        source: probe.titleButton.source || 'renderer-title-button',
+        scanId: probe.titleButton.scanId || '',
+        role: probe.titleButton.role || '',
+        className: probe.titleButton.className || '',
+        ariaLabel: probe.titleButton.ariaLabel || '',
+        surfaceKind: probe.titleButton.surfaceKind || 'save-title'
+      }
+    : (probe?.rendererProof?.titleButton && typeof probe.rendererProof.titleButton === 'object'
+      ? {
+          text: probe.rendererProof.titleButton.text || '',
+          observedText: probe.rendererProof.titleButton.observedText || probe.rendererProof.titleButton.text || '',
+          category: probe.rendererProof.titleButton.category || 'save-title',
+          source: probe.rendererProof.titleButton.source || 'renderer-title-button',
+          scanId: probe.rendererProof.titleButton.scanId || '',
+          role: probe.rendererProof.titleButton.role || '',
+          className: probe.rendererProof.titleButton.className || '',
+          ariaLabel: probe.rendererProof.titleButton.ariaLabel || '',
+          surfaceKind: probe.rendererProof.titleButton.surfaceKind || 'save-title'
+        }
+      : null);
   const entries = summarizeTradingViewPineVisibleAnchorEntries(
-    Array.isArray(probe?.visibleAnchorEntries) && probe.visibleAnchorEntries.length > 0
-      ? probe.visibleAnchorEntries
-      : (Array.isArray(probe?.rendererProof?.signals) ? probe.rendererProof.signals : []),
+    [
+      ...(Array.isArray(probe?.visibleAnchorEntries) ? probe.visibleAnchorEntries : []),
+      ...(Array.isArray(probe?.rendererProof?.signals) ? probe.rendererProof.signals : []),
+      ...(titleButtonEntry ? [titleButtonEntry] : [])
+    ],
     probe?.matchedBy || probe?.rendererProof?.matchedBy || null
   );
 
@@ -2187,6 +2253,884 @@ function findTradingViewRendererButtonNode(nodes = [], normalizedButtonText = ''
   }) || null;
 }
 
+function findTradingViewRendererMenuItemNode(nodes = [], normalizedItemText = '') {
+  const targetItemText = normalizeTradingViewRendererMatchText(normalizedItemText, 180);
+  if (!targetItemText) return null;
+
+  return (Array.isArray(nodes) ? nodes : []).find((node) => {
+    const role = normalizeTradingViewRendererMatchText(node?.role?.value || node?.chromeRole?.value || '', 80);
+    const name = normalizeTradingViewRendererMatchText(node?.name?.value || '', 180);
+    return node?.ignored !== true
+      && /(menuitem|button)/.test(role)
+      && name === targetItemText;
+  }) || null;
+}
+
+function collectTradingViewRendererMenuCandidates(nodes = [], options = {}) {
+  const maxResults = Number.isFinite(Number(options?.maxResults))
+    ? Math.max(1, Math.min(Math.round(Number(options.maxResults)), 12))
+    : 8;
+  const candidates = [];
+  const seen = new Set();
+
+  for (const node of Array.isArray(nodes) ? nodes : []) {
+    if (node?.ignored === true) continue;
+    const role = normalizeTradingViewRendererMatchText(node?.role?.value || node?.chromeRole?.value || '', 80);
+    const name = normalizeTradingViewRendererMatchText(node?.name?.value || '', 180);
+    if (!name || !/(menuitem|menu|button|listitem)/.test(role)) {
+      continue;
+    }
+
+    const key = `${role}::${name}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    candidates.push({
+      role,
+      name,
+      backendDOMNodeId: Number(node?.backendDOMNodeId || 0) || 0
+    });
+    if (candidates.length >= maxResults) {
+      break;
+    }
+  }
+
+  return candidates;
+}
+
+function buildTradingViewPineTitleButtonAnchorEntry(titleButton = null, options = {}) {
+  const buttonNode = titleButton?.node || null;
+  const metadata = titleButton?.metadata || null;
+  const buttonName = normalizeCompactText(
+    buttonNode?.name?.value || buttonNode?.name || metadata?.text || '',
+    180
+  );
+  if (!buttonName || !isTradingViewPineHeaderTitleButtonName(buttonName)) {
+    return null;
+  }
+
+  const normalizedName = normalizeTradingViewPineAnchorText(buttonName);
+  const normalizedExpected = normalizeTradingViewPineAnchorText(options?.expectedScriptName || '');
+  const starterLike = /^(untitled(?: script)?|my script|my strategy|my library|unnamed)$/i.test(buttonName);
+  const category = starterLike
+    ? 'starter'
+    : (normalizedExpected && normalizedName.includes(normalizedExpected) ? 'save-title' : 'save-title');
+
+  return {
+    text: buttonName,
+    observedText: normalizeCompactText(
+      [buttonName, metadata?.text || '', metadata?.title || '', metadata?.ariaLabel || ''].filter(Boolean).join('\n'),
+      220
+    ),
+    category,
+    source: 'renderer-title-button',
+    role: normalizeCompactText(buttonNode?.role?.value || buttonNode?.chromeRole?.value || metadata?.role || 'button', 80) || 'button',
+    className: normalizeCompactText(metadata?.className || '', 180) || null,
+    ariaLabel: normalizeCompactText(metadata?.ariaLabel || '', 180) || null,
+    surfaceKind: category
+  };
+}
+
+function summarizeTradingViewPineRendererTitleButton(titleButton = null, options = {}) {
+  const anchorEntry = buildTradingViewPineTitleButtonAnchorEntry(titleButton, options);
+  if (!anchorEntry) {
+    return null;
+  }
+
+  return {
+    text: normalizeCompactText(anchorEntry.text || '', 180) || null,
+    observedText: normalizeCompactText(anchorEntry.observedText || anchorEntry.text || '', 220) || null,
+    category: normalizeCompactText(anchorEntry.category || '', 40) || null,
+    source: normalizeCompactText(anchorEntry.source || 'renderer-title-button', 80) || 'renderer-title-button',
+    role: normalizeCompactText(anchorEntry.role || '', 80) || null,
+    className: normalizeCompactText(anchorEntry.className || '', 180) || null,
+    ariaLabel: normalizeCompactText(anchorEntry.ariaLabel || '', 180) || null,
+    surfaceKind: normalizeCompactText(anchorEntry.surfaceKind || '', 40) || null,
+    score: Number(titleButton?.score || 0) || 0,
+    metadata: titleButton?.metadata && typeof titleButton.metadata === 'object'
+      ? {
+          text: normalizeCompactText(titleButton.metadata.text || '', 180) || null,
+          title: normalizeCompactText(titleButton.metadata.title || '', 180) || null,
+          ariaLabel: normalizeCompactText(titleButton.metadata.ariaLabel || '', 180) || null,
+          className: normalizeCompactText(titleButton.metadata.className || '', 180) || null
+        }
+      : null
+  };
+}
+
+function isRetryableTradingViewRendererAttachError(error = null) {
+  const reason = String(error?.reason || '').trim().toLowerCase();
+  const message = String(error?.message || error || '').trim().toLowerCase();
+  if (reason && reason !== 'protocol-error') {
+    return false;
+  }
+
+  return [
+    'cdp websocket open timed out',
+    'cdp websocket transport error',
+    'cdp websocket closed before the session completed',
+    'cdp session is already closed'
+  ].some((token) => message.includes(token));
+}
+
+function buildTradingViewRendererAttachAttemptPlan(invokeKind = '', options = {}) {
+  const baseOpenTimeoutMs = Math.max(120, Number(options?.openTimeoutMs || 0) || 0);
+  const baseCallTimeoutMs = Math.max(120, Number(options?.callTimeoutMs || 0) || 0);
+  const normalizedKind = String(invokeKind || '').trim().toLowerCase();
+
+  if (normalizedKind !== 'pine-current-script-menu-item' && normalizedKind !== 'pine-editor-write') {
+    return [{
+      openTimeoutMs: baseOpenTimeoutMs,
+      callTimeoutMs: baseCallTimeoutMs,
+      retryDelayMs: 0
+    }];
+  }
+
+  const secondOpenTimeoutMs = Math.max(
+    baseOpenTimeoutMs + 450,
+    Math.min(2600, Math.round(baseOpenTimeoutMs * 1.6))
+  );
+  const secondCallTimeoutMs = Math.max(
+    baseCallTimeoutMs,
+    Math.min(1800, Math.round(baseCallTimeoutMs * 1.2))
+  );
+  const thirdOpenTimeoutMs = Math.max(
+    secondOpenTimeoutMs + 450,
+    Math.min(2400, Math.round(baseOpenTimeoutMs * 2.3))
+  );
+  const thirdCallTimeoutMs = Math.max(
+    secondCallTimeoutMs,
+    Math.min(2000, Math.round(baseCallTimeoutMs * 1.35))
+  );
+
+  return [
+    {
+      openTimeoutMs: baseOpenTimeoutMs,
+      callTimeoutMs: baseCallTimeoutMs,
+      retryDelayMs: 140
+    },
+    {
+      openTimeoutMs: secondOpenTimeoutMs,
+      callTimeoutMs: secondCallTimeoutMs,
+      retryDelayMs: 180
+    },
+    {
+      openTimeoutMs: thirdOpenTimeoutMs,
+      callTimeoutMs: thirdCallTimeoutMs,
+      retryDelayMs: 0
+    }
+  ];
+}
+
+const TRADINGVIEW_PINE_HEADER_TITLE_BUTTON_EXCLUDED_NAMES = new Set([
+  'add to chart',
+  'publish script',
+  'more',
+  'all changes saved',
+  'pine',
+  'save',
+  'indicators, metrics, and strategies',
+  'favorite indicators',
+  'indicator templates',
+  'show indicators legend',
+  'watchlist, details, and news',
+  'close strategy report',
+  'new drawings will not be synced',
+  'remove objects',
+  'remove options',
+  'click to learn more'
+]);
+
+function isTradingViewPineHeaderTitleButtonName(name = '') {
+  const normalized = normalizeTradingViewRendererMatchText(name, 180);
+  if (!normalized) return false;
+  if (TRADINGVIEW_PINE_HEADER_TITLE_BUTTON_EXCLUDED_NAMES.has(normalized)) {
+    return false;
+  }
+  if (normalized.length < 2 || normalized.length > 160) {
+    return false;
+  }
+  if (/^(buy|sell|strong buy|strong sell|neutral)$/i.test(normalized)) {
+    return false;
+  }
+  return true;
+}
+
+function inferTradingViewPineCurrentTitleHint(options = {}) {
+  const explicitHint = normalizeTradingViewRendererMatchText(
+    options?.currentTitleHint || options?.pineCurrentTitle || '',
+    180
+  );
+  if (explicitHint) {
+    return explicitHint;
+  }
+
+  const titleCandidates = [
+    options?.windowInfo?.title,
+    options?.foreground?.title,
+    options?.title
+  ]
+    .map((value) => String(value || '').trim())
+    .filter(Boolean);
+
+  for (const rawTitle of titleCandidates) {
+    const slashSegments = rawTitle.split('/').map((segment) => segment.trim()).filter(Boolean);
+    const rightMostSegment = slashSegments.length > 0 ? slashSegments[slashSegments.length - 1] : rawTitle;
+    const normalizedSegment = normalizeTradingViewRendererMatchText(rightMostSegment, 180);
+    if (
+      normalizedSegment
+      && !/^tradingview$/i.test(normalizedSegment)
+      && !/^(chart|unnamed chart)$/i.test(normalizedSegment)
+    ) {
+      return normalizedSegment;
+    }
+  }
+
+  return '';
+}
+
+function buildTradingViewRendererNodeMetadataFunctionDeclaration() {
+  return `function() {
+    const compact = (value, max = 220) => String(value || '').replace(/\\s+/g, ' ').trim().slice(0, max);
+    const rectOf = (element) => {
+      try {
+        const rect = element?.getBoundingClientRect?.();
+        return rect ? {
+          x: Number(rect.x || rect.left || 0) || 0,
+          y: Number(rect.y || rect.top || 0) || 0,
+          width: Number(rect.width || 0) || 0,
+          height: Number(rect.height || 0) || 0
+        } : null;
+      } catch {
+        return null;
+      }
+    };
+    const role = compact(
+      this.getAttribute?.('role')
+      || this.role
+      || this.ariaRoleDescription
+      || ''
+    , 80);
+    const rect = rectOf(this);
+    return {
+      text: compact(this.innerText || this.textContent || this.value || ''),
+      ariaLabel: compact(this.getAttribute?.('aria-label') || '', 180),
+      title: compact(this.getAttribute?.('title') || '', 180),
+      className: compact(typeof this.className === 'string' ? this.className : (this.className?.baseVal || ''), 240),
+      tagName: compact(this.tagName || '', 40),
+      role,
+      rect
+    };
+  }`;
+}
+
+async function resolveTradingViewRendererAxNodeMetadataWithCDPSession(session, node = null) {
+  const backendDOMNodeId = Number(node?.backendDOMNodeId || 0) || 0;
+  if (!backendDOMNodeId) {
+    return null;
+  }
+
+  let objectId = '';
+  try {
+    const resolvedNode = await session.call('DOM.resolveNode', {
+      backendNodeId: backendDOMNodeId
+    });
+    objectId = String(resolvedNode?.object?.objectId || '').trim();
+    if (!objectId) {
+      return null;
+    }
+
+    const response = await session.call('Runtime.callFunctionOn', {
+      objectId,
+      functionDeclaration: buildTradingViewRendererNodeMetadataFunctionDeclaration(),
+      returnByValue: true,
+      awaitPromise: true
+    });
+    const metadata = response?.result?.value || null;
+    return metadata && typeof metadata === 'object'
+      ? metadata
+      : null;
+  } catch {
+    return null;
+  } finally {
+    if (objectId) {
+      try {
+        await session.call('Runtime.releaseObject', {
+          objectId
+        });
+      } catch {}
+    }
+  }
+}
+
+async function clickTradingViewRendererAxNodeWithCDPSession(session, node = null) {
+  const backendDOMNodeId = Number(node?.backendDOMNodeId || 0) || 0;
+  if (!backendDOMNodeId) {
+    return {
+      success: false,
+      reason: 'renderer-button-dom-node-missing',
+      axNode: summarizeTradingViewRendererAxNode(node)
+    };
+  }
+
+  let objectId = '';
+  try {
+    const resolvedNode = await session.call('DOM.resolveNode', {
+      backendNodeId: backendDOMNodeId
+    });
+    objectId = String(resolvedNode?.object?.objectId || '').trim();
+    if (!objectId) {
+      return {
+        success: false,
+        reason: 'renderer-button-resolve-failed',
+        axNode: summarizeTradingViewRendererAxNode(node)
+      };
+    }
+
+    const clickResponse = await session.call('Runtime.callFunctionOn', {
+      objectId,
+      functionDeclaration: buildTradingViewRendererButtonInvokeFunctionDeclaration(),
+      returnByValue: true,
+      awaitPromise: true
+    });
+    const clickPayload = clickResponse?.result?.value || null;
+    return {
+      success: clickPayload?.clicked !== false,
+      reason: clickPayload?.clicked === false ? 'renderer-button-click-failed' : null,
+      clickResult: clickPayload || null,
+      axNode: summarizeTradingViewRendererAxNode(node)
+    };
+  } catch (error) {
+    return {
+      success: false,
+      reason: error?.reason || 'protocol-error',
+      error: error?.message || String(error || 'TradingView renderer node click failed'),
+      axNode: summarizeTradingViewRendererAxNode(node)
+    };
+  } finally {
+    if (objectId) {
+      try {
+        await session.call('Runtime.releaseObject', {
+          objectId
+        });
+      } catch {}
+    }
+  }
+}
+
+async function hoverTradingViewRendererAxNodeWithCDPSession(session, node = null) {
+  const backendDOMNodeId = Number(node?.backendDOMNodeId || 0) || 0;
+  if (!backendDOMNodeId) {
+    return {
+      success: false,
+      reason: 'renderer-button-dom-node-missing',
+      axNode: summarizeTradingViewRendererAxNode(node)
+    };
+  }
+
+  let objectId = '';
+  try {
+    const resolvedNode = await session.call('DOM.resolveNode', {
+      backendNodeId: backendDOMNodeId
+    });
+    objectId = String(resolvedNode?.object?.objectId || '').trim();
+    if (!objectId) {
+      return {
+        success: false,
+        reason: 'renderer-button-resolve-failed',
+        axNode: summarizeTradingViewRendererAxNode(node)
+      };
+    }
+
+    const hoverResponse = await session.call('Runtime.callFunctionOn', {
+      objectId,
+      functionDeclaration: buildTradingViewRendererNodeHoverFunctionDeclaration(),
+      returnByValue: true,
+      awaitPromise: true
+    });
+    const hoverPayload = hoverResponse?.result?.value || null;
+    return {
+      success: hoverPayload?.hovered !== false,
+      reason: hoverPayload?.hovered === false ? 'renderer-button-hover-failed' : null,
+      hoverResult: hoverPayload || null,
+      axNode: summarizeTradingViewRendererAxNode(node)
+    };
+  } catch (error) {
+    return {
+      success: false,
+      reason: error?.reason || 'protocol-error',
+      error: error?.message || String(error || 'TradingView renderer node hover failed'),
+      axNode: summarizeTradingViewRendererAxNode(node)
+    };
+  } finally {
+    if (objectId) {
+      try {
+        await session.call('Runtime.releaseObject', {
+          objectId
+        });
+      } catch {}
+    }
+  }
+}
+
+async function findTradingViewPineHeaderTitleButtonNodeWithCDPSession(session, nodes = [], options = {}) {
+  const addToChartNode = findTradingViewRendererButtonNode(nodes, 'add to chart');
+  const addToChartMetadata = addToChartNode
+    ? await resolveTradingViewRendererAxNodeMetadataWithCDPSession(session, addToChartNode)
+    : null;
+  const addRect = addToChartMetadata?.rect || null;
+  const currentTitleHint = inferTradingViewPineCurrentTitleHint(options);
+
+  const candidates = [];
+  for (const node of Array.isArray(nodes) ? nodes : []) {
+    const role = normalizeTradingViewRendererMatchText(node?.role?.value || node?.chromeRole?.value || '', 80);
+    const name = normalizeTradingViewRendererMatchText(node?.name?.value || '', 180);
+    if (!/button/.test(role) || !isTradingViewPineHeaderTitleButtonName(name)) {
+      continue;
+    }
+    if (!(Number(node?.backendDOMNodeId || 0) > 0)) {
+      continue;
+    }
+
+    const metadata = await resolveTradingViewRendererAxNodeMetadataWithCDPSession(session, node);
+    const rect = metadata?.rect || null;
+    let score = 0;
+    if (rect) {
+      if (rect.width >= 100) score += 120;
+      else if (rect.width >= 60) score += 70;
+      if (rect.height >= 24) score += 40;
+      if (rect.y >= 36 && rect.y <= 120) score += 100;
+    }
+    if (addRect && rect) {
+      const centerYDelta = Math.abs((rect.y + (rect.height / 2)) - (addRect.y + (addRect.height / 2)));
+      if (rect.x < addRect.x) score += 240;
+      if (centerYDelta <= 20) score += 220;
+      else if (centerYDelta <= 40) score += 120;
+      if ((rect.x + rect.width) <= (addRect.x + 8)) score += 80;
+    }
+    if (currentTitleHint && name === currentTitleHint) {
+      score += 260;
+    } else if (
+      currentTitleHint
+      && currentTitleHint.length >= 4
+      && (
+        name.includes(currentTitleHint)
+        || currentTitleHint.includes(name)
+      )
+    ) {
+      score += 180;
+    }
+    if (/^(my script|my strategy|my library|untitled(?: script)?)$/i.test(name)) {
+      score += 60;
+    }
+    if (/\bscript\b/i.test(name)) {
+      score += 20;
+    }
+
+    candidates.push({
+      node,
+      score,
+      metadata: metadata || null
+    });
+  }
+
+  candidates.sort((left, right) => right.score - left.score);
+  const best = candidates[0] || null;
+  if (!best || best.score < 180) {
+    return null;
+  }
+
+  return {
+    node: best.node,
+    metadata: best.metadata || null,
+    score: best.score,
+    candidates: candidates.slice(0, 5).map((candidate) => ({
+      score: candidate.score,
+      axNode: summarizeTradingViewRendererAxNode(candidate.node),
+      metadata: candidate.metadata || null
+    }))
+  };
+}
+
+async function discoverTradingViewPineTitleMenuItemWithCDPSession(session, options = {}) {
+  const menuItemText = normalizeCompactText(
+    options?.menuItemText || options?.buttonText || '',
+    180
+  );
+  const startedAt = Date.now();
+  const timeoutMs = Number.isFinite(Number(options?.timeoutMs))
+    ? Math.max(180, Math.min(Math.round(Number(options.timeoutMs)), 1800))
+    : 900;
+  const attemptDelaysMs = [90, 180, 260, 360];
+  const attempts = [];
+  let lastMenuCandidates = [];
+  let titleReclicked = false;
+
+  for (let attemptIndex = 0; attemptIndex < attemptDelaysMs.length; attemptIndex += 1) {
+    const elapsedBeforeWait = Date.now() - startedAt;
+    const remainingBeforeWait = timeoutMs - elapsedBeforeWait;
+    if (remainingBeforeWait <= 0 && attemptIndex > 0) {
+      break;
+    }
+
+    const waitMs = Math.max(
+      0,
+      Math.min(
+        attemptDelaysMs[attemptIndex],
+        attemptIndex === 0 ? timeoutMs : remainingBeforeWait
+      )
+    );
+    if (waitMs > 0) {
+      await sleep(waitMs);
+    }
+
+    const axTree = await session.call('Accessibility.getFullAXTree', {
+      depth: 16
+    });
+    const menuNodes = Array.isArray(axTree?.nodes) ? axTree.nodes : [];
+    const menuItemNode = findTradingViewRendererMenuItemNode(menuNodes, menuItemText);
+    const menuCandidates = collectTradingViewRendererMenuCandidates(menuNodes, {
+      maxResults: 8
+    });
+    lastMenuCandidates = menuCandidates;
+    const pineMenuSurfaceVisible = menuCandidates.some((candidate) =>
+      /^(save script|make a copy|rename|create new|open script)/i.test(candidate?.name || '')
+    );
+
+    attempts.push({
+      attempt: attemptIndex + 1,
+      waitedMs: waitMs,
+      nodeCount: menuNodes.length,
+      pineMenuSurfaceVisible,
+      foundExactMenuItem: !!menuItemNode,
+      menuCandidates
+    });
+
+    if (menuItemNode) {
+      return {
+        success: true,
+        menuItemNode,
+        attempts,
+        menuCandidates
+      };
+    }
+
+    if (!titleReclicked && attemptIndex >= 1 && pineMenuSurfaceVisible === false && options?.titleButtonNode) {
+      const reclickResult = await clickTradingViewRendererAxNodeWithCDPSession(session, options.titleButtonNode);
+      titleReclicked = reclickResult?.success === true;
+      attempts.push({
+        attempt: `${attemptIndex + 1}-reclick`,
+        waitedMs: 0,
+        reclickedTitleButton: titleReclicked,
+        reclickReason: pineMenuSurfaceVisible === false ? 'no-menu-surface-yet' : 'unknown',
+        reclickResult: reclickResult?.clickResult || null
+      });
+    }
+  }
+
+  return {
+    success: false,
+    attempts,
+    menuCandidates: lastMenuCandidates
+  };
+}
+
+async function discoverTradingViewPineCreateNewSubmenuItemWithCDPSession(session, options = {}) {
+  const submenuItemText = normalizeCompactText(options?.submenuItemText || '', 180);
+  if (!submenuItemText) {
+    return {
+      success: false,
+      attempts: [],
+      menuCandidates: []
+    };
+  }
+
+  const parentMenuItemNode = options?.parentMenuItemNode || null;
+  const startedAt = Date.now();
+  const timeoutMs = Number.isFinite(Number(options?.timeoutMs))
+    ? Math.max(220, Math.min(Math.round(Number(options.timeoutMs)), 2200))
+    : 1100;
+  const attemptDelaysMs = [0, 90, 160, 240, 320];
+  const attempts = [];
+  let lastMenuCandidates = [];
+  let hoverAttempted = false;
+  let parentClickAttempted = false;
+
+  for (let attemptIndex = 0; attemptIndex < attemptDelaysMs.length; attemptIndex += 1) {
+    const elapsedBeforeWait = Date.now() - startedAt;
+    const remainingBeforeWait = timeoutMs - elapsedBeforeWait;
+    if (remainingBeforeWait <= 0 && attemptIndex > 0) {
+      break;
+    }
+
+    if (!hoverAttempted && parentMenuItemNode) {
+      const hoverResult = await hoverTradingViewRendererAxNodeWithCDPSession(session, parentMenuItemNode);
+      hoverAttempted = hoverResult?.success === true;
+      attempts.push({
+        attempt: `${attemptIndex + 1}-hover`,
+        waitedMs: 0,
+        hoveredParentMenuItem: hoverAttempted,
+        hoverResult: hoverResult?.hoverResult || null
+      });
+    }
+
+    const waitMs = Math.max(
+      0,
+      Math.min(
+        attemptDelaysMs[attemptIndex],
+        remainingBeforeWait
+      )
+    );
+    if (waitMs > 0) {
+      await sleep(waitMs);
+    }
+
+    const axTree = await session.call('Accessibility.getFullAXTree', {
+      depth: 18
+    });
+    const menuNodes = Array.isArray(axTree?.nodes) ? axTree.nodes : [];
+    const submenuItemNode = findTradingViewRendererMenuItemNode(menuNodes, submenuItemText);
+    const menuCandidates = collectTradingViewRendererMenuCandidates(menuNodes, {
+      maxResults: 10
+    });
+    lastMenuCandidates = menuCandidates;
+    const submenuSurfaceVisible = menuCandidates.some((candidate) =>
+      /^(indicator|strategy|library|built in|built-in(?:\.\.\.)?)$/i.test(candidate?.name || '')
+    );
+
+    attempts.push({
+      attempt: attemptIndex + 1,
+      waitedMs: waitMs,
+      nodeCount: menuNodes.length,
+      submenuSurfaceVisible,
+      foundExactSubmenuItem: !!submenuItemNode,
+      menuCandidates
+    });
+
+    if (submenuItemNode) {
+      return {
+        success: true,
+        submenuItemNode,
+        attempts,
+        menuCandidates
+      };
+    }
+
+    if (!parentClickAttempted && parentMenuItemNode && attemptIndex >= 1 && submenuSurfaceVisible === false) {
+      const parentClickResult = await clickTradingViewRendererAxNodeWithCDPSession(session, parentMenuItemNode);
+      parentClickAttempted = parentClickResult?.success === true;
+      attempts.push({
+        attempt: `${attemptIndex + 1}-parent-click`,
+        waitedMs: 0,
+        clickedParentMenuItem: parentClickAttempted,
+        clickResult: parentClickResult?.clickResult || null
+      });
+    }
+  }
+
+  return {
+    success: false,
+    attempts,
+    menuCandidates: lastMenuCandidates
+  };
+}
+
+async function invokeTradingViewPineTitleMenuItemWithCDPSession(session, options = {}) {
+  const menuItemText = normalizeCompactText(
+    options?.menuItemText || options?.buttonText || '',
+    180
+  );
+  const submenuItemText = normalizeCompactText(options?.submenuItemText || '', 180);
+  if (!menuItemText) {
+    return {
+      success: false,
+      available: true,
+      reason: 'pine-menu-item-required',
+      error: 'TradingView Pine title-menu invoke requires a non-empty menu item label.'
+    };
+  }
+
+  await session.call('Accessibility.enable');
+  const initialAxTree = await session.call('Accessibility.getFullAXTree', {
+    depth: 14
+  });
+  const initialNodes = Array.isArray(initialAxTree?.nodes) ? initialAxTree.nodes : [];
+  const normalizedRequiredTexts = (Array.isArray(options?.requiredTexts) ? options.requiredTexts : [options?.requiredTexts])
+    .map((value) => normalizeTradingViewRendererMatchText(value || '', 220))
+    .filter(Boolean);
+  const matchedRequiredTexts = matchTradingViewRendererRequiredTexts(initialNodes, normalizedRequiredTexts);
+  if (normalizedRequiredTexts.length > 0 && matchedRequiredTexts.length !== normalizedRequiredTexts.length) {
+    return {
+      success: false,
+      available: true,
+      reason: 'renderer-required-text-missing',
+      matchedRequiredTexts
+    };
+  }
+
+  const titleButton = await findTradingViewPineHeaderTitleButtonNodeWithCDPSession(session, initialNodes, {
+    currentTitleHint: options?.currentTitleHint || options?.pineCurrentTitle || '',
+    pineCurrentTitle: options?.pineCurrentTitle || '',
+    windowInfo: options?.windowInfo || null,
+    foreground: options?.foreground || null,
+    title: options?.title || ''
+  });
+  if (!titleButton?.node) {
+    return {
+      success: false,
+      available: true,
+      reason: 'pine-title-button-unavailable',
+      matchedRequiredTexts,
+      error: 'TradingView Pine header title button was not exposed for the current script menu.',
+      currentTitleHint: inferTradingViewPineCurrentTitleHint(options)
+    };
+  }
+
+  const titleClick = await clickTradingViewRendererAxNodeWithCDPSession(session, titleButton.node);
+  if (!titleClick?.success) {
+    return {
+      success: false,
+      available: true,
+      reason: titleClick?.reason || 'pine-title-button-click-failed',
+      error: titleClick?.error || null,
+      matchedRequiredTexts,
+      currentTitleHint: inferTradingViewPineCurrentTitleHint(options),
+      titleButton: {
+        ...titleClick?.axNode,
+        metadata: titleButton.metadata || null
+      }
+    };
+  }
+
+  const menuDiscovery = await discoverTradingViewPineTitleMenuItemWithCDPSession(session, {
+    menuItemText,
+    timeoutMs: options?.menuDiscoveryTimeoutMs,
+    titleButtonNode: titleButton.node
+  });
+  const menuItemNode = menuDiscovery?.menuItemNode || null;
+  if (!menuItemNode) {
+    const currentTitleHint = inferTradingViewPineCurrentTitleHint(options);
+    const menuCandidateNames = (Array.isArray(menuDiscovery?.menuCandidates) ? menuDiscovery.menuCandidates : [])
+      .map((candidate) => candidate?.name)
+      .filter(Boolean)
+      .slice(0, 6);
+    return {
+      success: false,
+      available: true,
+      reason: 'pine-menu-item-unavailable',
+      error: menuCandidateNames.length > 0
+        ? `TradingView Pine menu opened without an exact "${menuItemText}" item. Visible candidates: ${menuCandidateNames.join(', ')}.`
+        : `TradingView Pine menu did not expose an exact "${menuItemText}" item after clicking the current script title.`,
+      matchedRequiredTexts,
+      currentTitleHint,
+      menuDiscovery: {
+        attempts: Array.isArray(menuDiscovery?.attempts) ? menuDiscovery.attempts : [],
+        menuCandidates: Array.isArray(menuDiscovery?.menuCandidates) ? menuDiscovery.menuCandidates : []
+      },
+      titleButton: {
+        ...summarizeTradingViewRendererAxNode(titleButton.node),
+        metadata: titleButton.metadata || null
+      }
+    };
+  }
+
+  let terminalMenuItemNode = menuItemNode;
+  let parentMenuItemNode = null;
+  let submenuDiscovery = null;
+  let terminalClickResult = null;
+
+  if (submenuItemText) {
+    submenuDiscovery = await discoverTradingViewPineCreateNewSubmenuItemWithCDPSession(session, {
+      submenuItemText,
+      timeoutMs: options?.submenuDiscoveryTimeoutMs,
+      parentMenuItemNode: menuItemNode
+    });
+    const submenuItemNode = submenuDiscovery?.submenuItemNode || null;
+    if (!submenuItemNode) {
+      const currentTitleHint = inferTradingViewPineCurrentTitleHint(options);
+      const submenuCandidateNames = (Array.isArray(submenuDiscovery?.menuCandidates) ? submenuDiscovery.menuCandidates : [])
+        .map((candidate) => candidate?.name)
+        .filter(Boolean)
+        .slice(0, 8);
+      return {
+        success: false,
+        available: true,
+        reason: 'pine-submenu-item-unavailable',
+        error: submenuCandidateNames.length > 0
+          ? `TradingView exposed "${menuItemText}" but did not expose an exact "${submenuItemText}" child. Visible candidates: ${submenuCandidateNames.join(', ')}.`
+          : `TradingView exposed "${menuItemText}" but did not expose an exact "${submenuItemText}" child after bounded submenu expansion.`,
+        matchedRequiredTexts,
+        currentTitleHint,
+        menuDiscovery: {
+          attempts: Array.isArray(menuDiscovery?.attempts) ? menuDiscovery.attempts : [],
+          menuCandidates: Array.isArray(menuDiscovery?.menuCandidates) ? menuDiscovery.menuCandidates : []
+        },
+        submenuDiscovery: {
+          attempts: Array.isArray(submenuDiscovery?.attempts) ? submenuDiscovery.attempts : [],
+          menuCandidates: Array.isArray(submenuDiscovery?.menuCandidates) ? submenuDiscovery.menuCandidates : []
+        },
+        titleButton: {
+          ...summarizeTradingViewRendererAxNode(titleButton.node),
+          metadata: titleButton.metadata || null
+        },
+        parentMenuItem: {
+          ...summarizeTradingViewRendererAxNode(menuItemNode)
+        }
+      };
+    }
+
+    parentMenuItemNode = menuItemNode;
+    terminalMenuItemNode = submenuItemNode;
+    terminalClickResult = await clickTradingViewRendererAxNodeWithCDPSession(session, submenuItemNode);
+  } else {
+    terminalClickResult = await clickTradingViewRendererAxNodeWithCDPSession(session, menuItemNode);
+  }
+
+  await sleep(120);
+  let postClickPineRendererProof = null;
+  try {
+    postClickPineRendererProof = await probeTradingViewPineEditorRendererWithCDPSession(session, {
+      pineExpectedScriptName: normalizeCompactText(options?.pineExpectedScriptName || '', 180)
+    });
+  } catch {}
+
+  return {
+    success: terminalClickResult?.success === true,
+    available: true,
+    reason: terminalClickResult?.success === true
+      ? null
+      : (terminalClickResult?.reason || 'pine-menu-item-click-failed'),
+    error: terminalClickResult?.success === true
+      ? null
+      : (terminalClickResult?.error || null),
+    matchedRequiredTexts,
+    currentTitleHint: inferTradingViewPineCurrentTitleHint(options),
+    menuDiscovery: {
+      attempts: Array.isArray(menuDiscovery?.attempts) ? menuDiscovery.attempts : [],
+      menuCandidates: Array.isArray(menuDiscovery?.menuCandidates) ? menuDiscovery.menuCandidates : []
+    },
+    submenuDiscovery: submenuDiscovery
+      ? {
+          attempts: Array.isArray(submenuDiscovery?.attempts) ? submenuDiscovery.attempts : [],
+          menuCandidates: Array.isArray(submenuDiscovery?.menuCandidates) ? submenuDiscovery.menuCandidates : []
+        }
+      : null,
+    titleButton: {
+      ...summarizeTradingViewRendererAxNode(titleButton.node),
+      metadata: titleButton.metadata || null
+    },
+    menuItem: {
+      ...summarizeTradingViewRendererAxNode(terminalMenuItemNode)
+    },
+    parentMenuItem: parentMenuItemNode
+      ? {
+          ...summarizeTradingViewRendererAxNode(parentMenuItemNode)
+        }
+      : null,
+    clickResult: terminalClickResult?.clickResult || null,
+    postClickPineRendererProof
+  };
+}
+
 function describeTradingViewRendererInvokeSurface(kind = '') {
   switch ((normalizeCompactText(kind || '', 80) || '').toLowerCase()) {
     case 'unsaved-changes-confirmation':
@@ -2195,6 +3139,8 @@ function describeTradingViewRendererInvokeSurface(kind = '') {
       return 'TradingView replace-script dialog';
     case 'pine-first-save-confirmation':
       return 'TradingView Pine save-name dialog';
+    case 'pine-current-script-menu-item':
+      return 'TradingView Pine current-script menu';
     default:
       return 'TradingView renderer dialog';
   }
@@ -2269,6 +3215,8 @@ function shouldVerifyTradingViewRendererInvokeEffect(kind = '', normalizedRequir
 
 async function probeTradingViewPineEditorRendererWithCDPSession(session, options = {}) {
   const rendererProofAnchors = buildTradingViewPineRendererProofAnchors(options);
+  const expectedScriptName = normalizeCompactText(options?.pineExpectedScriptName || '', 180);
+  const shouldCaptureTitleButton = !!expectedScriptName || options?.captureTitleButton === true;
   const axDepth = Number.isFinite(Number(options?.axDepth))
     ? Math.max(6, Math.min(Math.round(Number(options.axDepth)), 14))
     : 10;
@@ -2279,35 +3227,68 @@ async function probeTradingViewPineEditorRendererWithCDPSession(session, options
   });
   const domPayload = domProbeResponse?.result?.value || {};
   const domSignals = pickTradingViewPineAnchorSignals(domPayload?.signals || [], rendererProofAnchors);
-  if (domSignals.length > 0) {
-    return {
-      available: true,
-      active: true,
-      matchedBy: 'chromium-cdp-dom',
-      anchorText: domSignals[0].text,
-      signals: domSignals,
-      dom: {
-        matched: true,
-        scannedNodes: Number(domPayload?.scannedNodes || 0) || 0,
-        usedBodyInnerText: domPayload?.usedBodyInnerText === true
-      },
-      ax: null
-    };
-  }
+  const domSignalsSaveConfirmedOnly = domSignals.length > 0 && isTradingViewPineSaveConfirmedOnlyAnchorSet(domSignals);
 
   let axSignals = [];
   let axError = null;
+  let titleButtonAnchor = null;
+  let titleButtonSummary = null;
   try {
     await session.call('Accessibility.enable');
     const axTree = await session.call('Accessibility.getFullAXTree', {
       depth: axDepth
     });
-    axSignals = extractTradingViewPineRendererAxSignals(axTree?.nodes || [], rendererProofAnchors);
+    const axNodes = Array.isArray(axTree?.nodes) ? axTree.nodes : [];
+    axSignals = extractTradingViewPineRendererAxSignals(axNodes, rendererProofAnchors);
+    if (shouldCaptureTitleButton) {
+      const titleButton = await findTradingViewPineHeaderTitleButtonNodeWithCDPSession(session, axNodes, {
+        pineCurrentTitle: expectedScriptName || '',
+        currentTitleHint: expectedScriptName || ''
+      });
+      titleButtonSummary = summarizeTradingViewPineRendererTitleButton(titleButton, {
+        expectedScriptName
+      });
+      titleButtonAnchor = buildTradingViewPineTitleButtonAnchorEntry(titleButton, {
+        expectedScriptName
+      });
+    }
   } catch (error) {
     axError = error?.message || String(error || 'Accessibility.getFullAXTree failed');
   }
+  const mergedSignals = summarizeTradingViewPineVisibleAnchorEntries(
+    [
+      ...domSignals,
+      ...axSignals,
+      ...(titleButtonAnchor ? [titleButtonAnchor] : [])
+    ],
+    'chromium-cdp'
+  );
+  const decisiveSignals = mergedSignals.filter((entry) => {
+    const category = normalizeTradingViewPineAnchorText(entry?.category || '');
+    return category !== 'save-confirmed';
+  });
 
-  if (axSignals.length > 0) {
+  if (decisiveSignals.length > 0) {
+    return {
+      available: true,
+      active: true,
+      matchedBy: domSignals.length > 0 ? 'chromium-cdp-dom' : (axSignals.length > 0 ? 'chromium-cdp-ax' : 'chromium-cdp-title-button'),
+      anchorText: decisiveSignals[0].text,
+      signals: mergedSignals,
+      dom: {
+        matched: domSignals.length > 0,
+        scannedNodes: Number(domPayload?.scannedNodes || 0) || 0,
+        usedBodyInnerText: domPayload?.usedBodyInnerText === true
+      },
+      ax: {
+        matched: axSignals.length > 0 || !!titleButtonAnchor,
+        error: axError
+      },
+      titleButton: titleButtonSummary
+    };
+  }
+
+  if (axSignals.length > 0 && !isTradingViewPineSaveConfirmedOnlyAnchorSet(axSignals)) {
     return {
       available: true,
       active: true,
@@ -2322,17 +3303,37 @@ async function probeTradingViewPineEditorRendererWithCDPSession(session, options
       ax: {
         matched: true,
         error: null
-      }
+      },
+      titleButton: titleButtonSummary
     };
   }
+  const axSignalsSaveConfirmedOnly = axSignals.length > 0 && isTradingViewPineSaveConfirmedOnlyAnchorSet(axSignals);
 
   return {
     available: true,
     active: false,
     matchedBy: null,
     anchorText: null,
-    reason: 'no-visible-pine-anchor',
-    signals: [],
+    reason: (domSignalsSaveConfirmedOnly || axSignalsSaveConfirmedOnly)
+      ? 'save-confirmed-only-insufficient'
+      : 'no-visible-pine-anchor',
+    signals: domSignalsSaveConfirmedOnly
+      ? summarizeTradingViewPineVisibleAnchorEntries(
+          [
+            ...domSignals,
+            ...(titleButtonAnchor ? [titleButtonAnchor] : [])
+          ],
+          'chromium-cdp-dom'
+        )
+      : (axSignalsSaveConfirmedOnly
+        ? summarizeTradingViewPineVisibleAnchorEntries(
+            [
+              ...axSignals,
+              ...(titleButtonAnchor ? [titleButtonAnchor] : [])
+            ],
+            'chromium-cdp-ax'
+          )
+        : []),
     dom: {
       matched: false,
       scannedNodes: Number(domPayload?.scannedNodes || 0) || 0,
@@ -2341,7 +3342,8 @@ async function probeTradingViewPineEditorRendererWithCDPSession(session, options
     ax: {
       matched: false,
       error: axError
-    }
+    },
+    titleButton: titleButtonSummary
   };
 }
 
@@ -2591,6 +3593,52 @@ function buildTradingViewRendererButtonInvokeFunctionDeclaration() {
       title,
       tagName: String(this.tagName || '').trim() || null,
       rect
+    };
+  }`;
+}
+
+function buildTradingViewRendererNodeHoverFunctionDeclaration() {
+  return `function() {
+    const compact = (value, max = 220) => String(value || '').replace(/\\s+/g, ' ').trim().slice(0, max);
+    const rectOf = (element) => {
+      try {
+        const rect = element?.getBoundingClientRect?.();
+        return rect ? {
+          x: Number(rect.x || rect.left || 0) || 0,
+          y: Number(rect.y || rect.top || 0) || 0,
+          width: Number(rect.width || 0) || 0,
+          height: Number(rect.height || 0) || 0
+        } : null;
+      } catch {
+        return null;
+      }
+    };
+    const init = {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      view: window
+    };
+    try {
+      this.dispatchEvent?.(new PointerEvent('pointerover', init));
+      this.dispatchEvent?.(new PointerEvent('pointerenter', init));
+    } catch {}
+    try {
+      this.dispatchEvent?.(new MouseEvent('mouseover', init));
+      this.dispatchEvent?.(new MouseEvent('mouseenter', init));
+      this.dispatchEvent?.(new MouseEvent('mousemove', init));
+    } catch {}
+    try {
+      this.focus?.();
+    } catch {}
+    return {
+      hovered: true,
+      text: compact(this.innerText || this.textContent || this.value || ''),
+      ariaLabel: compact(this.getAttribute?.('aria-label') || '', 180),
+      title: compact(this.getAttribute?.('title') || '', 180),
+      tagName: compact(this.tagName || '', 40),
+      role: compact(this.getAttribute?.('role') || this.role || '', 80),
+      rect: rectOf(this)
     };
   }`;
 }
@@ -2887,7 +3935,7 @@ async function probeTradingViewPineEditorRendererWithCDP(options = {}) {
   const cdpDependencies = options?.cdpDependencies && typeof options.cdpDependencies === 'object'
     ? options.cdpDependencies
     : {};
-  const discovery = await discoverChromiumRemoteDebuggingTarget({
+  const discoveryOptions = {
     port: options?.cdpPort || 0,
     processIds: [windowInfo?.pid || windowInfo?.processId || 0],
     processNames: [
@@ -2905,7 +3953,8 @@ async function probeTradingViewPineEditorRendererWithCDP(options = {}) {
     processInspector: cdpDependencies.processInspector,
     listeningPortInspector: cdpDependencies.listeningPortInspector,
     executePowerShellScript: cdpDependencies.executePowerShellScript
-  });
+  };
+  const discovery = await discoverChromiumRemoteDebuggingTarget(discoveryOptions);
 
   if (!discovery?.available) {
     return {
@@ -3060,7 +4109,7 @@ async function invokeTradingViewRendererButtonWithCDP(options = {}) {
   const cdpDependencies = options?.cdpDependencies && typeof options.cdpDependencies === 'object'
     ? options.cdpDependencies
     : {};
-  const discovery = await discoverChromiumRemoteDebuggingTarget({
+  const discoveryOptions = {
     port: options?.cdpPort || 0,
     processIds: [windowInfo?.pid || windowInfo?.processId || 0],
     processNames: [
@@ -3078,136 +4127,255 @@ async function invokeTradingViewRendererButtonWithCDP(options = {}) {
     processInspector: cdpDependencies.processInspector,
     listeningPortInspector: cdpDependencies.listeningPortInspector,
     executePowerShellScript: cdpDependencies.executePowerShellScript
-  });
+  };
+  let resolvedDiscovery = await discoverChromiumRemoteDebuggingTarget(discoveryOptions);
 
-  if (!discovery?.available) {
+  if (!resolvedDiscovery?.available) {
     return {
-      applicable: discovery?.applicable !== false,
+      applicable: resolvedDiscovery?.applicable !== false,
       available: false,
       success: false,
-      reason: discovery?.reason || 'remote-debugging-port-not-configured',
-      error: discovery?.error || null,
+      reason: resolvedDiscovery?.reason || 'remote-debugging-port-not-configured',
+      error: resolvedDiscovery?.error || null,
       buttonText,
       requiredTexts,
-      port: Number(discovery?.port || 0) || 0,
-      target: discovery?.target || null,
-      targets: Array.isArray(discovery?.targets) ? discovery.targets : [],
-      endpointAttempts: Array.isArray(discovery?.endpointAttempts) ? discovery.endpointAttempts : [],
-      discovery: discovery?.discovery || null
+      port: Number(resolvedDiscovery?.port || 0) || 0,
+      target: resolvedDiscovery?.target || null,
+      targets: Array.isArray(resolvedDiscovery?.targets) ? resolvedDiscovery.targets : [],
+      endpointAttempts: Array.isArray(resolvedDiscovery?.endpointAttempts) ? resolvedDiscovery.endpointAttempts : [],
+      discovery: resolvedDiscovery?.discovery || null
     };
   }
 
+  const sessionAttachAttempts = [];
   try {
-    const cdpResult = await withChromiumCdpSession(
-      discovery.target,
-      {
-        WebSocketCtor: cdpDependencies.WebSocketCtor,
-        openTimeoutMs: Math.max(
+    const sessionOpenTimeoutMs = invokeKind === 'pine-current-script-menu-item'
+      ? Math.max(700, Math.min(1800, Math.round(timeout * 0.9)))
+      : Math.max(
           180,
-          Math.min(1800, Math.round(timeout * 0.45) + effectProofBudgetMs)
-        ),
-        callTimeoutMs: Math.max(160, Math.min(1000, Math.round(timeout * 0.4)))
-      },
-      async (session) => {
-        await session.call('Accessibility.enable');
-        const axTree = await session.call('Accessibility.getFullAXTree', {
-          depth: 12
+        Math.min(1800, Math.round(timeout * 0.45) + effectProofBudgetMs)
+      );
+    const sessionCallTimeoutMs = invokeKind === 'pine-current-script-menu-item'
+      ? Math.max(500, Math.min(1400, Math.round(timeout * 0.75)))
+      : Math.max(160, Math.min(1000, Math.round(timeout * 0.4)));
+    const attachAttemptPlan = buildTradingViewRendererAttachAttemptPlan(invokeKind, {
+      openTimeoutMs: sessionOpenTimeoutMs,
+      callTimeoutMs: sessionCallTimeoutMs
+    });
+    let cdpResult = null;
+    let lastAttachError = null;
+
+    for (let attemptIndex = 0; attemptIndex < attachAttemptPlan.length; attemptIndex += 1) {
+      const attempt = attachAttemptPlan[attemptIndex];
+      const attemptTarget = resolvedDiscovery?.target || null;
+      const attemptStartedAt = Date.now();
+      const attemptSummary = {
+        attempt: attemptIndex + 1,
+        openTimeoutMs: attempt.openTimeoutMs,
+        callTimeoutMs: attempt.callTimeoutMs,
+        targetId: String(attemptTarget?.id || ''),
+        targetTitle: String(attemptTarget?.title || ''),
+        targetUrl: String(attemptTarget?.url || ''),
+        port: Number(resolvedDiscovery?.port || 0) || 0
+      };
+
+      try {
+        cdpResult = await withChromiumCdpSession(
+          attemptTarget,
+          {
+            WebSocketCtor: cdpDependencies.WebSocketCtor,
+            openTimeoutMs: attempt.openTimeoutMs,
+            callTimeoutMs: attempt.callTimeoutMs
+          },
+          async (session) => {
+            if (invokeKind === 'pine-current-script-menu-item') {
+              const menuItemResult = await invokeTradingViewPineTitleMenuItemWithCDPSession(session, {
+                kind: invokeKind,
+                buttonText,
+                menuItemText: options?.menuItemText || buttonText,
+                submenuItemText: options?.submenuItemText || '',
+                requiredTexts,
+                pineExpectedScriptName,
+                currentTitleHint: options?.currentTitleHint || options?.pineCurrentTitle || '',
+                pineCurrentTitle: options?.pineCurrentTitle || '',
+                windowInfo: windowInfo || null,
+                foreground: foreground || null,
+                title: windowInfo?.title || foreground?.title || ''
+              });
+              return {
+                success: menuItemResult?.success === true,
+                available: true,
+                reason: menuItemResult?.reason || null,
+                error: menuItemResult?.error || null,
+                matchedRequiredTexts: Array.isArray(menuItemResult?.matchedRequiredTexts)
+                  ? menuItemResult.matchedRequiredTexts
+                  : [],
+                currentTitleHint: menuItemResult?.currentTitleHint || '',
+                axNode: menuItemResult?.menuItem || null,
+                clickResult: menuItemResult?.clickResult || null,
+                titleButton: menuItemResult?.titleButton || null,
+                menuDiscovery: menuItemResult?.menuDiscovery || null,
+                submenuDiscovery: menuItemResult?.submenuDiscovery || null,
+                parentMenuItem: menuItemResult?.parentMenuItem || null,
+                effectProof: menuItemResult?.postClickPineRendererProof
+                  ? {
+                      applicable: true,
+                      success: menuItemResult.postClickPineRendererProof.active === true,
+                      cleared: false,
+                      transitioned: false,
+                      kind: invokeKind,
+                      surface: describeTradingViewRendererInvokeSurface(invokeKind),
+                      buttonText,
+                      requiredTexts: requiredTexts.slice(0, 6),
+                      postClickPineRendererProof: menuItemResult.postClickPineRendererProof
+                    }
+                  : null
+              };
+            }
+
+            await session.call('Accessibility.enable');
+            const axTree = await session.call('Accessibility.getFullAXTree', {
+              depth: 12
+            });
+            const nodes = Array.isArray(axTree?.nodes) ? axTree.nodes : [];
+            const normalizedButtonText = normalizeTradingViewRendererMatchText(buttonText, 180);
+            const normalizedRequiredTexts = requiredTexts.map((text) => normalizeTradingViewRendererMatchText(text, 220));
+            const matchedRequiredTexts = matchTradingViewRendererRequiredTexts(nodes, normalizedRequiredTexts);
+            const allowButtonSearchWithoutRequiredTexts = invokeKind === 'pine-first-save-confirmation';
+
+            if (
+              normalizedRequiredTexts.length > 0
+              && matchedRequiredTexts.length !== normalizedRequiredTexts.length
+              && !allowButtonSearchWithoutRequiredTexts
+            ) {
+              return {
+                success: false,
+                available: true,
+                reason: 'renderer-required-text-missing',
+                matchedRequiredTexts
+              };
+            }
+
+            const buttonNode = findTradingViewRendererButtonNode(nodes, normalizedButtonText);
+
+            if (!buttonNode) {
+              return {
+                success: false,
+                available: true,
+                reason: 'renderer-button-unavailable',
+                matchedRequiredTexts
+              };
+            }
+
+            const backendDOMNodeId = Number(buttonNode?.backendDOMNodeId || 0) || 0;
+            if (!backendDOMNodeId) {
+              return {
+                success: false,
+                available: true,
+                reason: 'renderer-button-dom-node-missing',
+                matchedRequiredTexts,
+                axNode: summarizeTradingViewRendererAxNode(buttonNode)
+              };
+            }
+
+            const resolvedNode = await session.call('DOM.resolveNode', {
+              backendNodeId: backendDOMNodeId
+            });
+            const objectId = String(resolvedNode?.object?.objectId || '').trim();
+            if (!objectId) {
+              return {
+                success: false,
+                available: true,
+                reason: 'renderer-button-resolve-failed',
+                matchedRequiredTexts,
+                axNode: summarizeTradingViewRendererAxNode(buttonNode)
+              };
+            }
+
+            let clickPayload = null;
+            try {
+              const clickResponse = await session.call('Runtime.callFunctionOn', {
+                objectId,
+                functionDeclaration: buildTradingViewRendererButtonInvokeFunctionDeclaration(),
+                returnByValue: true,
+                awaitPromise: true
+              });
+              clickPayload = clickResponse?.result?.value || null;
+            } finally {
+              try {
+                await session.call('Runtime.releaseObject', {
+                  objectId
+                });
+              } catch {}
+            }
+
+            const effectProof = clickPayload?.clicked === false
+              ? null
+              : await verifyTradingViewRendererInvokeEffectWithCDPSession(session, {
+                  kind: invokeKind,
+                  buttonText,
+                  requiredTexts,
+                  timeoutMs: Math.max(220, Math.min(900, Math.round(timeout * 0.8))),
+                  pineExpectedScriptName,
+                  capturePineSurfaceAfterClear: true
+                });
+            const effectVerified = !effectProof || effectProof.success === true;
+
+            return {
+              success: clickPayload?.clicked !== false && effectVerified,
+              available: true,
+              reason: clickPayload?.clicked === false
+                ? 'renderer-button-click-failed'
+                : (!effectVerified ? (effectProof?.reason || 'renderer-button-effect-unverified') : null),
+              error: clickPayload?.clicked === false
+                ? null
+                : (!effectVerified ? (effectProof?.error || null) : null),
+              matchedRequiredTexts,
+              axNode: summarizeTradingViewRendererAxNode(buttonNode),
+              clickResult: clickPayload,
+              effectProof
+            };
+          }
+        );
+        sessionAttachAttempts.push({
+          ...attemptSummary,
+          success: true,
+          durationMs: Math.max(0, Date.now() - attemptStartedAt)
         });
-        const nodes = Array.isArray(axTree?.nodes) ? axTree.nodes : [];
-        const normalizedButtonText = normalizeTradingViewRendererMatchText(buttonText, 180);
-        const normalizedRequiredTexts = requiredTexts.map((text) => normalizeTradingViewRendererMatchText(text, 220));
-        const matchedRequiredTexts = matchTradingViewRendererRequiredTexts(nodes, normalizedRequiredTexts);
-
-        if (normalizedRequiredTexts.length > 0 && matchedRequiredTexts.length !== normalizedRequiredTexts.length) {
-          return {
-            success: false,
-            available: true,
-            reason: 'renderer-required-text-missing',
-            matchedRequiredTexts
-          };
-        }
-
-        const buttonNode = findTradingViewRendererButtonNode(nodes, normalizedButtonText);
-
-        if (!buttonNode) {
-          return {
-            success: false,
-            available: true,
-            reason: 'renderer-button-unavailable',
-            matchedRequiredTexts
-          };
-        }
-
-        const backendDOMNodeId = Number(buttonNode?.backendDOMNodeId || 0) || 0;
-        if (!backendDOMNodeId) {
-          return {
-            success: false,
-            available: true,
-            reason: 'renderer-button-dom-node-missing',
-            matchedRequiredTexts,
-            axNode: summarizeTradingViewRendererAxNode(buttonNode)
-          };
-        }
-
-        const resolvedNode = await session.call('DOM.resolveNode', {
-          backendNodeId: backendDOMNodeId
+        break;
+      } catch (error) {
+        lastAttachError = error;
+        const retryable = isRetryableTradingViewRendererAttachError(error);
+        sessionAttachAttempts.push({
+          ...attemptSummary,
+          success: false,
+          durationMs: Math.max(0, Date.now() - attemptStartedAt),
+          reason: error?.reason || 'protocol-error',
+          error: error?.message || String(error || 'CDP protocol session failed'),
+          retryable
         });
-        const objectId = String(resolvedNode?.object?.objectId || '').trim();
-        if (!objectId) {
-          return {
-            success: false,
-            available: true,
-            reason: 'renderer-button-resolve-failed',
-            matchedRequiredTexts,
-            axNode: summarizeTradingViewRendererAxNode(buttonNode)
-          };
+        if (!retryable || attemptIndex >= attachAttemptPlan.length - 1) {
+          error.cdpAttachAttempts = sessionAttachAttempts.slice();
+          throw error;
         }
 
-        let clickPayload = null;
+        if ((Number(attempt.retryDelayMs || 0) || 0) > 0) {
+          await sleep(Number(attempt.retryDelayMs || 0) || 0);
+        }
+
         try {
-          const clickResponse = await session.call('Runtime.callFunctionOn', {
-            objectId,
-            functionDeclaration: buildTradingViewRendererButtonInvokeFunctionDeclaration(),
-            returnByValue: true,
-            awaitPromise: true
-          });
-          clickPayload = clickResponse?.result?.value || null;
-        } finally {
-          try {
-            await session.call('Runtime.releaseObject', {
-              objectId
-            });
-          } catch {}
-        }
-
-        const effectProof = clickPayload?.clicked === false
-          ? null
-          : await verifyTradingViewRendererInvokeEffectWithCDPSession(session, {
-              kind: invokeKind,
-              buttonText,
-              requiredTexts,
-              timeoutMs: Math.max(220, Math.min(900, Math.round(timeout * 0.8))),
-              pineExpectedScriptName,
-              capturePineSurfaceAfterClear: true
-            });
-        const effectVerified = !effectProof || effectProof.success === true;
-
-        return {
-          success: clickPayload?.clicked !== false && effectVerified,
-          available: true,
-          reason: clickPayload?.clicked === false
-            ? 'renderer-button-click-failed'
-            : (!effectVerified ? (effectProof?.reason || 'renderer-button-effect-unverified') : null),
-          error: clickPayload?.clicked === false
-            ? null
-            : (!effectVerified ? (effectProof?.error || null) : null),
-          matchedRequiredTexts,
-          axNode: summarizeTradingViewRendererAxNode(buttonNode),
-          clickResult: clickPayload,
-          effectProof
-        };
+          const refreshedDiscovery = await discoverChromiumRemoteDebuggingTarget(discoveryOptions);
+          if (refreshedDiscovery?.available) {
+            resolvedDiscovery = refreshedDiscovery;
+          }
+        } catch {}
       }
-    );
+    }
+
+    if (!cdpResult && lastAttachError) {
+      lastAttachError.cdpAttachAttempts = sessionAttachAttempts.slice();
+      throw lastAttachError;
+    }
 
     return {
       applicable: true,
@@ -3221,14 +4389,20 @@ async function invokeTradingViewRendererButtonWithCDP(options = {}) {
       buttonText,
       requiredTexts,
       matchedRequiredTexts: Array.isArray(cdpResult?.matchedRequiredTexts) ? cdpResult.matchedRequiredTexts : [],
+      currentTitleHint: cdpResult?.currentTitleHint || '',
       axNode: cdpResult?.axNode || null,
+      titleButton: cdpResult?.titleButton || null,
+      menuDiscovery: cdpResult?.menuDiscovery || null,
+      submenuDiscovery: cdpResult?.submenuDiscovery || null,
+      parentMenuItem: cdpResult?.parentMenuItem || null,
       clickResult: cdpResult?.clickResult || null,
       effectProof: cdpResult?.effectProof || null,
-      port: Number(discovery?.port || 0) || 0,
-      target: discovery?.target || null,
-      targets: Array.isArray(discovery?.targets) ? discovery.targets : [],
-      endpointAttempts: Array.isArray(discovery?.endpointAttempts) ? discovery.endpointAttempts : [],
-      discovery: discovery?.discovery || null
+      cdpAttachAttempts: sessionAttachAttempts,
+      port: Number(resolvedDiscovery?.port || 0) || 0,
+      target: resolvedDiscovery?.target || null,
+      targets: Array.isArray(resolvedDiscovery?.targets) ? resolvedDiscovery.targets : [],
+      endpointAttempts: Array.isArray(resolvedDiscovery?.endpointAttempts) ? resolvedDiscovery.endpointAttempts : [],
+      discovery: resolvedDiscovery?.discovery || null
     };
   } catch (error) {
     return {
@@ -3239,11 +4413,12 @@ async function invokeTradingViewRendererButtonWithCDP(options = {}) {
       error: error?.message || String(error || 'CDP protocol session failed'),
       buttonText,
       requiredTexts,
-      port: Number(discovery?.port || 0) || 0,
-      target: discovery?.target || null,
-      targets: Array.isArray(discovery?.targets) ? discovery.targets : [],
-      endpointAttempts: Array.isArray(discovery?.endpointAttempts) ? discovery.endpointAttempts : [],
-      discovery: discovery?.discovery || null
+      cdpAttachAttempts: Array.isArray(error?.cdpAttachAttempts) ? error.cdpAttachAttempts : sessionAttachAttempts,
+      port: Number(resolvedDiscovery?.port || 0) || 0,
+      target: resolvedDiscovery?.target || null,
+      targets: Array.isArray(resolvedDiscovery?.targets) ? resolvedDiscovery.targets : [],
+      endpointAttempts: Array.isArray(resolvedDiscovery?.endpointAttempts) ? resolvedDiscovery.endpointAttempts : [],
+      discovery: resolvedDiscovery?.discovery || null
     };
   }
 }
@@ -3971,18 +5146,340 @@ function buildTradingViewPineEditorTextareaOperationExpression(options = {}) {
   return `(${tradingViewPineEditorTextareaOperationInPage.toString()})(${JSON.stringify(options || {})})`;
 }
 
+function tradingViewPineEditorMonacoOperationInPage(payload = {}) {
+  const options = payload && typeof payload === 'object' ? payload : {};
+  const operation = String(options.operation || 'inspect').trim().toLowerCase();
+  const replacementText = String(options.text ?? '');
+  const previewLimit = Number.isFinite(Number(options.previewLimit))
+    ? Math.max(120, Math.min(Math.round(Number(options.previewLimit)), 4000))
+    : 320;
+  const maxVisited = Number.isFinite(Number(options.maxVisited))
+    ? Math.max(80, Math.min(Math.round(Number(options.maxVisited)), 2400))
+    : 900;
+  const maxQueueLength = Number.isFinite(Number(options.maxQueueLength))
+    ? Math.max(120, Math.min(Math.round(Number(options.maxQueueLength)), 3200))
+    : 1400;
+  const maxKeysPerObject = Number.isFinite(Number(options.maxKeysPerObject))
+    ? Math.max(12, Math.min(Math.round(Number(options.maxKeysPerObject)), 80))
+    : 42;
+  const compact = (value, maxLength = previewLimit) => {
+    const text = String(value || '').replace(/\r/g, '').replace(/[ \t]+\n/g, '\n').trim();
+    return text.length > maxLength ? text.slice(0, maxLength) : text;
+  };
+  const compactPath = (value, maxLength = 240) => {
+    const text = compact(value, maxLength);
+    return text.length > maxLength ? text.slice(0, maxLength) : text;
+  };
+  const listOwnKeys = (value, limit = 20) => {
+    try {
+      return Object.getOwnPropertyNames(value).slice(0, limit);
+    } catch {
+      return [];
+    }
+  };
+  const collectMethodNames = (value) => {
+    const methods = [];
+    const methodNames = [
+      'getModel',
+      'getValue',
+      'setValue',
+      'executeEdits',
+      'pushEditOperations',
+      'getFullModelRange',
+      'setSelections',
+      'getSelections',
+      'trigger',
+      'hasTextFocus',
+      'focus',
+      'pushUndoStop'
+    ];
+    for (const name of methodNames) {
+      try {
+        if (typeof value?.[name] === 'function') {
+          methods.push(name);
+        }
+      } catch {}
+    }
+    return methods;
+  };
+  const summarizeCandidate = (candidate) => ({
+    kind: candidate.kind,
+    path: compactPath(candidate.path || '', 260) || null,
+    score: Number(candidate.score || 0) || 0,
+    ctor: compact(candidate.ctor || '', 80) || null,
+    methods: Array.isArray(candidate.methods) ? candidate.methods.slice(0, 12) : [],
+    ownKeys: Array.isArray(candidate.ownKeys) ? candidate.ownKeys.slice(0, 20) : []
+  });
+  const summarizeEditor = (editor, candidatePath = '') => {
+    if (!editor || (typeof editor !== 'object' && typeof editor !== 'function')) return null;
+    let model = null;
+    try {
+      model = typeof editor.getModel === 'function' ? editor.getModel() : null;
+    } catch {}
+    let selectionCount = 0;
+    try {
+      const selections = typeof editor.getSelections === 'function' ? editor.getSelections() : [];
+      selectionCount = Array.isArray(selections) ? selections.length : 0;
+    } catch {}
+    return {
+      path: compactPath(candidatePath || '', 260) || null,
+      ctor: compact(editor?.constructor?.name || '', 80) || null,
+      methods: collectMethodNames(editor),
+      hasModel: !!model,
+      selectionCount
+    };
+  };
+  const summarizeModel = (model, candidatePath = '') => {
+    if (!model || (typeof model !== 'object' && typeof model !== 'function')) return null;
+    let lineCount = 0;
+    try {
+      lineCount = Number(
+        typeof model.getLineCount === 'function'
+          ? model.getLineCount()
+          : 0
+      ) || 0;
+    } catch {}
+    return {
+      path: compactPath(candidatePath || '', 260) || null,
+      ctor: compact(model?.constructor?.name || '', 80) || null,
+      methods: collectMethodNames(model),
+      lineCount
+    };
+  };
+  const extractText = (editor, model) => {
+    try {
+      if (model && typeof model.getValue === 'function') {
+        return String(model.getValue() || '');
+      }
+    } catch {}
+    try {
+      if (editor && typeof editor.getValue === 'function') {
+        return String(editor.getValue() || '');
+      }
+    } catch {}
+    return '';
+  };
+  const buildRange = (model) => {
+    if (!model) return null;
+    try {
+      if (typeof model.getFullModelRange === 'function') {
+        return model.getFullModelRange() || null;
+      }
+    } catch {}
+    return null;
+  };
+  const rootElements = [];
+  const textarea = document.querySelector('textarea.inputarea.monaco-mouse-cursor-text');
+  const container = textarea?.closest?.('.monaco-editor')
+    || document.querySelector('.monaco-editor.pine-editor-monaco')
+    || null;
+  const widget = container?.closest?.('.tv-script-widget')
+    || document.querySelector('.tv-script-widget')
+    || null;
+  for (const value of [textarea, container, widget]) {
+    if (value && !rootElements.includes(value)) {
+      rootElements.push(value);
+    }
+  }
+
+  const queue = rootElements.map((value, index) => ({
+    value,
+    path: `root[${index}]`
+  }));
+  const seen = new Set();
+  const followKeyPattern = /(?:react|fiber|props|memoized|state|child|sibling|return|current|editor|model|view|controller|instance|ref|store|widget|delegate|input|textarea|dom|node|service|owner|monaco)/i;
+  const candidates = [];
+  let inspected = 0;
+
+  const maybeAddCandidate = (value, path) => {
+    if (!value || (typeof value !== 'object' && typeof value !== 'function')) return;
+    let nodeType = 0;
+    try {
+      nodeType = Number(value.nodeType || 0) || 0;
+    } catch {}
+    const methods = collectMethodNames(value);
+    if (methods.length === 0) return;
+    if (nodeType > 0 && methods.every((name) => name === 'focus')) {
+      return;
+    }
+
+    const kind = methods.includes('getModel')
+      ? 'editor'
+      : ((methods.includes('getValue') || methods.includes('setValue') || methods.includes('getFullModelRange'))
+        ? 'model'
+        : 'controller');
+    let score = 0;
+    if (kind === 'editor') score += 240;
+    if (kind === 'model') score += 180;
+    if (methods.includes('executeEdits')) score += 220;
+    if (methods.includes('getModel')) score += 160;
+    if (methods.includes('setValue')) score += 120;
+    if (methods.includes('getValue')) score += 80;
+    if (methods.includes('getFullModelRange')) score += 70;
+    if (methods.includes('focus')) score += 20;
+    if (/_editor\b/i.test(path)) score += 160;
+    if (/memoizedstate\.memoizedstate\.current/i.test(path)) score += 120;
+    if (/tv-script-widget|reactcontainer|reactfiber/i.test(path)) score += 40;
+
+    candidates.push({
+      value,
+      path,
+      kind,
+      score,
+      ctor: value?.constructor?.name || '',
+      methods,
+      ownKeys: listOwnKeys(value, 20)
+    });
+  };
+
+  while (queue.length > 0 && inspected < maxVisited) {
+    const current = queue.shift();
+    const value = current?.value;
+    const path = current?.path || '';
+    if (!value || (typeof value !== 'object' && typeof value !== 'function')) continue;
+    if (seen.has(value)) continue;
+    seen.add(value);
+    inspected += 1;
+    maybeAddCandidate(value, path);
+
+    let keys = [];
+    try {
+      keys = Object.getOwnPropertyNames(value);
+    } catch {}
+
+    for (const key of keys.slice(0, maxKeysPerObject)) {
+      if (!followKeyPattern.test(key)) continue;
+      let child = null;
+      try {
+        child = value[key];
+      } catch {}
+      if (!child || (typeof child !== 'object' && typeof child !== 'function')) continue;
+      if (seen.has(child)) continue;
+      if (queue.length >= maxQueueLength) break;
+      queue.push({
+        value: child,
+        path: path ? `${path}.${key}` : key
+      });
+    }
+  }
+
+  const sortedCandidates = candidates
+    .slice()
+    .sort((left, right) => (Number(right?.score || 0) || 0) - (Number(left?.score || 0) || 0));
+  const bestEditorCandidate = sortedCandidates.find((candidate) => candidate.kind === 'editor') || null;
+  const bestModelCandidate = sortedCandidates.find((candidate) => candidate.kind === 'model') || null;
+  const editor = bestEditorCandidate?.value || null;
+  let model = null;
+  try {
+    model = editor && typeof editor.getModel === 'function'
+      ? editor.getModel()
+      : null;
+  } catch {}
+  if (!model && bestModelCandidate?.value) {
+    model = bestModelCandidate.value;
+  }
+  const initialText = extractText(editor, model);
+  const result = {
+    surface: 'monaco-model',
+    found: !!(editor || model),
+    operation,
+    success: false,
+    inspected,
+    candidateCount: sortedCandidates.length,
+    candidates: sortedCandidates.slice(0, 6).map(summarizeCandidate),
+    editor: summarizeEditor(editor, bestEditorCandidate?.path || ''),
+    model: summarizeModel(model, bestModelCandidate?.path || bestEditorCandidate?.path || ''),
+    text: initialText,
+    textLength: initialText.length,
+    previousValueLength: initialText.length,
+    appliedTextLength: 0,
+    method: null,
+    error: null
+  };
+
+  if (operation === 'inspect' || operation === 'read') {
+    result.success = result.found;
+    return result;
+  }
+
+  if (operation !== 'write') {
+    result.error = `Unsupported Monaco operation: ${operation}`;
+    return result;
+  }
+
+  if (!result.found) {
+    result.error = 'TradingView Pine Monaco editor handle was not discoverable.';
+    return result;
+  }
+
+  try {
+    if (editor && typeof editor.focus === 'function') {
+      editor.focus();
+    }
+  } catch {}
+
+  let writeMethod = '';
+  try {
+    const range = buildRange(model);
+    if (editor && typeof editor.executeEdits === 'function' && range) {
+      try {
+        if (typeof editor.pushUndoStop === 'function') {
+          editor.pushUndoStop();
+        }
+      } catch {}
+      editor.executeEdits('liku-cdp', [{
+        range,
+        text: replacementText,
+        forceMoveMarkers: true
+      }]);
+      try {
+        if (typeof editor.pushUndoStop === 'function') {
+          editor.pushUndoStop();
+        }
+      } catch {}
+      writeMethod = 'editor-executeEdits';
+    } else if (model && typeof model.setValue === 'function') {
+      model.setValue(replacementText);
+      writeMethod = 'model-setValue';
+    } else if (editor && typeof editor.setValue === 'function') {
+      editor.setValue(replacementText);
+      writeMethod = 'editor-setValue';
+    } else {
+      result.error = 'TradingView Pine Monaco handle did not expose a writable editor/model API.';
+    }
+  } catch (error) {
+    result.error = error?.message || String(error || 'TradingView Pine Monaco write failed');
+  }
+
+  const finalText = extractText(editor, model);
+  result.text = finalText;
+  result.textLength = finalText.length;
+  result.appliedTextLength = replacementText.length;
+  result.method = writeMethod || null;
+  result.success = !!writeMethod && finalText === replacementText;
+  return result;
+}
+
+function buildTradingViewPineEditorMonacoOperationExpression(options = {}) {
+  return `(${tradingViewPineEditorMonacoOperationInPage.toString()})(${JSON.stringify(options || {})})`;
+}
+
 function summarizeTradingViewPineEditorCdpTextarea(textarea = null) {
   if (!textarea || typeof textarea !== 'object') return null;
+  const className = normalizeCompactText(textarea.className || '', 160) || null;
+  const ariaLabel = normalizeCompactText(textarea.ariaLabel || '', 180) || null;
   return {
     tagName: normalizeCompactText(textarea.tagName || '', 24) || null,
-    className: normalizeCompactText(textarea.className || '', 160) || null,
-    ariaLabel: normalizeCompactText(textarea.ariaLabel || '', 180) || null,
+    className,
+    ariaLabel,
     valueLength: Number(textarea.valueLength || 0) || 0,
     selectionStart: Number(textarea.selectionStart || 0) || 0,
     selectionEnd: Number(textarea.selectionEnd || 0) || 0,
     visible: textarea.visible === true,
     focused: textarea.focused === true,
     selectedAll: textarea.selectedAll === true,
+    isMonacoInput: /(?:^|\s)(?:inputarea|monaco-[^\s]+)(?:\s|$)/i.test(className || '')
+      || /editor content/i.test(ariaLabel || ''),
     rect: textarea.rect && typeof textarea.rect === 'object'
       ? {
           x: Number(textarea.rect.x || 0) || 0,
@@ -4061,6 +5558,60 @@ function summarizeTradingViewPineEditorCdpPayload(payload = null) {
   };
 }
 
+function summarizeTradingViewPineEditorCdpMonacoCandidate(candidate = null) {
+  if (!candidate || typeof candidate !== 'object') return null;
+  return {
+    kind: normalizeCompactText(candidate.kind || '', 24) || null,
+    path: normalizeCompactText(candidate.path || '', 260) || null,
+    score: Number(candidate.score || 0) || 0,
+    ctor: normalizeCompactText(candidate.ctor || '', 80) || null,
+    methods: Array.isArray(candidate.methods)
+      ? candidate.methods.map((value) => normalizeCompactText(value || '', 40)).filter(Boolean).slice(0, 12)
+      : [],
+    ownKeys: Array.isArray(candidate.ownKeys)
+      ? candidate.ownKeys.map((value) => normalizeCompactText(value || '', 80)).filter(Boolean).slice(0, 20)
+      : []
+  };
+}
+
+function summarizeTradingViewPineEditorCdpMonacoEntity(entity = null) {
+  if (!entity || typeof entity !== 'object') return null;
+  return {
+    path: normalizeCompactText(entity.path || '', 260) || null,
+    ctor: normalizeCompactText(entity.ctor || '', 80) || null,
+    methods: Array.isArray(entity.methods)
+      ? entity.methods.map((value) => normalizeCompactText(value || '', 40)).filter(Boolean).slice(0, 12)
+      : [],
+    hasModel: entity.hasModel === true,
+    selectionCount: Number(entity.selectionCount || 0) || 0,
+    lineCount: Number(entity.lineCount || 0) || 0
+  };
+}
+
+function summarizeTradingViewPineEditorCdpMonacoPayload(payload = null) {
+  if (!payload || typeof payload !== 'object') return null;
+  const text = String(payload.text || '');
+  return {
+    surface: normalizeCompactText(payload.surface || '', 24) || null,
+    found: payload.found === true,
+    success: payload.success === true,
+    operation: normalizeCompactText(payload.operation || '', 24) || null,
+    method: normalizeCompactText(payload.method || '', 40) || null,
+    error: normalizeCompactText(payload.error || '', 240) || null,
+    inspected: Number(payload.inspected || 0) || 0,
+    candidateCount: Number(payload.candidateCount || 0) || 0,
+    text,
+    textLength: Number(payload.textLength || text.length) || 0,
+    previousValueLength: Number(payload.previousValueLength || 0) || 0,
+    appliedTextLength: Number(payload.appliedTextLength || 0) || 0,
+    editor: summarizeTradingViewPineEditorCdpMonacoEntity(payload.editor),
+    model: summarizeTradingViewPineEditorCdpMonacoEntity(payload.model),
+    candidates: Array.isArray(payload.candidates)
+      ? payload.candidates.map((candidate) => summarizeTradingViewPineEditorCdpMonacoCandidate(candidate)).filter(Boolean).slice(0, 6)
+      : []
+  };
+}
+
 function buildTradingViewPineEditorCdpWriteVerification(readback = {}, expectedText = '', options = {}) {
   const bufferProof = buildPineEditorPasteProof(readback?.text || '', expectedText, options);
   const renderedText = String(readback?.renderedText || '');
@@ -4100,6 +5651,41 @@ function buildTradingViewPineEditorCdpWriteVerification(readback = {}, expectedT
   };
 }
 
+function buildTradingViewPineEditorMonacoWriteVerification(monacoReadback = {}, textareaReadback = {}, expectedText = '', options = {}) {
+  const bufferProof = buildPineEditorPasteProof(monacoReadback?.text || '', expectedText, options);
+  const renderedText = String(textareaReadback?.renderedText || textareaReadback?.text || '');
+  const renderedProof = renderedText
+    ? buildPineEditorPasteProof(renderedText, expectedText, options)
+    : null;
+  const renderedCorrupt = !!(
+    renderedProof
+    && (renderedProof.starterDefaultVisible || renderedProof.versionDirectiveCount > 1)
+  );
+  const renderedSupportsExpected = !!(
+    renderedProof
+    && (
+      renderedProof.exactMatch
+      || (options?.pinePreparedScriptName && renderedProof.expectedTitleVisible)
+    )
+  );
+
+  return {
+    success: bufferProof.exactMatch && !renderedCorrupt,
+    proof: bufferProof,
+    renderedProof,
+    compactSummary: [
+      bufferProof.compactSummary,
+      !renderedProof
+        ? 'rendered=unavailable'
+        : (renderedProof.exactMatch
+          ? 'rendered=verified'
+          : (renderedCorrupt
+            ? 'rendered=corrupt'
+            : (renderedSupportsExpected ? 'rendered=expected-title' : 'rendered=partial')))
+    ].filter(Boolean).join(' | ')
+  };
+}
+
 async function runTradingViewPineEditorTextareaOperationWithCDPSession(session, options = {}) {
   const response = await session.call('Runtime.evaluate', {
     expression: buildTradingViewPineEditorTextareaOperationExpression(options),
@@ -4107,6 +5693,94 @@ async function runTradingViewPineEditorTextareaOperationWithCDPSession(session, 
     awaitPromise: true
   });
   return summarizeTradingViewPineEditorCdpPayload(response?.result?.value || {});
+}
+
+async function runTradingViewPineEditorMonacoOperationWithCDPSession(session, options = {}) {
+  const response = await session.call('Runtime.evaluate', {
+    expression: buildTradingViewPineEditorMonacoOperationExpression(options),
+    returnByValue: true,
+    awaitPromise: true
+  });
+  return summarizeTradingViewPineEditorCdpMonacoPayload(response?.result?.value || {});
+}
+
+function buildTradingViewPineEditorInputInsertChunks(text = '', options = {}) {
+  const normalized = String(text || '');
+  if (!normalized) return [];
+
+  const maxChunkLength = Number.isFinite(Number(options.maxChunkLength))
+    ? Math.max(80, Math.min(Math.round(Number(options.maxChunkLength)), 400))
+    : 180;
+  const chunks = [];
+  let cursor = 0;
+
+  while (cursor < normalized.length) {
+    let end = Math.min(normalized.length, cursor + maxChunkLength);
+    if (end < normalized.length) {
+      const newlineIndex = normalized.lastIndexOf('\n', end);
+      if (newlineIndex > cursor + 40) {
+        end = newlineIndex + 1;
+      }
+    }
+    if (end <= cursor) {
+      end = Math.min(normalized.length, cursor + maxChunkLength);
+    }
+    chunks.push(normalized.slice(cursor, end));
+    cursor = end;
+  }
+
+  return chunks.filter((chunk) => chunk.length > 0);
+}
+
+async function insertTradingViewPineEditorTextWithCDPChunks(session, expectedText = '', options = {}) {
+  const chunks = buildTradingViewPineEditorInputInsertChunks(expectedText, options);
+  if (chunks.length === 0) {
+    return {
+      success: false,
+      reason: 'chunked-input-empty',
+      error: 'Chunked Pine editor input requires non-empty text.',
+      chunks: []
+    };
+  }
+
+  const selectionPayload = await runTradingViewPineEditorTextareaOperationWithCDPSession(session, {
+    operation: 'focus-select-all'
+  });
+  if (!selectionPayload?.found) {
+    return {
+      success: false,
+      reason: 'editor-textarea-unavailable',
+      error: 'TradingView Pine editor textarea was not exposed through CDP before chunked input.',
+      selectionPayload,
+      chunks: []
+    };
+  }
+
+  const insertedChunks = [];
+  const interChunkDelayMs = Number.isFinite(Number(options.interChunkDelayMs))
+    ? Math.max(0, Math.min(Math.round(Number(options.interChunkDelayMs)), 250))
+    : 28;
+
+  for (let index = 0; index < chunks.length; index += 1) {
+    const chunk = chunks[index];
+    await session.call('Input.insertText', {
+      text: chunk
+    });
+    insertedChunks.push({
+      index,
+      length: chunk.length
+    });
+    if (interChunkDelayMs > 0 && index < chunks.length - 1) {
+      await sleep(interChunkDelayMs);
+    }
+  }
+
+  return {
+    success: true,
+    method: 'ChromiumCDPInputInsertTextChunks',
+    selectionPayload,
+    chunks: insertedChunks
+  };
 }
 
 async function focusTradingViewPineEditorWithCDP(options = {}) {
@@ -4339,120 +6013,316 @@ async function setTradingViewPineEditorContentWithCDP(options = {}) {
   }
 
   try {
-    const cdpResult = await withChromiumCdpSession(
-      context.target,
-      {
-        WebSocketCtor: context.cdpDependencies?.WebSocketCtor,
-        openTimeoutMs: Math.max(180, Math.min(1200, Math.round(context.timeout * 0.45))),
-        callTimeoutMs: Math.max(180, Math.min(1400, Math.round(context.timeout * 0.42)))
-      },
-      async (session) => {
-        try {
-          await session.call('Page.bringToFront');
-        } catch {}
+    const sessionAttachAttempts = [];
+    const sessionOpenTimeoutMs = Math.max(900, Math.min(2200, Math.round(context.timeout * 0.95)));
+    const sessionCallTimeoutMs = Math.max(1600, Math.min(3600, Math.round(context.timeout * 1.4)));
+    const attachAttemptPlan = buildTradingViewRendererAttachAttemptPlan('pine-editor-write', {
+      openTimeoutMs: sessionOpenTimeoutMs,
+      callTimeoutMs: sessionCallTimeoutMs
+    });
+    let cdpResult = null;
+    let lastAttachError = null;
+    let resolvedDiscovery = context;
 
-        const strategyAttempts = [];
-        const focusPayload = await runTradingViewPineEditorTextareaOperationWithCDPSession(session, {
-          operation: 'focus-select-all'
-        });
-        if (!focusPayload?.found) {
-          return {
-            success: false,
-            reason: 'editor-textarea-unavailable',
-            error: 'TradingView Pine editor textarea was not exposed through CDP.',
-            focusPayload,
+    for (let attemptIndex = 0; attemptIndex < attachAttemptPlan.length; attemptIndex += 1) {
+      const attempt = attachAttemptPlan[attemptIndex];
+      const attemptTarget = resolvedDiscovery?.target || null;
+      const attemptStartedAt = Date.now();
+      const attemptSummary = {
+        attempt: attemptIndex + 1,
+        openTimeoutMs: attempt.openTimeoutMs,
+        callTimeoutMs: attempt.callTimeoutMs,
+        targetId: String(attemptTarget?.id || ''),
+        targetTitle: String(attemptTarget?.title || ''),
+        targetUrl: String(attemptTarget?.url || ''),
+        port: Number(resolvedDiscovery?.port || 0) || 0
+      };
+
+      try {
+        cdpResult = await withChromiumCdpSession(
+          attemptTarget,
+          {
+            WebSocketCtor: context.cdpDependencies?.WebSocketCtor,
+            openTimeoutMs: attempt.openTimeoutMs,
+            callTimeoutMs: attempt.callTimeoutMs
+          },
+          async (session) => {
+            try {
+              await session.call('Page.bringToFront');
+            } catch {}
+
+            const strategyAttempts = [];
+            const focusPayload = await runTradingViewPineEditorTextareaOperationWithCDPSession(session, {
+              operation: 'focus-select-all'
+            });
+          if (!focusPayload?.found) {
+            return {
+              success: false,
+                reason: 'editor-textarea-unavailable',
+                error: 'TradingView Pine editor textarea was not exposed through CDP.',
+                focusPayload,
             strategyAttempts
           };
         }
+
+        let monacoWritePayload = null;
+        let monacoReadback = null;
+        let monacoTextareaReadback = null;
+        let monacoVerification = null;
+        let monacoWriteError = null;
+        try {
+          monacoWritePayload = await runTradingViewPineEditorMonacoOperationWithCDPSession(session, {
+            operation: 'write',
+            text: expectedText
+          });
+          if (monacoWritePayload?.found) {
+            await sleep(80);
+            monacoReadback = await runTradingViewPineEditorMonacoOperationWithCDPSession(session, {
+              operation: 'read'
+            });
+            monacoTextareaReadback = await runTradingViewPineEditorTextareaOperationWithCDPSession(session, {
+              operation: 'read'
+            });
+            monacoVerification = buildTradingViewPineEditorMonacoWriteVerification(monacoReadback, monacoTextareaReadback, expectedText, {
+              pinePreparedScriptName: preparedScriptName
+            });
+          } else {
+            monacoWriteError = monacoWritePayload?.error || 'TradingView Pine Monaco handle was not discoverable';
+          }
+        } catch (error) {
+          monacoWriteError = error?.message || String(error || 'TradingView Pine Monaco write failed');
+        }
+        strategyAttempts.push({
+          strategy: 'monaco-editor-model',
+          success: monacoWritePayload?.found === true && monacoVerification?.success === true,
+          error: monacoWriteError,
+          method: monacoWritePayload?.method || null,
+          compactSummary: monacoVerification?.compactSummary || null,
+          monaco: monacoWritePayload || null,
+          editor: monacoTextareaReadback?.textarea || null,
+          rendered: monacoTextareaReadback?.rendered || null,
+          monacoReadback
+        });
+
+        if (monacoWritePayload?.found === true && monacoVerification?.success) {
+          const monacoMethod = String(monacoWritePayload?.method || '').trim().toLowerCase();
+          return {
+            success: true,
+            method: monacoMethod === 'editor-executeedits'
+              ? 'ChromiumCDPMonacoExecuteEdits'
+              : (monacoMethod === 'model-setvalue'
+                ? 'ChromiumCDPMonacoModelSetValue'
+                : 'ChromiumCDPMonacoEditorSetValue'),
+            focusPayload,
+            readback: {
+              ...(monacoTextareaReadback || {}),
+              text: String(monacoReadback?.text || ''),
+              textLength: Number(monacoReadback?.textLength || 0) || String(monacoReadback?.text || '').length,
+              monaco: monacoReadback || null
+            },
+            verification: monacoVerification,
+            strategyAttempts
+          };
+        }
+
+        const useChunkedMonacoInput = focusPayload?.textarea?.isMonacoInput === true
+          && expectedText.length >= 480;
 
         let inputReadback = null;
         let inputVerification = null;
         let inputInsertError = null;
         try {
-          await session.call('Input.insertText', {
-            text: expectedText
-          });
-        } catch (error) {
-          inputInsertError = error?.message || String(error || 'Input.insertText failed');
-        }
-        await sleep(80);
-        inputReadback = await runTradingViewPineEditorTextareaOperationWithCDPSession(session, {
-          operation: 'read'
-        });
-        inputVerification = buildTradingViewPineEditorCdpWriteVerification(inputReadback, expectedText, {
-          pinePreparedScriptName: preparedScriptName
-        });
-        strategyAttempts.push({
-          strategy: 'input-insert-text',
-          success: inputInsertError ? false : inputVerification.success,
-          error: inputInsertError,
-          compactSummary: inputVerification.compactSummary,
-          editor: inputReadback?.textarea || null,
-          rendered: inputReadback?.rendered || null
-        });
+              await session.call('Input.insertText', {
+                text: expectedText
+              });
+            } catch (error) {
+              inputInsertError = error?.message || String(error || 'Input.insertText failed');
+            }
+            await sleep(80);
+            inputReadback = await runTradingViewPineEditorTextareaOperationWithCDPSession(session, {
+              operation: 'read'
+            });
+            inputVerification = buildTradingViewPineEditorCdpWriteVerification(inputReadback, expectedText, {
+              pinePreparedScriptName: preparedScriptName
+            });
+            strategyAttempts.push({
+              strategy: 'input-insert-text',
+              success: inputInsertError ? false : inputVerification.success,
+              error: inputInsertError,
+              compactSummary: inputVerification.compactSummary,
+              editor: inputReadback?.textarea || null,
+              rendered: inputReadback?.rendered || null
+            });
 
-        if (!inputInsertError && inputVerification.success) {
-          return {
-            success: true,
-            method: 'ChromiumCDPInputInsertText',
-            focusPayload,
-            readback: inputReadback,
-            verification: inputVerification,
+            if (!inputInsertError && inputVerification.success) {
+              return {
+                success: true,
+                method: 'ChromiumCDPInputInsertText',
+                focusPayload,
+                readback: inputReadback,
+                verification: inputVerification,
             strategyAttempts
           };
+        }
+
+        if (useChunkedMonacoInput) {
+          let chunkedInsertError = null;
+          let chunkedInsertPayload = null;
+          let chunkedReadback = null;
+          let chunkedVerification = null;
+          try {
+            chunkedInsertPayload = await insertTradingViewPineEditorTextWithCDPChunks(session, expectedText, {
+              maxChunkLength: 180,
+              interChunkDelayMs: 28
+            });
+            if (!chunkedInsertPayload?.success) {
+              chunkedInsertError = chunkedInsertPayload?.error || 'Chunked Monaco input failed';
+            }
+          } catch (error) {
+            chunkedInsertError = error?.message || String(error || 'Chunked Monaco input failed');
+          }
+          if (!chunkedInsertError) {
+            await sleep(140);
+            chunkedReadback = await runTradingViewPineEditorTextareaOperationWithCDPSession(session, {
+              operation: 'read'
+            });
+            chunkedVerification = buildTradingViewPineEditorCdpWriteVerification(chunkedReadback, expectedText, {
+              pinePreparedScriptName: preparedScriptName
+            });
+          }
+          strategyAttempts.push({
+            strategy: 'monaco-input-chunks',
+            success: !chunkedInsertError && chunkedVerification?.success === true,
+            error: chunkedInsertError,
+            compactSummary: chunkedVerification?.compactSummary || null,
+            editor: chunkedReadback?.textarea || null,
+            rendered: chunkedReadback?.rendered || null,
+            chunks: Array.isArray(chunkedInsertPayload?.chunks) ? chunkedInsertPayload.chunks : []
+          });
+
+          if (!chunkedInsertError && chunkedVerification?.success) {
+            return {
+              success: true,
+              method: 'ChromiumCDPInputInsertTextChunks',
+              focusPayload,
+              readback: chunkedReadback,
+              verification: chunkedVerification,
+              strategyAttempts
+            };
+          }
         }
 
         const domSetPayload = await runTradingViewPineEditorTextareaOperationWithCDPSession(session, {
           operation: 'force-set',
           text: expectedText
-        });
-        await sleep(80);
-        const domReadback = await runTradingViewPineEditorTextareaOperationWithCDPSession(session, {
-          operation: 'read'
-        });
-        const domVerification = buildTradingViewPineEditorCdpWriteVerification(domReadback, expectedText, {
-          pinePreparedScriptName: preparedScriptName,
-          requireRenderedProof: true
-        });
-        strategyAttempts.push({
-          strategy: 'dom-force-set',
-          success: domVerification.success,
-          error: null,
-          compactSummary: domVerification.compactSummary,
-          editor: domReadback?.textarea || null,
-          rendered: domReadback?.rendered || null,
-          forceSet: {
-            previousValueLength: Number(domSetPayload?.previousValueLength || 0) || 0,
-            appliedTextLength: Number(domSetPayload?.appliedTextLength || 0) || 0,
-            dispatchedBeforeInput: domSetPayload?.dispatchedBeforeInput || null,
-            dispatchedInput: domSetPayload?.dispatchedInput || null,
-            dispatchedChange: domSetPayload?.dispatchedChange || null
-          }
-        });
+            });
+            await sleep(80);
+            const domReadback = await runTradingViewPineEditorTextareaOperationWithCDPSession(session, {
+              operation: 'read'
+            });
+            const domVerification = buildTradingViewPineEditorCdpWriteVerification(domReadback, expectedText, {
+              pinePreparedScriptName: preparedScriptName,
+              requireRenderedProof: true
+            });
+            strategyAttempts.push({
+              strategy: 'dom-force-set',
+              success: domVerification.success,
+              error: null,
+              compactSummary: domVerification.compactSummary,
+              editor: domReadback?.textarea || null,
+              rendered: domReadback?.rendered || null,
+              forceSet: {
+                previousValueLength: Number(domSetPayload?.previousValueLength || 0) || 0,
+                appliedTextLength: Number(domSetPayload?.appliedTextLength || 0) || 0,
+                dispatchedBeforeInput: domSetPayload?.dispatchedBeforeInput || null,
+                dispatchedInput: domSetPayload?.dispatchedInput || null,
+                dispatchedChange: domSetPayload?.dispatchedChange || null
+              }
+            });
 
-        if (domVerification.success) {
-          return {
-            success: true,
-            method: 'ChromiumCDPDOMInputEvent',
-            focusPayload,
-            readback: domReadback,
-            verification: domVerification,
-            strategyAttempts
-          };
+            if (domVerification.success) {
+              return {
+                success: true,
+                method: 'ChromiumCDPDOMInputEvent',
+                focusPayload,
+                readback: domReadback,
+                verification: domVerification,
+                strategyAttempts
+              };
+            }
+
+            return {
+              success: false,
+              reason: 'cdp-editor-write-unverified',
+              error: `TradingView Pine editor CDP write did not verify (${domVerification.compactSummary || inputVerification?.compactSummary || 'buffer mismatch'})`,
+              focusPayload,
+              readback: domReadback,
+              verification: domVerification,
+              inputVerification,
+              strategyAttempts
+            };
+          }
+        );
+        sessionAttachAttempts.push({
+          ...attemptSummary,
+          success: true,
+          durationMs: Math.max(0, Date.now() - attemptStartedAt)
+        });
+        break;
+      } catch (error) {
+        lastAttachError = error;
+        const retryable = isRetryableTradingViewRendererAttachError(error);
+        sessionAttachAttempts.push({
+          ...attemptSummary,
+          success: false,
+          durationMs: Math.max(0, Date.now() - attemptStartedAt),
+          reason: error?.reason || 'protocol-error',
+          error: error?.message || String(error || 'CDP protocol session failed'),
+          retryable
+        });
+        if (!retryable || attemptIndex >= attachAttemptPlan.length - 1) {
+          error.cdpAttachAttempts = sessionAttachAttempts.slice();
+          throw error;
         }
 
-        return {
-          success: false,
-          reason: 'cdp-editor-write-unverified',
-          error: `TradingView Pine editor CDP write did not verify (${domVerification.compactSummary || inputVerification?.compactSummary || 'buffer mismatch'})`,
-          focusPayload,
-          readback: domReadback,
-          verification: domVerification,
-          inputVerification,
-          strategyAttempts
-        };
+        if ((Number(attempt.retryDelayMs || 0) || 0) > 0) {
+          await sleep(Number(attempt.retryDelayMs || 0) || 0);
+        }
+
+        try {
+          const refreshedDiscovery = await discoverChromiumRemoteDebuggingTarget({
+            port: context.port || 0,
+            processIds: [context.windowInfo?.pid || context.windowInfo?.processId || 0],
+            processNames: [
+              context.windowInfo?.processName || '',
+              'tradingview'
+            ],
+            title: String(context.windowInfo?.title || ''),
+            titleTokens: buildTradingViewPineRendererTargetTokens(context.windowInfo?.title || ''),
+            targetTypes: ['page', 'webview'],
+            urlHints: ['tradingview', '/chart/'],
+            timeoutMs: context.timeout,
+            httpTimeoutMs: Math.max(120, Math.min(1200, Math.round(context.timeout * 0.3))),
+            fetchImpl: context.cdpDependencies?.fetchImpl,
+            WebSocketCtor: context.cdpDependencies?.WebSocketCtor,
+            processInspector: context.cdpDependencies?.processInspector,
+            listeningPortInspector: context.cdpDependencies?.listeningPortInspector,
+            executePowerShellScript: context.cdpDependencies?.executePowerShellScript
+          });
+          if (refreshedDiscovery?.available) {
+            resolvedDiscovery = {
+              ...context,
+              ...refreshedDiscovery
+            };
+          }
+        } catch {}
       }
-    );
+    }
+
+    if (!cdpResult && lastAttachError) {
+      lastAttachError.cdpAttachAttempts = sessionAttachAttempts.slice();
+      throw lastAttachError;
+    }
 
     return {
       applicable: true,
@@ -4478,7 +6348,8 @@ async function setTradingViewPineEditorContentWithCDP(options = {}) {
       proof: cdpResult?.verification?.proof || null,
       renderedProof: cdpResult?.verification?.renderedProof || null,
       compactSummary: cdpResult?.verification?.compactSummary || null,
-      strategyAttempts: Array.isArray(cdpResult?.strategyAttempts) ? cdpResult.strategyAttempts : []
+      strategyAttempts: Array.isArray(cdpResult?.strategyAttempts) ? cdpResult.strategyAttempts : [],
+      cdpAttachAttempts: sessionAttachAttempts
     };
   } catch (error) {
     return {
@@ -4494,6 +6365,8 @@ async function setTradingViewPineEditorContentWithCDP(options = {}) {
       endpointAttempts: context.endpointAttempts,
       discovery: context.discovery,
       windowInfo: context.windowInfo || null
+      ,
+      cdpAttachAttempts: Array.isArray(error?.cdpAttachAttempts) ? error.cdpAttachAttempts : []
     };
   }
 }
@@ -5139,6 +7012,9 @@ async function probeTradingViewPineEditorSurface(options = {}) {
   const allowPointProbe = options?.allowPointProbe !== false;
   const allowDiagnosticScan = options?.allowDiagnosticScan !== false;
   const evidenceMode = String(options?.pineEvidenceMode || options?.evidenceMode || '').trim().toLowerCase();
+  const captureTitleButton = options?.captureTitleButton === true
+    || options?.acceptGenericSavedSurfaceAsStarter === true
+    || evidenceMode === 'save-status';
   const requestedScanViews = Array.isArray(options?.scanViews)
     ? options.scanViews
       .map((view) => String(view || '').trim().toLowerCase())
@@ -5200,10 +7076,11 @@ async function probeTradingViewPineEditorSurface(options = {}) {
         windowInfo,
         foreground,
         resolveWindowState: false,
-        timeout: Math.max(
+      timeout: Math.max(
           MIN_TRADINGVIEW_PINE_RENDERER_PROOF_TIMEOUT_MS,
           Math.min(Math.round(timeout * 0.58), 1200)
         ),
+        captureTitleButton,
         pineExpectedScriptName: expectedScriptName,
         cdpPort: options?.cdpPort || 0,
         cdpDependencies: options?.cdpDependencies || null
@@ -6213,7 +8090,7 @@ async function captureTradingViewPineActivationSnapshot(options = {}) {
       windowInfo,
       foreground: foregroundSummary,
       resolveWindowState: false,
-      timeout: Math.max(240, Math.min(700, Math.round(totalTimeout * 0.55))),
+      timeout: Math.max(700, Math.min(1200, Math.round(totalTimeout * 0.8))),
       scanViews: ['control'],
       minScanAttemptTimeout: 160,
       allowPointProbe: false,
@@ -6483,9 +8360,17 @@ async function prepareTradingViewPineActivationProofContext(action = {}) {
     startedAt: Date.now(),
     timeoutMs,
     windowHandle,
+    cdpPort: Number(action?.cdpPort || 0) || 0,
+    cdpDependencies: action?.cdpDependencies && typeof action.cdpDependencies === 'object'
+      ? action.cdpDependencies
+      : null,
     proofStrategy: 'watcher-first',
     before: await captureTradingViewPineActivationSnapshot({
       windowHandle,
+      cdpPort: Number(action?.cdpPort || 0) || 0,
+      cdpDependencies: action?.cdpDependencies && typeof action.cdpDependencies === 'object'
+        ? action.cdpDependencies
+        : null,
       timeoutMs: Math.max(MIN_TRADINGVIEW_PINE_ACTIVATION_PROOF_TIMEOUT_MS, Math.round(timeoutMs * 0.85)),
       phase: 'before',
       proofStrategy: 'watcher-first'
@@ -6514,6 +8399,8 @@ async function finalizeTradingViewPineActivationProofContext(context = null, res
 
   const after = await captureTradingViewPineActivationSnapshot({
     windowHandle: postInvokeWindowHandle,
+    cdpPort: Number(context?.cdpPort || action?.cdpPort || 0) || 0,
+    cdpDependencies: context?.cdpDependencies || action?.cdpDependencies || null,
     timeoutMs: context.timeoutMs,
     waitForWatcherState: true,
     watcherSinceTs: Number(context?.before?.watcher?.lastUpdate || context.startedAt || 0) || 0,
@@ -6989,6 +8876,71 @@ async function verifyTradingViewPineEditorPaste(action = {}, pressKeyImpl = pres
       error: error?.message || String(error || 'Pine Editor paste proof failed')
     };
   }
+}
+
+function buildPineAuthoringWriteTelemetry(cdpWrite = null, pasteProof = null) {
+  const summarizedStrategyAttempts = Array.isArray(cdpWrite?.strategyAttempts)
+    ? cdpWrite.strategyAttempts
+      .map((attempt = {}) => ({
+        strategy: normalizeCompactText(attempt?.strategy || '', 60) || null,
+        success: attempt?.success === true,
+        method: normalizeCompactText(attempt?.method || '', 80) || null,
+        error: normalizeCompactText(attempt?.error || '', 160) || null,
+        compactSummary: normalizeCompactText(attempt?.compactSummary || '', 160) || null
+      }))
+      .filter((attempt) => attempt.strategy || attempt.method || attempt.error || attempt.compactSummary)
+    : [];
+  const selectedMethod = normalizeCompactText(
+    pasteProof?.applicable
+      ? (pasteProof?.method || '')
+      : (cdpWrite?.method || ''),
+    80
+  ) || null;
+  const primaryMethod = normalizeCompactText(cdpWrite?.method || '', 80) || null;
+  const successfulPrimaryAttempt = summarizedStrategyAttempts.find((attempt) => attempt?.success === true) || null;
+  const firstPrimaryAttempt = summarizedStrategyAttempts[0] || null;
+  const primaryStrategy = successfulPrimaryAttempt?.strategy || firstPrimaryAttempt?.strategy || null;
+  const primaryAttemptSummary = successfulPrimaryAttempt || firstPrimaryAttempt
+    ? [
+        normalizeCompactText((successfulPrimaryAttempt || firstPrimaryAttempt)?.strategy || '', 40) || 'unknown',
+        (successfulPrimaryAttempt || firstPrimaryAttempt)?.success === true ? 'ok' : 'fail',
+        normalizeCompactText((successfulPrimaryAttempt || firstPrimaryAttempt)?.method || '', 40) || null,
+        (successfulPrimaryAttempt || firstPrimaryAttempt)?.success === true
+          ? null
+          : (normalizeCompactText((successfulPrimaryAttempt || firstPrimaryAttempt)?.error || '', 60) || null)
+      ].filter(Boolean).join(':')
+    : null;
+
+  return {
+    selectedMethod,
+    primaryMethod,
+    primarySucceeded: cdpWrite?.success === true,
+    primaryReason: cdpWrite?.success === true
+      ? null
+      : (normalizeCompactText(cdpWrite?.reason || cdpWrite?.error || '', 180) || null),
+    primaryStrategy: normalizeCompactText(
+      successfulPrimaryAttempt?.strategy || primaryStrategy || '',
+      60
+    ) || null,
+    primaryAttemptSummary,
+    fallbackUsed: pasteProof?.applicable === true,
+    fallbackMethod: normalizeCompactText(pasteProof?.method || '', 80) || null,
+    fallbackRetryAttempted: pasteProof?.retryAttempted === true,
+    proofVerified: pasteProof?.proof?.exactMatch === true || cdpWrite?.proof?.exactMatch === true,
+    primaryAttempts: summarizedStrategyAttempts.slice(0, 4),
+    compactSummary: [
+      `selected=${selectedMethod || 'unknown'}`,
+      primaryMethod
+        ? `primary=${primaryMethod}${cdpWrite?.success === true ? ':ok' : ':fallback'}`
+        : null,
+      primaryStrategy ? `strategy=${primaryStrategy}` : null,
+      primaryAttemptSummary ? `attempt=${primaryAttemptSummary}` : null,
+      !primaryMethod && cdpWrite?.applicable ? `primaryReason=${normalizeCompactText(cdpWrite?.reason || cdpWrite?.error || 'unknown', 120) || 'unknown'}` : null,
+      pasteProof?.applicable === true
+        ? `fallback=${normalizeCompactText(pasteProof?.method || 'ClipboardRoundTrip', 80) || 'ClipboardRoundTrip'}${pasteProof?.retryAttempted ? ':repair' : ''}`
+        : null
+    ].filter(Boolean).join(' | ')
+  };
 }
 
 const DEFAULT_PINE_READBACK_TIMEOUT_MS = 8000;
@@ -7606,6 +9558,12 @@ async function getPineEditorTextFallback(action = {}) {
     const hostExpectedTitleProofVisible = expectedScriptName
       ? extractTradingViewPineExpectedTitleProof(hostSurfaceProbe, expectedScriptName).visible === true
       : false;
+    const safeAuthoringSummary = evidenceMode === 'safe-authoring-inspect'
+      ? buildPineEditorSafeAuthoringSummary(syntheticAnchors.join('\n'), {
+          ...action,
+          pineEditorSurfaceProbe: hostSurfaceProbe
+        })
+      : null;
     const hostProofDecisive = evidenceMode === 'save-status'
       ? (
           hostExpectedTitleProofVisible
@@ -7614,7 +9572,15 @@ async function getPineEditorTextFallback(action = {}) {
           || hostSurfaceState.saveConfirmationVisible
           || hostSurfaceState.saveReplaceConfirmationVisible
         )
-      : hostSurfaceState.active === true;
+      : evidenceMode === 'safe-authoring-inspect'
+        ? (
+            safeAuthoringSummary?.editorVisibleState === 'empty-or-starter'
+            || safeAuthoringSummary?.editorVisibleState === 'existing-script-visible'
+            || safeAuthoringSummary?.editorVisibleState === 'confirmation-blocking'
+            || safeAuthoringSummary?.editorVisibleState === 'replace-confirmation-blocking'
+            || safeAuthoringSummary?.editorVisibleState === 'save-required-blocking'
+          )
+        : hostSurfaceState.active === true;
     if (hostProofDecisive) {
       return buildSyntheticAnchorResult();
     }
@@ -7845,6 +9811,9 @@ async function getPineEditorSurfaceProbeFallback(action = {}, options = {}) {
     timeout: boundedTimeout,
     allowRendererProof,
     pineEvidenceMode: action?.pineEvidenceMode || options?.pineEvidenceMode || '',
+    acceptGenericSavedSurfaceAsStarter: action?.acceptGenericSavedSurfaceAsStarter === true
+      || options?.acceptGenericSavedSurfaceAsStarter === true,
+    captureTitleButton: action?.captureTitleButton === true || options?.captureTitleButton === true,
     pineExpectedScriptName: action?.pineExpectedScriptName || action?.expectedScriptName || action?.scriptName || '',
     cdpPort: Number(action?.cdpPort || options?.cdpPort || 0) || 0,
     cdpDependencies: action?.cdpDependencies || options?.cdpDependencies || null
@@ -11161,7 +13130,11 @@ async function executeAction(action, runtimeOptions = {}) {
         
       case ACTION_TYPES.KEY:
         {
-          const pineEditorOpenBypass = await maybeBypassTradingViewPineEditorOpenAction(effectiveAction);
+          const pineEditorOpenBypass = await maybeBypassTradingViewPineEditorOpenAction({
+            ...effectiveAction,
+            cdpPort: Number(effectiveAction?.cdpPort || runtimeOptions?.cdpPort || 0) || 0,
+            cdpDependencies: effectiveAction?.cdpDependencies || runtimeOptions?.cdpDependencies || null
+          });
           if (pineEditorOpenBypass?.bypass) {
             result.skipped = true;
             result.skippedReason = pineEditorOpenBypass.skippedReason || 'pine-editor-already-active';
@@ -11186,8 +13159,9 @@ async function executeAction(action, runtimeOptions = {}) {
 
             if (pineAuthoringCdpWrite.success) {
               result.pineAuthoringPasteProof = pineAuthoringCdpWrite;
+              result.pineAuthoringWriteTelemetry = buildPineAuthoringWriteTelemetry(pineAuthoringCdpWrite, null);
               result.method = pineAuthoringCdpWrite.method || 'ChromiumCDP';
-              result.message = `Replaced the Pine buffer via ${result.method} and verified the prepared script`;
+              result.message = `Replaced the Pine buffer via ${result.method} and verified the prepared script${result.pineAuthoringWriteTelemetry?.compactSummary ? ` [${result.pineAuthoringWriteTelemetry.compactSummary}]` : ''}`;
               break;
             }
 
@@ -11214,6 +13188,7 @@ async function executeAction(action, runtimeOptions = {}) {
           const pinePasteProof = await verifyTradingViewPineEditorPaste(effectiveAction, pressKeyImpl);
           if (pinePasteProof?.applicable) {
             result.pineAuthoringPasteProof = pinePasteProof;
+            result.pineAuthoringWriteTelemetry = buildPineAuthoringWriteTelemetry(pineAuthoringCdpWrite, pinePasteProof);
             result.method = pinePasteProof.method || result.method;
 
             if (!pinePasteProof.success) {
@@ -11236,6 +13211,9 @@ async function executeAction(action, runtimeOptions = {}) {
               result.message = pinePasteProof.retryAttempted
                 ? `Pressed ${effectiveAction.key} and repaired the Pine buffer after a single bounded retry`
                 : `Pressed ${effectiveAction.key} and verified the Pine buffer`;
+            }
+            if (result.pineAuthoringWriteTelemetry?.compactSummary) {
+              result.message = `${result.message} [${result.pineAuthoringWriteTelemetry.compactSummary}]`;
             }
             break;
           }
@@ -11272,7 +13250,11 @@ async function executeAction(action, runtimeOptions = {}) {
       
       // Semantic element-based actions (MORE RELIABLE than coordinates)
       case ACTION_TYPES.CLICK_ELEMENT: {
-        const pineEditorOpenBypass = await maybeBypassTradingViewPineEditorOpenAction(effectiveAction);
+        const pineEditorOpenBypass = await maybeBypassTradingViewPineEditorOpenAction({
+          ...effectiveAction,
+          cdpPort: Number(effectiveAction?.cdpPort || runtimeOptions?.cdpPort || 0) || 0,
+          cdpDependencies: effectiveAction?.cdpDependencies || runtimeOptions?.cdpDependencies || null
+        });
         if (pineEditorOpenBypass?.bypass) {
           result.skipped = true;
           result.skippedReason = pineEditorOpenBypass.skippedReason || 'pine-editor-already-active';
@@ -11285,13 +13267,19 @@ async function executeAction(action, runtimeOptions = {}) {
         let pineActivationProofContext = null;
         if (isTradingViewSemanticPineIconAction(effectiveAction)) {
           try {
-            pineActivationProofContext = await prepareTradingViewPineActivationProofContext(effectiveAction);
+            pineActivationProofContext = await prepareTradingViewPineActivationProofContext({
+              ...effectiveAction,
+              cdpPort: Number(effectiveAction?.cdpPort || runtimeOptions?.cdpPort || 0) || 0,
+              cdpDependencies: effectiveAction?.cdpDependencies || runtimeOptions?.cdpDependencies || null
+            });
           } catch (error) {
             pineActivationProofContext = {
               applicable: true,
               startedAt: Date.now(),
               timeoutMs: getTradingViewPineActivationProofTimeoutMs(),
               windowHandle: Number(effectiveAction?.windowHandle || effectiveAction?.hwnd || 0) || 0,
+              cdpPort: Number(effectiveAction?.cdpPort || runtimeOptions?.cdpPort || 0) || 0,
+              cdpDependencies: effectiveAction?.cdpDependencies || runtimeOptions?.cdpDependencies || null,
               before: {
                 captured: false,
                 reason: 'pre-invoke-proof-failed',
@@ -11325,9 +13313,9 @@ async function executeAction(action, runtimeOptions = {}) {
             foregroundOnly: !!effectiveAction.foregroundOnly,
             allowCoordinateFallback: effectiveAction.allowCoordinateFallback !== false,
             pineExpectedScriptName: effectiveAction.pineExpectedScriptName || effectiveAction.expectedScriptName || effectiveAction.scriptName || '',
-            cdpPort: Number(effectiveAction.cdpPort || 0) || 0,
+            cdpPort: Number(effectiveAction?.cdpPort || runtimeOptions?.cdpPort || 0) || 0,
             rendererInvoke: effectiveAction.tradingViewRendererInvoke || effectiveAction.rendererInvoke || null,
-            cdpDependencies: effectiveAction.cdpDependencies || null
+            cdpDependencies: effectiveAction?.cdpDependencies || runtimeOptions?.cdpDependencies || null
           });
           result = { ...result, ...clickResult };
         }
@@ -11337,7 +13325,11 @@ async function executeAction(action, runtimeOptions = {}) {
             result.tradingViewPineActivationProof = await finalizeTradingViewPineActivationProofContext(
               pineActivationProofContext,
               result,
-              effectiveAction
+              {
+                ...effectiveAction,
+                cdpPort: Number(effectiveAction?.cdpPort || runtimeOptions?.cdpPort || 0) || 0,
+                cdpDependencies: effectiveAction?.cdpDependencies || runtimeOptions?.cdpDependencies || null
+              }
             );
           } catch (error) {
             result.tradingViewPineActivationProof = {
@@ -11363,6 +13355,20 @@ async function executeAction(action, runtimeOptions = {}) {
               durationMs: Math.max(0, Date.now() - (Number(pineActivationProofContext?.startedAt || 0) || Date.now())),
               signals: []
             };
+          }
+
+          if (
+            result?.success !== true
+            && result?.tradingViewPineActivationProof?.applicable
+            && result.tradingViewPineActivationProof.pineSurfaceObserved === true
+          ) {
+            result.rawExecutionError = result.error || null;
+            result.success = true;
+            result.error = null;
+            result.method = result.method || 'semantic-icon-post-invoke-proof';
+            result.recoveredBy = 'semantic-pine-activation-proof';
+            result.message = result.message
+              || 'Opened TradingView Pine Editor via bounded semantic icon proof';
           }
         }
         break;
