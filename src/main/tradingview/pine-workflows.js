@@ -794,17 +794,10 @@ function buildPineSaveStatusVerificationAction({
 
   if (includeSaveRequiredRecovery) {
     lifecycleContinuations['save-required-before-apply'] = [
-      { type: 'wait', ms: 180 },
-      {
-        type: 'type',
-        text: derivedScriptName,
-        reason: `Provide a Pine script name in the TradingView first-save flow: ${derivedScriptName}`,
-        inputSurfaceContract: cloneTradingViewPineSaveNameSurfaceContract()
-      },
-      { type: 'wait', ms: 180 },
+      { type: 'wait', ms: 160 },
       buildTradingViewFirstSaveDialogSaveAction(
         derivedScriptName,
-        'Confirm the exact TradingView first-save dialog after entering the Pine script name'
+        `Provide the Pine script name and confirm the exact TradingView first-save dialog: ${derivedScriptName}`
       ),
       { type: 'wait', ms: 320 },
       buildPineSaveStatusVerificationAction({

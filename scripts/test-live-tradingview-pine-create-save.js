@@ -72,6 +72,26 @@ test('pine-create-save scenario preserves an explicit smoke script name over syn
   assert(/indicator\("Liku Monaco Steady State Probe 20260509-1445"/.test(String(pasteStep?.pinePreparedScriptText || '')));
 });
 
+test('pine-create-save save-required recovery uses a single verified save invoke instead of separate dialog typing', () => {
+  const scenario = buildPineCreateSaveScenario('TradingView is already open. Create a new Pine script called "Liku Save Flow Probe", save the script, and report the visible save status. Do not add it to the chart.');
+  const actions = scenario?.actionData?.actions || [];
+  const inspectStep = actions.find((action) => action?.type === 'get_text' && action?.pineEvidenceMode === 'safe-authoring-inspect');
+  const starterContinuation = inspectStep?.continueActionsByPineEditorState?.['empty-or-starter'] || [];
+  const saveStatusStep = starterContinuation.find((action) =>
+    action?.type === 'get_text' && action?.pineEvidenceMode === 'save-status'
+  );
+  const saveRequiredRecovery = saveStatusStep?.continueActionsByPineLifecycleState?.['save-required-before-apply'] || [];
+  const typedNameStep = saveRequiredRecovery.find((action) => action?.type === 'type');
+  const saveDialogSaveStep = saveRequiredRecovery.find((action) =>
+    action?.type === 'click_element' && String(action?.text || '').trim() === 'Save'
+  );
+
+  assert.strictEqual(typedNameStep, undefined);
+  assert(saveDialogSaveStep, 'save-required recovery should invoke the first-save Save button');
+  assert.strictEqual(String(saveDialogSaveStep?.pineExpectedScriptName || ''), 'Liku Save Flow Probe');
+  assert.strictEqual(String(saveDialogSaveStep?.tradingViewRendererInvoke?.pineExpectedScriptName || ''), 'Liku Save Flow Probe');
+});
+
 console.log(`\nLive TradingView pine-create-save tests: ${passed} passed, ${failed} failed`);
 if (failed > 0) {
   process.exit(1);

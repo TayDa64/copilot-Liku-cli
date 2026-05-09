@@ -4234,11 +4234,47 @@ async function invokeTradingViewRendererButtonWithCDP(options = {}) {
             }
 
             await session.call('Accessibility.enable');
+            const normalizedButtonText = normalizeTradingViewRendererMatchText(buttonText, 180);
+            let dialogPrefill = null;
+            if (invokeKind === 'pine-first-save-confirmation' && normalizedButtonText === 'save' && pineExpectedScriptName) {
+              const dialogSetResult = await runTradingViewPineEditorTextareaOperationWithCDPSession(session, {
+                operation: 'dialog-force-set',
+                text: pineExpectedScriptName
+              });
+              const dialogInputValues = Array.isArray(dialogSetResult?.dialog?.inputValues)
+                ? dialogSetResult.dialog.inputValues
+                : [];
+              const normalizedDesiredName = pineExpectedScriptName.toLowerCase();
+              const inputApplied = dialogInputValues.some((value) =>
+                normalizeCompactText(value || '', 180).toLowerCase() === normalizedDesiredName
+              );
+              dialogPrefill = {
+                attempted: true,
+                success: inputApplied,
+                method: inputApplied ? 'ChromiumCDPDialogSetValue' : null,
+                dialogFound: dialogSetResult?.dialogFound === true || !!normalizeCompactText(dialogSetResult?.dialogText || '', 240),
+                dialogInputValues,
+                previousValueLength: Number(dialogSetResult?.previousValueLength || 0) || 0,
+                appliedTextLength: Number(dialogSetResult?.appliedTextLength || 0) || 0
+              };
+              if (!inputApplied) {
+                return {
+                  success: false,
+                  available: true,
+                  reason: dialogPrefill.dialogFound ? 'renderer-dialog-input-unverified' : 'renderer-dialog-input-unavailable',
+                  error: dialogPrefill.dialogFound
+                    ? `TradingView save dialog read back ${JSON.stringify(dialogInputValues[0] || '')} instead of ${JSON.stringify(pineExpectedScriptName)}`
+                    : 'TradingView save dialog input was not exposed through CDP.',
+                  matchedRequiredTexts: [],
+                  dialogPrefill
+                };
+              }
+            }
+
             const axTree = await session.call('Accessibility.getFullAXTree', {
               depth: 12
             });
             const nodes = Array.isArray(axTree?.nodes) ? axTree.nodes : [];
-            const normalizedButtonText = normalizeTradingViewRendererMatchText(buttonText, 180);
             const normalizedRequiredTexts = requiredTexts.map((text) => normalizeTradingViewRendererMatchText(text, 220));
             const matchedRequiredTexts = matchTradingViewRendererRequiredTexts(nodes, normalizedRequiredTexts);
             const allowButtonSearchWithoutRequiredTexts = invokeKind === 'pine-first-save-confirmation';
@@ -4331,6 +4367,7 @@ async function invokeTradingViewRendererButtonWithCDP(options = {}) {
                 ? null
                 : (!effectVerified ? (effectProof?.error || null) : null),
               matchedRequiredTexts,
+              dialogPrefill,
               axNode: summarizeTradingViewRendererAxNode(buttonNode),
               clickResult: clickPayload,
               effectProof
@@ -4389,6 +4426,7 @@ async function invokeTradingViewRendererButtonWithCDP(options = {}) {
       buttonText,
       requiredTexts,
       matchedRequiredTexts: Array.isArray(cdpResult?.matchedRequiredTexts) ? cdpResult.matchedRequiredTexts : [],
+      dialogPrefill: cdpResult?.dialogPrefill || null,
       currentTitleHint: cdpResult?.currentTitleHint || '',
       axNode: cdpResult?.axNode || null,
       titleButton: cdpResult?.titleButton || null,

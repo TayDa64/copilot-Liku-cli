@@ -218,7 +218,10 @@ function buildTradingViewCdpDependencies(options = {}) {
     tagName: 'BUTTON'
   };
   const state = {
-    axNodes: Array.isArray(options?.axNodes) ? options.axNodes.slice() : []
+    axNodes: Array.isArray(options?.axNodes) ? options.axNodes.slice() : [],
+    dialogInputValues: Array.isArray(options?.initialDialogInputValues)
+      ? options.initialDialogInputValues.map((value) => String(value ?? ''))
+      : []
   };
 
   return {
@@ -247,6 +250,36 @@ function buildTradingViewCdpDependencies(options = {}) {
       onMessage?.(message);
       switch (String(message?.method || '')) {
         case 'Runtime.evaluate':
+          if (typeof options?.onEvaluate === 'function') {
+            const hookResult = options.onEvaluate({
+              message,
+              state: {
+                axNodes: Array.isArray(state.axNodes) ? state.axNodes.slice() : [],
+                dialogInputValues: Array.isArray(state.dialogInputValues) ? state.dialogInputValues.slice() : []
+              }
+            });
+            if (hookResult && typeof hookResult === 'object') {
+              if (Array.isArray(hookResult.axNodes)) {
+                state.axNodes = hookResult.axNodes.slice();
+              }
+              if (Object.prototype.hasOwnProperty.call(hookResult, 'dialogInputValues')) {
+                state.dialogInputValues = Array.isArray(hookResult.dialogInputValues)
+                  ? hookResult.dialogInputValues.map((value) => String(value ?? ''))
+                  : [];
+              }
+              if (Object.prototype.hasOwnProperty.call(hookResult, 'value')) {
+                return {
+                  id: message.id,
+                  result: {
+                    result: {
+                      type: 'object',
+                      value: hookResult.value
+                    }
+                  }
+                };
+              }
+            }
+          }
           return {
             id: message.id,
             result: {
@@ -290,7 +323,8 @@ function buildTradingViewCdpDependencies(options = {}) {
             const hookResult = options.onCallFunctionOn({
               message,
               state: {
-                axNodes: Array.isArray(state.axNodes) ? state.axNodes.slice() : []
+                axNodes: Array.isArray(state.axNodes) ? state.axNodes.slice() : [],
+                dialogInputValues: Array.isArray(state.dialogInputValues) ? state.dialogInputValues.slice() : []
               }
             });
             if (hookResult && typeof hookResult === 'object') {
@@ -2471,6 +2505,104 @@ async function main() {
     assert.strictEqual(invokeResult?.effectProof?.success, true);
     assert.strictEqual(invokeResult?.effectProof?.cleared, true);
     assert(axReadCount >= 2, 'AX tree should be read before and after the click');
+  });
+
+  await test('invokeTradingViewRendererButtonWithCDP pre-fills the Pine first-save dialog name before clicking Save', async () => {
+    let evaluateCount = 0;
+    const initialAxNodes = [
+      {
+        nodeId: '34550',
+        ignored: false,
+        role: { value: 'generic' },
+        name: { value: 'Save script New script name Cancel Save' }
+      },
+      {
+        nodeId: '34551',
+        ignored: false,
+        role: { value: 'button' },
+        name: { value: 'Save' },
+        backendDOMNodeId: 34551
+      }
+    ];
+    const afterClickAxNodes = [
+      {
+        nodeId: '34650',
+        ignored: false,
+        role: { value: 'generic' },
+        name: { value: 'Pine Editor Liku Save Flow Probe Add to chart Publish script' }
+      }
+    ];
+
+    const invokeResult = await systemAutomation.invokeTradingViewRendererButtonWithCDP({
+      windowInfo: buildWindowInfo({
+        hwnd: 460834,
+        title: 'MN / Untitled'
+      }),
+      resolveWindowState: false,
+      kind: 'pine-first-save-confirmation',
+      buttonText: 'Save',
+      pineExpectedScriptName: 'Liku Save Flow Probe',
+      requiredTexts: [
+        'Save script',
+        'New script name'
+      ],
+      cdpDependencies: buildTradingViewCdpDependencies({
+        port: 9563,
+        axNodes: initialAxNodes,
+        domResolveResult: {
+          object: {
+            objectId: 'mock-node-save-prefill'
+          }
+        },
+        onEvaluate: ({ message, state }) => {
+          const payload = extractRuntimeEvaluatePayload(message?.params?.expression || '');
+          if (String(payload?.operation || '').trim().toLowerCase() !== 'dialog-force-set') {
+            return null;
+          }
+          evaluateCount += 1;
+          return {
+            dialogInputValues: ['Liku Save Flow Probe'],
+            value: {
+              found: true,
+              operation: 'dialog-force-set',
+              dialogFound: true,
+              dialogText: 'Save script\nNew script name\nCancel\nSave',
+              dialog: {
+                text: 'Save script\nNew script name\nCancel\nSave',
+                inputValues: ['Liku Save Flow Probe'],
+                buttonTexts: ['Cancel', 'Save'],
+                source: 'dialog-surface',
+                visible: true,
+                score: 920
+              },
+              dialogInputApplied: true,
+              previousValueLength: 0,
+              appliedTextLength: 'Liku Save Flow Probe'.length
+            }
+          };
+        },
+        onCallFunctionOn: ({ message, state }) => {
+          assert.strictEqual(String(message?.params?.objectId || ''), 'mock-node-save-prefill');
+          assert.deepStrictEqual(state.dialogInputValues, ['Liku Save Flow Probe']);
+          return {
+            axNodes: afterClickAxNodes,
+            callFunctionOnValue: {
+              clicked: true,
+              text: 'Save',
+              tagName: 'BUTTON'
+            }
+          };
+        }
+      })
+    });
+
+    assert.strictEqual(evaluateCount, 1);
+    assert.strictEqual(invokeResult?.success, true);
+    assert.strictEqual(invokeResult?.dialogPrefill?.attempted, true);
+    assert.strictEqual(invokeResult?.dialogPrefill?.success, true);
+    assert.strictEqual(invokeResult?.dialogPrefill?.method, 'ChromiumCDPDialogSetValue');
+    assert.deepStrictEqual(invokeResult?.dialogPrefill?.dialogInputValues, ['Liku Save Flow Probe']);
+    assert.strictEqual(invokeResult?.clickResult?.clicked, true);
   });
 
   await test('invokeTradingViewRendererButtonWithCDP captures a post-click Pine surface proof after replace confirmation clears', async () => {
