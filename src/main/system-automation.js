@@ -11,6 +11,10 @@ const path = require('path');
 const os = require('os');
 const gridMath = require('../shared/grid-math');
 const { writeTelemetry } = require('./telemetry/telemetry-writer');
+const {
+  discoverChromiumRemoteDebuggingTarget,
+  withChromiumCdpSession
+} = require('./ui-automation/core/chromium-cdp');
 
 // Action types the AI can request
 const ACTION_TYPES = {
@@ -626,15 +630,167 @@ function buildPineVersionHistoryStructuredSummary(text, summaryFields = []) {
   return structured;
 }
 
-function buildPineEditorSafeAuthoringSummary(text) {
+function extractPineEditorSafeAuthoringSurfaceState(probe = null) {
+  const matchedBy = String(probe?.matchedBy || probe?.rendererProof?.matchedBy || '').trim() || null;
+  const rawVisibleAnchorEntries = Array.isArray(probe?.visibleAnchorEntries) && probe.visibleAnchorEntries.length > 0
+    ? probe.visibleAnchorEntries
+    : (Array.isArray(probe?.rendererProof?.signals) && probe.rendererProof.signals.length > 0
+      ? probe.rendererProof.signals
+      : synthesizeTradingViewPineVisibleAnchorEntriesFromTexts(
+          Array.isArray(probe?.visibleAnchors) ? probe.visibleAnchors : [],
+          matchedBy
+        ));
+  const visibleAnchorEntries = summarizeTradingViewPineVisibleAnchorEntries(
+    rawVisibleAnchorEntries,
+    matchedBy
+  );
+  const summary = {
+    active: probe?.active === true || probe?.rendererProof?.active === true || visibleAnchorEntries.length > 0,
+    matchedBy,
+    visibleAnchors: visibleAnchorEntries
+      .map((entry) => normalizeCompactText(entry?.text || entry?.observedText || '', 180))
+      .filter(Boolean)
+      .slice(0, 4),
+    starterVisible: false,
+    renameSurfaceVisible: false,
+    saveTitleVisible: false,
+    saveConfirmedVisible: false,
+    actionableSurfaceVisible: false,
+    saveRequiredVisible: false,
+    saveConfirmationVisible: false,
+    saveReplaceConfirmationVisible: false
+  };
+  let saveRequiredAnchorVisible = false;
+  let saveRequiredStrongVisible = false;
+  let saveRequiredDialogLikeVisible = false;
+
+  for (const entry of visibleAnchorEntries) {
+    const entryText = normalizeCompactText(entry?.text || '', 180);
+    const observedText = normalizeCompactText(
+      [entry?.text || '', entry?.observedText || '', entry?.ariaLabel || ''].filter(Boolean).join('\n'),
+      220
+    );
+    const entryMetadata = normalizeCompactText(
+      [entry?.source || '', entry?.className || '', entry?.role || '', entry?.scanId || ''].filter(Boolean).join('\n'),
+      220
+    );
+    const category = normalizeTradingViewPineAnchorText(entry?.category || '');
+    const starterLike = /^(untitled(?: script)?|my script|my strategy|my library)$/i.test(entryText)
+      || /^(untitled(?: script)?|my script|my strategy|my library)$/i.test(normalizeCompactText(entry?.observedText || '', 180));
+
+    if (!summary.starterVisible && (category === 'starter' || starterLike)) {
+      summary.starterVisible = true;
+    }
+
+    if (!summary.saveTitleVisible && category === 'save-title') {
+      summary.saveTitleVisible = isTradingViewPineSaveTitleProofCandidate({
+        name: entry?.text || '',
+        value: entry?.observedText || '',
+        source: entry?.source || '',
+        scanId: entry?.scanId || '',
+        controlType: entry?.role || '',
+        className: entry?.className || '',
+        ariaLabel: entry?.ariaLabel || ''
+      });
+    }
+
+    if (!summary.renameSurfaceVisible && category === 'rename-surface') {
+      summary.renameSurfaceVisible = true;
+      saveRequiredAnchorVisible = true;
+      saveRequiredStrongVisible = true;
+    }
+
+    if (!summary.saveConfirmedVisible && (category === 'save-confirmed' || /\b(all changes saved|saved successfully|save complete)\b/i.test(observedText))) {
+      summary.saveConfirmedVisible = true;
+    }
+
+    if (
+      category === 'save-required'
+      || /\b(save script|new script name|script name|save as|rename script|unsaved)\b/i.test(observedText)
+    ) {
+      saveRequiredAnchorVisible = true;
+      if (hasStrongTradingViewPineSaveRequiredText(observedText)) {
+        saveRequiredStrongVisible = true;
+      }
+      if (/\b(dialog|modal)\b/i.test(entryMetadata)) {
+        saveRequiredDialogLikeVisible = true;
+      }
+    }
+
+    if (
+      !summary.saveConfirmationVisible
+      && (
+        /\byou have unsaved changes\b/i.test(observedText)
+        || /\bwould you like to save them\b/i.test(observedText)
+      )
+    ) {
+      summary.saveConfirmationVisible = true;
+    }
+
+    if (
+      !summary.saveReplaceConfirmationVisible
+      && (
+        /\balready exists\b/i.test(observedText)
+        || /\breplace it\b/i.test(observedText)
+        || /\breally want to replace it\b/i.test(observedText)
+      )
+    ) {
+      summary.saveReplaceConfirmationVisible = true;
+    }
+
+    if (
+      !summary.actionableSurfaceVisible
+      && category === 'surface'
+      && /\b(publish script|add to chart|update on chart)\b/i.test(observedText)
+    ) {
+      summary.actionableSurfaceVisible = true;
+    }
+  }
+
+  const aggregateObservedText = normalizeCompactText(
+    visibleAnchorEntries
+      .map((entry) => [entry?.text || '', entry?.observedText || '', entry?.ariaLabel || ''].filter(Boolean).join('\n'))
+      .filter(Boolean)
+      .join('\n'),
+    2400
+  );
+  if (!saveRequiredStrongVisible && hasStrongTradingViewPineSaveRequiredText(aggregateObservedText)) {
+    saveRequiredStrongVisible = true;
+  }
+  if (!summary.saveConfirmationVisible && (/\byou have unsaved changes\b/i.test(aggregateObservedText) || /\bwould you like to save them\b/i.test(aggregateObservedText))) {
+    summary.saveConfirmationVisible = true;
+  }
+  if (!summary.saveReplaceConfirmationVisible && (/\balready exists\b/i.test(aggregateObservedText) || /\breplace it\b/i.test(aggregateObservedText) || /\breally want to replace it\b/i.test(aggregateObservedText))) {
+    summary.saveReplaceConfirmationVisible = true;
+  }
+  summary.saveRequiredVisible = saveRequiredStrongVisible
+    || (
+      saveRequiredAnchorVisible
+      && saveRequiredDialogLikeVisible
+      && !summary.saveConfirmedVisible
+    );
+
+  summary.genericSavedSurfaceVisible = summary.active
+    && summary.saveConfirmedVisible
+    && summary.actionableSurfaceVisible
+    && !summary.starterVisible;
+
+  return summary;
+}
+
+function buildPineEditorSafeAuthoringSummary(text, options = {}) {
   const rawText = String(text || '').replace(/\r/g, '');
   const compactText = normalizeCompactText(rawText, 2400);
   if (!compactText) return null;
+  const surfaceState = extractPineEditorSafeAuthoringSurfaceState(options?.pineEditorSurfaceProbe || null);
 
   const visibleLines = rawText
     .split('\n')
     .map((line) => String(line || '').trim())
     .filter(Boolean);
+  const defaultStarterLabelVisible = visibleLines.some((line) =>
+    /^(untitled(?: script)?|my script|my strategy|my library)$/i.test(String(line || '').trim())
+  );
 
   const addSignal = (signals, signal) => {
     if (signal && !signals.includes(signal)) signals.push(signal);
@@ -654,6 +810,8 @@ function buildPineEditorSafeAuthoringSummary(text) {
 
   if (/\/\/\s*@version\s*=\s*\d+/i.test(rawText)) addSignal(visibleSignals, 'pine-version-directive');
   if (visibleScriptKind !== 'unknown') addSignal(visibleSignals, `${visibleScriptKind}-declaration`);
+  if (defaultStarterLabelVisible) addSignal(visibleSignals, 'starter-default-name');
+  if (surfaceState.starterVisible) addSignal(visibleSignals, 'starter-default-name');
   if (declarationName && /^(my script|my strategy|my library|untitled(?: script)?)$/i.test(declarationName)) {
     addSignal(visibleSignals, 'starter-default-name');
   }
@@ -661,12 +819,31 @@ function buildPineEditorSafeAuthoringSummary(text) {
   if (/\b(input|plot|plotshape|plotchar|hline|bgcolor|fill|alertcondition|strategy\.)\s*\(/i.test(rawText)) {
     addSignal(visibleSignals, 'script-body-visible');
   }
-  if (/\b(start writing|write your script|new script|empty editor|untitled script)\b/i.test(compactText)) {
+  if (
+    defaultStarterLabelVisible
+    || surfaceState.starterVisible
+    || /\b(start writing|write your script|new script|empty editor|untitled script)\b/i.test(compactText)
+  ) {
     addSignal(visibleSignals, 'editor-empty-hint');
   }
+  const saveConfirmationVisible = surfaceState.saveConfirmationVisible
+    || /\byou have unsaved changes\b/i.test(compactText)
+    || /\bwould you like to save them\b/i.test(compactText);
+  const saveReplaceConfirmationVisible = surfaceState.saveReplaceConfirmationVisible
+    || /\balready exists\b/i.test(compactText)
+    || /\breplace it\b/i.test(compactText)
+    || /\breally want to replace it\b/i.test(compactText);
+  const saveRequiredSurfaceVisible = surfaceState.saveRequiredVisible
+    || hasStrongTradingViewPineSaveRequiredText(compactText);
+  if (saveConfirmationVisible) addSignal(visibleSignals, 'save-confirmation-modal');
+  if (saveReplaceConfirmationVisible) addSignal(visibleSignals, 'save-replace-confirmation-modal');
+  if (saveRequiredSurfaceVisible) addSignal(visibleSignals, 'save-required-visible');
+  if (surfaceState.renameSurfaceVisible) addSignal(visibleSignals, 'save-rename-surface-visible');
   const targetCorruptionVisible = /\bscript could not be translated from\b/i.test(compactText)
     || (/\|[a-z]\|/i.test(rawText) && /\bpine editor\b/i.test(compactText));
   if (targetCorruptionVisible) addSignal(visibleSignals, 'editor-target-corrupt');
+  if (surfaceState.saveTitleVisible) addSignal(visibleSignals, 'save-title-surface');
+  if (surfaceState.genericSavedSurfaceVisible) addSignal(visibleSignals, 'existing-script-saved-surface');
 
   const starterLike = (
     visibleScriptKind !== 'unknown'
@@ -682,16 +859,26 @@ function buildPineEditorSafeAuthoringSummary(text) {
   );
 
   let editorVisibleState = 'unknown-visible-state';
-  if (targetCorruptionVisible) {
+  if (saveReplaceConfirmationVisible) {
+    editorVisibleState = 'replace-confirmation-blocking';
+  } else if (saveConfirmationVisible) {
+    editorVisibleState = 'confirmation-blocking';
+  } else if (saveRequiredSurfaceVisible) {
+    editorVisibleState = 'save-required-blocking';
+  } else if (targetCorruptionVisible) {
     editorVisibleState = 'unknown-visible-state';
-  } else if (visibleSignals.includes('editor-empty-hint') || starterLike) {
+  } else if (visibleSignals.includes('editor-empty-hint') || starterLike || surfaceState.starterVisible) {
     editorVisibleState = 'empty-or-starter';
   } else if (
-    visibleScriptKind !== 'unknown'
-    && (
-      meaningfulLines.length > 0
-      || visibleLines.length >= 5
-      || visibleSignals.includes('script-body-visible')
+    surfaceState.saveTitleVisible
+    || surfaceState.genericSavedSurfaceVisible
+    || (
+      visibleScriptKind !== 'unknown'
+      && (
+        meaningfulLines.length > 0
+        || visibleLines.length >= 5
+        || visibleSignals.includes('script-body-visible')
+      )
     )
   ) {
     editorVisibleState = 'existing-script-visible';
@@ -703,7 +890,13 @@ function buildPineEditorSafeAuthoringSummary(text) {
     visibleScriptKind !== 'unknown' ? `kind=${visibleScriptKind}` : null,
     Number.isFinite(visibleLineCountEstimate) ? `lines=${visibleLineCountEstimate}` : null
   ].filter(Boolean).join(' | ');
-  const lifecycleState = targetCorruptionVisible
+  const lifecycleState = saveReplaceConfirmationVisible
+    ? 'save-replace-confirmation-blocking'
+    : saveConfirmationVisible
+    ? 'save-confirmation-blocking'
+    : saveRequiredSurfaceVisible
+    ? 'save-required-before-apply'
+    : targetCorruptionVisible
     ? 'editor-target-corrupt'
     : editorVisibleState === 'empty-or-starter'
       ? 'new-script-required'
@@ -714,7 +907,9 @@ function buildPineEditorSafeAuthoringSummary(text) {
     editorVisibleState,
     visibleScriptKind,
     visibleLineCountEstimate,
-    visibleSignals: visibleSignals.slice(0, 6),
+    visibleSignals: visibleSignals.slice(0, 8),
+    surfaceMatchedBy: surfaceState.matchedBy,
+    surfaceVisibleAnchors: surfaceState.visibleAnchors,
     lifecycleState,
     compactSummary: compactSummary || null
   };
@@ -728,10 +923,43 @@ function inferPineLineBudgetSignal(lineCountEstimate) {
   return 'within-budget-visible';
 }
 
-function buildPineEditorDiagnosticsStructuredSummary(text, evidenceMode = 'generic-status') {
+function looksLikePineScriptPayloadText(value = '') {
+  const compact = normalizeCompactText(value, 400) || '';
+  if (!compact) return false;
+  return /\/\/\s*@version\s*=\s*\d+\b|\b(?:indicator|strategy|library)\s*\(|\bplot(?:shape|char)?\s*\(|\binput(?:\.[a-z]+)?\s*\(|\balertcondition\s*\(/i.test(compact);
+}
+
+function buildPineEditorDiagnosticsStructuredSummary(text, evidenceMode = 'generic-status', options = {}) {
   const rawText = String(text || '').replace(/\r/g, '');
   const compactText = normalizeCompactText(rawText, 2400);
   if (!compactText) return null;
+  const surfaceState = extractPineEditorSafeAuthoringSurfaceState(options?.pineEditorSurfaceProbe || null);
+  const visibleLines = rawText
+    .split('\n')
+    .map((line) => normalizeCompactText(line, 220))
+    .filter(Boolean);
+  const expectedScriptName = normalizeCompactText(
+    options?.pineExpectedScriptName || options?.expectedScriptName || options?.scriptName || '',
+    180
+  );
+  const normalizedExpectedScriptName = normalizeTradingViewPineAnchorText(expectedScriptName);
+  const expectedScriptNameVisible = expectedScriptName
+    ? compactText.toLowerCase().includes(expectedScriptName.toLowerCase())
+    : false;
+  const expectedScriptNameLineVisible = normalizedExpectedScriptName
+    ? visibleLines.some((line) =>
+        normalizeTradingViewPineAnchorText(line) === normalizedExpectedScriptName
+        && !looksLikePineScriptPayloadText(line)
+      )
+    : false;
+  const expectedScriptNameProbe = extractTradingViewPineExpectedTitleProof(
+    options?.pineEditorSurfaceProbe || null,
+    expectedScriptName
+  );
+  const expectedScriptNameProofVisible = expectedScriptNameProbe.visible === true || expectedScriptNameLineVisible;
+  const expectedScriptNameEvidence = expectedScriptNameProbe.visible === true
+    ? expectedScriptNameProbe.source || 'surface-anchor'
+    : (expectedScriptNameLineVisible ? 'line-text' : null);
 
   const visibleSegments = rawText
     .split(/[\n;]+/)
@@ -750,9 +978,25 @@ function buildPineEditorDiagnosticsStructuredSummary(text, evidenceMode = 'gener
   const lineBudgetContextVisible = /\b(500\s*lines?|line count|line budget|script length|lines used|line limit|maximum lines|max lines|capped)\b/i.test(compactText);
   const targetCorruptionVisible = /\bscript could not be translated from\b/i.test(compactText)
     || (/\|[a-z]\|/i.test(rawText) && /\bpine editor\b/i.test(compactText));
-  const saveConfirmedVisible = /\b(saved(?: successfully)?|script saved|all changes saved|saved version|save complete)\b/i.test(compactText);
-  const saveRequiredVisible = /\b(save script|save your script|name your script|script name|save as|rename script)\b/i.test(compactText)
-    || /\bunsaved\b/i.test(compactText);
+  const saveConfirmationBlockingVisible = surfaceState.saveConfirmationVisible
+    || /\byou have unsaved changes\b/i.test(compactText)
+    || /\bwould you like to save them\b/i.test(compactText);
+  const saveReplaceConfirmationVisible = surfaceState.saveReplaceConfirmationVisible
+    || /\balready exists\b/i.test(compactText)
+    || /\breally want to replace it\b/i.test(compactText);
+  const renameSurfaceVisible = surfaceState.renameSurfaceVisible === true;
+  const saveConfirmedVisible = surfaceState.saveConfirmedVisible
+    || /\b(saved(?: successfully)?|script saved|all changes saved|saved version|save complete)\b/i.test(compactText);
+  const saveActionVisible = surfaceState.saveRequiredVisible
+    || renameSurfaceVisible
+    || /\bsave script\b/i.test(compactText);
+  const saveRequiredVisible = surfaceState.saveRequiredVisible
+    || renameSurfaceVisible
+    || hasStrongTradingViewPineSaveRequiredText(compactText);
+  const strongSavedTitleProofVisible = evidenceMode === 'save-status'
+    && saveConfirmedVisible
+    && expectedScriptNameProofVisible
+    && expectedScriptNameEvidence !== 'window-host-scan';
 
   let visibleLineCountEstimate = null;
   const lineCountMatch = rawText.match(/(?:line count|script length|lines used|used)\s*[:=]?\s*(\d{1,4})(?:\s*\/\s*500|\s+of\s+500)?\s*lines?/i)
@@ -785,8 +1029,21 @@ function buildPineEditorDiagnosticsStructuredSummary(text, evidenceMode = 'gener
   if (lineBudgetContextVisible || Number.isFinite(visibleLineCountEstimate)) {
     addSignal(statusSignals, 'line-budget-hint-visible');
   }
+  if (saveConfirmationBlockingVisible) addSignal(statusSignals, 'save-confirmation-modal');
+  if (saveReplaceConfirmationVisible) addSignal(statusSignals, 'save-replace-confirmation-modal');
   if (saveConfirmedVisible) addSignal(statusSignals, 'save-confirmed-visible');
+  if (saveActionVisible) addSignal(statusSignals, 'save-action-visible');
   if (saveRequiredVisible) addSignal(statusSignals, 'save-required-visible');
+  if (renameSurfaceVisible) addSignal(statusSignals, 'save-rename-surface-visible');
+  if (expectedScriptName) addSignal(statusSignals, 'save-title-expected');
+  if (expectedScriptNameProofVisible) addSignal(statusSignals, 'save-title-visible');
+  if (strongSavedTitleProofVisible) addSignal(statusSignals, 'save-title-confirmed-visible');
+  if (expectedScriptNameVisible && !expectedScriptNameProofVisible && evidenceMode === 'save-status' && !renameSurfaceVisible) {
+    addSignal(statusSignals, 'save-title-text-visible-unverified');
+  }
+  if (expectedScriptName && !expectedScriptNameProofVisible && evidenceMode === 'save-status' && !renameSurfaceVisible) {
+    addSignal(statusSignals, 'save-title-unverified');
+  }
   if (evidenceMode === 'diagnostics') addSignal(statusSignals, 'diagnostics-request');
   if (evidenceMode === 'compile-result') addSignal(statusSignals, 'compile-result-request');
   if (evidenceMode === 'line-budget') addSignal(statusSignals, 'line-budget-request');
@@ -807,14 +1064,31 @@ function buildPineEditorDiagnosticsStructuredSummary(text, evidenceMode = 'gener
     Number.isFinite(errorCountEstimate) ? `errors=${errorCountEstimate}` : null,
     Number.isFinite(warningCountEstimate) ? `warnings=${warningCountEstimate}` : null,
     Number.isFinite(visibleLineCountEstimate) ? `lines=${visibleLineCountEstimate}` : null,
-    lineBudgetSignal !== 'unknown-line-budget' ? `budget=${lineBudgetSignal}` : null
+    lineBudgetSignal !== 'unknown-line-budget' ? `budget=${lineBudgetSignal}` : null,
+    evidenceMode === 'save-status' && expectedScriptName
+      ? `title=${expectedScriptNameProofVisible ? 'verified' : (renameSurfaceVisible ? 'rename-surface' : (expectedScriptNameVisible ? 'text-only' : 'missing'))}`
+      : null
   ].filter(Boolean).join(' | ');
   const lifecycleState = targetCorruptionVisible
     ? 'editor-target-corrupt'
     : evidenceMode === 'save-status'
-      ? (saveConfirmedVisible
-        ? 'saved-state-verified'
-        : (saveRequiredVisible ? 'save-required-before-apply' : 'unknown-save-state'))
+      ? (
+        saveConfirmationBlockingVisible
+          ? 'save-confirmation-blocking'
+          : saveReplaceConfirmationVisible
+          ? 'save-replace-confirmation-blocking'
+          : strongSavedTitleProofVisible
+          ? 'saved-state-verified'
+          : saveRequiredVisible
+          ? 'save-required-before-apply'
+          : expectedScriptName
+            ? (
+              saveConfirmedVisible && expectedScriptNameProofVisible
+                ? 'saved-state-verified'
+                : (saveConfirmedVisible ? 'save-title-unverified' : 'unknown-save-state')
+            )
+            : (saveConfirmedVisible ? 'saved-state-verified' : 'unknown-save-state')
+      )
       : (compileStatus === 'success' || compileStatus === 'errors-visible' || compileStatus === 'status-only'
         ? 'apply-result-verified'
         : null);
@@ -826,6 +1100,17 @@ function buildPineEditorDiagnosticsStructuredSummary(text, evidenceMode = 'gener
     warningCountEstimate,
     visibleLineCountEstimate,
     lineBudgetSignal,
+    expectedScriptName: expectedScriptName || null,
+    expectedScriptNameVisible,
+    expectedScriptNameLineVisible,
+    expectedScriptNameProofVisible,
+    expectedScriptNameEvidence,
+    renameSurfaceVisible,
+    saveConfirmationBlockingVisible,
+    saveReplaceConfirmationVisible,
+    saveActionVisible,
+    saveRequiredVisible,
+    saveConfirmedVisible,
     statusSignals: statusSignals.slice(0, 8),
     topVisibleDiagnostics,
     lifecycleState,
@@ -833,11 +1118,15 @@ function buildPineEditorDiagnosticsStructuredSummary(text, evidenceMode = 'gener
   };
 }
 
-function buildPineEditorFallbackCandidates(evidenceMode = 'generic-status') {
+function buildPineEditorFallbackCandidates(evidenceMode = 'generic-status', options = {}) {
   const normalizedMode = String(evidenceMode || 'generic-status').trim().toLowerCase();
   const baseCandidates = [
     { text: 'Pine Editor', synthetic: false, category: 'probe' }
   ];
+  const expectedScriptName = normalizeCompactText(
+    options?.pineExpectedScriptName || options?.expectedScriptName || options?.scriptName || '',
+    180
+  );
 
   const safeAuthoringCandidates = [
     { text: 'Untitled script', synthetic: true, category: 'starter' },
@@ -852,11 +1141,18 @@ function buildPineEditorFallbackCandidates(evidenceMode = 'generic-status') {
   ];
 
   const saveStatusCandidates = [
+    ...(expectedScriptName ? [{ text: expectedScriptName, synthetic: true, category: 'save-title' }] : []),
     { text: 'Save script', synthetic: true, category: 'save-required' },
+    { text: 'New script name', synthetic: true, category: 'save-required' },
     { text: 'Script name', synthetic: true, category: 'save-required' },
     { text: 'Save as', synthetic: true, category: 'save-required' },
     { text: 'Rename script', synthetic: true, category: 'save-required' },
     { text: 'Unsaved', synthetic: true, category: 'save-required' },
+    { text: 'Confirmation', synthetic: true, category: 'confirmation-modal' },
+    { text: 'You have unsaved changes', synthetic: true, category: 'confirmation-modal' },
+    { text: 'Would you like to save them', synthetic: true, category: 'confirmation-modal' },
+    { text: 'already exists', synthetic: true, category: 'confirmation-modal' },
+    { text: 'replace it', synthetic: true, category: 'confirmation-modal' },
     { text: 'All changes saved', synthetic: true, category: 'save-confirmed' },
     { text: 'Saved successfully', synthetic: true, category: 'save-confirmed' },
     { text: 'Save complete', synthetic: true, category: 'save-confirmed' }
@@ -874,14 +1170,21 @@ function buildPineEditorFallbackCandidates(evidenceMode = 'generic-status') {
 }
 
 const TRADINGVIEW_PINE_EDITOR_SURFACE_HOST_ANCHORS = Object.freeze([
+  { text: 'Pine Editor', exact: false, priority: 224, category: 'surface' },
   { text: 'Untitled script', exact: false, priority: 220, category: 'starter' },
   { text: 'My Script', exact: false, priority: 210, category: 'starter' },
   { text: 'My Strategy', exact: false, priority: 205, category: 'starter' },
   { text: 'My Library', exact: false, priority: 200, category: 'starter' },
   { text: 'Save script', exact: false, priority: 190, category: 'save-required' },
+  { text: 'New script name', exact: false, priority: 189, category: 'save-required' },
   { text: 'Script name', exact: false, priority: 188, category: 'save-required' },
   { text: 'Save as', exact: false, priority: 186, category: 'save-required' },
   { text: 'Rename script', exact: false, priority: 184, category: 'save-required' },
+  { text: 'Confirmation', exact: false, priority: 183, category: 'confirmation-modal' },
+  { text: 'You have unsaved changes', exact: false, priority: 182, category: 'confirmation-modal' },
+  { text: 'Would you like to save them', exact: false, priority: 181, category: 'confirmation-modal' },
+  { text: 'already exists', exact: false, priority: 180, category: 'confirmation-modal' },
+  { text: 'replace it', exact: false, priority: 179, category: 'confirmation-modal' },
   { text: 'All changes saved', exact: false, priority: 182, category: 'save-confirmed' },
   { text: 'Saved successfully', exact: false, priority: 180, category: 'save-confirmed' },
   { text: 'Save complete', exact: false, priority: 178, category: 'save-confirmed' },
@@ -891,6 +1194,42 @@ const TRADINGVIEW_PINE_EDITOR_SURFACE_HOST_ANCHORS = Object.freeze([
   { text: 'Pine Logs', exact: false, priority: 162, category: 'surface' },
   { text: 'Strategy Tester', exact: false, priority: 160, category: 'surface' }
 ]);
+
+const TRADINGVIEW_PINE_EDITOR_RENDERER_PROOF_ANCHORS = Object.freeze(
+  TRADINGVIEW_PINE_EDITOR_SURFACE_HOST_ANCHORS.filter((anchor) =>
+    !['Pine Editor', 'Pine Logs', 'Strategy Tester'].includes(anchor?.text)
+  )
+);
+
+function escapeRegexForUIASearch(value = '') {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+const TRADINGVIEW_PINE_EDITOR_SURFACE_HOST_REGEX = buildTradingViewPineSurfaceHostRegex();
+
+const TRADINGVIEW_PINE_EDITOR_DIAGNOSTIC_HOST_REGEX = [
+  'pine',
+  'editor',
+  'script',
+  'publish',
+  'save',
+  'untitled',
+  'tester',
+  'logs',
+  'source'
+]
+  .map((term) => escapeRegexForUIASearch(term))
+  .sort((left, right) => right.length - left.length)
+  .join('|');
+
+const DEFAULT_TRADINGVIEW_PINE_ACTIVATION_PROOF_TIMEOUT_MS = 1000;
+const MIN_TRADINGVIEW_PINE_ACTIVATION_PROOF_TIMEOUT_MS = 350;
+const DEFAULT_TRADINGVIEW_PINE_RENDERER_PROOF_TIMEOUT_MS = 700;
+const MIN_TRADINGVIEW_PINE_RENDERER_PROOF_TIMEOUT_MS = 240;
+const MIN_TRADINGVIEW_PINE_RENDERER_DISCOVERY_TIMEOUT_MS = 650;
+const DEFAULT_TRADINGVIEW_PINE_EDITOR_CDP_TIMEOUT_MS = 1200;
+const MIN_TRADINGVIEW_PINE_EDITOR_CDP_TIMEOUT_MS = 300;
+const DEFAULT_TRADINGVIEW_PINE_EDITOR_CDP_PREVIEW_LIMIT = 320;
 
 function normalizeBoundsRect(bounds = null) {
   if (!bounds || typeof bounds !== 'object') return null;
@@ -927,23 +1266,114 @@ function normalizeBoundsRect(bounds = null) {
   };
 }
 
-function buildTradingViewLowerPanelBounds(windowInfo = {}) {
+function buildTradingViewPineSurfaceScanBounds(windowInfo = {}) {
   const bounds = normalizeBoundsRect(windowInfo?.bounds || windowInfo?.Bounds || null);
   if (!bounds || bounds.width < 320 || bounds.height < 240) {
-    return null;
+    return [];
   }
 
   const insetX = Math.max(20, Math.round(bounds.width * 0.02));
   const insetBottom = Math.max(12, Math.round(bounds.height * 0.03));
-  const topOffset = Math.max(120, Math.round(bounds.height * 0.56));
-  const height = Math.max(120, bounds.height - topOffset - insetBottom);
-
-  return {
-    x: bounds.x + insetX,
-    y: bounds.y + topOffset,
-    width: Math.max(120, bounds.width - (insetX * 2)),
-    height
+  const buildBounds = (id, topRatio, minTopOffset) => {
+    const topOffset = Math.max(Math.round(Number(minTopOffset) || 0), Math.round(bounds.height * topRatio));
+    const height = Math.max(120, bounds.height - topOffset - insetBottom);
+    return {
+      id,
+      bounds: {
+        x: bounds.x + insetX,
+        y: bounds.y + topOffset,
+        width: Math.max(120, bounds.width - (insetX * 2)),
+        height
+      }
+    };
   };
+  const buildBandBounds = (id, topRatio, minTopOffset, heightRatio, minHeight, maxHeight) => {
+    const topOffset = Math.max(Math.round(Number(minTopOffset) || 0), Math.round(bounds.height * topRatio));
+    const availableHeight = Math.max(72, bounds.height - topOffset - insetBottom);
+    const requestedHeight = Math.max(
+      Math.round(Number(minHeight) || 0),
+      Math.round(bounds.height * Number(heightRatio || 0))
+    );
+    const cappedHeight = Number.isFinite(Number(maxHeight)) && Number(maxHeight) > 0
+      ? Math.min(requestedHeight, Math.round(Number(maxHeight)))
+      : requestedHeight;
+    const height = Math.max(72, Math.min(availableHeight, cappedHeight));
+    return {
+      id,
+      bounds: {
+        x: bounds.x + insetX,
+        y: bounds.y + topOffset,
+        width: Math.max(120, bounds.width - (insetX * 2)),
+        height
+      }
+    };
+  };
+
+  const candidates = [
+    buildBandBounds('panel-header-band', 0.4, 82, 0.16, 96, 180),
+    buildBounds('panel-header-and-body', 0.42, 90),
+    buildBounds('panel-body', 0.56, 120)
+  ];
+  const seen = new Set();
+  return candidates.filter((entry) => {
+    const rect = normalizeBoundsRect(entry?.bounds || null);
+    if (!rect) return false;
+    const dedupeKey = `${rect.x}|${rect.y}|${rect.width}|${rect.height}`;
+    if (seen.has(dedupeKey)) return false;
+    seen.add(dedupeKey);
+    return true;
+  });
+}
+
+function buildTradingViewPineSurfaceDiagnosticBounds(windowInfo = {}) {
+  const bounds = normalizeBoundsRect(windowInfo?.bounds || windowInfo?.Bounds || null);
+  if (!bounds || bounds.width < 320 || bounds.height < 240) {
+    return [];
+  }
+
+  const insetX = Math.max(16, Math.round(bounds.width * 0.02));
+  const insetTop = Math.max(28, Math.round(bounds.height * 0.04));
+  const insetBottom = Math.max(12, Math.round(bounds.height * 0.03));
+  const candidates = [
+    {
+      id: 'modal-center',
+      bounds: {
+        x: bounds.x + Math.max(insetX, Math.round(bounds.width * 0.18)),
+        y: bounds.y + Math.max(insetTop, Math.round(bounds.height * 0.18)),
+        width: Math.max(180, Math.round(bounds.width * 0.64)),
+        height: Math.max(180, Math.round(bounds.height * 0.56))
+      }
+    },
+    {
+      id: 'right-workspace',
+      bounds: {
+        x: bounds.x + Math.max(insetX, Math.round(bounds.width * 0.58)),
+        y: bounds.y + Math.max(insetTop, Math.round(bounds.height * 0.12)),
+        width: Math.max(140, Math.round(bounds.width * 0.36) - insetX),
+        height: Math.max(180, Math.round(bounds.height * 0.76))
+      }
+    },
+    {
+      id: 'full-window-content',
+      bounds: {
+        x: bounds.x + insetX,
+        y: bounds.y + insetTop,
+        width: Math.max(180, bounds.width - (insetX * 2)),
+        height: Math.max(180, bounds.height - insetTop - insetBottom)
+      }
+    }
+  ];
+
+  const seen = new Set();
+  return candidates.filter((entry) => {
+    const rect = normalizeBoundsRect(entry?.bounds || null);
+    if (!rect) return false;
+    const dedupeKey = `${rect.x}|${rect.y}|${rect.width}|${rect.height}`;
+    if (seen.has(dedupeKey)) return false;
+    seen.add(dedupeKey);
+    entry.bounds = rect;
+    return true;
+  });
 }
 
 function normalizeTradingViewPineAnchorText(value = '') {
@@ -953,7 +1383,352 @@ function normalizeTradingViewPineAnchorText(value = '') {
     .toLowerCase();
 }
 
-function collectTradingViewPineEditorHostAnchors(elements = []) {
+function isLikelyTradingViewChartChromeNoise(value = '') {
+  const compact = normalizeCompactText(value, 240);
+  if (!compact) return true;
+
+  return /^[A-Z0-9.\-]{1,24}\s*[▲▼]/.test(compact)
+    || /\s[▲▼]\s*\d+(?:\.\d+)?\b/.test(compact)
+    || /\b[+-]?\d+(?:\.\d+)?%\b/.test(compact)
+    || /\b(?:open|high|low|close|vol)\s*[:=]?\s*[+-]?\d+(?:\.\d+)?\b/i.test(compact)
+    || /\/\s*unnamed\b/i.test(compact)
+    || /\bunnamed\b/i.test(compact);
+}
+
+function buildTradingViewPineSurfaceHostAnchors(options = {}) {
+  const anchors = TRADINGVIEW_PINE_EDITOR_SURFACE_HOST_ANCHORS.map((anchor) => ({ ...anchor }));
+  const expectedScriptName = normalizeCompactText(
+    options?.pineExpectedScriptName || options?.expectedScriptName || options?.scriptName || '',
+    180
+  );
+  const normalizedExpected = normalizeTradingViewPineAnchorText(expectedScriptName);
+  if (normalizedExpected && !anchors.some((anchor) =>
+    normalizeTradingViewPineAnchorText(anchor?.text || '') === normalizedExpected
+  )) {
+    anchors.unshift({
+      text: expectedScriptName,
+      exact: false,
+      priority: 214,
+      category: 'save-title'
+    });
+  }
+  return anchors;
+}
+
+function buildTradingViewPineSurfaceHostRegex(options = {}) {
+  return buildTradingViewPineSurfaceHostAnchors(options)
+    .map((anchor) => escapeRegexForUIASearch(anchor.text))
+    .sort((left, right) => right.length - left.length)
+    .join('|');
+}
+
+function isTradingViewPineSaveTitleProofCandidate({
+  name = '',
+  value = '',
+  description = '',
+  source = '',
+  scanId = '',
+  controlType = '',
+  className = '',
+  ariaLabel = ''
+} = {}) {
+  return classifyTradingViewPineExpectedTitleSurface({
+    name,
+    value,
+    description,
+    source,
+    scanId,
+    controlType,
+    className,
+    ariaLabel
+  }) === 'save-title';
+}
+
+function classifyTradingViewPineExpectedTitleSurface({
+  name = '',
+  value = '',
+  description = '',
+  source = '',
+  scanId = '',
+  controlType = '',
+  className = '',
+  ariaLabel = ''
+} = {}) {
+  const candidateText = [name, value, description, ariaLabel].filter(Boolean).join('\n');
+  if (looksLikePineScriptPayloadText(candidateText)) {
+    return 'reject';
+  }
+
+  if (isLikelyTradingViewChartChromeNoise(candidateText)) {
+    return 'reject';
+  }
+
+  const sourceNorm = normalizeTradingViewPineAnchorText(source);
+  if (sourceNorm === 'body-innertext') {
+    return 'reject';
+  }
+
+  const scanNorm = normalizeTradingViewPineAnchorText(scanId);
+  const controlNorm = normalizeTradingViewPineAnchorText(controlType);
+  const classNorm = normalizeTradingViewPineAnchorText(className);
+  const nameNorm = normalizeTradingViewPineAnchorText(name);
+  const valueNorm = normalizeTradingViewPineAnchorText(value);
+  const metadataNorm = normalizeTradingViewPineAnchorText([
+    source,
+    scanId,
+    controlType,
+    className,
+    description,
+    ariaLabel
+  ].filter(Boolean).join(' '));
+  const modalLike = /\b(modal|dialog)\b/.test(metadataNorm)
+    || /modal-center/.test(scanNorm)
+    || /\b(save script|new script name|script name|save as|rename script)\b/.test(metadataNorm);
+  const editLike = /\b(edit|combobox)\b/.test(controlNorm);
+  const valueBacked = !!valueNorm && (!nameNorm || nameNorm !== valueNorm);
+
+  if (modalLike && (editLike || valueBacked || scanNorm.includes('modal'))) {
+    return 'rename-surface';
+  }
+
+  if (editLike || (valueBacked && scanNorm)) {
+    return scanNorm.includes('header') ? 'rename-surface' : 'reject';
+  }
+
+  if (scanNorm && !/(header|modal)/.test(scanNorm)) {
+    return 'reject';
+  }
+
+  if (classNorm.includes('chrome_renderwidgethosthwnd') && !scanNorm) {
+    return 'reject';
+  }
+
+  if (modalLike) {
+    return 'rename-surface';
+  }
+
+  return 'save-title';
+}
+
+function isTradingViewPineRenameSurfaceCandidate({
+  name = '',
+  value = '',
+  description = '',
+  source = '',
+  scanId = '',
+  controlType = '',
+  className = '',
+  ariaLabel = ''
+} = {}) {
+  return classifyTradingViewPineExpectedTitleSurface({
+    name,
+    value,
+    description,
+    source,
+    scanId,
+    controlType,
+    className,
+    ariaLabel
+  }) === 'rename-surface';
+}
+
+function summarizeTradingViewPineVisibleAnchorEntries(entries = [], fallbackSource = null) {
+  const summaries = [];
+  const seen = new Set();
+
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    if (!entry || typeof entry !== 'object') continue;
+
+    const text = normalizeCompactText(
+      entry?.text || entry?.element?.Name || entry?.element?.name || '',
+      220
+    );
+    const observedText = normalizeCompactText(
+      entry?.observedText
+      || entry?.element?.Name
+      || entry?.element?.Value
+      || entry?.element?.Description
+      || text
+      || '',
+      220
+    );
+    if (!text && !observedText) continue;
+
+    const summary = {
+      text: text || observedText || null,
+      observedText: observedText || text || null,
+      category: normalizeCompactText(entry?.category || '', 60) || null,
+      source: normalizeCompactText(
+        entry?.source
+        || entry?.element?.LikuPineProbeSource
+        || fallbackSource
+        || '',
+        80
+      ) || null,
+      scanId: normalizeCompactText(
+        entry?.scanId
+        || entry?.element?.LikuPineProbeScanId
+        || '',
+        80
+      ) || null,
+      role: normalizeCompactText(
+        entry?.role
+        || entry?.controlType
+        || entry?.element?.ControlType
+        || '',
+        80
+      ) || null,
+      className: normalizeCompactText(
+        entry?.className
+        || entry?.title
+        || entry?.element?.ClassName
+        || '',
+        120
+      ) || null,
+      ariaLabel: normalizeCompactText(entry?.ariaLabel || '', 180) || null,
+      surfaceKind: normalizeCompactText(
+        entry?.surfaceKind
+        || entry?.expectedTitleSurfaceKind
+        || '',
+        40
+      ) || null,
+      priority: Number(entry?.priority || 0) || 0
+    };
+
+    const dedupeKey = [
+      normalizeTradingViewPineAnchorText(summary.category || ''),
+      normalizeTradingViewPineAnchorText(summary.text || ''),
+      normalizeTradingViewPineAnchorText(summary.source || ''),
+      normalizeTradingViewPineAnchorText(summary.scanId || '')
+    ].join('|');
+    if (seen.has(dedupeKey)) continue;
+    seen.add(dedupeKey);
+    summaries.push(summary);
+  }
+
+  return summaries
+    .sort((left, right) => {
+      if ((right.priority || 0) !== (left.priority || 0)) {
+        return (right.priority || 0) - (left.priority || 0);
+      }
+      return String(left.text || '').localeCompare(String(right.text || ''));
+    })
+    .slice(0, 8);
+}
+
+function synthesizeTradingViewPineVisibleAnchorEntriesFromTexts(anchorTexts = [], fallbackSource = null) {
+  const inferredEntries = [];
+  const knownAnchors = buildTradingViewPineSurfaceHostAnchors();
+  const seen = new Set();
+
+  for (const anchorText of Array.isArray(anchorTexts) ? anchorTexts : []) {
+    const normalizedText = normalizeCompactText(anchorText, 220);
+    const normalizedHaystack = normalizeTradingViewPineAnchorText(normalizedText);
+    if (!normalizedHaystack) continue;
+
+    const matchedAnchor = knownAnchors.find((anchor) => {
+      const knownText = normalizeTradingViewPineAnchorText(anchor?.text || '');
+      if (!knownText) return false;
+      return anchor?.exact ? normalizedHaystack === knownText : normalizedHaystack.includes(knownText);
+    }) || null;
+
+    const dedupeKey = [
+      normalizeTradingViewPineAnchorText(matchedAnchor?.category || ''),
+      normalizeTradingViewPineAnchorText(matchedAnchor?.text || normalizedText)
+    ].join('|');
+    if (seen.has(dedupeKey)) continue;
+    seen.add(dedupeKey);
+
+    inferredEntries.push({
+      text: matchedAnchor?.text || normalizedText,
+      observedText: normalizedText,
+      category: matchedAnchor?.category || null,
+      source: fallbackSource || 'synthetic-visible-anchor',
+      priority: Number(matchedAnchor?.priority || 0) || 0
+    });
+  }
+
+  return summarizeTradingViewPineVisibleAnchorEntries(inferredEntries, fallbackSource);
+}
+
+function hasStrongTradingViewPineSaveRequiredText(value = '') {
+  const compactText = normalizeCompactText(value, 2400) || '';
+  if (!compactText) return false;
+
+  if (/\b(new script name|script name|save as|rename script|save your script|name your script|unsaved)\b/i.test(compactText)) {
+    return true;
+  }
+
+  return /\bsave script\b/i.test(compactText) && /\bcancel\b/i.test(compactText);
+}
+
+function extractTradingViewPineExpectedTitleProof(probe = null, expectedScriptName = '') {
+  const normalizedExpected = normalizeTradingViewPineAnchorText(expectedScriptName);
+  if (!normalizedExpected) {
+    return {
+      visible: false,
+      source: null,
+      matchedBy: null,
+      scanId: null,
+      surfaceKind: null,
+      text: null
+    };
+  }
+
+  const entries = summarizeTradingViewPineVisibleAnchorEntries(
+    Array.isArray(probe?.visibleAnchorEntries) && probe.visibleAnchorEntries.length > 0
+      ? probe.visibleAnchorEntries
+      : (Array.isArray(probe?.rendererProof?.signals) ? probe.rendererProof.signals : []),
+    probe?.matchedBy || probe?.rendererProof?.matchedBy || null
+  );
+
+  for (const entry of entries) {
+    if (normalizeTradingViewPineAnchorText(entry?.category || '') !== 'save-title') {
+      continue;
+    }
+
+    const haystack = normalizeTradingViewPineAnchorText([
+      entry?.text || '',
+      entry?.observedText || ''
+    ].join(' '));
+    if (!haystack.includes(normalizedExpected)) {
+      continue;
+    }
+
+    if (!isTradingViewPineSaveTitleProofCandidate({
+      name: entry?.text || '',
+      value: entry?.observedText || '',
+      source: entry?.source || '',
+      scanId: entry?.scanId || '',
+      controlType: entry?.role || '',
+      className: entry?.className || '',
+      ariaLabel: entry?.ariaLabel || ''
+    })) {
+      continue;
+    }
+
+    return {
+      visible: true,
+      source: entry?.source || null,
+      matchedBy: String(probe?.matchedBy || probe?.rendererProof?.matchedBy || '').trim() || null,
+      scanId: entry?.scanId || null,
+      surfaceKind: entry?.surfaceKind || 'save-title',
+      text: entry?.text || entry?.observedText || expectedScriptName
+    };
+  }
+
+  return {
+    visible: false,
+    source: null,
+    matchedBy: String(probe?.matchedBy || probe?.rendererProof?.matchedBy || '').trim() || null,
+    scanId: null,
+    surfaceKind: null,
+    text: null
+  };
+}
+
+function collectTradingViewPineEditorHostAnchors(elements = [], options = {}) {
+  const anchors = buildTradingViewPineSurfaceHostAnchors(options);
   const matches = [];
   const seen = new Set();
 
@@ -961,29 +1736,67 @@ function collectTradingViewPineEditorHostAnchors(elements = []) {
     if (!element || typeof element !== 'object') continue;
 
     const name = normalizeCompactText(element?.Name || element?.name || '', 160) || '';
+    const value = normalizeCompactText(element?.Value || element?.value || '', 160) || '';
+    const description = normalizeCompactText(element?.Description || element?.description || '', 160) || '';
+    const defaultAction = normalizeCompactText(element?.DefaultAction || element?.defaultAction || '', 120) || '';
+    const legacyRole = normalizeCompactText(element?.LegacyRole || element?.legacyRole || '', 120) || '';
     const automationId = normalizeCompactText(element?.AutomationId || element?.automationId || '', 120) || '';
     const className = normalizeCompactText(element?.ClassName || element?.className || '', 120) || '';
     const controlType = normalizeCompactText(element?.ControlType || element?.controlType || '', 120) || '';
-    const exactHaystack = normalizeTradingViewPineAnchorText(name);
-    const containsHaystack = normalizeTradingViewPineAnchorText([name, automationId, className, controlType].join(' '));
+    const probeSource = normalizeCompactText(element?.LikuPineProbeSource || '', 80) || '';
+    const probeScanId = normalizeCompactText(element?.LikuPineProbeScanId || '', 80) || '';
+    const exactHaystack = normalizeTradingViewPineAnchorText(name || value || description);
+    const containsHaystack = normalizeTradingViewPineAnchorText([
+      name,
+      value,
+      description,
+      defaultAction,
+      legacyRole,
+      automationId,
+      className,
+      controlType
+    ].join(' '));
     if (!exactHaystack && !containsHaystack) continue;
 
-    for (const anchor of TRADINGVIEW_PINE_EDITOR_SURFACE_HOST_ANCHORS) {
+    for (const anchor of anchors) {
       const anchorText = normalizeTradingViewPineAnchorText(anchor.text);
+      let category = anchor.category;
+      let surfaceKind = null;
       const matched = anchor.exact
         ? exactHaystack === anchorText
         : containsHaystack.includes(anchorText);
       if (!matched) continue;
 
-      const displayText = name || anchor.text;
-      const dedupeKey = `${anchor.category}:${normalizeTradingViewPineAnchorText(displayText)}`;
+      if (anchor.category === 'save-title') {
+        surfaceKind = classifyTradingViewPineExpectedTitleSurface({
+          name,
+          value,
+          description,
+          source: probeSource,
+          scanId: probeScanId,
+          controlType,
+          className
+        });
+        if (surfaceKind === 'reject') {
+          continue;
+        }
+        if (surfaceKind === 'rename-surface') {
+          category = 'rename-surface';
+        }
+      }
+
+      const displayText = name || value || description || anchor.text;
+      const dedupeKey = `${category}:${normalizeTradingViewPineAnchorText(displayText)}`;
       if (seen.has(dedupeKey)) break;
       seen.add(dedupeKey);
       matches.push({
         text: displayText,
         element,
-        category: anchor.category,
-        priority: anchor.priority
+        category,
+        priority: anchor.priority,
+        source: probeSource || null,
+        scanId: probeScanId || null,
+        surfaceKind: surfaceKind || null
       });
       break;
     }
@@ -997,16 +1810,1050 @@ function collectTradingViewPineEditorHostAnchors(elements = []) {
   });
 }
 
-async function probeTradingViewPineEditorSurface(options = {}) {
+function isTradingViewPineTitleOnlyAnchorSet(entries = []) {
+  const anchors = Array.isArray(entries) ? entries : [];
+  if (anchors.length === 0) return false;
+  return anchors.every((entry) => {
+    const category = normalizeTradingViewPineAnchorText(entry?.category || '');
+    return category === 'save-title' || category === 'rename-surface';
+  });
+}
+
+function mergeTradingViewPineAnchorMatches(...collections) {
+  const merged = [];
+  const seen = new Set();
+
+  for (const collection of collections) {
+    for (const entry of Array.isArray(collection) ? collection : []) {
+      if (!entry || typeof entry !== 'object') continue;
+      const dedupeKey = [
+        normalizeTradingViewPineAnchorText(entry?.category || ''),
+        normalizeTradingViewPineAnchorText(entry?.text || ''),
+        normalizeTradingViewPineAnchorText(entry?.source || ''),
+        normalizeTradingViewPineAnchorText(entry?.scanId || ''),
+        normalizeTradingViewPineAnchorText(entry?.surfaceKind || '')
+      ].join('|');
+      if (seen.has(dedupeKey)) continue;
+      seen.add(dedupeKey);
+      merged.push(entry);
+    }
+  }
+
+  return merged.sort((left, right) => {
+    if ((right?.priority || 0) !== (left?.priority || 0)) {
+      return (right?.priority || 0) - (left?.priority || 0);
+    }
+    return String(left?.text || '').localeCompare(String(right?.text || ''));
+  });
+}
+
+function buildTradingViewPineRendererTargetTokens(title = '') {
+  const ignoredTokens = new Set([
+    'tradingview',
+    'unnamed',
+    'chart',
+    'desktop',
+    'beta',
+    'stable'
+  ]);
+  const seen = new Set();
+  const tokens = [];
+
+  for (const token of String(title || '')
+    .toLowerCase()
+    .split(/[^a-z0-9]+/g)
+    .map((value) => value.trim())
+    .filter(Boolean)) {
+    if (token.length < 2 || ignoredTokens.has(token) || seen.has(token)) {
+      continue;
+    }
+    seen.add(token);
+    tokens.push(token);
+    if (tokens.length >= 10) {
+      break;
+    }
+  }
+
+  return tokens;
+}
+
+function pickTradingViewPineAnchorSignals(entries = [], anchors = TRADINGVIEW_PINE_EDITOR_RENDERER_PROOF_ANCHORS) {
+  const matches = [];
+  const seen = new Set();
+
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    if (!entry || typeof entry !== 'object') continue;
+
+    const primaryText = normalizeCompactText(entry?.text || entry?.name || entry?.label || '', 200) || '';
+    const valueText = normalizeCompactText(entry?.value || '', 180) || '';
+    const descriptionText = normalizeCompactText(entry?.description || '', 180) || '';
+    const sourceText = normalizeCompactText(entry?.source || '', 80) || '';
+    const roleText = normalizeCompactText(entry?.role || '', 80) || '';
+    const titleText = normalizeCompactText(entry?.title || '', 160) || '';
+    const ariaLabelText = normalizeCompactText(entry?.ariaLabel || '', 160) || '';
+    const scanIdText = normalizeCompactText(entry?.scanId || entry?.probeScanId || '', 80) || '';
+    const exactHaystack = normalizeTradingViewPineAnchorText(primaryText || valueText || descriptionText);
+    const containsHaystack = normalizeTradingViewPineAnchorText([
+      primaryText,
+      valueText,
+      descriptionText,
+      sourceText,
+      roleText,
+      titleText,
+      ariaLabelText
+    ].join(' '));
+    if (!exactHaystack && !containsHaystack) continue;
+
+    for (const anchor of anchors) {
+      const anchorText = normalizeTradingViewPineAnchorText(anchor?.text || '');
+      let category = anchor.category;
+      let surfaceKind = null;
+      if (!anchorText) continue;
+
+      const matched = anchor.exact
+        ? exactHaystack === anchorText
+        : containsHaystack.includes(anchorText);
+      if (!matched) continue;
+
+      if (anchor.category === 'save-title') {
+        surfaceKind = classifyTradingViewPineExpectedTitleSurface({
+          name: primaryText,
+          value: valueText,
+          description: descriptionText,
+          source: sourceText,
+          scanId: scanIdText,
+          controlType: roleText,
+          className: titleText,
+          ariaLabel: ariaLabelText
+        });
+        if (surfaceKind === 'reject') {
+          continue;
+        }
+        if (surfaceKind === 'rename-surface') {
+          category = 'rename-surface';
+        }
+      }
+
+      const signalText = String(anchor.text || '').trim();
+      const dedupeKey = `${category}:${anchorText}`;
+      if (seen.has(dedupeKey)) {
+        break;
+      }
+      seen.add(dedupeKey);
+      matches.push({
+        text: signalText,
+        observedText: primaryText || valueText || descriptionText || signalText,
+        source: sourceText || null,
+        role: roleText || null,
+        title: titleText || null,
+        ariaLabel: ariaLabelText || null,
+        category,
+        surfaceKind: surfaceKind || null,
+        priority: Number(anchor.priority || 0) || 0
+      });
+      break;
+    }
+  }
+
+  return matches.sort((left, right) => {
+    if (right.priority !== left.priority) {
+      return right.priority - left.priority;
+    }
+    return String(left.text || '').localeCompare(String(right.text || ''));
+  });
+}
+
+function buildTradingViewPineRendererProofAnchors(options = {}) {
+  const anchors = TRADINGVIEW_PINE_EDITOR_RENDERER_PROOF_ANCHORS.map((anchor) => ({ ...anchor }));
+  const expectedScriptName = normalizeCompactText(
+    options?.pineExpectedScriptName || options?.expectedScriptName || options?.scriptName || '',
+    180
+  );
+  const normalizedExpected = normalizeTradingViewPineAnchorText(expectedScriptName);
+  if (normalizedExpected && !anchors.some((anchor) =>
+    normalizeTradingViewPineAnchorText(anchor?.text || '') === normalizedExpected
+  )) {
+    anchors.unshift({
+      text: expectedScriptName,
+      exact: false,
+      priority: 214,
+      category: 'save-title'
+    });
+  }
+  return anchors;
+}
+
+function buildTradingViewPineRendererDomProbeExpression(anchors = TRADINGVIEW_PINE_EDITOR_RENDERER_PROOF_ANCHORS) {
+  return `(() => {
+    const anchors = ${JSON.stringify(anchors)};
+    const maxNodes = 1600;
+    const maxSignals = 24;
+    const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+    const compact = (value, maxLength = 180) => {
+      const text = String(value || '').replace(/\\s+/g, ' ').trim();
+      return text ? text.slice(0, maxLength) : '';
+    };
+    const isVisible = (element) => {
+      if (!element || typeof element.getBoundingClientRect !== 'function') return false;
+      const rect = element.getBoundingClientRect();
+      if (!rect || rect.width <= 2 || rect.height <= 2) return false;
+      if (typeof window.getComputedStyle === 'function') {
+        const style = window.getComputedStyle(element);
+        if (style && (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0')) {
+          return false;
+        }
+      }
+      return true;
+    };
+    const signals = [];
+    const seen = new Set();
+    const pushSignal = (candidate) => {
+      if (!candidate || signals.length >= maxSignals) return;
+      const primaryText = compact(candidate.primary || candidate.text || '', 220);
+      const valueText = compact(candidate.value || '', 180);
+      const descriptionText = compact(candidate.description || '', 180);
+      const exactHaystack = normalize(primaryText || valueText || descriptionText);
+      const containsHaystack = normalize([
+        primaryText,
+        valueText,
+        descriptionText,
+        compact(candidate.source || '', 80),
+        compact(candidate.role || '', 80),
+        compact(candidate.ariaLabel || '', 180),
+        compact(candidate.title || '', 180)
+      ].join(' '));
+      if (!exactHaystack && !containsHaystack) return;
+
+      for (const anchor of anchors) {
+        const anchorText = normalize(anchor && anchor.text ? anchor.text : '');
+        if (!anchorText) continue;
+        const matched = anchor.exact ? exactHaystack === anchorText : containsHaystack.includes(anchorText);
+        if (!matched) continue;
+        const dedupeKey = String(anchor.category || 'surface') + ':' + anchorText;
+        if (seen.has(dedupeKey)) {
+          return;
+        }
+        seen.add(dedupeKey);
+        signals.push({
+          text: String(anchor.text || '').trim(),
+          observedText: primaryText || valueText || descriptionText || String(anchor.text || '').trim(),
+          source: compact(candidate.source || '', 80),
+          role: compact(candidate.role || '', 80),
+          ariaLabel: compact(candidate.ariaLabel || '', 180),
+          title: compact(candidate.title || '', 180),
+          priority: Number(anchor.priority || 0) || 0
+        });
+        return;
+      }
+    };
+
+    const bodyText = compact(document && document.body && document.body.innerText ? document.body.innerText : '', 6000);
+    if (bodyText) {
+      pushSignal({
+        primary: bodyText,
+        source: 'body-innertext'
+      });
+    }
+
+    const queue = [];
+    const seenNodes = new Set();
+    if (document && document.body) {
+      queue.push(document.body);
+      seenNodes.add(document.body);
+    }
+
+    let scannedNodes = 0;
+    while (queue.length > 0 && scannedNodes < maxNodes && signals.length < maxSignals) {
+      const current = queue.shift();
+      if (!current) continue;
+
+      const childElements = current.children
+        ? Array.from(current.children)
+        : Array.from(current.childNodes || []).filter((node) => node && node.nodeType === 1);
+      for (const child of childElements) {
+        if (!child || seenNodes.has(child)) continue;
+        seenNodes.add(child);
+        queue.push(child);
+        if (child.shadowRoot && !seenNodes.has(child.shadowRoot)) {
+          seenNodes.add(child.shadowRoot);
+          queue.push(child.shadowRoot);
+        }
+
+        scannedNodes += 1;
+        if (!isVisible(child)) {
+          if (scannedNodes >= maxNodes) break;
+          continue;
+        }
+
+        pushSignal({
+          primary: compact(child.innerText || child.textContent || '', 220),
+          value: compact(child.value || (child.getAttribute ? child.getAttribute('value') : '') || '', 180),
+          description: compact(
+            (child.getAttribute ? child.getAttribute('aria-description') : '')
+            || (child.getAttribute ? child.getAttribute('aria-roledescription') : '')
+            || '',
+            180
+          ),
+          source: 'dom-node',
+          role: compact((child.getAttribute ? child.getAttribute('role') : '') || '', 80),
+          ariaLabel: compact((child.getAttribute ? child.getAttribute('aria-label') : '') || '', 180),
+          title: compact(
+            (child.getAttribute ? child.getAttribute('title') : '')
+            || (child.getAttribute ? child.getAttribute('data-name') : '')
+            || (child.getAttribute ? child.getAttribute('placeholder') : '')
+            || '',
+            180
+          )
+        });
+
+        if (scannedNodes >= maxNodes || signals.length >= maxSignals) {
+          break;
+        }
+      }
+    }
+
+    signals.sort((left, right) => {
+      if ((right.priority || 0) !== (left.priority || 0)) {
+        return (right.priority || 0) - (left.priority || 0);
+      }
+      return String(left.text || '').localeCompare(String(right.text || ''));
+    });
+
+    return {
+      matched: signals.length > 0,
+      matchedBy: signals.length > 0 ? 'chromium-cdp-dom' : null,
+      anchorText: signals.length > 0 ? signals[0].text : null,
+      signals: signals.slice(0, 12),
+      scannedNodes,
+      usedBodyInnerText: !!bodyText
+    };
+  })()`;
+}
+
+function extractTradingViewPineRendererAxSignals(nodes = [], anchors = TRADINGVIEW_PINE_EDITOR_RENDERER_PROOF_ANCHORS) {
+  const candidates = [];
+
+  for (const node of Array.isArray(nodes) ? nodes : []) {
+    if (!node || typeof node !== 'object') continue;
+
+    candidates.push({
+      text: normalizeCompactText(node?.name?.value || '', 200) || '',
+      value: normalizeCompactText(node?.value?.value || '', 180) || '',
+      description: normalizeCompactText(node?.description?.value || '', 180) || '',
+      role: normalizeCompactText(node?.role?.value || node?.chromeRole?.value || '', 120) || '',
+      source: 'ax-node'
+    });
+  }
+
+  return pickTradingViewPineAnchorSignals(candidates, anchors);
+}
+
+function normalizeTradingViewRendererMatchText(value = '', maxLength = 240) {
+  const compact = normalizeCompactText(value || '', maxLength);
+  return compact ? compact.toLowerCase() : '';
+}
+
+function collectTradingViewRendererNodeMatchEntries(node = {}) {
+  return [
+    node?.name?.value,
+    node?.value?.value,
+    node?.description?.value
+  ]
+    .map((value) => normalizeTradingViewRendererMatchText(value, 240))
+    .filter(Boolean);
+}
+
+function matchTradingViewRendererRequiredTexts(nodes = [], normalizedRequiredTexts = []) {
+  const requiredTexts = Array.isArray(normalizedRequiredTexts)
+    ? normalizedRequiredTexts.filter(Boolean)
+    : [];
+  if (requiredTexts.length === 0) return [];
+
+  return requiredTexts.filter((requiredText) => (Array.isArray(nodes) ? nodes : []).some((node) =>
+    collectTradingViewRendererNodeMatchEntries(node).some((entry) => entry.includes(requiredText))
+  ));
+}
+
+function findTradingViewRendererButtonNode(nodes = [], normalizedButtonText = '') {
+  const targetButtonText = normalizeTradingViewRendererMatchText(normalizedButtonText, 180);
+  if (!targetButtonText) return null;
+
+  return (Array.isArray(nodes) ? nodes : []).find((node) => {
+    const role = normalizeTradingViewRendererMatchText(node?.role?.value || node?.chromeRole?.value || '', 80);
+    const name = normalizeTradingViewRendererMatchText(node?.name?.value || '', 180);
+    return node?.ignored !== true
+      && /button/.test(role)
+      && name === targetButtonText;
+  }) || null;
+}
+
+function describeTradingViewRendererInvokeSurface(kind = '') {
+  switch ((normalizeCompactText(kind || '', 80) || '').toLowerCase()) {
+    case 'unsaved-changes-confirmation':
+      return 'TradingView unsaved-changes dialog';
+    case 'replace-existing-script-confirmation':
+      return 'TradingView replace-script dialog';
+    case 'pine-first-save-confirmation':
+      return 'TradingView Pine save-name dialog';
+    default:
+      return 'TradingView renderer dialog';
+  }
+}
+
+function getTradingViewRendererSurfaceRequiredTexts(kind = '') {
+  switch ((normalizeCompactText(kind || '', 80) || '').toLowerCase()) {
+    case 'unsaved-changes-confirmation':
+      return [
+        'you have unsaved changes',
+        'would you like to save them'
+      ];
+    case 'replace-existing-script-confirmation':
+      return [
+        'already exists',
+        'replace it'
+      ];
+    case 'pine-first-save-confirmation':
+      return [
+        'save script',
+        'new script name'
+      ];
+    default:
+      return [];
+  }
+}
+
+function getTradingViewRendererInvokeTransitionCandidates(kind = '', buttonText = '') {
+  const normalizedKind = (normalizeCompactText(kind || '', 80) || '').toLowerCase();
+  const normalizedButtonText = normalizeTradingViewRendererMatchText(buttonText, 120);
+  if (normalizedKind === 'pine-first-save-confirmation' && normalizedButtonText === 'save') {
+    return [
+      'replace-existing-script-confirmation',
+      'unsaved-changes-confirmation'
+    ];
+  }
+  return [];
+}
+
+function detectTradingViewRendererVisibleSurface(nodes = [], kind = '') {
+  const normalizedKind = (normalizeCompactText(kind || '', 80) || '').toLowerCase();
+  const requiredTexts = getTradingViewRendererSurfaceRequiredTexts(normalizedKind);
+  if (requiredTexts.length === 0) {
+    return null;
+  }
+
+  const matchedRequiredTexts = matchTradingViewRendererRequiredTexts(nodes, requiredTexts);
+  if (matchedRequiredTexts.length !== requiredTexts.length) {
+    return null;
+  }
+
+  return {
+    kind: normalizedKind,
+    surface: describeTradingViewRendererInvokeSurface(normalizedKind),
+    requiredTexts: requiredTexts.slice(0, 6),
+    matchedRequiredTexts: matchedRequiredTexts.slice(0, 6)
+  };
+}
+
+function shouldVerifyTradingViewRendererInvokeEffect(kind = '', normalizedRequiredTexts = []) {
+  const normalizedKind = (normalizeCompactText(kind || '', 80) || '').toLowerCase();
+  if (!Array.isArray(normalizedRequiredTexts) || normalizedRequiredTexts.filter(Boolean).length === 0) {
+    return false;
+  }
+
+  return [
+    'unsaved-changes-confirmation',
+    'replace-existing-script-confirmation',
+    'pine-first-save-confirmation'
+  ].includes(normalizedKind);
+}
+
+async function probeTradingViewPineEditorRendererWithCDPSession(session, options = {}) {
+  const rendererProofAnchors = buildTradingViewPineRendererProofAnchors(options);
+  const axDepth = Number.isFinite(Number(options?.axDepth))
+    ? Math.max(6, Math.min(Math.round(Number(options.axDepth)), 14))
+    : 10;
+  const domProbeResponse = await session.call('Runtime.evaluate', {
+    expression: buildTradingViewPineRendererDomProbeExpression(rendererProofAnchors),
+    returnByValue: true,
+    awaitPromise: true
+  });
+  const domPayload = domProbeResponse?.result?.value || {};
+  const domSignals = pickTradingViewPineAnchorSignals(domPayload?.signals || [], rendererProofAnchors);
+  if (domSignals.length > 0) {
+    return {
+      available: true,
+      active: true,
+      matchedBy: 'chromium-cdp-dom',
+      anchorText: domSignals[0].text,
+      signals: domSignals,
+      dom: {
+        matched: true,
+        scannedNodes: Number(domPayload?.scannedNodes || 0) || 0,
+        usedBodyInnerText: domPayload?.usedBodyInnerText === true
+      },
+      ax: null
+    };
+  }
+
+  let axSignals = [];
+  let axError = null;
+  try {
+    await session.call('Accessibility.enable');
+    const axTree = await session.call('Accessibility.getFullAXTree', {
+      depth: axDepth
+    });
+    axSignals = extractTradingViewPineRendererAxSignals(axTree?.nodes || [], rendererProofAnchors);
+  } catch (error) {
+    axError = error?.message || String(error || 'Accessibility.getFullAXTree failed');
+  }
+
+  if (axSignals.length > 0) {
+    return {
+      available: true,
+      active: true,
+      matchedBy: 'chromium-cdp-ax',
+      anchorText: axSignals[0].text,
+      signals: axSignals,
+      dom: {
+        matched: false,
+        scannedNodes: Number(domPayload?.scannedNodes || 0) || 0,
+        usedBodyInnerText: domPayload?.usedBodyInnerText === true
+      },
+      ax: {
+        matched: true,
+        error: null
+      }
+    };
+  }
+
+  return {
+    available: true,
+    active: false,
+    matchedBy: null,
+    anchorText: null,
+    reason: 'no-visible-pine-anchor',
+    signals: [],
+    dom: {
+      matched: false,
+      scannedNodes: Number(domPayload?.scannedNodes || 0) || 0,
+      usedBodyInnerText: domPayload?.usedBodyInnerText === true
+    },
+    ax: {
+      matched: false,
+      error: axError
+    }
+  };
+}
+
+async function verifyTradingViewRendererInvokeEffectWithCDPSession(session, options = {}) {
+  const requiredTexts = Array.from(new Set(
+    (Array.isArray(options?.requiredTexts) ? options.requiredTexts : [options?.requiredTexts])
+      .map((value) => normalizeTradingViewRendererMatchText(value || '', 220))
+      .filter(Boolean)
+  ));
+  const kind = (normalizeCompactText(options?.kind || '', 80) || '').toLowerCase();
+  if (!shouldVerifyTradingViewRendererInvokeEffect(kind, requiredTexts)) {
+    return null;
+  }
+
+  const buttonText = normalizeCompactText(options?.buttonText || '', 120) || null;
+  const pineExpectedScriptName = normalizeCompactText(
+    options?.pineExpectedScriptName || options?.expectedScriptName || options?.scriptName || '',
+    180
+  );
+  const capturePineSurfaceAfterClear = options?.capturePineSurfaceAfterClear !== false
+    && [
+      'unsaved-changes-confirmation',
+      'replace-existing-script-confirmation',
+      'pine-first-save-confirmation'
+    ].includes(kind);
+  const surface = describeTradingViewRendererInvokeSurface(kind);
+  const transitionCandidateKinds = getTradingViewRendererInvokeTransitionCandidates(kind, buttonText);
+  const timeoutMs = Number.isFinite(Number(options?.timeoutMs || options?.timeout))
+    ? Math.max(180, Math.min(Math.round(Number(options.timeoutMs || options.timeout)), 900))
+    : 520;
+  const attemptDelaysMs = [60, 140, 220];
+  const startedAt = Date.now();
+  const attempts = [];
+  let lastMatchedRequiredTexts = [];
+  let lastNodeCount = 0;
+  let lastError = null;
+  let successfulReadCount = 0;
+
+  for (let attemptIndex = 0; attemptIndex < attemptDelaysMs.length; attemptIndex += 1) {
+    const elapsedBeforeWait = Date.now() - startedAt;
+    const remainingBeforeWait = timeoutMs - elapsedBeforeWait;
+    if (remainingBeforeWait <= 0 && attemptIndex > 0) {
+      break;
+    }
+
+    const waitMs = Math.max(
+      0,
+      Math.min(
+        attemptDelaysMs[attemptIndex],
+        attemptIndex === 0 ? timeoutMs : remainingBeforeWait
+      )
+    );
+    if (waitMs > 0) {
+      await sleep(waitMs);
+    }
+
+    try {
+      const axTree = await session.call('Accessibility.getFullAXTree', {
+        depth: 12
+      });
+      const nodes = Array.isArray(axTree?.nodes) ? axTree.nodes : [];
+      const matchedRequiredTexts = matchTradingViewRendererRequiredTexts(nodes, requiredTexts);
+      const matchedButtonNode = findTradingViewRendererButtonNode(nodes, buttonText || '');
+      const transitionedSurface = transitionCandidateKinds
+        .map((candidateKind) => detectTradingViewRendererVisibleSurface(nodes, candidateKind))
+        .find(Boolean) || null;
+      successfulReadCount += 1;
+      lastNodeCount = nodes.length;
+      lastMatchedRequiredTexts = matchedRequiredTexts;
+      const exactDialogStillVisible = matchedRequiredTexts.length === requiredTexts.length;
+
+      attempts.push({
+        attempt: attemptIndex + 1,
+        nodeCount: nodes.length,
+        matchedRequiredTexts: matchedRequiredTexts.slice(0, 6),
+        exactDialogStillVisible,
+        buttonVisible: !!matchedButtonNode,
+        transitionKind: transitionedSurface?.kind || null,
+        transitionMatchedRequiredTexts: Array.isArray(transitionedSurface?.matchedRequiredTexts)
+          ? transitionedSurface.matchedRequiredTexts.slice(0, 6)
+          : []
+      });
+
+      if (transitionedSurface) {
+        return {
+          applicable: true,
+          success: true,
+          cleared: false,
+          transitioned: true,
+          transitionKind: transitionedSurface.kind,
+          transitionSurface: transitionedSurface.surface,
+          transitionRequiredTexts: transitionedSurface.requiredTexts.slice(0, 6),
+          transitionMatchedRequiredTexts: transitionedSurface.matchedRequiredTexts.slice(0, 6),
+          surface,
+          kind,
+          buttonText,
+          requiredTexts: requiredTexts.slice(0, 6),
+          remainingMatchedRequiredTexts: matchedRequiredTexts.slice(0, 6),
+          attempts,
+          lastNodeCount,
+          startedAt,
+          finishedAt: Date.now(),
+          durationMs: Math.max(0, Date.now() - startedAt)
+        };
+      }
+
+      if (!exactDialogStillVisible) {
+        let postClickPineRendererProof = null;
+        if (capturePineSurfaceAfterClear) {
+          try {
+            postClickPineRendererProof = await probeTradingViewPineEditorRendererWithCDPSession(session, {
+              pineExpectedScriptName
+            });
+          } catch (error) {
+            postClickPineRendererProof = {
+              available: false,
+              active: false,
+              reason: 'renderer-post-click-surface-readback-failed',
+              error: error?.message || String(error || 'TradingView renderer surface readback failed')
+            };
+          }
+        }
+
+        return {
+          applicable: true,
+          success: true,
+          cleared: true,
+          transitioned: false,
+          surface,
+          kind,
+          buttonText,
+          requiredTexts: requiredTexts.slice(0, 6),
+          remainingMatchedRequiredTexts: matchedRequiredTexts.slice(0, 6),
+          postClickPineRendererProof,
+          attempts,
+          lastNodeCount,
+          startedAt,
+          finishedAt: Date.now(),
+          durationMs: Math.max(0, Date.now() - startedAt)
+        };
+      }
+    } catch (error) {
+      lastError = error;
+      attempts.push({
+        attempt: attemptIndex + 1,
+        error: error?.message || String(error || 'TradingView renderer post-click AX recheck failed')
+      });
+    }
+  }
+
+  if (successfulReadCount === 0 && lastError) {
+    return {
+      applicable: true,
+      success: false,
+      cleared: false,
+      surface,
+      kind,
+      buttonText,
+      requiredTexts: requiredTexts.slice(0, 6),
+      reason: 'renderer-post-click-readback-failed',
+      error: `TradingView could not re-check the ${surface} after clicking ${JSON.stringify(buttonText || 'the target button')}.`,
+      attempts,
+      lastNodeCount,
+      startedAt,
+      finishedAt: Date.now(),
+      durationMs: Math.max(0, Date.now() - startedAt),
+      lastError: lastError?.message || String(lastError || '')
+    };
+  }
+
+  return {
+    applicable: true,
+    success: false,
+    cleared: false,
+    surface,
+    kind,
+    buttonText,
+    requiredTexts: requiredTexts.slice(0, 6),
+    remainingMatchedRequiredTexts: lastMatchedRequiredTexts.slice(0, 6),
+    reason: 'renderer-modal-still-visible',
+    error: `TradingView still exposes the exact ${surface} after clicking ${JSON.stringify(buttonText || 'the target button')}.`,
+    attempts,
+    lastNodeCount,
+    startedAt,
+    finishedAt: Date.now(),
+    durationMs: Math.max(0, Date.now() - startedAt)
+  };
+}
+
+function summarizeTradingViewRendererAxNode(node = null) {
+  if (!node || typeof node !== 'object') return null;
+
+  return {
+    nodeId: String(node?.nodeId || '').trim() || null,
+    backendDOMNodeId: Number(node?.backendDOMNodeId || 0) || 0,
+    name: normalizeCompactText(node?.name?.value || '', 160) || null,
+    value: normalizeCompactText(node?.value?.value || '', 160) || null,
+    description: normalizeCompactText(node?.description?.value || '', 180) || null,
+    role: normalizeCompactText(node?.role?.value || node?.chromeRole?.value || '', 80) || null,
+    ignored: node?.ignored === true
+  };
+}
+
+function buildTradingViewRendererButtonInvokeFunctionDeclaration() {
+  return `function() {
+    const compact = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+    const text = compact(this.innerText || this.textContent || this.value || this.getAttribute?.('aria-label') || this.title || '');
+    const ariaLabel = compact(this.getAttribute?.('aria-label') || '');
+    const title = compact(this.getAttribute?.('title') || '');
+    let rect = null;
+    try {
+      if (typeof this.getBoundingClientRect === 'function') {
+        const rawRect = this.getBoundingClientRect();
+        rect = rawRect ? {
+          x: Number(rawRect.x || rawRect.left || 0) || 0,
+          y: Number(rawRect.y || rawRect.top || 0) || 0,
+          width: Number(rawRect.width || 0) || 0,
+          height: Number(rawRect.height || 0) || 0
+        } : null;
+      }
+    } catch {}
+
+    try { this.scrollIntoView?.({ block: 'center', inline: 'center' }); } catch {}
+    try { this.focus?.(); } catch {}
+    try {
+      const init = rect ? {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        view: window,
+        clientX: rect.x + (rect.width / 2),
+        clientY: rect.y + (rect.height / 2)
+      } : { bubbles: true, cancelable: true, composed: true, view: window };
+      this.dispatchEvent?.(new MouseEvent('pointerdown', init));
+      this.dispatchEvent?.(new MouseEvent('mousedown', init));
+      this.dispatchEvent?.(new MouseEvent('pointerup', init));
+      this.dispatchEvent?.(new MouseEvent('mouseup', init));
+    } catch {}
+    if (typeof this.click === 'function') {
+      this.click();
+    }
+
+    return {
+      clicked: true,
+      text,
+      ariaLabel,
+      title,
+      tagName: String(this.tagName || '').trim() || null,
+      rect
+    };
+  }`;
+}
+
+function buildTradingViewPineSurfaceProbeFromRendererInvoke(invokeResult = {}, options = {}) {
+  const effectProof = invokeResult?.effectProof && typeof invokeResult.effectProof === 'object'
+    ? invokeResult.effectProof
+    : null;
+  const postClickPineRendererProof = effectProof?.postClickPineRendererProof
+    && typeof effectProof.postClickPineRendererProof === 'object'
+    ? effectProof.postClickPineRendererProof
+    : null;
+  const transitionKind = (normalizeCompactText(effectProof?.transitionKind || '', 80) || '').toLowerCase();
+  const windowHandle = Number(
+    options?.windowHandle
+    || options?.hwnd
+    || invokeResult?.windowHandle
+    || invokeResult?.foreground?.hwnd
+    || invokeResult?.windowInfo?.hwnd
+    || 0
+  ) || 0;
+  if (effectProof?.success === true && postClickPineRendererProof?.available === true && postClickPineRendererProof?.active === true) {
+    const matchedBy = String(postClickPineRendererProof?.matchedBy || 'chromium-cdp-post-click-surface').trim() || 'chromium-cdp-post-click-surface';
+    const visibleAnchorEntries = summarizeTradingViewPineVisibleAnchorEntries(
+      Array.isArray(postClickPineRendererProof?.signals) ? postClickPineRendererProof.signals : [],
+      matchedBy
+    );
+    const visibleAnchors = visibleAnchorEntries
+      .map((entry) => entry.text)
+      .filter(Boolean);
+    if (visibleAnchors.length > 0) {
+      return {
+        active: true,
+        matched: true,
+        matchedBy,
+        transitionKind: transitionKind || null,
+        anchorText: visibleAnchors[0],
+        visibleAnchors,
+        visibleAnchorEntries,
+        rendererProof: {
+          ...postClickPineRendererProof,
+          applicable: postClickPineRendererProof?.applicable !== false,
+          available: true,
+          active: true,
+          matchedBy,
+          anchorText: postClickPineRendererProof?.anchorText || visibleAnchors[0],
+          signals: visibleAnchorEntries.map((entry) => ({ ...entry }))
+        },
+        element: {
+          name: visibleAnchors[0],
+          WindowHandle: windowHandle
+        },
+        windowHandle
+      };
+    }
+  }
+  if (!effectProof || effectProof.success !== true || effectProof.transitioned !== true || !transitionKind) {
+    return null;
+  }
+
+  const matchedBy = 'chromium-cdp-ax-transition';
+  const visibleAnchorEntries = [];
+  const seen = new Set();
+  const addEntry = (text = '', category = 'confirmation-modal', extra = {}) => {
+    const normalizedText = normalizeCompactText(text, 180);
+    if (!normalizedText) return;
+    const dedupeKey = `${category}:${normalizeTradingViewPineAnchorText(normalizedText)}`;
+    if (seen.has(dedupeKey)) return;
+    seen.add(dedupeKey);
+    visibleAnchorEntries.push({
+      text: normalizedText,
+      observedText: normalizedText,
+      category,
+      source: 'renderer-transition',
+      role: extra.role || null,
+      title: extra.title || null,
+      ariaLabel: extra.ariaLabel || null,
+      className: extra.className || null,
+      priority: Number(extra.priority || 0) || 0
+    });
+  };
+
+  switch (transitionKind) {
+    case 'replace-existing-script-confirmation':
+      addEntry('Confirmation', 'confirmation-modal', {
+        role: 'dialog',
+        title: 'Confirmation',
+        priority: 183
+      });
+      addEntry('already exists', 'confirmation-modal', {
+        priority: 180
+      });
+      addEntry('replace it', 'confirmation-modal', {
+        priority: 179
+      });
+      addEntry('No', 'confirmation-modal', {
+        role: 'button',
+        priority: 120
+      });
+      addEntry('Yes', 'confirmation-modal', {
+        role: 'button',
+        priority: 120
+      });
+      break;
+    case 'unsaved-changes-confirmation':
+      addEntry('Confirmation', 'confirmation-modal', {
+        role: 'dialog',
+        title: 'Confirmation',
+        priority: 183
+      });
+      addEntry('You have unsaved changes', 'confirmation-modal', {
+        priority: 182
+      });
+      addEntry('Would you like to save them', 'confirmation-modal', {
+        priority: 181
+      });
+      addEntry('No', 'confirmation-modal', {
+        role: 'button',
+        priority: 120
+      });
+      addEntry('Yes', 'confirmation-modal', {
+        role: 'button',
+        priority: 120
+      });
+      break;
+    default:
+      return null;
+  }
+
+  for (const text of Array.isArray(effectProof?.transitionMatchedRequiredTexts)
+    ? effectProof.transitionMatchedRequiredTexts
+    : []) {
+    addEntry(text, 'confirmation-modal', {
+      priority: 178
+    });
+  }
+
+  const visibleAnchors = visibleAnchorEntries
+    .map((entry) => entry.text)
+    .filter(Boolean);
+  if (visibleAnchors.length === 0) {
+    return null;
+  }
+
+  return {
+    active: true,
+    matched: true,
+    matchedBy,
+    transitionKind,
+    anchorText: visibleAnchors[0],
+    visibleAnchors,
+    visibleAnchorEntries,
+    rendererProof: {
+      applicable: true,
+      available: true,
+      active: true,
+      matchedBy,
+      anchorText: visibleAnchors[0],
+      signals: visibleAnchorEntries.map((entry) => ({ ...entry }))
+    },
+    element: {
+      name: visibleAnchors[0],
+      WindowHandle: windowHandle
+    },
+    windowHandle
+  };
+}
+
+function summarizeTradingViewPineRendererProof(proof = null) {
+  if (!proof || typeof proof !== 'object') return null;
+
+  return {
+    applicable: proof.applicable !== false,
+    available: proof.available === true,
+    active: proof.active === true,
+    reason: normalizeCompactText(proof.reason || proof.error || '', 140),
+    anchorText: normalizeCompactText(proof.anchorText || '', 120),
+    matchedBy: normalizeCompactText(proof.matchedBy || '', 80),
+    port: Number(proof.port || 0) || 0,
+    target: proof.target && typeof proof.target === 'object'
+      ? {
+          id: String(proof.target.id || ''),
+          type: normalizeCompactText(proof.target.type || '', 32),
+          title: normalizeCompactText(proof.target.title || '', 140),
+          url: normalizeCompactText(proof.target.url || '', 180)
+        }
+      : null,
+    signals: Array.isArray(proof.signals)
+      ? proof.signals.slice(0, 8).map((signal) => ({
+          text: normalizeCompactText(signal?.text || '', 120),
+          observedText: normalizeCompactText(signal?.observedText || '', 160),
+          source: normalizeCompactText(signal?.source || '', 60),
+          role: normalizeCompactText(signal?.role || '', 60)
+        }))
+      : [],
+    endpointAttempts: Array.isArray(proof.endpointAttempts)
+      ? proof.endpointAttempts.slice(0, 6).map((attempt) => ({
+          port: Number(attempt?.port || 0) || 0,
+          source: normalizeCompactText(attempt?.source || '', 40),
+          error: normalizeCompactText(attempt?.error || '', 120)
+        }))
+      : [],
+    discovery: proof.discovery && typeof proof.discovery === 'object'
+      ? {
+          explicitPort: Number(proof.discovery?.explicitPort || 0) || 0,
+          cachedCandidateCount: Array.isArray(proof.discovery?.cachedCandidates)
+            ? proof.discovery.cachedCandidates.length
+            : 0,
+          portCandidateCount: Array.isArray(proof.discovery?.portCandidates)
+            ? proof.discovery.portCandidates.length
+            : 0,
+          processInspectionSuccess: proof.discovery?.processInspection?.success !== false,
+          processInspectionError: normalizeCompactText(proof.discovery?.processInspection?.error || '', 160),
+          processCount: Array.isArray(proof.discovery?.processInspection?.processes)
+            ? proof.discovery.processInspection.processes.length
+            : 0,
+          listenerInspectionSuccess: proof.discovery?.listenerInspection?.success !== false,
+          listenerInspectionError: normalizeCompactText(proof.discovery?.listenerInspection?.error || '', 160),
+          listenerCount: Array.isArray(proof.discovery?.listenerInspection?.listeners)
+            ? proof.discovery.listenerInspection.listeners.length
+            : 0
+        }
+      : null
+  };
+}
+
+async function probeTradingViewPineEditorRendererWithCDP(options = {}) {
   const explicitWindowHandle = Number(options?.windowHandle || options?.hwnd || 0) || 0;
+  const resolveWindowState = options?.resolveWindowState !== false;
   const timeout = Number.isFinite(Number(options?.timeout || options?.timeoutMs))
-    ? Math.max(250, Math.min(Math.round(Number(options.timeout || options.timeoutMs)), 2500))
-    : 1400;
+    ? Math.max(
+        MIN_TRADINGVIEW_PINE_RENDERER_PROOF_TIMEOUT_MS,
+        Math.min(Math.round(Number(options.timeout || options.timeoutMs)), 2000)
+      )
+    : DEFAULT_TRADINGVIEW_PINE_RENDERER_PROOF_TIMEOUT_MS;
+  const discoveryTimeoutMs = Math.max(
+    MIN_TRADINGVIEW_PINE_RENDERER_DISCOVERY_TIMEOUT_MS,
+    Math.min(1600, Math.round(timeout * 0.9))
+  );
+  const httpTimeoutMs = Math.max(
+    220,
+    Math.min(700, Math.round(discoveryTimeoutMs * 0.36))
+  );
+  const expectedScriptName = normalizeCompactText(
+    options?.pineExpectedScriptName || options?.expectedScriptName || options?.scriptName || '',
+    180
+  );
 
-  let foreground = null;
-  let windowInfo = null;
+  let windowInfo = options?.windowInfo && typeof options.windowInfo === 'object'
+    ? options.windowInfo
+    : null;
+  let foreground = options?.foreground && typeof options.foreground === 'object'
+    ? options.foreground
+    : null;
 
-  if (explicitWindowHandle > 0) {
+  if (windowInfo && typeof windowInfo === 'object' && windowInfo.success === undefined) {
+    windowInfo = { success: true, ...windowInfo };
+  }
+  if (foreground && typeof foreground === 'object' && foreground.success === undefined) {
+    foreground = { success: true, ...foreground };
+  }
+
+  if (!windowInfo?.success && explicitWindowHandle > 0 && resolveWindowState) {
     try {
       const candidate = await getWindowInfoByHandle(explicitWindowHandle);
       if (candidate?.success) {
@@ -1015,9 +2862,2314 @@ async function probeTradingViewPineEditorSurface(options = {}) {
     } catch {}
   }
 
+  if (!foreground?.success && resolveWindowState) {
+    try {
+      foreground = await getForegroundWindowInfo();
+    } catch {}
+  }
+
+  if (!windowInfo?.success && foreground?.success) {
+    windowInfo = foreground;
+  }
+
+  if (!windowInfo?.success || !isTradingViewForegroundWindow(windowInfo)) {
+    return {
+      applicable: false,
+      available: false,
+      active: false,
+      reason: 'window-not-tradingview',
+      port: 0,
+      target: null,
+      signals: []
+    };
+  }
+
+  const cdpDependencies = options?.cdpDependencies && typeof options.cdpDependencies === 'object'
+    ? options.cdpDependencies
+    : {};
+  const discovery = await discoverChromiumRemoteDebuggingTarget({
+    port: options?.cdpPort || 0,
+    processIds: [windowInfo?.pid || windowInfo?.processId || 0],
+    processNames: [
+      windowInfo?.processName || '',
+      'tradingview'
+    ],
+    title: String(windowInfo?.title || ''),
+    titleTokens: buildTradingViewPineRendererTargetTokens(windowInfo?.title || ''),
+    targetTypes: ['page', 'webview'],
+    urlHints: ['tradingview', '/chart/'],
+    timeoutMs: discoveryTimeoutMs,
+    httpTimeoutMs,
+    fetchImpl: cdpDependencies.fetchImpl,
+    WebSocketCtor: cdpDependencies.WebSocketCtor,
+    processInspector: cdpDependencies.processInspector,
+    listeningPortInspector: cdpDependencies.listeningPortInspector,
+    executePowerShellScript: cdpDependencies.executePowerShellScript
+  });
+
+  if (!discovery?.available) {
+    return {
+      applicable: discovery?.applicable !== false,
+      available: false,
+      active: false,
+      reason: discovery?.reason || 'remote-debugging-port-not-configured',
+      error: discovery?.error || null,
+      port: Number(discovery?.port || 0) || 0,
+      target: discovery?.target || null,
+      targets: Array.isArray(discovery?.targets) ? discovery.targets : [],
+      endpointAttempts: Array.isArray(discovery?.endpointAttempts) ? discovery.endpointAttempts : [],
+      discovery: discovery?.discovery || null,
+      signals: []
+    };
+  }
+
   try {
-    foreground = await getForegroundWindowInfo();
-  } catch {}
+    const cdpResult = await withChromiumCdpSession(
+      discovery.target,
+      {
+        WebSocketCtor: cdpDependencies.WebSocketCtor,
+        openTimeoutMs: Math.max(140, Math.min(900, Math.round(timeout * 0.4))),
+        callTimeoutMs: Math.max(140, Math.min(900, Math.round(timeout * 0.34)))
+      },
+      async (session) => probeTradingViewPineEditorRendererWithCDPSession(session, {
+        pineExpectedScriptName: expectedScriptName
+      })
+    );
+
+    return {
+      applicable: true,
+      available: true,
+      active: cdpResult?.active === true,
+      matchedBy: cdpResult?.matchedBy || null,
+      anchorText: cdpResult?.anchorText || null,
+      signals: Array.isArray(cdpResult?.signals) ? cdpResult.signals : [],
+      port: Number(discovery?.port || 0) || 0,
+      target: discovery?.target || null,
+      targets: Array.isArray(discovery?.targets) ? discovery.targets : [],
+      endpointAttempts: Array.isArray(discovery?.endpointAttempts) ? discovery.endpointAttempts : [],
+      discovery: discovery?.discovery || null,
+      dom: cdpResult?.dom || null,
+      ax: cdpResult?.ax || null,
+      reason: cdpResult?.reason || null
+    };
+  } catch (error) {
+    return {
+      applicable: true,
+      available: false,
+      active: false,
+      reason: error?.reason || 'protocol-error',
+      error: error?.message || String(error || 'CDP protocol session failed'),
+      port: Number(discovery?.port || 0) || 0,
+      target: discovery?.target || null,
+      targets: Array.isArray(discovery?.targets) ? discovery.targets : [],
+      endpointAttempts: Array.isArray(discovery?.endpointAttempts) ? discovery.endpointAttempts : [],
+      discovery: discovery?.discovery || null,
+      signals: []
+    };
+  }
+}
+
+async function invokeTradingViewRendererButtonWithCDP(options = {}) {
+  const buttonText = normalizeCompactText(options?.buttonText || options?.text || '', 120);
+  const requiredTexts = Array.from(new Set(
+    (Array.isArray(options?.requiredTexts) ? options.requiredTexts : [options?.requiredTexts])
+      .map((value) => normalizeCompactText(value || '', 180))
+      .filter(Boolean)
+  ));
+  if (!buttonText) {
+    return {
+      applicable: false,
+      available: false,
+      success: false,
+      reason: 'button-text-required',
+      error: 'Renderer button invoke requires a non-empty buttonText.'
+    };
+  }
+
+  const explicitWindowHandle = Number(options?.windowHandle || options?.hwnd || 0) || 0;
+  const resolveWindowState = options?.resolveWindowState !== false;
+  const timeout = Number.isFinite(Number(options?.timeout || options?.timeoutMs))
+    ? Math.max(
+        MIN_TRADINGVIEW_PINE_RENDERER_PROOF_TIMEOUT_MS,
+        Math.min(Math.round(Number(options.timeout || options.timeoutMs)), 2000)
+      )
+    : DEFAULT_TRADINGVIEW_PINE_RENDERER_PROOF_TIMEOUT_MS;
+  const discoveryTimeoutMs = Math.max(
+    MIN_TRADINGVIEW_PINE_RENDERER_DISCOVERY_TIMEOUT_MS,
+    Math.min(1600, Math.round(timeout * 0.9))
+  );
+  const httpTimeoutMs = Math.max(
+    220,
+    Math.min(700, Math.round(discoveryTimeoutMs * 0.36))
+  );
+  const invokeKind = (normalizeCompactText(options?.kind || '', 80) || '').toLowerCase();
+  const pineExpectedScriptName = normalizeCompactText(
+    options?.pineExpectedScriptName || options?.expectedScriptName || options?.scriptName || '',
+    180
+  );
+  const effectProofBudgetMs = shouldVerifyTradingViewRendererInvokeEffect(
+    invokeKind,
+    requiredTexts.map((text) => normalizeTradingViewRendererMatchText(text, 220))
+  )
+    ? Math.max(220, Math.min(900, Math.round(timeout * 0.8)))
+    : 0;
+
+  let windowInfo = options?.windowInfo && typeof options.windowInfo === 'object'
+    ? options.windowInfo
+    : null;
+  let foreground = options?.foreground && typeof options.foreground === 'object'
+    ? options.foreground
+    : null;
+
+  if (windowInfo && typeof windowInfo === 'object' && windowInfo.success === undefined) {
+    windowInfo = { success: true, ...windowInfo };
+  }
+  if (foreground && typeof foreground === 'object' && foreground.success === undefined) {
+    foreground = { success: true, ...foreground };
+  }
+
+  if (!windowInfo?.success && explicitWindowHandle > 0 && resolveWindowState) {
+    try {
+      const candidate = await getWindowInfoByHandle(explicitWindowHandle);
+      if (candidate?.success) {
+        windowInfo = candidate;
+      }
+    } catch {}
+  }
+
+  if (!foreground?.success && resolveWindowState) {
+    try {
+      foreground = await getForegroundWindowInfo();
+    } catch {}
+  }
+
+  if (!windowInfo?.success && foreground?.success) {
+    windowInfo = foreground;
+  }
+
+  if (!windowInfo?.success || !isTradingViewForegroundWindow(windowInfo)) {
+    return {
+      applicable: false,
+      available: false,
+      success: false,
+      reason: 'window-not-tradingview',
+      error: 'Renderer button invoke is only available for the active TradingView window.'
+    };
+  }
+
+  const cdpDependencies = options?.cdpDependencies && typeof options.cdpDependencies === 'object'
+    ? options.cdpDependencies
+    : {};
+  const discovery = await discoverChromiumRemoteDebuggingTarget({
+    port: options?.cdpPort || 0,
+    processIds: [windowInfo?.pid || windowInfo?.processId || 0],
+    processNames: [
+      windowInfo?.processName || '',
+      'tradingview'
+    ],
+    title: String(windowInfo?.title || ''),
+    titleTokens: buildTradingViewPineRendererTargetTokens(windowInfo?.title || ''),
+    targetTypes: ['page', 'webview'],
+    urlHints: ['tradingview', '/chart/'],
+    timeoutMs: discoveryTimeoutMs,
+    httpTimeoutMs,
+    fetchImpl: cdpDependencies.fetchImpl,
+    WebSocketCtor: cdpDependencies.WebSocketCtor,
+    processInspector: cdpDependencies.processInspector,
+    listeningPortInspector: cdpDependencies.listeningPortInspector,
+    executePowerShellScript: cdpDependencies.executePowerShellScript
+  });
+
+  if (!discovery?.available) {
+    return {
+      applicable: discovery?.applicable !== false,
+      available: false,
+      success: false,
+      reason: discovery?.reason || 'remote-debugging-port-not-configured',
+      error: discovery?.error || null,
+      buttonText,
+      requiredTexts,
+      port: Number(discovery?.port || 0) || 0,
+      target: discovery?.target || null,
+      targets: Array.isArray(discovery?.targets) ? discovery.targets : [],
+      endpointAttempts: Array.isArray(discovery?.endpointAttempts) ? discovery.endpointAttempts : [],
+      discovery: discovery?.discovery || null
+    };
+  }
+
+  try {
+    const cdpResult = await withChromiumCdpSession(
+      discovery.target,
+      {
+        WebSocketCtor: cdpDependencies.WebSocketCtor,
+        openTimeoutMs: Math.max(
+          180,
+          Math.min(1800, Math.round(timeout * 0.45) + effectProofBudgetMs)
+        ),
+        callTimeoutMs: Math.max(160, Math.min(1000, Math.round(timeout * 0.4)))
+      },
+      async (session) => {
+        await session.call('Accessibility.enable');
+        const axTree = await session.call('Accessibility.getFullAXTree', {
+          depth: 12
+        });
+        const nodes = Array.isArray(axTree?.nodes) ? axTree.nodes : [];
+        const normalizedButtonText = normalizeTradingViewRendererMatchText(buttonText, 180);
+        const normalizedRequiredTexts = requiredTexts.map((text) => normalizeTradingViewRendererMatchText(text, 220));
+        const matchedRequiredTexts = matchTradingViewRendererRequiredTexts(nodes, normalizedRequiredTexts);
+
+        if (normalizedRequiredTexts.length > 0 && matchedRequiredTexts.length !== normalizedRequiredTexts.length) {
+          return {
+            success: false,
+            available: true,
+            reason: 'renderer-required-text-missing',
+            matchedRequiredTexts
+          };
+        }
+
+        const buttonNode = findTradingViewRendererButtonNode(nodes, normalizedButtonText);
+
+        if (!buttonNode) {
+          return {
+            success: false,
+            available: true,
+            reason: 'renderer-button-unavailable',
+            matchedRequiredTexts
+          };
+        }
+
+        const backendDOMNodeId = Number(buttonNode?.backendDOMNodeId || 0) || 0;
+        if (!backendDOMNodeId) {
+          return {
+            success: false,
+            available: true,
+            reason: 'renderer-button-dom-node-missing',
+            matchedRequiredTexts,
+            axNode: summarizeTradingViewRendererAxNode(buttonNode)
+          };
+        }
+
+        const resolvedNode = await session.call('DOM.resolveNode', {
+          backendNodeId: backendDOMNodeId
+        });
+        const objectId = String(resolvedNode?.object?.objectId || '').trim();
+        if (!objectId) {
+          return {
+            success: false,
+            available: true,
+            reason: 'renderer-button-resolve-failed',
+            matchedRequiredTexts,
+            axNode: summarizeTradingViewRendererAxNode(buttonNode)
+          };
+        }
+
+        let clickPayload = null;
+        try {
+          const clickResponse = await session.call('Runtime.callFunctionOn', {
+            objectId,
+            functionDeclaration: buildTradingViewRendererButtonInvokeFunctionDeclaration(),
+            returnByValue: true,
+            awaitPromise: true
+          });
+          clickPayload = clickResponse?.result?.value || null;
+        } finally {
+          try {
+            await session.call('Runtime.releaseObject', {
+              objectId
+            });
+          } catch {}
+        }
+
+        const effectProof = clickPayload?.clicked === false
+          ? null
+          : await verifyTradingViewRendererInvokeEffectWithCDPSession(session, {
+              kind: invokeKind,
+              buttonText,
+              requiredTexts,
+              timeoutMs: Math.max(220, Math.min(900, Math.round(timeout * 0.8))),
+              pineExpectedScriptName,
+              capturePineSurfaceAfterClear: true
+            });
+        const effectVerified = !effectProof || effectProof.success === true;
+
+        return {
+          success: clickPayload?.clicked !== false && effectVerified,
+          available: true,
+          reason: clickPayload?.clicked === false
+            ? 'renderer-button-click-failed'
+            : (!effectVerified ? (effectProof?.reason || 'renderer-button-effect-unverified') : null),
+          error: clickPayload?.clicked === false
+            ? null
+            : (!effectVerified ? (effectProof?.error || null) : null),
+          matchedRequiredTexts,
+          axNode: summarizeTradingViewRendererAxNode(buttonNode),
+          clickResult: clickPayload,
+          effectProof
+        };
+      }
+    );
+
+    return {
+      applicable: true,
+      available: true,
+      success: cdpResult?.success === true,
+      method: cdpResult?.success === true ? 'chromium-cdp-ax-dom-click' : null,
+      reason: cdpResult?.reason || null,
+      error: cdpResult?.success === true
+        ? null
+        : (cdpResult?.error || `TradingView renderer could not invoke "${buttonText}" (${cdpResult?.reason || 'unknown-reason'}).`),
+      buttonText,
+      requiredTexts,
+      matchedRequiredTexts: Array.isArray(cdpResult?.matchedRequiredTexts) ? cdpResult.matchedRequiredTexts : [],
+      axNode: cdpResult?.axNode || null,
+      clickResult: cdpResult?.clickResult || null,
+      effectProof: cdpResult?.effectProof || null,
+      port: Number(discovery?.port || 0) || 0,
+      target: discovery?.target || null,
+      targets: Array.isArray(discovery?.targets) ? discovery.targets : [],
+      endpointAttempts: Array.isArray(discovery?.endpointAttempts) ? discovery.endpointAttempts : [],
+      discovery: discovery?.discovery || null
+    };
+  } catch (error) {
+    return {
+      applicable: true,
+      available: false,
+      success: false,
+      reason: error?.reason || 'protocol-error',
+      error: error?.message || String(error || 'CDP protocol session failed'),
+      buttonText,
+      requiredTexts,
+      port: Number(discovery?.port || 0) || 0,
+      target: discovery?.target || null,
+      targets: Array.isArray(discovery?.targets) ? discovery.targets : [],
+      endpointAttempts: Array.isArray(discovery?.endpointAttempts) ? discovery.endpointAttempts : [],
+      discovery: discovery?.discovery || null
+    };
+  }
+}
+
+async function resolveTradingViewRendererCdpContext(options = {}) {
+  const explicitWindowHandle = Number(options?.windowHandle || options?.hwnd || 0) || 0;
+  const resolveWindowState = options?.resolveWindowState !== false;
+  const timeout = Number.isFinite(Number(options?.timeout || options?.timeoutMs))
+    ? Math.max(
+        MIN_TRADINGVIEW_PINE_EDITOR_CDP_TIMEOUT_MS,
+        Math.min(Math.round(Number(options.timeout || options.timeoutMs)), 2400)
+      )
+    : DEFAULT_TRADINGVIEW_PINE_EDITOR_CDP_TIMEOUT_MS;
+  const discoveryTimeoutMs = Math.max(
+    MIN_TRADINGVIEW_PINE_RENDERER_DISCOVERY_TIMEOUT_MS,
+    Math.min(1800, Math.round(timeout * 0.82))
+  );
+  const httpTimeoutMs = Math.max(
+    220,
+    Math.min(700, Math.round(discoveryTimeoutMs * 0.38))
+  );
+
+  let windowInfo = options?.windowInfo && typeof options.windowInfo === 'object'
+    ? options.windowInfo
+    : null;
+  let foreground = options?.foreground && typeof options.foreground === 'object'
+    ? options.foreground
+    : null;
+
+  if (windowInfo && typeof windowInfo === 'object' && windowInfo.success === undefined) {
+    windowInfo = { success: true, ...windowInfo };
+  }
+  if (foreground && typeof foreground === 'object' && foreground.success === undefined) {
+    foreground = { success: true, ...foreground };
+  }
+
+  if (!windowInfo?.success && explicitWindowHandle > 0 && resolveWindowState) {
+    try {
+      const candidate = await getWindowInfoByHandle(explicitWindowHandle);
+      if (candidate?.success) {
+        windowInfo = candidate;
+      }
+    } catch {}
+  }
+
+  if (!foreground?.success && resolveWindowState) {
+    try {
+      foreground = await getForegroundWindowInfo();
+    } catch {}
+  }
+
+  if (!windowInfo?.success && foreground?.success) {
+    windowInfo = foreground;
+  }
+
+  if (!windowInfo?.success || !isTradingViewForegroundWindow(windowInfo)) {
+    return {
+      applicable: false,
+      available: false,
+      timeout,
+      windowInfo: windowInfo?.success ? windowInfo : null,
+      foreground: foreground?.success ? foreground : null,
+      reason: 'window-not-tradingview',
+      error: 'TradingView renderer CDP access requires the foreground TradingView window.'
+    };
+  }
+
+  const cdpDependencies = options?.cdpDependencies && typeof options.cdpDependencies === 'object'
+    ? options.cdpDependencies
+    : {};
+  const discovery = await discoverChromiumRemoteDebuggingTarget({
+    port: options?.cdpPort || 0,
+    processIds: [windowInfo?.pid || windowInfo?.processId || 0],
+    processNames: [
+      windowInfo?.processName || '',
+      'tradingview'
+    ],
+    title: String(windowInfo?.title || ''),
+    titleTokens: buildTradingViewPineRendererTargetTokens(windowInfo?.title || ''),
+    targetTypes: ['page', 'webview'],
+    urlHints: ['tradingview', '/chart/'],
+    timeoutMs: discoveryTimeoutMs,
+    httpTimeoutMs,
+    fetchImpl: cdpDependencies.fetchImpl,
+    WebSocketCtor: cdpDependencies.WebSocketCtor,
+    processInspector: cdpDependencies.processInspector,
+    listeningPortInspector: cdpDependencies.listeningPortInspector,
+    executePowerShellScript: cdpDependencies.executePowerShellScript
+  });
+
+  return {
+    applicable: true,
+    available: discovery?.available === true,
+    timeout,
+    windowInfo,
+    foreground,
+    cdpDependencies,
+    port: Number(discovery?.port || 0) || 0,
+    target: discovery?.target || null,
+    targets: Array.isArray(discovery?.targets) ? discovery.targets : [],
+    endpointAttempts: Array.isArray(discovery?.endpointAttempts) ? discovery.endpointAttempts : [],
+    discovery: discovery?.discovery || null,
+    reason: discovery?.available === true ? null : (discovery?.reason || 'remote-debugging-port-not-configured'),
+    error: discovery?.available === true ? null : (discovery?.error || null)
+  };
+}
+
+function tradingViewPineEditorTextareaOperationInPage(payload = {}) {
+  const options = payload && typeof payload === 'object' ? payload : {};
+  const operation = String(options.operation || 'read').trim().toLowerCase();
+  const replacementText = String(options.text ?? '');
+  const previewLimit = Number.isFinite(Number(options.previewLimit))
+    ? Math.max(120, Math.min(Math.round(Number(options.previewLimit)), 4000))
+    : 320;
+  const maxRoots = Number.isFinite(Number(options.maxRoots))
+    ? Math.max(4, Math.min(Math.round(Number(options.maxRoots)), 64))
+    : 32;
+  const maxElements = Number.isFinite(Number(options.maxElements))
+    ? Math.max(100, Math.min(Math.round(Number(options.maxElements)), 4000))
+    : 1800;
+  const compact = (value, maxLength = previewLimit) => {
+    const text = String(value || '').replace(/\r/g, '').replace(/[ \t]+\n/g, '\n').trim();
+    return text.length > maxLength ? text.slice(0, maxLength) : text;
+  };
+  const rectOf = (element) => {
+    try {
+      const rect = element?.getBoundingClientRect?.();
+      if (!rect) return null;
+      return {
+        x: Number(rect.x || rect.left || 0) || 0,
+        y: Number(rect.y || rect.top || 0) || 0,
+        width: Number(rect.width || 0) || 0,
+        height: Number(rect.height || 0) || 0
+      };
+    } catch {
+      return null;
+    }
+  };
+  const isVisible = (element) => {
+    if (!element) return false;
+    const rect = rectOf(element);
+    if (!rect) return false;
+    if (rect.width <= 0 || rect.height <= 0) {
+      return false;
+    }
+    try {
+      const style = window.getComputedStyle?.(element);
+      if (style && (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0')) {
+        return false;
+      }
+    } catch {}
+    return true;
+  };
+  const elementHasFocus = (element) => {
+    if (!element) return false;
+    try {
+      if (document.activeElement === element) return true;
+    } catch {}
+    try {
+      const root = typeof element.getRootNode === 'function' ? element.getRootNode() : null;
+      if (root && root.activeElement === element) return true;
+    } catch {}
+    return false;
+  };
+  const collectRoots = () => {
+    const queue = [];
+    const roots = [];
+    const seen = new Set();
+    let scannedElements = 0;
+
+    if (typeof document !== 'undefined' && document) {
+      queue.push(document);
+      seen.add(document);
+    }
+
+    while (queue.length > 0 && roots.length < maxRoots && scannedElements < maxElements) {
+      const root = queue.shift();
+      if (!root) continue;
+      roots.push(root);
+
+      let elements = [];
+      try {
+        elements = root.querySelectorAll ? Array.from(root.querySelectorAll('*')) : [];
+      } catch {}
+
+      for (const element of elements) {
+        if (!element || typeof element !== 'object') continue;
+        scannedElements += 1;
+        try {
+          if (element.shadowRoot && !seen.has(element.shadowRoot)) {
+            seen.add(element.shadowRoot);
+            queue.push(element.shadowRoot);
+          }
+        } catch {}
+        if (scannedElements >= maxElements) {
+          break;
+        }
+      }
+    }
+
+    return {
+      roots,
+      scannedRoots: roots.length,
+      scannedElements
+    };
+  };
+  const rootCollection = collectRoots();
+  const buildTextareaCandidate = (element, rootIndex = 0) => {
+    if (!element) return null;
+    const tagName = String(element.tagName || '').trim().toUpperCase();
+    const isContentEditable = element.isContentEditable === true;
+    if (tagName !== 'TEXTAREA' && !isContentEditable) {
+      return null;
+    }
+
+    const ariaLabel = String(element.getAttribute?.('aria-label') || '').trim();
+    const className = typeof element.className === 'string'
+      ? element.className
+      : (element.className?.baseVal || '');
+    const value = tagName === 'TEXTAREA' || 'value' in element
+      ? String(element.value ?? '')
+      : String(element.textContent || '');
+    const visible = isVisible(element);
+    const focused = elementHasFocus(element);
+    let score = 0;
+
+    if (tagName === 'TEXTAREA') score += 220;
+    if (isContentEditable) score += 120;
+    if (/inputarea/i.test(className)) score += 190;
+    if (/monaco/i.test(className)) score += 130;
+    if (/mouse-cursor-text/i.test(className)) score += 90;
+    if (/editor content/i.test(ariaLabel)) score += 220;
+    if (/accessibility options/i.test(ariaLabel)) score += 70;
+    if (/\/\/\s*@version\b/i.test(value)) score += 150;
+    if (/\b(?:indicator|strategy|library)\s*\(/i.test(value)) score += 120;
+    if (visible) score += 60;
+    if (focused) score += 140;
+    if (value) score += Math.min(80, Math.round(value.length / 24));
+    score += Math.max(0, 30 - rootIndex);
+
+    return {
+      element,
+      value,
+      tagName,
+      ariaLabel,
+      className: String(className || ''),
+      visible,
+      focused,
+      score,
+      rect: rectOf(element)
+    };
+  };
+  const textareaCandidates = [];
+  for (let index = 0; index < rootCollection.roots.length; index += 1) {
+    const root = rootCollection.roots[index];
+    let candidates = [];
+    try {
+      candidates = root.querySelectorAll
+        ? Array.from(root.querySelectorAll('textarea, [contenteditable]'))
+        : [];
+    } catch {}
+
+    for (const candidate of candidates) {
+      const built = buildTextareaCandidate(candidate, index);
+      if (!built) continue;
+      textareaCandidates.push(built);
+    }
+  }
+  textareaCandidates.sort((left, right) => right.score - left.score);
+  const bestTextarea = textareaCandidates[0] || null;
+
+  const collectRenderedCandidates = () => {
+    const candidates = [];
+    const seen = new Set();
+
+    for (let rootIndex = 0; rootIndex < rootCollection.roots.length; rootIndex += 1) {
+      const root = rootCollection.roots[rootIndex];
+      let containers = [];
+      try {
+        containers = root.querySelectorAll
+          ? Array.from(root.querySelectorAll('.view-lines, .lines-content'))
+          : [];
+      } catch {}
+
+      for (const container of containers) {
+        if (!container) continue;
+        const lineNodes = (() => {
+          try {
+            return Array.from(container.querySelectorAll('.view-line'));
+          } catch {
+            return [];
+          }
+        })();
+        const lines = lineNodes.length > 0
+          ? lineNodes.map((line) => compact(line.innerText || line.textContent || '', 4000)).filter(Boolean)
+          : compact(container.innerText || container.textContent || '', 12000)
+            .split(/\n+/)
+            .map((line) => compact(line, 4000))
+            .filter(Boolean);
+        const text = lines.join('\n').trim();
+        if (!text) continue;
+
+        const source = lineNodes.length > 0 ? 'view-lines' : 'lines-content';
+        const dedupeKey = `${source}:${text}`;
+        if (seen.has(dedupeKey)) continue;
+        seen.add(dedupeKey);
+
+        let score = 0;
+        if (/\/\/\s*@version\b/i.test(text)) score += 220;
+        if (/\b(?:indicator|strategy|library)\s*\(/i.test(text)) score += 180;
+        if (isVisible(container)) score += 80;
+        if (lineNodes.length > 0) score += 40;
+        score += Math.max(0, 20 - rootIndex);
+
+        candidates.push({
+          text,
+          lineCount: lines.length,
+          source,
+          visible: isVisible(container),
+          score
+        });
+      }
+    }
+
+    candidates.sort((left, right) => {
+      if (right.score !== left.score) {
+        return right.score - left.score;
+      }
+      return String(right.text || '').length - String(left.text || '').length;
+    });
+    return candidates;
+  };
+  const collectDialogCandidates = () => {
+    const candidates = [];
+    const seen = new Set();
+    const dialogSelector = [
+      '[role="dialog"]',
+      '[aria-modal="true"]',
+      'dialog',
+      '[class*="dialog"]',
+      '[class*="modal"]',
+      '[class*="popup"]'
+    ].join(', ');
+    const collectUniqueText = (values = []) => Array.from(new Set(
+      (Array.isArray(values) ? values : [values])
+        .map((value) => compact(value, 1200))
+        .filter(Boolean)
+    ));
+    const buildDialogInputCandidate = (input, rootIndex = 0) => {
+      if (!input || !isVisible(input)) return null;
+      const tagName = String(input.tagName || '').trim().toUpperCase();
+      const type = String(input.getAttribute?.('type') || input.type || '').trim().toLowerCase();
+      if (!['INPUT', 'TEXTAREA'].includes(tagName)) {
+        return null;
+      }
+      if (tagName === 'INPUT' && ['hidden', 'button', 'submit', 'checkbox', 'radio', 'file', 'color', 'range'].includes(type)) {
+        return null;
+      }
+
+      const ariaLabel = String(input.getAttribute?.('aria-label') || '').trim();
+      const placeholder = String(input.getAttribute?.('placeholder') || '').trim();
+      const value = tagName === 'TEXTAREA' || 'value' in input
+        ? String(input.value ?? '')
+        : String(input.textContent || '');
+      let score = 0;
+      if (tagName === 'INPUT') score += 200;
+      if (tagName === 'TEXTAREA') score += 120;
+      if (!type || ['text', 'search'].includes(type)) score += 100;
+      if (/script|name|save/i.test([ariaLabel, placeholder].join(' '))) score += 220;
+      if (elementHasFocus(input)) score += 140;
+      score += Math.max(0, 18 - rootIndex);
+
+      return {
+        element: input,
+        value,
+        ariaLabel,
+        placeholder,
+        score
+      };
+    };
+
+    for (let rootIndex = 0; rootIndex < rootCollection.roots.length; rootIndex += 1) {
+      const root = rootCollection.roots[rootIndex];
+      let containers = [];
+      try {
+        containers = root.querySelectorAll
+          ? Array.from(root.querySelectorAll(dialogSelector))
+          : [];
+      } catch {}
+
+      for (let containerIndex = 0; containerIndex < containers.length; containerIndex += 1) {
+        const container = containers[containerIndex];
+        if (!container || !isVisible(container)) continue;
+        const dialogInputs = (() => {
+          try {
+            return Array.from(container.querySelectorAll('input, textarea'))
+              .map((input) => buildDialogInputCandidate(input, rootIndex))
+              .filter(Boolean)
+              .sort((left, right) => right.score - left.score);
+          } catch {
+            return [];
+          }
+        })();
+        const inputValues = collectUniqueText((() => {
+          return dialogInputs.map((input) =>
+            String(input?.value || input?.placeholder || input?.ariaLabel || '')
+          );
+        })());
+        const buttonTexts = collectUniqueText((() => {
+          try {
+            return Array.from(container.querySelectorAll('button, [role="button"]')).map((button) =>
+              String(
+                button?.innerText
+                || button?.textContent
+                || button?.getAttribute?.('aria-label')
+                || button?.getAttribute?.('title')
+                || ''
+              )
+            );
+          } catch {
+            return [];
+          }
+        })());
+        const containerText = compact(container.innerText || container.textContent || '', 12000);
+        const textParts = collectUniqueText([containerText, ...inputValues, ...buttonTexts]);
+        const text = textParts.join('\n').trim();
+        if (!text) continue;
+
+        const dedupeKey = text;
+        if (seen.has(dedupeKey)) continue;
+        seen.add(dedupeKey);
+
+        const role = String(container.getAttribute?.('role') || '').trim().toLowerCase();
+        const className = typeof container.className === 'string'
+          ? container.className
+          : (container.className?.baseVal || '');
+        let zIndex = 0;
+        try {
+          const style = window.getComputedStyle?.(container);
+          const parsedZIndex = Number.parseInt(String(style?.zIndex || ''), 10);
+          if (Number.isFinite(parsedZIndex)) {
+            zIndex = parsedZIndex;
+          }
+        } catch {}
+        let score = 0;
+        if (role === 'dialog' || container.getAttribute?.('aria-modal') === 'true' || container.tagName === 'DIALOG') score += 180;
+        if (/dialog|modal|popup/i.test(className)) score += 80;
+        if (/\bsave script\b|\bnew script name\b|\bscript name\b|\bsave as\b|\brename script\b/i.test(text)) score += 220;
+        if (/\balready exists\b|\breplace it\b|\byou have unsaved changes\b|\bwould you like to save them\b/i.test(text)) score += 340;
+        if (/\byes\b|\bno\b/i.test(buttonTexts.join(' '))) score += 110;
+        if (/\bsave\b|\bcancel\b/i.test(buttonTexts.join(' '))) score += 60;
+        score += Math.max(0, Math.min(200, zIndex));
+        score += Math.min(40, containerIndex);
+        score += Math.max(0, 16 - rootIndex);
+
+        candidates.push({
+          text,
+          inputValues,
+          buttonTexts,
+          inputElement: dialogInputs[0]?.element || null,
+          source: role === 'dialog' || container.tagName === 'DIALOG' ? 'dialog-surface' : 'modal-surface',
+          visible: true,
+          score
+        });
+      }
+    }
+
+    candidates.sort((left, right) => {
+      if (right.score !== left.score) {
+        return right.score - left.score;
+      }
+      return String(right.text || '').length - String(left.text || '').length;
+    });
+    return candidates;
+  };
+  const summarizeTextarea = (candidate) => {
+    if (!candidate) return null;
+    const liveValue = (candidate.tagName === 'TEXTAREA' || 'value' in candidate.element)
+      ? String(candidate.element?.value ?? '')
+      : String(candidate.element?.textContent || '');
+    const valueLength = Number(liveValue.length || 0) || 0;
+    let selectionStart = 0;
+    let selectionEnd = 0;
+    try {
+      selectionStart = Number(candidate.element?.selectionStart || 0) || 0;
+      selectionEnd = Number(candidate.element?.selectionEnd || 0) || 0;
+    } catch {}
+    return {
+      tagName: candidate.tagName || null,
+      className: String(candidate.className || ''),
+      ariaLabel: String(candidate.ariaLabel || ''),
+      value: liveValue,
+      valueLength,
+      selectionStart,
+      selectionEnd,
+      visible: isVisible(candidate.element),
+      focused: elementHasFocus(candidate.element),
+      selectedAll: valueLength > 0 && selectionStart === 0 && selectionEnd === valueLength,
+      rect: rectOf(candidate.element),
+      score: Number(candidate.score || 0) || 0
+    };
+  };
+  const summarizeRendered = (candidate) => candidate
+    ? {
+        text: String(candidate.text || ''),
+        lineCount: Number(candidate.lineCount || 0) || 0,
+        source: String(candidate.source || ''),
+        visible: candidate.visible === true,
+        score: Number(candidate.score || 0) || 0
+      }
+    : null;
+  const summarizeDialog = (candidate) => candidate
+    ? {
+        text: String(candidate.text || ''),
+        inputValues: Array.isArray(candidate.inputValues) ? candidate.inputValues.slice(0, 4) : [],
+        buttonTexts: Array.isArray(candidate.buttonTexts) ? candidate.buttonTexts.slice(0, 6) : [],
+        source: String(candidate.source || ''),
+        visible: candidate.visible === true,
+        score: Number(candidate.score || 0) || 0
+      }
+    : null;
+  const dispatchInputEvent = (element, type, data = '', inputType = '') => {
+    try {
+      const event = new InputEvent(type, {
+        bubbles: true,
+        cancelable: type === 'beforeinput',
+        composed: true,
+        data,
+        inputType: inputType || undefined
+      });
+      element.dispatchEvent(event);
+      return 'InputEvent';
+    } catch {
+      try {
+        const event = new Event(type, {
+          bubbles: true,
+          cancelable: type === 'beforeinput',
+          composed: true
+        });
+        event.data = data;
+        event.inputType = inputType || undefined;
+        element.dispatchEvent(event);
+        return 'Event';
+      } catch {
+        return 'failed';
+      }
+    }
+  };
+  const forceSetTextLikeElementValue = (element, nextValue, previousValue = '') => {
+    if (!element) return;
+    try {
+      if (typeof element.setRangeText === 'function') {
+        element.setRangeText(nextValue, 0, previousValue.length, 'end');
+      } else if ('value' in element) {
+        const tagName = String(element.tagName || '').trim().toUpperCase();
+        const prototype = tagName === 'TEXTAREA'
+          ? window.HTMLTextAreaElement?.prototype
+          : window.HTMLInputElement?.prototype;
+        const descriptor = prototype
+          ? Object.getOwnPropertyDescriptor(prototype, 'value')
+          : null;
+        if (descriptor && typeof descriptor.set === 'function') {
+          descriptor.set.call(element, nextValue);
+        } else {
+          element.value = nextValue;
+        }
+      } else {
+        element.textContent = nextValue;
+      }
+    } catch {}
+    try {
+      if ('value' in element && String(element.value ?? '') !== nextValue) {
+        element.value = nextValue;
+      }
+    } catch {}
+    try {
+      if (!('value' in element) && String(element.textContent || '') !== nextValue) {
+        element.textContent = nextValue;
+      }
+    } catch {}
+  };
+  const focusAndSelectTextarea = (element) => {
+    if (!element) return { found: false };
+    try {
+      element.scrollIntoView?.({ block: 'center', inline: 'nearest' });
+    } catch {}
+    try {
+      element.focus?.({ preventScroll: true });
+    } catch {
+      try {
+        element.focus?.();
+      } catch {}
+    }
+
+    const value = (element.tagName === 'TEXTAREA' || 'value' in element)
+      ? String(element.value ?? '')
+      : String(element.textContent || '');
+    try {
+      if (typeof element.select === 'function') {
+        element.select();
+      }
+    } catch {}
+    try {
+      if (typeof element.setSelectionRange === 'function') {
+        element.setSelectionRange(0, value.length);
+      }
+    } catch {}
+
+    let selectionStart = 0;
+    let selectionEnd = 0;
+    try {
+      selectionStart = Number(element.selectionStart || 0) || 0;
+      selectionEnd = Number(element.selectionEnd || 0) || 0;
+    } catch {}
+
+    return {
+      found: true,
+      valueLength: value.length,
+      selectionStart,
+      selectionEnd,
+      focused: elementHasFocus(element)
+    };
+  };
+  const buildResult = (extra = {}) => {
+    const renderedCandidates = collectRenderedCandidates();
+    const dialogCandidates = collectDialogCandidates();
+    return {
+      found: !!bestTextarea,
+      operation,
+      textarea: summarizeTextarea(bestTextarea),
+      rendered: summarizeRendered(renderedCandidates[0] || null),
+      dialog: summarizeDialog(dialogCandidates[0] || null),
+      scannedRoots: rootCollection.scannedRoots,
+      scannedElements: rootCollection.scannedElements,
+      activeElementTagName: String(document?.activeElement?.tagName || ''),
+      ...extra
+    };
+  };
+
+  const dialogCandidates = collectDialogCandidates();
+  const bestDialog = dialogCandidates[0] || null;
+
+  if (operation === 'dialog-force-set') {
+    const dialogInput = bestDialog?.inputElement || null;
+    if (!dialogInput) {
+      return buildResult({
+        dialogFound: !!bestDialog,
+        dialogInputApplied: false
+      });
+    }
+
+    const previousValue = 'value' in dialogInput
+      ? String(dialogInput.value ?? '')
+      : String(dialogInput.textContent || '');
+    const focusResult = focusAndSelectTextarea(dialogInput);
+    const dispatchedBeforeInput = dispatchInputEvent(dialogInput, 'beforeinput', replacementText, 'insertText');
+    forceSetTextLikeElementValue(dialogInput, replacementText, previousValue);
+    try {
+      if (typeof dialogInput.setSelectionRange === 'function') {
+        const end = String(replacementText || '').length;
+        dialogInput.setSelectionRange(end, end);
+      }
+    } catch {}
+    const dispatchedInput = dispatchInputEvent(dialogInput, 'input', replacementText, 'insertText');
+    const dispatchedChange = dispatchInputEvent(dialogInput, 'change', replacementText, '');
+    const appliedValue = 'value' in dialogInput
+      ? String(dialogInput.value ?? '')
+      : String(dialogInput.textContent || '');
+
+    return buildResult({
+      dialogFound: true,
+      dialogInputApplied: appliedValue === replacementText,
+      previousValueLength: previousValue.length,
+      appliedTextLength: replacementText.length,
+      focused: focusResult.focused === true,
+      dispatchedBeforeInput,
+      dispatchedInput,
+      dispatchedChange
+    });
+  }
+
+  if (!bestTextarea) {
+    return buildResult();
+  }
+
+  if (operation === 'focus-select-all') {
+    const focusResult = focusAndSelectTextarea(bestTextarea.element);
+    return buildResult({
+      focused: focusResult.focused === true,
+      selectedAll: focusResult.valueLength > 0
+        && focusResult.selectionStart === 0
+        && focusResult.selectionEnd === focusResult.valueLength
+    });
+  }
+
+  if (operation === 'force-set') {
+    const previousValue = (bestTextarea.tagName === 'TEXTAREA' || 'value' in bestTextarea.element)
+      ? String(bestTextarea.element.value ?? '')
+      : String(bestTextarea.element.textContent || '');
+    focusAndSelectTextarea(bestTextarea.element);
+    const dispatchedBeforeInput = dispatchInputEvent(bestTextarea.element, 'beforeinput', replacementText, 'insertFromPaste');
+    forceSetTextLikeElementValue(bestTextarea.element, replacementText, previousValue);
+    try {
+      if (typeof bestTextarea.element.setSelectionRange === 'function') {
+        const end = String(replacementText || '').length;
+        bestTextarea.element.setSelectionRange(end, end);
+      }
+    } catch {}
+    const dispatchedInput = dispatchInputEvent(bestTextarea.element, 'input', replacementText, 'insertFromPaste');
+    const dispatchedChange = dispatchInputEvent(bestTextarea.element, 'change', replacementText, '');
+
+    return buildResult({
+      previousValueLength: previousValue.length,
+      appliedTextLength: replacementText.length,
+      dispatchedBeforeInput,
+      dispatchedInput,
+      dispatchedChange
+    });
+  }
+
+  return buildResult();
+}
+
+function buildTradingViewPineEditorTextareaOperationExpression(options = {}) {
+  return `(${tradingViewPineEditorTextareaOperationInPage.toString()})(${JSON.stringify(options || {})})`;
+}
+
+function summarizeTradingViewPineEditorCdpTextarea(textarea = null) {
+  if (!textarea || typeof textarea !== 'object') return null;
+  return {
+    tagName: normalizeCompactText(textarea.tagName || '', 24) || null,
+    className: normalizeCompactText(textarea.className || '', 160) || null,
+    ariaLabel: normalizeCompactText(textarea.ariaLabel || '', 180) || null,
+    valueLength: Number(textarea.valueLength || 0) || 0,
+    selectionStart: Number(textarea.selectionStart || 0) || 0,
+    selectionEnd: Number(textarea.selectionEnd || 0) || 0,
+    visible: textarea.visible === true,
+    focused: textarea.focused === true,
+    selectedAll: textarea.selectedAll === true,
+    rect: textarea.rect && typeof textarea.rect === 'object'
+      ? {
+          x: Number(textarea.rect.x || 0) || 0,
+          y: Number(textarea.rect.y || 0) || 0,
+          width: Number(textarea.rect.width || 0) || 0,
+          height: Number(textarea.rect.height || 0) || 0
+        }
+      : null,
+    valuePreview: normalizeCompactText(textarea.value || '', DEFAULT_TRADINGVIEW_PINE_EDITOR_CDP_PREVIEW_LIMIT) || ''
+  };
+}
+
+function summarizeTradingViewPineEditorCdpRendered(rendered = null) {
+  if (!rendered || typeof rendered !== 'object') return null;
+  return {
+    textPreview: normalizeCompactText(rendered.text || '', DEFAULT_TRADINGVIEW_PINE_EDITOR_CDP_PREVIEW_LIMIT) || '',
+    lineCount: Number(rendered.lineCount || 0) || 0,
+    source: normalizeCompactText(rendered.source || '', 40) || null,
+    visible: rendered.visible === true
+  };
+}
+
+function summarizeTradingViewPineEditorCdpDialog(dialog = null) {
+  if (!dialog || typeof dialog !== 'object') return null;
+  return {
+    textPreview: normalizeCompactText(dialog.text || '', DEFAULT_TRADINGVIEW_PINE_EDITOR_CDP_PREVIEW_LIMIT) || '',
+    inputValues: Array.isArray(dialog.inputValues)
+      ? dialog.inputValues.map((value) => normalizeCompactText(value || '', 120)).filter(Boolean).slice(0, 4)
+      : [],
+    buttonTexts: Array.isArray(dialog.buttonTexts)
+      ? dialog.buttonTexts.map((value) => normalizeCompactText(value || '', 80)).filter(Boolean).slice(0, 6)
+      : [],
+    source: normalizeCompactText(dialog.source || '', 40) || null,
+    visible: dialog.visible === true
+  };
+}
+
+function summarizeTradingViewPineEditorCdpPayload(payload = null) {
+  const textarea = payload?.textarea && typeof payload.textarea === 'object'
+    ? payload.textarea
+    : null;
+  const rendered = payload?.rendered && typeof payload.rendered === 'object'
+    ? payload.rendered
+    : null;
+  const dialog = payload?.dialog && typeof payload.dialog === 'object'
+    ? payload.dialog
+    : null;
+  const text = String(textarea?.value || '');
+  const renderedText = String(rendered?.text || '');
+  const dialogText = String(dialog?.text || '');
+
+  return {
+    found: payload?.found === true,
+    dialogFound: payload?.dialogFound === true || dialog?.visible === true,
+    dialogInputApplied: payload?.dialogInputApplied === true,
+    operation: normalizeCompactText(payload?.operation || '', 40) || null,
+    focused: payload?.focused === true || textarea?.focused === true,
+    selectedAll: payload?.selectedAll === true || textarea?.selectedAll === true,
+    text,
+    textLength: Number(textarea?.valueLength || text.length) || 0,
+    renderedText,
+    renderedTextLength: renderedText.length,
+    dialogText,
+    dialogTextLength: dialogText.length,
+    scannedRoots: Number(payload?.scannedRoots || 0) || 0,
+    scannedElements: Number(payload?.scannedElements || 0) || 0,
+    activeElementTagName: normalizeCompactText(payload?.activeElementTagName || '', 24) || null,
+    textarea: summarizeTradingViewPineEditorCdpTextarea(textarea),
+    rendered: summarizeTradingViewPineEditorCdpRendered(rendered),
+    dialog: summarizeTradingViewPineEditorCdpDialog(dialog),
+    previousValueLength: Number(payload?.previousValueLength || 0) || 0,
+    appliedTextLength: Number(payload?.appliedTextLength || 0) || 0,
+    dispatchedBeforeInput: normalizeCompactText(payload?.dispatchedBeforeInput || '', 24) || null,
+    dispatchedInput: normalizeCompactText(payload?.dispatchedInput || '', 24) || null,
+    dispatchedChange: normalizeCompactText(payload?.dispatchedChange || '', 24) || null
+  };
+}
+
+function buildTradingViewPineEditorCdpWriteVerification(readback = {}, expectedText = '', options = {}) {
+  const bufferProof = buildPineEditorPasteProof(readback?.text || '', expectedText, options);
+  const renderedText = String(readback?.renderedText || '');
+  const renderedProof = renderedText
+    ? buildPineEditorPasteProof(renderedText, expectedText, options)
+    : null;
+  const renderedCorrupt = !!(
+    renderedProof
+    && (renderedProof.starterDefaultVisible || renderedProof.versionDirectiveCount > 1)
+  );
+  const renderedSupportsExpected = !!(
+    renderedProof
+    && (
+      renderedProof.exactMatch
+      || (options?.pinePreparedScriptName && renderedProof.expectedTitleVisible)
+    )
+  );
+  const requireRenderedProof = options?.requireRenderedProof === true;
+  const success = bufferProof.exactMatch
+    && !renderedCorrupt
+    && (!requireRenderedProof || renderedSupportsExpected);
+
+  return {
+    success,
+    proof: bufferProof,
+    renderedProof,
+    compactSummary: [
+      bufferProof.compactSummary,
+      !renderedProof
+        ? 'rendered=unavailable'
+        : (renderedProof.exactMatch
+          ? 'rendered=verified'
+          : (renderedCorrupt
+            ? 'rendered=corrupt'
+            : (renderedSupportsExpected ? 'rendered=expected-title' : 'rendered=ambiguous')))
+    ].filter(Boolean).join(' | ')
+  };
+}
+
+async function runTradingViewPineEditorTextareaOperationWithCDPSession(session, options = {}) {
+  const response = await session.call('Runtime.evaluate', {
+    expression: buildTradingViewPineEditorTextareaOperationExpression(options),
+    returnByValue: true,
+    awaitPromise: true
+  });
+  return summarizeTradingViewPineEditorCdpPayload(response?.result?.value || {});
+}
+
+async function focusTradingViewPineEditorWithCDP(options = {}) {
+  const context = await resolveTradingViewRendererCdpContext(options);
+  if (!context?.applicable) {
+    return {
+      applicable: false,
+      available: false,
+      success: false,
+      reason: context?.reason || 'window-not-tradingview',
+      error: context?.error || null,
+      port: 0,
+      target: null,
+      targets: [],
+      endpointAttempts: [],
+      discovery: null
+    };
+  }
+
+  if (!context.available) {
+    return {
+      applicable: true,
+      available: false,
+      success: false,
+      reason: context.reason || 'remote-debugging-port-not-configured',
+      error: context.error || null,
+      port: context.port,
+      target: context.target,
+      targets: context.targets,
+      endpointAttempts: context.endpointAttempts,
+      discovery: context.discovery,
+      windowInfo: context.windowInfo || null
+    };
+  }
+
+  try {
+    const focusPayload = await withChromiumCdpSession(
+      context.target,
+      {
+        WebSocketCtor: context.cdpDependencies?.WebSocketCtor,
+        openTimeoutMs: Math.max(180, Math.min(1200, Math.round(context.timeout * 0.45))),
+        callTimeoutMs: Math.max(180, Math.min(1200, Math.round(context.timeout * 0.4)))
+      },
+      async (session) => {
+        try {
+          await session.call('Page.bringToFront');
+        } catch {}
+        return await runTradingViewPineEditorTextareaOperationWithCDPSession(session, {
+          operation: 'focus-select-all'
+        });
+      }
+    );
+
+    return {
+      applicable: true,
+      available: true,
+      success: focusPayload?.found === true,
+      method: focusPayload?.found === true ? 'ChromiumCDPFocus' : null,
+      reason: focusPayload?.found === true ? null : 'editor-textarea-unavailable',
+      error: focusPayload?.found === true ? null : 'TradingView Pine editor textarea was not exposed through CDP.',
+      port: context.port,
+      target: context.target,
+      targets: context.targets,
+      endpointAttempts: context.endpointAttempts,
+      discovery: context.discovery,
+      windowInfo: context.windowInfo || null,
+      editor: focusPayload?.textarea || null,
+      rendered: focusPayload?.rendered || null,
+      dialog: focusPayload?.dialog || null,
+      text: focusPayload?.text || '',
+      renderedText: focusPayload?.renderedText || '',
+      dialogText: focusPayload?.dialogText || '',
+      focused: focusPayload?.focused === true,
+      selectedAll: focusPayload?.selectedAll === true
+    };
+  } catch (error) {
+    return {
+      applicable: true,
+      available: false,
+      success: false,
+      reason: error?.reason || 'protocol-error',
+      error: error?.message || String(error || 'CDP protocol session failed'),
+      port: context.port,
+      target: context.target,
+      targets: context.targets,
+      endpointAttempts: context.endpointAttempts,
+      discovery: context.discovery,
+      windowInfo: context.windowInfo || null
+    };
+  }
+}
+
+async function readTradingViewPineEditorContentWithCDP(options = {}) {
+  const context = await resolveTradingViewRendererCdpContext(options);
+  if (!context?.applicable) {
+    return {
+      applicable: false,
+      available: false,
+      success: false,
+      reason: context?.reason || 'window-not-tradingview',
+      error: context?.error || null,
+      port: 0,
+      target: null,
+      targets: [],
+      endpointAttempts: [],
+      discovery: null
+    };
+  }
+
+  if (!context.available) {
+    return {
+      applicable: true,
+      available: false,
+      success: false,
+      reason: context.reason || 'remote-debugging-port-not-configured',
+      error: context.error || null,
+      port: context.port,
+      target: context.target,
+      targets: context.targets,
+      endpointAttempts: context.endpointAttempts,
+      discovery: context.discovery,
+      windowInfo: context.windowInfo || null
+    };
+  }
+
+  try {
+    const readback = await withChromiumCdpSession(
+      context.target,
+      {
+        WebSocketCtor: context.cdpDependencies?.WebSocketCtor,
+        openTimeoutMs: Math.max(180, Math.min(1200, Math.round(context.timeout * 0.45))),
+        callTimeoutMs: Math.max(180, Math.min(1200, Math.round(context.timeout * 0.4)))
+      },
+      async (session) => {
+        try {
+          await session.call('Page.bringToFront');
+        } catch {}
+        return await runTradingViewPineEditorTextareaOperationWithCDPSession(session, {
+          operation: 'read'
+        });
+      }
+    );
+
+    return {
+      applicable: true,
+      available: true,
+      success: readback?.found === true,
+      method: readback?.found === true ? 'ChromiumCDPRead' : null,
+      reason: readback?.found === true ? null : 'editor-textarea-unavailable',
+      error: readback?.found === true ? null : 'TradingView Pine editor textarea was not exposed through CDP.',
+      port: context.port,
+      target: context.target,
+      targets: context.targets,
+      endpointAttempts: context.endpointAttempts,
+      discovery: context.discovery,
+      windowInfo: context.windowInfo || null,
+      editor: readback?.textarea || null,
+      rendered: readback?.rendered || null,
+      dialog: readback?.dialog || null,
+      text: readback?.text || '',
+      textLength: Number(readback?.textLength || 0) || 0,
+      renderedText: readback?.renderedText || '',
+      renderedTextLength: Number(readback?.renderedTextLength || 0) || 0,
+      dialogText: readback?.dialogText || '',
+      dialogTextLength: Number(readback?.dialogTextLength || 0) || 0
+    };
+  } catch (error) {
+    return {
+      applicable: true,
+      available: false,
+      success: false,
+      reason: error?.reason || 'protocol-error',
+      error: error?.message || String(error || 'CDP protocol session failed'),
+      port: context.port,
+      target: context.target,
+      targets: context.targets,
+      endpointAttempts: context.endpointAttempts,
+      discovery: context.discovery,
+      windowInfo: context.windowInfo || null
+    };
+  }
+}
+
+async function setTradingViewPineEditorContentWithCDP(options = {}) {
+  const expectedText = normalizePineEditorBufferText(options?.text || options?.pinePreparedScriptText || '');
+  const preparedScriptName = normalizeCompactText(options?.pinePreparedScriptName || '', 120);
+  if (!expectedText) {
+    return {
+      applicable: false,
+      available: false,
+      success: false,
+      fallbackRecommended: false,
+      reason: 'prepared-script-text-required',
+      error: 'TradingView Pine editor CDP write requires a non-empty prepared script.'
+    };
+  }
+
+  const context = await resolveTradingViewRendererCdpContext(options);
+  if (!context?.applicable) {
+    return {
+      applicable: false,
+      available: false,
+      success: false,
+      fallbackRecommended: true,
+      reason: context?.reason || 'window-not-tradingview',
+      error: context?.error || null,
+      port: 0,
+      target: null,
+      targets: [],
+      endpointAttempts: [],
+      discovery: null
+    };
+  }
+
+  if (!context.available) {
+    return {
+      applicable: true,
+      available: false,
+      success: false,
+      fallbackRecommended: true,
+      reason: context.reason || 'remote-debugging-port-not-configured',
+      error: context.error || null,
+      port: context.port,
+      target: context.target,
+      targets: context.targets,
+      endpointAttempts: context.endpointAttempts,
+      discovery: context.discovery,
+      windowInfo: context.windowInfo || null
+    };
+  }
+
+  try {
+    const cdpResult = await withChromiumCdpSession(
+      context.target,
+      {
+        WebSocketCtor: context.cdpDependencies?.WebSocketCtor,
+        openTimeoutMs: Math.max(180, Math.min(1200, Math.round(context.timeout * 0.45))),
+        callTimeoutMs: Math.max(180, Math.min(1400, Math.round(context.timeout * 0.42)))
+      },
+      async (session) => {
+        try {
+          await session.call('Page.bringToFront');
+        } catch {}
+
+        const strategyAttempts = [];
+        const focusPayload = await runTradingViewPineEditorTextareaOperationWithCDPSession(session, {
+          operation: 'focus-select-all'
+        });
+        if (!focusPayload?.found) {
+          return {
+            success: false,
+            reason: 'editor-textarea-unavailable',
+            error: 'TradingView Pine editor textarea was not exposed through CDP.',
+            focusPayload,
+            strategyAttempts
+          };
+        }
+
+        let inputReadback = null;
+        let inputVerification = null;
+        let inputInsertError = null;
+        try {
+          await session.call('Input.insertText', {
+            text: expectedText
+          });
+        } catch (error) {
+          inputInsertError = error?.message || String(error || 'Input.insertText failed');
+        }
+        await sleep(80);
+        inputReadback = await runTradingViewPineEditorTextareaOperationWithCDPSession(session, {
+          operation: 'read'
+        });
+        inputVerification = buildTradingViewPineEditorCdpWriteVerification(inputReadback, expectedText, {
+          pinePreparedScriptName: preparedScriptName
+        });
+        strategyAttempts.push({
+          strategy: 'input-insert-text',
+          success: inputInsertError ? false : inputVerification.success,
+          error: inputInsertError,
+          compactSummary: inputVerification.compactSummary,
+          editor: inputReadback?.textarea || null,
+          rendered: inputReadback?.rendered || null
+        });
+
+        if (!inputInsertError && inputVerification.success) {
+          return {
+            success: true,
+            method: 'ChromiumCDPInputInsertText',
+            focusPayload,
+            readback: inputReadback,
+            verification: inputVerification,
+            strategyAttempts
+          };
+        }
+
+        const domSetPayload = await runTradingViewPineEditorTextareaOperationWithCDPSession(session, {
+          operation: 'force-set',
+          text: expectedText
+        });
+        await sleep(80);
+        const domReadback = await runTradingViewPineEditorTextareaOperationWithCDPSession(session, {
+          operation: 'read'
+        });
+        const domVerification = buildTradingViewPineEditorCdpWriteVerification(domReadback, expectedText, {
+          pinePreparedScriptName: preparedScriptName,
+          requireRenderedProof: true
+        });
+        strategyAttempts.push({
+          strategy: 'dom-force-set',
+          success: domVerification.success,
+          error: null,
+          compactSummary: domVerification.compactSummary,
+          editor: domReadback?.textarea || null,
+          rendered: domReadback?.rendered || null,
+          forceSet: {
+            previousValueLength: Number(domSetPayload?.previousValueLength || 0) || 0,
+            appliedTextLength: Number(domSetPayload?.appliedTextLength || 0) || 0,
+            dispatchedBeforeInput: domSetPayload?.dispatchedBeforeInput || null,
+            dispatchedInput: domSetPayload?.dispatchedInput || null,
+            dispatchedChange: domSetPayload?.dispatchedChange || null
+          }
+        });
+
+        if (domVerification.success) {
+          return {
+            success: true,
+            method: 'ChromiumCDPDOMInputEvent',
+            focusPayload,
+            readback: domReadback,
+            verification: domVerification,
+            strategyAttempts
+          };
+        }
+
+        return {
+          success: false,
+          reason: 'cdp-editor-write-unverified',
+          error: `TradingView Pine editor CDP write did not verify (${domVerification.compactSummary || inputVerification?.compactSummary || 'buffer mismatch'})`,
+          focusPayload,
+          readback: domReadback,
+          verification: domVerification,
+          inputVerification,
+          strategyAttempts
+        };
+      }
+    );
+
+    return {
+      applicable: true,
+      available: true,
+      success: cdpResult?.success === true,
+      fallbackRecommended: cdpResult?.success !== true,
+      method: cdpResult?.success === true ? cdpResult.method : null,
+      reason: cdpResult?.success === true ? null : (cdpResult?.reason || 'cdp-editor-write-unverified'),
+      error: cdpResult?.success === true ? null : (cdpResult?.error || 'TradingView Pine editor CDP write did not verify'),
+      port: context.port,
+      target: context.target,
+      targets: context.targets,
+      endpointAttempts: context.endpointAttempts,
+      discovery: context.discovery,
+      windowInfo: context.windowInfo || null,
+      focus: cdpResult?.focusPayload || null,
+      editor: cdpResult?.readback?.textarea || null,
+      rendered: cdpResult?.readback?.rendered || null,
+      dialog: cdpResult?.readback?.dialog || null,
+      text: cdpResult?.readback?.text || '',
+      renderedText: cdpResult?.readback?.renderedText || '',
+      dialogText: cdpResult?.readback?.dialogText || '',
+      proof: cdpResult?.verification?.proof || null,
+      renderedProof: cdpResult?.verification?.renderedProof || null,
+      compactSummary: cdpResult?.verification?.compactSummary || null,
+      strategyAttempts: Array.isArray(cdpResult?.strategyAttempts) ? cdpResult.strategyAttempts : []
+    };
+  } catch (error) {
+    return {
+      applicable: true,
+      available: false,
+      success: false,
+      fallbackRecommended: true,
+      reason: error?.reason || 'protocol-error',
+      error: error?.message || String(error || 'CDP protocol session failed'),
+      port: context.port,
+      target: context.target,
+      targets: context.targets,
+      endpointAttempts: context.endpointAttempts,
+      discovery: context.discovery,
+      windowInfo: context.windowInfo || null
+    };
+  }
+}
+
+async function setTradingViewPineSaveDialogNameWithCDP(options = {}) {
+  const desiredText = normalizeCompactText(options?.text ?? '', 180);
+  if (!desiredText) {
+    return {
+      applicable: false,
+      available: false,
+      success: false,
+      fallbackRecommended: false,
+      reason: 'save-dialog-name-required',
+      error: 'TradingView save-name dialog authoring requires a non-empty script name.'
+    };
+  }
+
+  const context = await resolveTradingViewRendererCdpContext(options);
+  if (!context?.applicable) {
+    return {
+      applicable: false,
+      available: false,
+      success: false,
+      fallbackRecommended: true,
+      reason: context?.reason || 'window-not-tradingview',
+      error: context?.error || null,
+      port: 0,
+      target: null,
+      targets: [],
+      endpointAttempts: [],
+      discovery: null
+    };
+  }
+
+  if (!context.available) {
+    return {
+      applicable: true,
+      available: false,
+      success: false,
+      fallbackRecommended: true,
+      reason: context.reason || 'remote-debugging-port-not-configured',
+      error: context.error || null,
+      port: context.port,
+      target: context.target,
+      targets: context.targets,
+      endpointAttempts: context.endpointAttempts,
+      discovery: context.discovery,
+      windowInfo: context.windowInfo || null
+    };
+  }
+
+  try {
+    const cdpResult = await withChromiumCdpSession(
+      context.target,
+      {
+        WebSocketCtor: context.cdpDependencies?.WebSocketCtor,
+        openTimeoutMs: Math.max(180, Math.min(1200, Math.round(context.timeout * 0.45))),
+        callTimeoutMs: Math.max(180, Math.min(1200, Math.round(context.timeout * 0.4)))
+      },
+      async (session) => {
+        try {
+          await session.call('Page.bringToFront');
+        } catch {}
+        return await runTradingViewPineEditorTextareaOperationWithCDPSession(session, {
+          operation: 'dialog-force-set',
+          text: desiredText
+        });
+      }
+    );
+
+    const dialogInputValues = Array.isArray(cdpResult?.dialog?.inputValues)
+      ? cdpResult.dialog.inputValues
+      : [];
+    const normalizedDesiredText = desiredText.toLowerCase();
+    const verified = dialogInputValues.some((value) =>
+      normalizeCompactText(value || '', 180).toLowerCase() === normalizedDesiredText
+    );
+    const dialogVisible = cdpResult?.dialogFound === true || !!normalizeCompactText(cdpResult?.dialogText || '', 240);
+
+    return {
+      applicable: true,
+      available: true,
+      success: verified,
+      fallbackRecommended: false,
+      method: verified ? 'ChromiumCDPDialogSetValue' : null,
+      reason: verified
+        ? null
+        : (dialogVisible ? 'dialog-input-readback-mismatch' : 'dialog-input-unavailable'),
+      error: verified
+        ? null
+        : (dialogVisible
+          ? `TradingView save dialog read back ${JSON.stringify(dialogInputValues[0] || '')} instead of ${JSON.stringify(desiredText)}`
+          : 'TradingView save dialog input was not exposed through CDP.'),
+      port: context.port,
+      target: context.target,
+      targets: context.targets,
+      endpointAttempts: context.endpointAttempts,
+      discovery: context.discovery,
+      windowInfo: context.windowInfo || null,
+      dialog: cdpResult?.dialog || null,
+      dialogText: cdpResult?.dialogText || '',
+      dialogFound: dialogVisible,
+      dialogInputApplied: cdpResult?.dialogInputApplied === true,
+      dialogInputValues,
+      previousValueLength: Number(cdpResult?.previousValueLength || 0) || 0,
+      appliedTextLength: Number(cdpResult?.appliedTextLength || 0) || 0,
+      dispatchedBeforeInput: cdpResult?.dispatchedBeforeInput || null,
+      dispatchedInput: cdpResult?.dispatchedInput || null,
+      dispatchedChange: cdpResult?.dispatchedChange || null
+    };
+  } catch (error) {
+    return {
+      applicable: true,
+      available: false,
+      success: false,
+      fallbackRecommended: true,
+      reason: error?.reason || 'protocol-error',
+      error: error?.message || String(error || 'CDP protocol session failed'),
+      port: context.port,
+      target: context.target,
+      targets: context.targets,
+      endpointAttempts: context.endpointAttempts,
+      discovery: context.discovery,
+      windowInfo: context.windowInfo || null
+    };
+  }
+}
+
+function buildTradingViewPineProbeElementDedupKey(element = {}) {
+  const bounds = element?.Bounds || element?.bounds || {};
+  return [
+    normalizeTradingViewPineAnchorText(element?.Name || element?.name || ''),
+    normalizeTradingViewPineAnchorText(element?.AutomationId || element?.automationId || ''),
+    normalizeTradingViewPineAnchorText(element?.ClassName || element?.className || ''),
+    normalizeTradingViewPineAnchorText(element?.ControlType || element?.controlType || ''),
+    Number(bounds?.X ?? bounds?.x ?? 0) || 0,
+    Number(bounds?.Y ?? bounds?.y ?? 0) || 0,
+    Number(bounds?.Width ?? bounds?.width ?? 0) || 0,
+    Number(bounds?.Height ?? bounds?.height ?? 0) || 0
+  ].join('|');
+}
+
+function summarizeTradingViewPineProbeElement(element = null) {
+  if (!element || typeof element !== 'object') return null;
+  const bounds = normalizeBoundsRect(element?.Bounds || element?.bounds || null);
+  return {
+    Name: String(element?.Name || element?.name || ''),
+    ControlType: String(element?.ControlType || element?.controlType || ''),
+    AutomationId: String(element?.AutomationId || element?.automationId || ''),
+    ClassName: String(element?.ClassName || element?.className || ''),
+    Value: normalizeCompactText(element?.Value || element?.value || '', 180) || '',
+    Description: normalizeCompactText(element?.Description || element?.description || '', 180) || '',
+    DefaultAction: normalizeCompactText(element?.DefaultAction || element?.defaultAction || '', 120) || '',
+    LegacyRole: normalizeCompactText(element?.LegacyRole || element?.legacyRole || '', 120) || '',
+    Source: normalizeCompactText(element?.Source || element?.source || '', 80) || '',
+    WindowHandle: Number(element?.WindowHandle || element?.windowHandle || 0) || 0,
+    NativeWindowHandle: Number(element?.NativeWindowHandle || element?.nativeWindowHandle || 0) || 0,
+    Patterns: Array.isArray(element?.Patterns || element?.patterns)
+      ? (element.Patterns || element.patterns).slice(0, 8)
+      : [],
+    IsEnabled: element?.IsEnabled !== undefined ? element.IsEnabled : element?.isEnabled,
+    IsOffscreen: element?.IsOffscreen !== undefined ? element.IsOffscreen : element?.isOffscreen,
+    HasKeyboardFocus: element?.HasKeyboardFocus !== undefined ? element.HasKeyboardFocus : element?.hasKeyboardFocus,
+    IsFocusable: element?.IsFocusable !== undefined ? element.IsFocusable : element?.isFocusable,
+    IsClickable: element?.IsClickable !== undefined ? element.IsClickable : element?.isClickable,
+    Bounds: bounds
+      ? {
+          X: bounds.x,
+          Y: bounds.y,
+          Width: bounds.width,
+          Height: bounds.height,
+          CenterX: bounds.x + Math.round(bounds.width / 2),
+          CenterY: bounds.y + Math.round(bounds.height / 2)
+        }
+      : null
+  };
+}
+
+function scoreTradingViewPineDiagnosticElement(element = {}) {
+  const haystack = normalizeTradingViewPineAnchorText([
+    element?.Name || element?.name || '',
+    element?.AutomationId || element?.automationId || '',
+    element?.ClassName || element?.className || '',
+    element?.Value || element?.value || '',
+    element?.Description || element?.description || '',
+    element?.DefaultAction || element?.defaultAction || '',
+    element?.LegacyRole || element?.legacyRole || '',
+    element?.Source || element?.source || '',
+    element?.ControlType || element?.controlType || ''
+  ].join(' '));
+  if (!haystack) return 0;
+
+  let score = 0;
+  if (/\bpine\b/.test(haystack)) score += 80;
+  if (/\beditor\b/.test(haystack)) score += 44;
+  if (/\bscript\b/.test(haystack)) score += 36;
+  if (/\bpublish\b/.test(haystack)) score += 32;
+  if (/\bsave\b/.test(haystack)) score += 24;
+  if (/\buntitled\b/.test(haystack)) score += 22;
+  if (/\btester\b/.test(haystack)) score += 20;
+  if (/\blogs\b/.test(haystack)) score += 18;
+  if (/\bsource\b/.test(haystack)) score += 14;
+
+  const controlType = String(element?.ControlType || element?.controlType || '');
+  if (/button/i.test(controlType)) score += 18;
+  if (/edit/i.test(controlType)) score += 18;
+  if (/tab/i.test(controlType)) score += 14;
+  if (/text/i.test(controlType)) score += 8;
+  if (/document/i.test(controlType)) score -= 20;
+  if (/pane|custom/i.test(controlType)) score -= 10;
+
+  const patterns = Array.isArray(element?.Patterns || element?.patterns)
+    ? (element.Patterns || element.patterns)
+    : [];
+  if (patterns.some((pattern) => /invoke/i.test(String(pattern || '')))) score += 18;
+  if (patterns.some((pattern) => /value/i.test(String(pattern || '')))) score += 10;
+  if (patterns.some((pattern) => /text/i.test(String(pattern || '')))) score += 10;
+
+  if (element?.HasKeyboardFocus === true || element?.hasKeyboardFocus === true) score += 8;
+  if (element?.IsFocusable === true || element?.isFocusable === true) score += 8;
+  if (element?.IsClickable === true || element?.isClickable === true) score += 8;
+  return score;
+}
+
+function collectTradingViewPineEditorDiagnosticSignals(elements = []) {
+  const signals = [];
+  const seen = new Set();
+
+  for (const element of Array.isArray(elements) ? elements : []) {
+    const score = scoreTradingViewPineDiagnosticElement(element);
+    if (score < 24) continue;
+
+    const summary = summarizeTradingViewPineProbeElement(element);
+    if (!summary) continue;
+
+    const label = normalizeCompactText(
+      summary.Name
+      || summary.AutomationId
+      || summary.ClassName
+      || summary.ControlType,
+      160
+    );
+    if (!label) continue;
+
+    const dedupeKey = `${normalizeTradingViewPineAnchorText(label)}|${normalizeTradingViewPineAnchorText(summary.ControlType || '')}`;
+    if (seen.has(dedupeKey)) continue;
+    seen.add(dedupeKey);
+    signals.push({
+      text: label,
+      score,
+      controlType: summary.ControlType,
+      automationId: summary.AutomationId,
+      className: summary.ClassName,
+      patterns: summary.Patterns,
+      bounds: summary.Bounds
+    });
+  }
+
+  return signals
+    .sort((left, right) => {
+      if (right.score !== left.score) return right.score - left.score;
+      return String(left.text || '').localeCompare(String(right.text || ''));
+    })
+    .slice(0, 12);
+}
+
+async function collectTradingViewPineEditorDiagnosticHostElements(windowHandle = 0, windowInfo = {}, options = {}) {
+  const hwnd = Number(windowHandle || 0) || 0;
+  const diagnosticBounds = buildTradingViewPineSurfaceDiagnosticBounds(windowInfo);
+  const emptyResult = {
+    elements: [],
+    elementSummaries: [],
+    signals: [],
+    attempts: [],
+    diagnosticBounds
+  };
+  if (!hwnd || diagnosticBounds.length === 0) {
+    return emptyResult;
+  }
+
+  const scanPlans = [];
+  for (const diagnosticBound of diagnosticBounds) {
+    scanPlans.push({
+      id: diagnosticBound.id,
+      bounds: diagnosticBound.bounds,
+      query: 'diagnostic-regex',
+      view: 'raw',
+      text: TRADINGVIEW_PINE_EDITOR_DIAGNOSTIC_HOST_REGEX,
+      textMode: 'regex',
+      maxResults: 28,
+      maxDepth: 22,
+      maxVisited: 2600
+    });
+
+    if (diagnosticBound.id !== 'right-workspace') {
+      scanPlans.push({
+        id: diagnosticBound.id,
+        bounds: diagnosticBound.bounds,
+        query: 'diagnostic-sample',
+        view: 'control',
+        text: '',
+        textMode: 'contains',
+        maxResults: diagnosticBound.id === 'full-window-content' ? 56 : 36,
+        maxDepth: 18,
+        maxVisited: 2200,
+        skipRootMatch: true
+      });
+    }
+  }
+
+  const totalTimeout = Number.isFinite(Number(options?.timeout || options?.timeoutMs))
+    ? Math.max(400, Math.min(Math.round(Number(options.timeout || options.timeoutMs)), 2200))
+    : 1000;
+  const perAttemptTimeout = Math.max(180, Math.min(420, Math.round(totalTimeout / Math.max(1, scanPlans.length))));
+  const seenElements = new Set();
+  const collectedElements = [];
+  const attempts = [];
+
+  for (const plan of scanPlans) {
+    const scanResult = await findElementsByWindowWithHost(plan.text, {
+      windowHandle: hwnd,
+      timeout: perAttemptTimeout,
+      maxResults: plan.maxResults,
+      maxDepth: plan.maxDepth,
+      maxVisited: plan.maxVisited,
+      includeDisabled: true,
+      includeOffscreen: false,
+      bounds: plan.bounds,
+      textMode: plan.textMode,
+      view: plan.view,
+      skipRootMatch: plan.skipRootMatch === true
+    });
+    attempts.push({
+      id: plan.id,
+      bounds: plan.bounds,
+      view: plan.view,
+      query: plan.query,
+      success: scanResult?.success === true,
+      count: Number(scanResult?.count || 0) || 0,
+      stats: scanResult?.stats || null,
+      error: scanResult?.error || null
+    });
+
+    if (scanResult?.success && Array.isArray(scanResult.elements)) {
+      for (const element of scanResult.elements) {
+        const taggedElement = {
+          ...element,
+          LikuPineProbeScanId: plan.id,
+          LikuPineProbeView: plan.view,
+          LikuPineProbeSource: 'diagnostic-host-scan'
+        };
+        const dedupeKey = buildTradingViewPineProbeElementDedupKey(taggedElement);
+        if (seenElements.has(dedupeKey)) continue;
+        seenElements.add(dedupeKey);
+        collectedElements.push(taggedElement);
+      }
+    }
+
+    if (collectTradingViewPineEditorHostAnchors(collectedElements, options).length > 0) {
+      break;
+    }
+  }
+
+  return {
+    elements: collectedElements,
+    elementSummaries: collectedElements
+      .map((element) => summarizeTradingViewPineProbeElement(element))
+      .filter(Boolean)
+      .slice(0, 12),
+    signals: collectTradingViewPineEditorDiagnosticSignals(collectedElements),
+    attempts,
+    diagnosticBounds
+  };
+}
+
+async function collectTradingViewPineEditorDocumentHostElements(windowHandle = 0, scanBounds = [], options = {}) {
+  const hwnd = Number(windowHandle || 0) || 0;
+  const boundsPlans = Array.isArray(scanBounds)
+    ? scanBounds
+      .map((entry) => ({
+        id: String(entry?.id || 'lower-panel'),
+        bounds: normalizeBoundsRect(entry?.bounds || entry || null)
+      }))
+      .filter((entry) => entry.bounds)
+    : [];
+  const emptyResult = {
+    elements: [],
+    elementSummaries: [],
+    rootSummaries: [],
+    signals: [],
+    attempts: []
+  };
+  if (!hwnd || boundsPlans.length === 0) {
+    return emptyResult;
+  }
+
+  const totalTimeout = Number.isFinite(Number(options?.timeout || options?.timeoutMs))
+    ? Math.max(320, Math.min(Math.round(Number(options.timeout || options.timeoutMs)), 1800))
+    : 900;
+  const perAttemptTimeout = Math.max(180, Math.min(520, Math.round(totalTimeout / Math.max(1, boundsPlans.length))));
+  const seenElements = new Set();
+  const seenRoots = new Set();
+  const collectedElements = [];
+  const collectedRoots = [];
+  const attempts = [];
+
+  for (const plan of boundsPlans) {
+    const probeResult = await probeWindowAccessibilityWithHost({
+      windowHandle: hwnd,
+      bounds: plan.bounds,
+      timeout: perAttemptTimeout,
+      maxResults: 24,
+      maxRoots: 3,
+      maxDepth: 20,
+      maxVisited: 1600,
+      includeDisabled: true,
+      includeOffscreen: false,
+      rootControlType: 'Document',
+      rootClassName: 'Chrome_RenderWidgetHostHWND'
+    });
+
+    attempts.push({
+      id: plan.id,
+      bounds: plan.bounds,
+      success: probeResult?.success === true,
+      count: Number(probeResult?.count || 0) || 0,
+      rootCount: Number(probeResult?.rootCount || 0) || 0,
+      stats: probeResult?.stats || null,
+      error: probeResult?.error || null
+    });
+
+    if (!probeResult?.success) {
+      continue;
+    }
+
+    for (const element of Array.isArray(probeResult?.elements) ? probeResult.elements : []) {
+      const taggedElement = {
+        ...element,
+        LikuPineProbeScanId: plan.id,
+        LikuPineProbeView: 'document',
+        LikuPineProbeSource: 'document-accessibility-probe'
+      };
+      const dedupeKey = buildTradingViewPineProbeElementDedupKey(taggedElement);
+      if (seenElements.has(dedupeKey)) continue;
+      seenElements.add(dedupeKey);
+      collectedElements.push(taggedElement);
+    }
+
+    for (const root of Array.isArray(probeResult?.roots) ? probeResult.roots : []) {
+      const taggedRoot = {
+        ...root,
+        LikuPineProbeScanId: plan.id,
+        LikuPineProbeView: 'document-root',
+        LikuPineProbeSource: 'document-accessibility-root'
+      };
+      const dedupeKey = buildTradingViewPineProbeElementDedupKey(taggedRoot);
+      if (seenRoots.has(dedupeKey)) continue;
+      seenRoots.add(dedupeKey);
+      collectedRoots.push(taggedRoot);
+    }
+
+    if (collectTradingViewPineEditorHostAnchors(collectedElements, options).length > 0) {
+      break;
+    }
+  }
+
+  return {
+    elements: collectedElements,
+    elementSummaries: collectedElements
+      .map((element) => summarizeTradingViewPineProbeElement(element))
+      .filter(Boolean)
+      .slice(0, 16),
+    rootSummaries: collectedRoots
+      .map((root) => summarizeTradingViewPineProbeElement(root))
+      .filter(Boolean)
+      .slice(0, 8),
+    signals: collectTradingViewPineEditorDiagnosticSignals(collectedElements),
+    attempts
+  };
+}
+
+async function collectTradingViewPineEditorPointProbeElements(windowHandle = 0, scanBounds = [], options = {}) {
+  const primaryBounds = normalizeBoundsRect(scanBounds?.[0]?.bounds || scanBounds?.[0] || null);
+  const emptyResult = {
+    elements: [],
+    attempts: [],
+    usedWindowScopedHost: false,
+    usedGlobalFallback: false
+  };
+  if (!primaryBounds) {
+    return emptyResult;
+  }
+
+  try {
+    const ui = require('./ui-automation');
+    const host = ui.getSharedUIAHost();
+    const targetWindowHandle = Number(windowHandle || 0) || 0;
+    const canUseWindowScopedHost = targetWindowHandle > 0 && typeof host?.elementFromPointInWindow === 'function';
+    const canUseGlobalFallback = typeof host?.elementFromPoint === 'function';
+    if (!canUseWindowScopedHost && !canUseGlobalFallback) {
+      return emptyResult;
+    }
+
+    const sampled = [];
+    const seen = new Set();
+    const attempts = [];
+    const xRatios = [0.18, 0.38, 0.62, 0.82];
+    const yRatios = [0.08, 0.28, 0.62];
+    const totalTimeout = Number.isFinite(Number(options?.timeout || options?.timeoutMs))
+      ? Math.max(250, Math.min(Math.round(Number(options.timeout || options.timeoutMs)), 2500))
+      : 1200;
+    const sampleCount = Math.max(1, xRatios.length * yRatios.length);
+    const perProbeTimeout = Math.max(90, Math.min(260, Math.round(totalTimeout / sampleCount)));
+
+    const summarizePointProbeElement = (element) => {
+      if (!element || typeof element !== 'object') return null;
+      return {
+        Name: String(element?.Name || ''),
+        ControlType: String(element?.ControlType || ''),
+        WindowHandle: Number(element?.WindowHandle || 0) || 0,
+        Bounds: element?.Bounds || null
+      };
+    };
+
+    const addSampledElement = (element) => {
+      if (!element) return;
+      const bounds = element?.Bounds || {};
+      const dedupeKey = [
+        normalizeTradingViewPineAnchorText(element?.Name || ''),
+        Number(bounds?.X || 0) || 0,
+        Number(bounds?.Y || 0) || 0,
+        Number(bounds?.Width || 0) || 0,
+        Number(bounds?.Height || 0) || 0
+      ].join('|');
+      if (seen.has(dedupeKey)) return;
+      seen.add(dedupeKey);
+      sampled.push({
+        ...element,
+        LikuPineProbeScanId: String(scanBounds?.[0]?.id || 'point-sample'),
+        LikuPineProbeView: 'raw',
+        LikuPineProbeSource: 'point-probe'
+      });
+    };
+
+    for (const yRatio of yRatios) {
+      const y = Math.round(primaryBounds.y + Math.max(12, Math.min(primaryBounds.height - 12, primaryBounds.height * yRatio)));
+      for (const xRatio of xRatios) {
+        const x = Math.round(primaryBounds.x + Math.max(12, Math.min(primaryBounds.width - 12, primaryBounds.width * xRatio)));
+        let shouldUseGlobalFallback = canUseGlobalFallback && !canUseWindowScopedHost;
+
+        if (canUseWindowScopedHost) {
+          try {
+            const response = await host.elementFromPointInWindow(targetWindowHandle, x, y, {
+              view: 'raw',
+              maxDepth: 18,
+              maxVisited: 1400,
+              timeoutMs: perProbeTimeout,
+              includeOffscreen: false,
+              includeDisabled: true
+            });
+            const element = normalizeHostElementForFind(response?.element);
+            attempts.push({
+              x,
+              y,
+              mode: 'window-scoped',
+              windowHandle: targetWindowHandle,
+              matchedBy: response?.matchedBy || null,
+              directHitWithinWindow: response?.directHitWithinWindow === true,
+              stats: response?.stats || null,
+              element: summarizePointProbeElement(element),
+              error: null
+            });
+            if (element) {
+              addSampledElement(element);
+              continue;
+            }
+            shouldUseGlobalFallback = canUseGlobalFallback;
+          } catch (error) {
+            const errorMessage = error?.message || String(error || 'window-scoped point probe failed');
+            attempts.push({
+              x,
+              y,
+              mode: 'window-scoped',
+              windowHandle: targetWindowHandle,
+              matchedBy: null,
+              directHitWithinWindow: null,
+              stats: null,
+              element: null,
+              error: errorMessage
+            });
+            shouldUseGlobalFallback = canUseGlobalFallback
+              && !/no matching element in target window at point|window handle not found|fromhandle failed/i.test(errorMessage);
+          }
+        }
+
+        if (!shouldUseGlobalFallback) {
+          continue;
+        }
+
+        let fallbackElement = null;
+        let fallbackError = null;
+        try {
+          fallbackElement = normalizeHostElementForFind(await host.elementFromPoint(x, y));
+        } catch (error) {
+          fallbackError = error?.message || String(error || 'global point probe failed');
+        }
+
+        attempts.push({
+          x,
+          y,
+          mode: 'global-fallback',
+          windowHandle: targetWindowHandle || null,
+          matchedBy: null,
+          directHitWithinWindow: null,
+          stats: null,
+          element: summarizePointProbeElement(fallbackElement),
+          error: fallbackError
+        });
+        if (fallbackElement) {
+          addSampledElement(fallbackElement);
+        }
+      }
+    }
+
+    return {
+      elements: sampled,
+      attempts,
+      usedWindowScopedHost: canUseWindowScopedHost,
+      usedGlobalFallback: attempts.some((attempt) => attempt?.mode === 'global-fallback')
+    };
+  } catch {
+    return emptyResult;
+  }
+}
+
+async function probeTradingViewPineEditorSurface(options = {}) {
+  const explicitWindowHandle = Number(options?.windowHandle || options?.hwnd || 0) || 0;
+  const timeout = Number.isFinite(Number(options?.timeout || options?.timeoutMs))
+    ? Math.max(250, Math.min(Math.round(Number(options.timeout || options.timeoutMs)), 2500))
+    : 1400;
+  const allowRendererProof = options?.allowRendererProof !== false;
+  const resolveWindowState = options?.resolveWindowState !== false;
+  const allowPointProbe = options?.allowPointProbe !== false;
+  const allowDiagnosticScan = options?.allowDiagnosticScan !== false;
+  const evidenceMode = String(options?.pineEvidenceMode || options?.evidenceMode || '').trim().toLowerCase();
+  const requestedScanViews = Array.isArray(options?.scanViews)
+    ? options.scanViews
+      .map((view) => String(view || '').trim().toLowerCase())
+      .filter((view) => ['content', 'control', 'raw'].includes(view))
+    : [];
+  const scanViews = requestedScanViews.length > 0 ? requestedScanViews : ['content', 'control', 'raw'];
+  const minScanAttemptTimeout = Number.isFinite(Number(options?.minScanAttemptTimeout))
+    ? Math.max(120, Math.min(450, Math.round(Number(options.minScanAttemptTimeout))))
+    : 450;
+  const expectedScriptName = normalizeCompactText(
+    options?.pineExpectedScriptName || options?.expectedScriptName || options?.scriptName || '',
+    180
+  );
+
+  let foreground = summarizeTradingViewPineActivationForeground(options?.foreground || null);
+  let windowInfo = summarizeTradingViewPineActivationWindowInfo(options?.windowInfo || null);
+
+  if (!windowInfo?.success && explicitWindowHandle > 0 && resolveWindowState) {
+    try {
+      const candidate = await getWindowInfoByHandle(explicitWindowHandle);
+      if (candidate?.success) {
+        windowInfo = candidate;
+      }
+    } catch {}
+  }
+
+  if (!foreground?.success && resolveWindowState) {
+    try {
+      foreground = await getForegroundWindowInfo();
+    } catch {}
+  }
 
   if (!windowInfo?.success && foreground?.success) {
     windowInfo = foreground;
@@ -1027,7 +5179,8 @@ async function probeTradingViewPineEditorSurface(options = {}) {
     return {
       active: false,
       foreground: foreground?.success ? foreground : windowInfo?.success ? windowInfo : null,
-      reason: 'foreground-not-tradingview'
+      reason: 'foreground-not-tradingview',
+      rendererProof: null
     };
   }
 
@@ -1036,40 +5189,578 @@ async function probeTradingViewPineEditorSurface(options = {}) {
     return {
       active: false,
       foreground: windowInfo,
-      reason: 'missing-window-handle'
+      reason: 'missing-window-handle',
+      rendererProof: null
     };
   }
 
-  const scanBounds = buildTradingViewLowerPanelBounds(windowInfo);
-  if (!scanBounds) {
+  const rendererProof = allowRendererProof
+    ? await probeTradingViewPineEditorRendererWithCDP({
+        windowHandle: hwnd,
+        windowInfo,
+        foreground,
+        resolveWindowState: false,
+        timeout: Math.max(
+          MIN_TRADINGVIEW_PINE_RENDERER_PROOF_TIMEOUT_MS,
+          Math.min(Math.round(timeout * 0.58), 1200)
+        ),
+        pineExpectedScriptName: expectedScriptName,
+        cdpPort: options?.cdpPort || 0,
+        cdpDependencies: options?.cdpDependencies || null
+      })
+    : null;
+  const rendererVisibleAnchorEntries = summarizeTradingViewPineVisibleAnchorEntries(
+    rendererProof?.signals || [],
+    rendererProof?.matchedBy || null
+  );
+  const rendererProvidesExpectedTitleProof = expectedScriptName
+    ? extractTradingViewPineExpectedTitleProof({
+        matchedBy: rendererProof?.matchedBy || null,
+        visibleAnchorEntries: rendererVisibleAnchorEntries,
+        rendererProof
+      }, expectedScriptName).visible === true
+    : false;
+  if (
+    rendererProof?.available === true
+    && rendererProof?.active === true
+    && (!expectedScriptName || rendererProvidesExpectedTitleProof)
+  ) {
+    return {
+      active: true,
+      foreground: windowInfo,
+      windowInfo,
+      searchBounds: null,
+      scanBounds: [],
+      scanAttempts: [],
+      documentProbeAttempts: [],
+      documentProbeSignals: [],
+      documentProbeRoots: [],
+      documentProbeElements: [],
+      pointProbeAttempts: [],
+      pointProbeUsedWindowScopedHost: false,
+      pointProbeUsedGlobalFallback: false,
+      diagnosticBounds: [],
+      diagnosticAttempts: [],
+      diagnosticSignals: [],
+      diagnosticElements: [],
+      matchedBy: rendererProof.matchedBy || 'chromium-cdp-dom',
+      element: null,
+      anchorText: rendererProof.anchorText || null,
+      pointProbeElements: [],
+      visibleAnchors: Array.isArray(rendererProof?.signals)
+        ? rendererProof.signals.map((signal) => signal?.text).filter(Boolean).slice(0, 8)
+        : [],
+      visibleAnchorEntries: rendererVisibleAnchorEntries,
+      rendererProof
+    };
+  }
+
+  const scanBounds = buildTradingViewPineSurfaceScanBounds(windowInfo);
+  if (!Array.isArray(scanBounds) || scanBounds.length === 0) {
+    if (rendererProof?.active === true) {
+      return {
+        active: true,
+        foreground: windowInfo,
+        windowInfo,
+        searchBounds: null,
+        scanBounds: [],
+        scanAttempts: [],
+        documentProbeAttempts: [],
+        documentProbeSignals: [],
+        documentProbeRoots: [],
+        documentProbeElements: [],
+        pointProbeAttempts: [],
+        pointProbeUsedWindowScopedHost: false,
+        pointProbeUsedGlobalFallback: false,
+        diagnosticBounds: [],
+        diagnosticAttempts: [],
+        diagnosticSignals: [],
+        diagnosticElements: [],
+        matchedBy: rendererProof.matchedBy || 'chromium-cdp-dom',
+        element: null,
+        anchorText: rendererProof.anchorText || null,
+        pointProbeElements: [],
+        visibleAnchors: rendererVisibleAnchorEntries.map((entry) => entry?.text).filter(Boolean).slice(0, 8),
+        visibleAnchorEntries: rendererVisibleAnchorEntries,
+        reason: expectedScriptName ? 'save-title-unverified' : null,
+        rendererProof
+      };
+    }
+
     return {
       active: false,
       foreground: windowInfo,
-      reason: 'missing-lower-panel-bounds'
+      reason: 'missing-lower-panel-bounds',
+      rendererProof
     };
   }
-
-  const scanOptions = {
-    windowHandle: hwnd,
-    timeout,
-    maxResults: 120,
-    maxDepth: 18,
-    maxVisited: 1600,
-    includeDisabled: true,
-    bounds: scanBounds
-  };
 
   const scanAttempts = [];
   const seenElements = new Set();
   const collectedElements = [];
+  const perAttemptTimeout = Math.max(
+    minScanAttemptTimeout,
+    Math.min(900, Math.round(timeout / Math.max(1, scanBounds.length * scanViews.length)) || minScanAttemptTimeout)
+  );
+  const hostSurfaceRegex = buildTradingViewPineSurfaceHostRegex({
+    pineExpectedScriptName: expectedScriptName
+  });
+  let matchedScanId = null;
 
-  for (const view of ['control', 'raw']) {
-    const scanResult = await findElementsByWindowWithHost('', {
-      ...scanOptions,
-      view
+  for (const scanBound of scanBounds) {
+    for (const view of scanViews) {
+      const scanResult = await findElementsByWindowWithHost(hostSurfaceRegex, {
+        windowHandle: hwnd,
+        timeout: perAttemptTimeout,
+        maxResults: 32,
+        maxDepth: 20,
+        maxVisited: 2200,
+        includeDisabled: true,
+        bounds: scanBound.bounds,
+        textMode: 'regex',
+        view
+      });
+      scanAttempts.push({
+        id: scanBound.id,
+        bounds: scanBound.bounds,
+        view,
+        success: scanResult?.success === true,
+        count: Number(scanResult?.count || 0) || 0,
+        stats: scanResult?.stats || null,
+        error: scanResult?.error || null
+      });
+
+      if (!scanResult?.success || !Array.isArray(scanResult.elements)) {
+        continue;
+      }
+
+      for (const element of scanResult.elements) {
+        const taggedElement = {
+          ...element,
+          LikuPineProbeScanId: scanBound.id,
+          LikuPineProbeView: view,
+          LikuPineProbeSource: 'window-host-scan'
+        };
+        const bounds = taggedElement?.Bounds || {};
+        const dedupeKey = [
+          normalizeTradingViewPineAnchorText(taggedElement?.Name || ''),
+          Number(taggedElement?.WindowHandle || 0) || 0,
+          Number(bounds?.X || 0) || 0,
+          Number(bounds?.Y || 0) || 0,
+          Number(bounds?.Width || 0) || 0,
+          Number(bounds?.Height || 0) || 0
+        ].join('|');
+        if (seenElements.has(dedupeKey)) continue;
+        seenElements.add(dedupeKey);
+        collectedElements.push(taggedElement);
+      }
+
+      const collectedAnchors = collectTradingViewPineEditorHostAnchors(collectedElements, {
+        pineExpectedScriptName: expectedScriptName
+      });
+      if (collectedAnchors.length > 0 && !matchedScanId) {
+        matchedScanId = scanBound.id;
+      }
+      if (
+        collectedAnchors.length > 0
+        && (
+          evidenceMode !== 'save-status'
+          || !isTradingViewPineTitleOnlyAnchorSet(collectedAnchors)
+        )
+      ) {
+        break;
+      }
+    }
+
+    if (matchedScanId && evidenceMode !== 'save-status') {
+      break;
+    }
+  }
+
+  const anchors = collectTradingViewPineEditorHostAnchors(collectedElements, {
+    pineExpectedScriptName: expectedScriptName
+  });
+  const matchedAnchorsNeedDiagnostic = evidenceMode === 'save-status' && isTradingViewPineTitleOnlyAnchorSet(anchors);
+  const documentProbe = anchors.length === 0
+    ? await collectTradingViewPineEditorDocumentHostElements(hwnd, scanBounds, {
+        timeout,
+        pineExpectedScriptName: expectedScriptName
+      })
+    : null;
+  const documentProbeElements = Array.isArray(documentProbe?.elements)
+    ? documentProbe.elements
+    : [];
+  const documentProbeAttempts = Array.isArray(documentProbe?.attempts)
+    ? documentProbe.attempts
+    : [];
+  const documentProbeSignals = Array.isArray(documentProbe?.signals)
+    ? documentProbe.signals
+    : [];
+  const documentProbeRoots = Array.isArray(documentProbe?.rootSummaries)
+    ? documentProbe.rootSummaries
+    : [];
+  const documentProbeElementSummaries = Array.isArray(documentProbe?.elementSummaries)
+    ? documentProbe.elementSummaries
+    : [];
+  const documentAnchors = anchors.length === 0
+    ? collectTradingViewPineEditorHostAnchors(documentProbeElements, {
+        pineExpectedScriptName: expectedScriptName
+      })
+    : [];
+  const pointProbe = allowPointProbe && anchors.length === 0 && documentAnchors.length === 0
+    ? await collectTradingViewPineEditorPointProbeElements(hwnd, scanBounds, { timeout })
+    : null;
+  const pointProbeElements = Array.isArray(pointProbe?.elements)
+    ? pointProbe.elements
+    : [];
+  const pointProbeAttempts = Array.isArray(pointProbe?.attempts)
+    ? pointProbe.attempts
+    : [];
+  const pointAnchors = anchors.length === 0 && documentAnchors.length === 0
+    ? collectTradingViewPineEditorHostAnchors(pointProbeElements, {
+        pineExpectedScriptName: expectedScriptName
+      })
+    : [];
+  const matchedAnchors = anchors.length > 0
+    ? anchors
+    : documentAnchors.length > 0
+      ? documentAnchors
+      : pointAnchors;
+  const diagnosticHostScan = allowDiagnosticScan && (matchedAnchors.length === 0 || matchedAnchorsNeedDiagnostic)
+    ? await collectTradingViewPineEditorDiagnosticHostElements(hwnd, windowInfo, {
+        timeout,
+        pineExpectedScriptName: expectedScriptName
+      })
+    : null;
+  const diagnosticAnchors = (matchedAnchors.length === 0 || matchedAnchorsNeedDiagnostic)
+    ? collectTradingViewPineEditorHostAnchors(diagnosticHostScan?.elements || [], {
+        pineExpectedScriptName: expectedScriptName
+      })
+    : [];
+  const diagnosticSignals = Array.isArray(diagnosticHostScan?.signals)
+    ? diagnosticHostScan.signals
+    : [];
+  const diagnosticAttempts = Array.isArray(diagnosticHostScan?.attempts)
+    ? diagnosticHostScan.attempts
+    : [];
+  const diagnosticElements = Array.isArray(diagnosticHostScan?.elementSummaries)
+    ? diagnosticHostScan.elementSummaries
+    : [];
+  const diagnosticBounds = Array.isArray(diagnosticHostScan?.diagnosticBounds)
+    ? diagnosticHostScan.diagnosticBounds
+    : [];
+  const finalAnchors = matchedAnchorsNeedDiagnostic
+    ? mergeTradingViewPineAnchorMatches(matchedAnchors, diagnosticAnchors)
+    : (matchedAnchors.length > 0 ? matchedAnchors : diagnosticAnchors);
+  if (!finalAnchors.length) {
+    if (rendererProof?.active === true) {
+      return {
+        active: true,
+        foreground: windowInfo,
+        windowInfo,
+        searchBounds: scanBounds[0]?.bounds || null,
+        scanBounds,
+        scanAttempts,
+        documentProbeAttempts: documentProbeAttempts.slice(0, 8),
+        documentProbeSignals,
+        documentProbeRoots,
+        documentProbeElements: documentProbeElementSummaries,
+        pointProbeAttempts: pointProbeAttempts.slice(0, 12),
+        pointProbeUsedWindowScopedHost: pointProbe?.usedWindowScopedHost === true,
+        pointProbeUsedGlobalFallback: pointProbe?.usedGlobalFallback === true,
+        pointProbeElements: pointProbeElements.slice(0, 8),
+        diagnosticBounds,
+        diagnosticAttempts: diagnosticAttempts.slice(0, 12),
+        diagnosticSignals,
+        diagnosticElements,
+        matchedBy: rendererProof.matchedBy || 'chromium-cdp-dom',
+        element: null,
+        anchorText: rendererProof.anchorText || null,
+        visibleAnchors: rendererVisibleAnchorEntries.map((entry) => entry?.text).filter(Boolean).slice(0, 8),
+        visibleAnchorEntries: rendererVisibleAnchorEntries,
+        reason: expectedScriptName ? 'save-title-unverified' : null,
+        rendererProof
+      };
+    }
+
+    return {
+      active: false,
+      foreground: windowInfo,
+      windowInfo,
+      searchBounds: scanBounds[0]?.bounds || null,
+      scanBounds,
+      scanAttempts,
+      documentProbeAttempts: documentProbeAttempts.slice(0, 8),
+      documentProbeSignals,
+      documentProbeRoots,
+      documentProbeElements: documentProbeElementSummaries,
+      pointProbeAttempts: pointProbeAttempts.slice(0, 12),
+      pointProbeUsedWindowScopedHost: pointProbe?.usedWindowScopedHost === true,
+      pointProbeUsedGlobalFallback: pointProbe?.usedGlobalFallback === true,
+      pointProbeElements: pointProbeElements.slice(0, 8),
+      diagnosticBounds,
+      diagnosticAttempts: diagnosticAttempts.slice(0, 12),
+      diagnosticSignals,
+      diagnosticElements,
+      visibleAnchors: [],
+      visibleAnchorEntries: [],
+      reason: rendererProof?.available === false
+        ? (rendererProof.reason || 'renderer-proof-unavailable')
+        : 'no-visible-pine-anchor',
+      rendererProof
+    };
+  }
+
+  const finalMatchedBy = anchors.length > 0
+    ? (/panel-header/i.test(String(matchedScanId || ''))
+      ? 'uia-host-pine-surface-header-scan'
+      : 'uia-host-pine-surface-scan')
+    : (documentAnchors.length > 0
+      ? 'uia-host-pine-surface-accessibility-probe'
+      : (pointAnchors.length > 0
+      ? 'uia-host-pine-surface-point-sample'
+      : 'uia-host-pine-surface-diagnostic-scan'));
+  const visibleAnchorEntries = summarizeTradingViewPineVisibleAnchorEntries(finalAnchors, finalMatchedBy);
+
+  return {
+    active: true,
+    foreground: windowInfo,
+    windowInfo,
+    searchBounds: scanBounds[0]?.bounds || null,
+    scanBounds,
+    scanAttempts,
+    documentProbeAttempts: documentProbeAttempts.slice(0, 8),
+    documentProbeSignals,
+    documentProbeRoots,
+    documentProbeElements: documentProbeElementSummaries,
+    pointProbeAttempts: pointProbeAttempts.slice(0, 12),
+    pointProbeUsedWindowScopedHost: pointProbe?.usedWindowScopedHost === true,
+    pointProbeUsedGlobalFallback: pointProbe?.usedGlobalFallback === true,
+    diagnosticBounds,
+    diagnosticAttempts: diagnosticAttempts.slice(0, 12),
+    diagnosticSignals,
+    diagnosticElements,
+    matchedBy: finalMatchedBy,
+    element: finalAnchors[0].element,
+    anchorText: finalAnchors[0].text,
+    pointProbeElements: pointProbeElements.slice(0, 8),
+    visibleAnchors: finalAnchors.map((entry) => entry.text).slice(0, 8),
+    visibleAnchorEntries,
+    rendererProof
+  };
+}
+
+function getTradingViewPineActivationProofTimeoutMs(options = {}) {
+  const configuredTimeout = Number(options?.timeoutMs || options?.timeout || process.env.LIKU_TRADINGVIEW_PINE_ACTIVATION_PROOF_TIMEOUT_MS || 0);
+  if (Number.isFinite(configuredTimeout) && configuredTimeout >= MIN_TRADINGVIEW_PINE_ACTIVATION_PROOF_TIMEOUT_MS) {
+    return Math.round(configuredTimeout);
+  }
+
+  return DEFAULT_TRADINGVIEW_PINE_ACTIVATION_PROOF_TIMEOUT_MS;
+}
+
+function isTradingViewSemanticPineIconAction(action = {}) {
+  const actionType = String(action?.type || '').trim().toLowerCase();
+  const routeId = String(action?.searchSurfaceContract?.id || '').trim().toLowerCase();
+  const route = String(action?.searchSurfaceContract?.route || '').trim().toLowerCase();
+  const shortcutId = String(action?.tradingViewShortcut?.id || '').trim().toLowerCase();
+  const verifyTarget = String(action?.verify?.target || '').trim().toLowerCase();
+
+  return actionType === 'click_element'
+    && routeId === 'open-pine-editor'
+    && route === 'semantic-icon'
+    && (shortcutId === 'open-pine-editor' || verifyTarget === 'pine-editor');
+}
+
+function summarizeTradingViewPineActivationForeground(foreground = null) {
+  if (!foreground || typeof foreground !== 'object') return null;
+
+  return {
+    success: foreground.success !== false,
+    hwnd: Number(foreground.hwnd || 0) || 0,
+    pid: Number(foreground.pid || foreground.processId || 0) || 0,
+    processId: Number(foreground.processId || foreground.pid || 0) || 0,
+    processName: normalizeCompactText(foreground.processName || '', 80),
+    title: normalizeCompactText(foreground.title || '', 220),
+    windowKind: normalizeCompactText(foreground.windowKind || '', 40),
+    bounds: normalizeBoundsRect(foreground.bounds || foreground.Bounds || null)
+  };
+}
+
+function summarizeTradingViewPineActivationWindowInfo(windowInfo = null) {
+  if (!windowInfo || typeof windowInfo !== 'object') return null;
+
+  return {
+    success: windowInfo.success !== false,
+    hwnd: Number(windowInfo.hwnd || 0) || 0,
+    pid: Number(windowInfo.pid || windowInfo.processId || 0) || 0,
+    processId: Number(windowInfo.processId || windowInfo.pid || 0) || 0,
+    processName: normalizeCompactText(windowInfo.processName || '', 80),
+    title: normalizeCompactText(windowInfo.title || '', 220),
+    windowKind: normalizeCompactText(windowInfo.windowKind || '', 40),
+    bounds: normalizeBoundsRect(windowInfo.bounds || windowInfo.Bounds || null)
+  };
+}
+
+function buildTradingViewPineActivationStructureBounds(windowInfo = {}) {
+  const candidates = [];
+  const lowerPanelBounds = buildTradingViewPineSurfaceScanBounds(windowInfo);
+  const fullWindowBounds = buildTradingViewPineSurfaceDiagnosticBounds(windowInfo)
+    .find((entry) => entry?.id === 'full-window-content');
+
+  if (lowerPanelBounds[0]?.bounds) {
+    candidates.push({
+      id: lowerPanelBounds[0].id || 'panel-header-and-body',
+      bounds: lowerPanelBounds[0].bounds,
+      view: 'control',
+      maxResults: 18,
+      maxDepth: 18,
+      maxVisited: 1600
     });
-    scanAttempts.push({
-      view,
+  }
+
+  if (fullWindowBounds?.bounds) {
+    candidates.push({
+      id: fullWindowBounds.id || 'full-window-content',
+      bounds: fullWindowBounds.bounds,
+      view: 'control',
+      maxResults: 28,
+      maxDepth: 14,
+      maxVisited: 1500
+    });
+  }
+
+  const seen = new Set();
+  return candidates.filter((candidate) => {
+    const rect = normalizeBoundsRect(candidate?.bounds || null);
+    if (!rect) return false;
+    const dedupeKey = `${rect.x}|${rect.y}|${rect.width}|${rect.height}`;
+    if (seen.has(dedupeKey)) return false;
+    seen.add(dedupeKey);
+    return true;
+  });
+}
+
+function summarizeTradingViewPineActivationFocusLabel(summary = null) {
+  if (!summary || typeof summary !== 'object') return null;
+  return normalizeCompactText(
+    summary.Name
+    || summary.AutomationId
+    || summary.ClassName
+    || summary.ControlType
+    || '',
+    120
+  );
+}
+
+function buildTradingViewPineActivationStructureElementKey(summary = {}) {
+  if (!summary || typeof summary !== 'object') return '';
+  const bounds = summary.Bounds || {};
+  return [
+    normalizeTradingViewPineAnchorText(summary.Name || ''),
+    normalizeTradingViewPineAnchorText(summary.AutomationId || ''),
+    normalizeTradingViewPineAnchorText(summary.ClassName || ''),
+    normalizeTradingViewPineAnchorText(summary.ControlType || ''),
+    Math.round((Number(bounds.X || 0) || 0) / 24),
+    Math.round((Number(bounds.Y || 0) || 0) / 24),
+    Math.round((Number(bounds.Width || 0) || 0) / 24),
+    Math.round((Number(bounds.Height || 0) || 0) / 24)
+  ].join('|');
+}
+
+function isLikelyTradingViewPineActivationStructureNoise(summary = {}) {
+  if (!summary || typeof summary !== 'object') return true;
+
+  const label = normalizeCompactText(summary.Name || summary.AutomationId || '', 120) || '';
+  const haystack = normalizeTradingViewPineAnchorText([
+    summary.Name || '',
+    summary.AutomationId || '',
+    summary.ClassName || '',
+    summary.Value || ''
+  ].join(' '));
+  const controlType = normalizeTradingViewPineAnchorText(summary.ControlType || '');
+  const patterns = Array.isArray(summary.Patterns) ? summary.Patterns : [];
+  const hasPatternSignal = patterns.some((pattern) => /invoke|value|text|selection/i.test(String(pattern || '')));
+
+  if (/live stock index futures forex and bitcoin charts on tradingview/.test(haystack)) {
+    return true;
+  }
+
+  if (/^[+\-]?\d+(?:[.,]\d+)*(?:%|k|m|b)?$/i.test(label)) {
+    return true;
+  }
+
+  if (/^(?:open|high|low|close|vol|volume)\b/i.test(label)) {
+    return true;
+  }
+
+  if (/^[a-z0-9._-]{1,16}\s*[▲▼]/i.test(label)) {
+    return true;
+  }
+
+  if (!label && !hasPatternSignal && !summary.HasKeyboardFocus && !summary.IsFocusable && !summary.IsClickable) {
+    return true;
+  }
+
+  if (/controltype\.(?:document|pane|custom)$/i.test(controlType) && !label && !summary.HasKeyboardFocus) {
+    return true;
+  }
+
+  return false;
+}
+
+function summarizeTradingViewPineActivationStructureElement(summary = null) {
+  if (!summary || typeof summary !== 'object') return null;
+  return {
+    label: summarizeTradingViewPineActivationFocusLabel(summary),
+    controlType: normalizeCompactText(summary.ControlType || '', 60),
+    automationId: normalizeCompactText(summary.AutomationId || '', 80),
+    className: normalizeCompactText(summary.ClassName || '', 80),
+    bounds: normalizeBoundsRect(summary.Bounds || null)
+  };
+}
+
+async function collectTradingViewPineActivationStructureHostSample(windowHandle = 0, windowInfo = {}, options = {}) {
+  const hwnd = Number(windowHandle || 0) || 0;
+  const bounds = buildTradingViewPineActivationStructureBounds(windowInfo);
+  const emptyResult = {
+    bounds,
+    attempts: [],
+    elements: [],
+    elementKeys: [],
+    fingerprint: null
+  };
+
+  if (!hwnd || bounds.length === 0) {
+    return emptyResult;
+  }
+
+  const totalTimeout = Number.isFinite(Number(options?.timeout || options?.timeoutMs))
+    ? Math.max(200, Math.min(Math.round(Number(options.timeout || options.timeoutMs)), 1200))
+    : 520;
+  const perAttemptTimeout = Math.max(120, Math.min(360, Math.round(totalTimeout / Math.max(1, bounds.length))));
+  const seen = new Set();
+  const collected = [];
+  const attempts = [];
+
+  for (const plan of bounds) {
+    const scanResult = await findElementsByWindowWithHost('', {
+      windowHandle: hwnd,
+      timeout: perAttemptTimeout,
+      maxResults: plan.maxResults,
+      maxDepth: plan.maxDepth,
+      maxVisited: plan.maxVisited,
+      includeDisabled: true,
+      includeOffscreen: false,
+      bounds: plan.bounds,
+      textMode: 'contains',
+      view: plan.view,
+      skipRootMatch: true
+    });
+
+    attempts.push({
+      id: plan.id,
+      bounds: plan.bounds,
       success: scanResult?.success === true,
       count: Number(scanResult?.count || 0) || 0,
       stats: scanResult?.stats || null,
@@ -1081,48 +5772,809 @@ async function probeTradingViewPineEditorSurface(options = {}) {
     }
 
     for (const element of scanResult.elements) {
-      const bounds = element?.Bounds || {};
-      const dedupeKey = [
-        normalizeTradingViewPineAnchorText(element?.Name || ''),
-        Number(element?.WindowHandle || 0) || 0,
-        Number(bounds?.X || 0) || 0,
-        Number(bounds?.Y || 0) || 0,
-        Number(bounds?.Width || 0) || 0,
-        Number(bounds?.Height || 0) || 0
-      ].join('|');
-      if (seenElements.has(dedupeKey)) continue;
-      seenElements.add(dedupeKey);
-      collectedElements.push(element);
-    }
-
-    if (collectedElements.length >= 24) {
-      break;
+      const summary = summarizeTradingViewPineProbeElement(element);
+      if (!summary || isLikelyTradingViewPineActivationStructureNoise(summary)) continue;
+      const elementKey = buildTradingViewPineActivationStructureElementKey(summary);
+      if (!elementKey || seen.has(elementKey)) continue;
+      seen.add(elementKey);
+      collected.push(summary);
     }
   }
 
-  const anchors = collectTradingViewPineEditorHostAnchors(collectedElements);
-  if (!anchors.length) {
+  const elements = collected
+    .sort((left, right) => {
+      const leftY = Number(left?.Bounds?.Y || 0) || 0;
+      const rightY = Number(right?.Bounds?.Y || 0) || 0;
+      if (leftY !== rightY) return leftY - rightY;
+      const leftX = Number(left?.Bounds?.X || 0) || 0;
+      const rightX = Number(right?.Bounds?.X || 0) || 0;
+      if (leftX !== rightX) return leftX - rightX;
+      return String(left?.Name || left?.AutomationId || '').localeCompare(String(right?.Name || right?.AutomationId || ''));
+    })
+    .slice(0, 20)
+    .map((summary) => summarizeTradingViewPineActivationStructureElement(summary))
+    .filter(Boolean);
+  const elementKeys = elements
+    .map((summary) => buildTradingViewPineActivationStructureElementKey({
+      Name: summary.label || '',
+      ControlType: summary.controlType || '',
+      AutomationId: summary.automationId || '',
+      ClassName: summary.className || '',
+      Bounds: summary.bounds || null
+    }))
+    .filter(Boolean)
+    .sort();
+
+  return {
+    bounds,
+    attempts,
+    elements,
+    elementKeys,
+    fingerprint: elementKeys.length > 0 ? elementKeys.join('||') : null
+  };
+}
+
+function summarizeTradingViewPineActivationWatcherElement(element = {}) {
+  if (!element || typeof element !== 'object') return null;
+
+  return {
+    id: normalizeCompactText(element.id || '', 160),
+    name: normalizeCompactText(element.name || '', 120),
+    type: normalizeCompactText(element.type || '', 60),
+    automationId: normalizeCompactText(element.automationId || '', 80),
+    className: normalizeCompactText(element.className || '', 80),
+    windowHandle: Number(element.windowHandle || 0) || 0,
+    bounds: normalizeBoundsRect(element.bounds || element.Bounds || null)
+  };
+}
+
+function isLikelyTradingViewPineActivationWatcherNoise(summary = {}) {
+  if (!summary || typeof summary !== 'object') return true;
+
+  const label = normalizeCompactText(summary.name || summary.automationId || '', 120) || '';
+  const haystack = normalizeTradingViewPineAnchorText([
+    summary.name || '',
+    summary.automationId || '',
+    summary.className || '',
+    summary.type || ''
+  ].join(' '));
+
+  if (/live stock index futures forex and bitcoin charts on tradingview/.test(haystack)) {
+    return true;
+  }
+
+  if (/^[+\-]?\d+(?:[.,]\d+)*(?:%|k|m|b)?$/i.test(label)) {
+    return true;
+  }
+
+  if (!label && !/button|edit|text|tabitem|menuitem|listitem|combobox|treeitem/i.test(String(summary.type || ''))) {
+    return true;
+  }
+
+  return false;
+}
+
+function buildTradingViewPineActivationWatcherElementKey(summary = {}) {
+  if (!summary || typeof summary !== 'object') return '';
+  const bounds = summary.bounds || {};
+  return [
+    normalizeTradingViewPineAnchorText(summary.id || ''),
+    normalizeTradingViewPineAnchorText(summary.name || ''),
+    normalizeTradingViewPineAnchorText(summary.automationId || ''),
+    normalizeTradingViewPineAnchorText(summary.type || ''),
+    Math.round((Number(bounds.x || 0) || 0) / 24),
+    Math.round((Number(bounds.y || 0) || 0) / 24),
+    Math.round((Number(bounds.width || 0) || 0) / 24),
+    Math.round((Number(bounds.height || 0) || 0) / 24)
+  ].join('|');
+}
+
+function summarizeTradingViewPineActivationWatcherDiffElement(summary = null) {
+  if (!summary || typeof summary !== 'object') return null;
+  return {
+    label: normalizeCompactText(summary.name || summary.automationId || summary.type || '', 120),
+    controlType: normalizeCompactText(summary.type || '', 60),
+    automationId: normalizeCompactText(summary.automationId || '', 80),
+    className: normalizeCompactText(summary.className || '', 80),
+    bounds: normalizeBoundsRect(summary.bounds || null)
+  };
+}
+
+async function collectTradingViewPineActivationWatcherSnapshot(windowHandle = 0, options = {}) {
+  let getUIWatcher = null;
+  try {
+    ({ getUIWatcher } = require('./ai-service/ui-context'));
+  } catch {
     return {
-      active: false,
-      foreground: windowInfo,
-      windowInfo,
-      searchBounds: scanBounds,
-      scanAttempts,
-      visibleAnchors: []
+      available: false,
+      reason: 'watcher-unavailable'
+    };
+  }
+
+  const watcher = typeof getUIWatcher === 'function' ? getUIWatcher() : null;
+  if (!watcher?.cache) {
+    return {
+      available: false,
+      reason: 'watcher-not-running'
+    };
+  }
+
+  const hwnd = Number(windowHandle || 0) || 0;
+  let waitedForFreshState = null;
+  if (options.waitForFreshState === true && typeof watcher.waitForFreshState === 'function') {
+    try {
+      const timeoutMs = Math.max(80, Math.min(420, Math.round(Number(options?.timeoutMs || 0) || 240)));
+      const freshState = await watcher.waitForFreshState({
+        targetHwnd: hwnd,
+        sinceTs: Number(options?.sinceTs || 0) || 0,
+        timeoutMs
+      });
+      waitedForFreshState = {
+        fresh: freshState?.fresh === true,
+        timedOut: freshState?.timedOut === true,
+        immediate: freshState?.immediate === true,
+        lastUpdate: Number(freshState?.lastUpdate || 0) || 0
+      };
+    } catch {}
+  }
+
+  const lastUpdate = Number(watcher.cache.lastUpdate || 0) || 0;
+  const ageMs = lastUpdate > 0 ? Math.max(0, Date.now() - lastUpdate) : Number.POSITIVE_INFINITY;
+  const activeWindow = watcher.cache.activeWindow || null;
+  const activeHwnd = Number(activeWindow?.hwnd || 0) || 0;
+  const allElements = Array.isArray(watcher.cache.elements) ? watcher.cache.elements : [];
+  const scopedElements = hwnd > 0
+    ? allElements.filter((element) => Number(element?.windowHandle || 0) === hwnd)
+    : allElements.slice();
+  const elements = scopedElements
+    .map((element) => summarizeTradingViewPineActivationWatcherElement(element))
+    .filter((summary) => summary && !isLikelyTradingViewPineActivationWatcherNoise(summary))
+    .sort((left, right) => {
+      const leftY = Number(left?.bounds?.y || 0) || 0;
+      const rightY = Number(right?.bounds?.y || 0) || 0;
+      if (leftY !== rightY) return leftY - rightY;
+      const leftX = Number(left?.bounds?.x || 0) || 0;
+      const rightX = Number(right?.bounds?.x || 0) || 0;
+      if (leftX !== rightX) return leftX - rightX;
+      return String(left?.name || left?.automationId || '').localeCompare(String(right?.name || right?.automationId || ''));
+    })
+    .slice(0, 20);
+  const elementKeys = elements
+    .map((summary) => buildTradingViewPineActivationWatcherElementKey(summary))
+    .filter(Boolean)
+    .sort();
+
+  return {
+    available: true,
+    reason: null,
+    activeMatchesWindow: hwnd > 0 ? activeHwnd === hwnd : true,
+    activeWindow: activeWindow
+      ? {
+          hwnd: activeHwnd,
+          title: normalizeCompactText(activeWindow.title || '', 220),
+          processName: normalizeCompactText(activeWindow.processName || '', 80),
+          windowKind: normalizeCompactText(activeWindow.windowKind || '', 40),
+          bounds: normalizeBoundsRect(activeWindow.bounds || null)
+        }
+      : null,
+    lastUpdate,
+    ageMs: Number.isFinite(ageMs) ? ageMs : null,
+    updateCount: Number(watcher.cache.updateCount || 0) || 0,
+    elementCount: scopedElements.length,
+    elements,
+    elementKeys,
+    fingerprint: elementKeys.length > 0 ? elementKeys.join('||') : null,
+    waitedForFreshState
+  };
+}
+
+function buildTradingViewPineActivationWatcherTransition(beforeWatcher = null, afterWatcher = null) {
+  const before = beforeWatcher && typeof beforeWatcher === 'object' ? beforeWatcher : null;
+  const after = afterWatcher && typeof afterWatcher === 'object' ? afterWatcher : null;
+  const beforeWatcherFingerprint = String(before?.fingerprint || '').trim();
+  const afterWatcherFingerprint = String(after?.fingerprint || '').trim();
+  const beforeElements = Array.isArray(before?.elements) ? before.elements : [];
+  const afterElements = Array.isArray(after?.elements) ? after.elements : [];
+  const elementDiff = buildTradingViewPineActivationDiffEntries(
+    Array.isArray(before?.elementKeys) ? before.elementKeys : [],
+    Array.isArray(after?.elementKeys) ? after.elementKeys : [],
+    beforeElements.map((entry) => summarizeTradingViewPineActivationWatcherDiffElement(entry)).filter(Boolean),
+    afterElements.map((entry) => summarizeTradingViewPineActivationWatcherDiffElement(entry)).filter(Boolean)
+  );
+  const beforeActiveWindow = before?.activeWindow || null;
+  const afterActiveWindow = after?.activeWindow || null;
+  const activeWindowChanged = Number(beforeActiveWindow?.hwnd || 0) !== Number(afterActiveWindow?.hwnd || 0)
+    || String(beforeActiveWindow?.title || '') !== String(afterActiveWindow?.title || '')
+    || String(beforeActiveWindow?.processName || '') !== String(afterActiveWindow?.processName || '');
+  const updateDelta = (Number(after?.updateCount || 0) || 0) - (Number(before?.updateCount || 0) || 0);
+  const fingerprintChanged = (!!beforeWatcherFingerprint || !!afterWatcherFingerprint)
+    && beforeWatcherFingerprint !== afterWatcherFingerprint;
+  const elementChangeObserved = elementDiff.added.length > 0 || elementDiff.removed.length > 0;
+  const changed = fingerprintChanged || elementChangeObserved || updateDelta !== 0 || activeWindowChanged;
+  const available = before?.available === true || after?.available === true;
+  const ambiguous = after?.available !== true
+    || after?.activeMatchesWindow === false
+    || after?.waitedForFreshState?.timedOut === true;
+
+  return {
+    available,
+    changed,
+    meaningful: after?.available === true && changed,
+    ambiguous,
+    updateDelta,
+    fingerprintChanged,
+    activeWindowChanged,
+    beforeElementCount: Number(before?.elementCount || 0) || 0,
+    afterElementCount: Number(after?.elementCount || 0) || 0,
+    added: elementDiff.added,
+    removed: elementDiff.removed
+  };
+}
+
+function shouldRevalidateTradingViewPineActivationHostEvidence(options = {}) {
+  const proofStrategy = String(options?.proofStrategy || '').trim().toLowerCase();
+  const watcher = options?.watcher && typeof options.watcher === 'object'
+    ? options.watcher
+    : null;
+  const watcherTransition = options?.watcherTransition && typeof options.watcherTransition === 'object'
+    ? options.watcherTransition
+    : null;
+  const phase = String(options?.phase || '').trim().toLowerCase() || 'after';
+
+  if (proofStrategy !== 'watcher-first') {
+    return {
+      attempted: true,
+      reason: 'legacy-host-proof'
+    };
+  }
+
+  if (watcher?.available !== true) {
+    return {
+      attempted: true,
+      reason: 'watcher-unavailable'
+    };
+  }
+
+  if (phase === 'before') {
+    return {
+      attempted: false,
+      reason: 'watcher-baseline'
+    };
+  }
+
+  if (watcherTransition?.changed === true) {
+    return {
+      attempted: true,
+      reason: 'watcher-delta'
+    };
+  }
+
+  if (watcherTransition?.ambiguous === true) {
+    return {
+      attempted: true,
+      reason: 'watcher-ambiguous'
     };
   }
 
   return {
-    active: true,
-    foreground: windowInfo,
-    windowInfo,
-    searchBounds: scanBounds,
-    scanAttempts,
-    matchedBy: 'uia-host-lower-panel-scan',
-    element: anchors[0].element,
-    anchorText: anchors[0].text,
-    visibleAnchors: anchors.map((entry) => entry.text).slice(0, 8)
+    attempted: false,
+    reason: 'watcher-stable-no-delta'
   };
+}
+
+function summarizeTradingViewPineSurfaceSnapshot(probe = null) {
+  if (!probe || typeof probe !== 'object') return null;
+
+  return {
+    active: probe.active === true,
+    reason: normalizeCompactText(probe.reason || '', 140),
+    anchorText: normalizeCompactText(probe.anchorText || '', 120),
+    matchedBy: normalizeCompactText(probe.matchedBy || '', 80),
+    visibleAnchors: Array.isArray(probe.visibleAnchors) ? probe.visibleAnchors.slice(0, 8) : [],
+    diagnosticSignals: Array.isArray(probe.diagnosticSignals) ? probe.diagnosticSignals.slice(0, 8) : [],
+    diagnosticElements: Array.isArray(probe.diagnosticElements) ? probe.diagnosticElements.slice(0, 8) : [],
+    pointProbeAttempts: Array.isArray(probe.pointProbeAttempts) ? probe.pointProbeAttempts.slice(0, 8) : [],
+    diagnosticAttempts: Array.isArray(probe.diagnosticAttempts) ? probe.diagnosticAttempts.slice(0, 8) : [],
+    rendererProof: summarizeTradingViewPineRendererProof(probe.rendererProof || null)
+  };
+}
+
+async function captureTradingViewPineActivationSnapshot(options = {}) {
+  const explicitWindowHandle = Number(options?.windowHandle || options?.hwnd || 0) || 0;
+  const totalTimeout = getTradingViewPineActivationProofTimeoutMs(options);
+  const proofStrategy = String(options?.proofStrategy || '').trim().toLowerCase() || 'legacy';
+  const previousSnapshot = options?.previousSnapshot && typeof options.previousSnapshot === 'object'
+    ? options.previousSnapshot
+    : null;
+  const phase = String(options?.phase || '').trim().toLowerCase() || (previousSnapshot ? 'after' : 'before');
+  const watcherTimeoutMs = options.waitForWatcherState === true
+    ? Math.max(90, Math.min(360, Math.round(totalTimeout * 0.25)))
+    : 0;
+  const watcher = await collectTradingViewPineActivationWatcherSnapshot(explicitWindowHandle, {
+    waitForFreshState: options.waitForWatcherState === true,
+    sinceTs: Number(options?.watcherSinceTs || options?.sinceTs || 0) || 0,
+    timeoutMs: watcherTimeoutMs
+  });
+  const watcherTransition = buildTradingViewPineActivationWatcherTransition(previousSnapshot?.watcher, watcher);
+  const inheritedWindowInfo = summarizeTradingViewPineActivationWindowInfo(
+    options?.windowInfo
+    || options?.boundWindowInfo
+    || previousSnapshot?.windowInfo
+    || null
+  );
+  const watcherForeground = summarizeTradingViewPineActivationForeground(watcher?.activeWindow || null);
+  let foregroundSummary = watcherForeground;
+  let windowInfo = watcher?.available === true
+    && watcher?.activeMatchesWindow !== false
+    && isTradingViewForegroundWindow(watcher?.activeWindow)
+    ? summarizeTradingViewPineActivationWindowInfo(watcher.activeWindow)
+    : null;
+
+  if (!windowInfo?.success && inheritedWindowInfo?.success) {
+    windowInfo = inheritedWindowInfo;
+  }
+
+  if (!windowInfo?.success && explicitWindowHandle > 0) {
+    try {
+      const candidate = await getWindowInfoByHandle(explicitWindowHandle);
+      if (candidate?.success) {
+        windowInfo = candidate;
+      }
+    } catch {}
+  }
+
+  if (!foregroundSummary?.success && watcher?.available !== true) {
+    try {
+      foregroundSummary = summarizeTradingViewPineActivationForeground(await getForegroundWindowInfo());
+    } catch {}
+  }
+
+  if (!windowInfo?.success && foregroundSummary?.success && isTradingViewForegroundWindow(foregroundSummary)) {
+    windowInfo = foregroundSummary;
+  }
+
+  if (!windowInfo?.success) {
+    return {
+      captured: false,
+      reason: 'window-unresolved',
+      windowHandle: explicitWindowHandle || 0,
+      foreground: foregroundSummary,
+      windowInfo: inheritedWindowInfo || null,
+      proofStrategy,
+      hostRevalidation: {
+        attempted: false,
+        reason: 'window-unresolved'
+      },
+      watcher,
+      watcherTransition
+    };
+  }
+
+  if (!isTradingViewForegroundWindow(windowInfo)) {
+    return {
+      captured: false,
+      reason: 'window-not-tradingview',
+      windowHandle: Number(windowInfo?.hwnd || explicitWindowHandle || 0) || 0,
+      foreground: foregroundSummary,
+      windowInfo: summarizeTradingViewPineActivationWindowInfo(windowInfo),
+      proofStrategy,
+      hostRevalidation: {
+        attempted: false,
+        reason: 'window-not-tradingview'
+      },
+      watcher,
+      watcherTransition
+    };
+  }
+
+  const hwnd = Number(windowInfo?.hwnd || explicitWindowHandle || 0) || 0;
+  const hostRevalidation = shouldRevalidateTradingViewPineActivationHostEvidence({
+    proofStrategy,
+    phase,
+    watcher,
+    watcherTransition
+  });
+  let focusedElementProbe = {
+    success: false,
+    focused: false,
+    reason: hostRevalidation.reason
+  };
+  let structure = {
+    bounds: [],
+    attempts: [],
+    elements: [],
+    elementKeys: [],
+    fingerprint: null,
+    skipped: true,
+    skipReason: hostRevalidation.reason
+  };
+  let pineSurface = {
+    active: false,
+    reason: hostRevalidation.reason,
+    anchorText: null,
+    matchedBy: null,
+    visibleAnchors: [],
+    diagnosticSignals: [],
+    diagnosticElements: [],
+    pointProbeAttempts: [],
+    diagnosticAttempts: []
+  };
+  let rendererProof = null;
+
+  if (hostRevalidation.attempted) {
+    focusedElementProbe = await getFocusedElementInWindowWithHost(hwnd);
+    if (proofStrategy !== 'watcher-first' || watcher?.available !== true) {
+      structure = await collectTradingViewPineActivationStructureHostSample(hwnd, windowInfo, {
+        timeoutMs: Math.max(220, Math.min(640, Math.round(totalTimeout * 0.45)))
+      });
+    }
+    const pineSurfaceProbe = await probeTradingViewPineEditorSurface({
+      windowHandle: hwnd,
+      windowInfo,
+      foreground: foregroundSummary,
+      resolveWindowState: false,
+      timeout: Math.max(240, Math.min(700, Math.round(totalTimeout * 0.55))),
+      scanViews: ['control'],
+      minScanAttemptTimeout: 160,
+      allowPointProbe: false,
+      allowDiagnosticScan: false,
+      cdpPort: options?.cdpPort || 0,
+      cdpDependencies: options?.cdpDependencies || null
+    });
+    pineSurface = summarizeTradingViewPineSurfaceSnapshot(pineSurfaceProbe) || pineSurface;
+    rendererProof = summarizeTradingViewPineRendererProof(pineSurfaceProbe?.rendererProof || null);
+  }
+
+  return {
+    captured: true,
+    reason: null,
+    collectedAt: Date.now(),
+    windowHandle: hwnd,
+    foreground: foregroundSummary,
+    windowInfo: summarizeTradingViewPineActivationWindowInfo(windowInfo),
+    proofStrategy,
+    hostRevalidation,
+    pineSurface,
+    rendererProof,
+    focusedElementAvailable: focusedElementProbe?.focused === true,
+    focusedElementReason: normalizeCompactText(focusedElementProbe?.reason || '', 80),
+    focusedElement: summarizeTradingViewPineProbeElement(focusedElementProbe?.element || null),
+    focusedElementKey: buildTradingViewPineActivationStructureElementKey(
+      summarizeTradingViewPineProbeElement(focusedElementProbe?.element || null) || {}
+    ),
+    structure,
+    watcher,
+    watcherTransition
+  };
+}
+
+function buildTradingViewPineActivationForegroundKey(foreground = null) {
+  if (!foreground || typeof foreground !== 'object') return '';
+  return [
+    Number(foreground.hwnd || 0) || 0,
+    normalizeTradingViewPineAnchorText(foreground.processName || ''),
+    normalizeTradingViewPineAnchorText(foreground.title || ''),
+    normalizeTradingViewPineAnchorText(foreground.windowKind || '')
+  ].join('|');
+}
+
+function summarizeTradingViewPineActivationForegroundLabel(foreground = null) {
+  if (!foreground || typeof foreground !== 'object') return null;
+  return normalizeCompactText([
+    foreground.processName || '',
+    foreground.title || '',
+    foreground.windowKind || ''
+  ].filter(Boolean).join(' | '), 220);
+}
+
+function buildTradingViewPineActivationDiffEntries(beforeKeys = [], afterKeys = [], beforeElements = [], afterElements = []) {
+  const normalizedBeforeElements = Array.isArray(beforeElements) ? beforeElements : [];
+  const normalizedAfterElements = Array.isArray(afterElements) ? afterElements : [];
+  const computedBeforeKeys = normalizedBeforeElements.map((entry) => buildTradingViewPineActivationStructureElementKey({
+    Name: entry?.label || '',
+    ControlType: entry?.controlType || '',
+    AutomationId: entry?.automationId || '',
+    ClassName: entry?.className || '',
+    Bounds: entry?.bounds || null
+  }));
+  const computedAfterKeys = normalizedAfterElements.map((entry) => buildTradingViewPineActivationStructureElementKey({
+    Name: entry?.label || '',
+    ControlType: entry?.controlType || '',
+    AutomationId: entry?.automationId || '',
+    ClassName: entry?.className || '',
+    Bounds: entry?.bounds || null
+  }));
+  const effectiveBeforeKeys = Array.isArray(beforeKeys) && beforeKeys.length > 0 ? beforeKeys : computedBeforeKeys;
+  const effectiveAfterKeys = Array.isArray(afterKeys) && afterKeys.length > 0 ? afterKeys : computedAfterKeys;
+  const beforeSet = new Set(effectiveBeforeKeys);
+  const afterSet = new Set(effectiveAfterKeys);
+  const beforeMap = new Map();
+  const afterMap = new Map();
+
+  computedBeforeKeys.forEach((key, index) => {
+    if (key) beforeMap.set(key, normalizedBeforeElements[index]);
+    const providedKey = String(effectiveBeforeKeys[index] || '').trim();
+    if (providedKey) beforeMap.set(providedKey, normalizedBeforeElements[index]);
+  });
+  computedAfterKeys.forEach((key, index) => {
+    if (key) afterMap.set(key, normalizedAfterElements[index]);
+    const providedKey = String(effectiveAfterKeys[index] || '').trim();
+    if (providedKey) afterMap.set(providedKey, normalizedAfterElements[index]);
+  });
+
+  const added = Array.from(afterSet)
+    .filter((key) => !beforeSet.has(key))
+    .map((key) => afterMap.get(key))
+    .filter(Boolean)
+    .slice(0, 8);
+  const removed = Array.from(beforeSet)
+    .filter((key) => !afterSet.has(key))
+    .map((key) => beforeMap.get(key))
+    .filter(Boolean)
+    .slice(0, 8);
+
+  return { added, removed };
+}
+
+function buildTradingViewPineActivationTransitionProof(beforeSnapshot = null, afterSnapshot = null, options = {}) {
+  const before = beforeSnapshot && typeof beforeSnapshot === 'object' ? beforeSnapshot : null;
+  const after = afterSnapshot && typeof afterSnapshot === 'object' ? afterSnapshot : null;
+  const signals = [];
+  const watcherTransition = buildTradingViewPineActivationWatcherTransition(before?.watcher, after?.watcher);
+  const addSignal = (kind, details = {}) => {
+    signals.push({ kind, ...details });
+  };
+
+  if (after?.pineSurface?.active === true && before?.pineSurface?.active !== true) {
+    addSignal('pine-surface-observed', {
+      anchorText: after?.pineSurface?.anchorText || null,
+      matchedBy: after?.pineSurface?.matchedBy || null
+    });
+  }
+
+  if (
+    after?.rendererProof?.active === true
+    && before?.rendererProof?.active !== true
+    && !signals.some((signal) => signal?.kind === 'pine-surface-observed')
+  ) {
+    addSignal('renderer-surface-observed', {
+      anchorText: after?.rendererProof?.anchorText || null,
+      matchedBy: after?.rendererProof?.matchedBy || null,
+      port: Number(after?.rendererProof?.port || 0) || 0
+    });
+  }
+
+  if (after?.rendererProof?.applicable === true && after?.rendererProof?.available !== true && after?.rendererProof?.reason) {
+    addSignal('renderer-proof-unavailable', {
+      reason: after.rendererProof.reason,
+      port: Number(after?.rendererProof?.port || 0) || 0
+    });
+  }
+
+  const beforeForegroundKey = buildTradingViewPineActivationForegroundKey(before?.foreground);
+  const afterForegroundKey = buildTradingViewPineActivationForegroundKey(after?.foreground);
+  if (beforeForegroundKey && afterForegroundKey && beforeForegroundKey !== afterForegroundKey) {
+    addSignal('foreground-changed', {
+      before: summarizeTradingViewPineActivationForegroundLabel(before?.foreground),
+      after: summarizeTradingViewPineActivationForegroundLabel(after?.foreground)
+    });
+  }
+
+  const beforeFocusKey = String(before?.focusedElementKey || '').trim();
+  const afterFocusKey = String(after?.focusedElementKey || '').trim();
+  if (beforeFocusKey || afterFocusKey) {
+    if (beforeFocusKey !== afterFocusKey) {
+      addSignal('focused-element-changed', {
+        before: summarizeTradingViewPineActivationFocusLabel(before?.focusedElement),
+        after: summarizeTradingViewPineActivationFocusLabel(after?.focusedElement)
+      });
+    }
+  }
+
+  const beforeStructureKeys = Array.isArray(before?.structure?.elementKeys) ? before.structure.elementKeys : [];
+  const afterStructureKeys = Array.isArray(after?.structure?.elementKeys) ? after.structure.elementKeys : [];
+  const structureDiff = buildTradingViewPineActivationDiffEntries(
+    beforeStructureKeys,
+    afterStructureKeys,
+    before?.structure?.elements || [],
+    after?.structure?.elements || []
+  );
+  if (structureDiff.added.length > 0 || structureDiff.removed.length > 0) {
+    addSignal('uia-structure-changed', structureDiff);
+  }
+
+  if (watcherTransition.available && watcherTransition.changed) {
+    addSignal('watcher-state-changed', {
+      activeMatchesWindow: after?.watcher?.activeMatchesWindow !== false,
+      updateDelta: watcherTransition.updateDelta,
+      beforeElementCount: watcherTransition.beforeElementCount,
+      afterElementCount: watcherTransition.afterElementCount,
+      added: watcherTransition.added,
+      removed: watcherTransition.removed
+    });
+  }
+
+  const pineSurfaceObserved = after?.pineSurface?.active === true || after?.rendererProof?.active === true;
+  const tradingViewForegroundLost = !!after?.foreground?.success && !isTradingViewForegroundWindow(after.foreground);
+  const rendererProofUnavailable = after?.rendererProof?.applicable === true
+    && after?.rendererProof?.available !== true
+    && !!String(after?.rendererProof?.reason || '').trim();
+  const structuralChangeObserved = signals.some((signal) =>
+    signal.kind === 'uia-structure-changed'
+    || signal.kind === 'focused-element-changed'
+    || signal.kind === 'watcher-state-changed'
+  );
+  const observedChange = signals.length > 0;
+
+  let disposition = 'no-window-state-change-observed';
+  let likelyMeaning = 'No bounded foreground, focus, watcher, or structure change was observed after the semantic Pine invoke. That suggests the current click path did not activate Pine in this live TradingView state.';
+  if (pineSurfaceObserved) {
+    disposition = 'pine-surface-observed';
+    likelyMeaning = after?.rendererProof?.active === true
+      ? 'The semantic Pine invoke produced a renderer-proved Pine surface inside the bound TradingView window.'
+      : 'The semantic Pine invoke produced a UIA-visible Pine surface inside the bound TradingView window.';
+  } else if (tradingViewForegroundLost) {
+    disposition = 'focus-drift-without-pine-surface';
+    likelyMeaning = 'Foreground drifted away from TradingView before any Pine surface became visible, so the semantic Pine click did not complete in a stable app state.';
+  } else if (rendererProofUnavailable) {
+    disposition = 'renderer-proof-unavailable';
+    likelyMeaning = `The semantic Pine post-invoke proof could not query Chromium renderer state because ${after?.rendererProof?.reason || 'renderer proof was unavailable'}. Repeated Ctrl+E recovery is not trustworthy until TradingView is launched with remote debugging and renderer accessibility enabled.`;
+  } else if (structuralChangeObserved) {
+    disposition = 'window-state-changed-without-pine-surface';
+    likelyMeaning = 'TradingView state changed after the semantic Pine click, but Pine anchors still did not become UIA-visible. That suggests a non-obvious surface or a surface that Chromium/UIA is not exposing under current conditions.';
+  } else if (signals.some((signal) => signal.kind === 'foreground-changed')) {
+    disposition = 'foreground-changed-without-pine-surface';
+    likelyMeaning = 'Foreground metadata changed after the semantic Pine click, but no TradingView Pine surface or internal UIA structure change was observed.';
+  }
+
+  if (
+    disposition === 'no-window-state-change-observed'
+    && after?.proofStrategy === 'watcher-first'
+    && after?.hostRevalidation?.attempted === false
+    && watcherTransition.available
+    && watcherTransition.changed !== true
+  ) {
+    likelyMeaning = 'Watcher-first Pine proof observed no fresh watcher delta after the semantic Pine click, so deep host revalidation was skipped to keep the steady-state path bounded.';
+  }
+
+  if (!before?.captured && !after?.captured) {
+    disposition = 'proof-unavailable';
+    likelyMeaning = after?.reason === 'window-not-tradingview'
+      ? 'The semantic Pine post-invoke proof could not bind a TradingView window after the click.'
+      : 'The semantic Pine post-invoke proof could not resolve a TradingView window in the current app state.';
+  }
+
+  return {
+    applicable: true,
+    route: 'semantic-icon',
+    expectedSurface: 'pine-editor',
+    windowHandle: Number(after?.windowHandle || before?.windowHandle || options?.windowHandle || 0) || 0,
+    proofStrategy: String(after?.proofStrategy || before?.proofStrategy || 'legacy'),
+    actionSucceeded: options?.actionSucceeded === true,
+    observedChange,
+    pineSurfaceObserved,
+    disposition,
+    likelyMeaning,
+    error: options?.error || null,
+    hostRevalidation: after?.hostRevalidation || null,
+    rendererProof: after?.rendererProof || before?.rendererProof || null,
+    signals: signals.slice(0, 8),
+    before,
+    after
+  };
+}
+
+async function prepareTradingViewPineActivationProofContext(action = {}) {
+  if (!isTradingViewSemanticPineIconAction(action)) {
+    return null;
+  }
+
+  const timeoutMs = getTradingViewPineActivationProofTimeoutMs();
+  const windowHandle = Number(
+    action?.windowHandle
+    || action?.hwnd
+    || action?.criteria?.windowHandle
+    || action?.criteria?.hwnd
+    || 0
+  ) || 0;
+
+  return {
+    applicable: true,
+    startedAt: Date.now(),
+    timeoutMs,
+    windowHandle,
+    proofStrategy: 'watcher-first',
+    before: await captureTradingViewPineActivationSnapshot({
+      windowHandle,
+      timeoutMs: Math.max(MIN_TRADINGVIEW_PINE_ACTIVATION_PROOF_TIMEOUT_MS, Math.round(timeoutMs * 0.85)),
+      phase: 'before',
+      proofStrategy: 'watcher-first'
+    })
+  };
+}
+
+async function finalizeTradingViewPineActivationProofContext(context = null, result = {}, action = {}) {
+  if (!context?.applicable) {
+    return null;
+  }
+
+  const postInvokeWindowHandle = Number(
+    result?.element?.WindowHandle
+    || result?.element?.windowHandle
+    || result?.hostResponse?.element?.WindowHandle
+    || result?.hostResponse?.element?.windowHandle
+    || context?.before?.windowHandle
+    || context?.windowHandle
+    || action?.windowHandle
+    || action?.hwnd
+    || 0
+  ) || 0;
+
+  await sleep(160);
+
+  const after = await captureTradingViewPineActivationSnapshot({
+    windowHandle: postInvokeWindowHandle,
+    timeoutMs: context.timeoutMs,
+    waitForWatcherState: true,
+    watcherSinceTs: Number(context?.before?.watcher?.lastUpdate || context.startedAt || 0) || 0,
+    previousSnapshot: context.before || null,
+    boundWindowInfo: context?.before?.windowInfo || null,
+    phase: 'after',
+    proofStrategy: String(context?.proofStrategy || 'watcher-first')
+  });
+  const proof = buildTradingViewPineActivationTransitionProof(context.before, after, {
+    windowHandle: postInvokeWindowHandle,
+    actionSucceeded: result?.success === true,
+    error: result?.success === true ? null : (result?.error || null)
+  });
+
+  return {
+    ...proof,
+    startedAt: Number(context.startedAt || 0) || 0,
+    finishedAt: Date.now(),
+    durationMs: Math.max(0, Date.now() - (Number(context.startedAt || 0) || Date.now()))
+  };
+}
+
+function appendTradingViewPineActivationProofToExecutionProof(proof = null, activationProof = null) {
+  if (!proof || typeof proof !== 'object' || !activationProof?.applicable) {
+    return proof;
+  }
+
+  const status = activationProof.pineSurfaceObserved
+    ? 'pass'
+    : activationProof.observedChange
+      ? 'bounded'
+      : 'fail';
+  proof.checks = Array.isArray(proof.checks) ? proof.checks : [];
+  proof.checks.push({
+    kind: 'tradingview-pine-activation',
+    status,
+    classification: activationProof.disposition || null,
+    method: 'semantic-icon-post-invoke-proof',
+    matchReason: activationProof.likelyMeaning || null
+  });
+
+  proof.boundedClaims = Array.isArray(proof.boundedClaims) ? proof.boundedClaims : [];
+  proof.limitations = Array.isArray(proof.limitations) ? proof.limitations : [];
+
+  if (activationProof.pineSurfaceObserved) {
+    if (!proof.boundedClaims.includes('A bounded semantic-icon post-invoke proof observed a Pine surface immediately after the click.')) {
+      proof.boundedClaims.push('A bounded semantic-icon post-invoke proof observed a Pine surface immediately after the click.');
+    }
+  } else if (activationProof.disposition === 'renderer-proof-unavailable') {
+    if (!proof.limitations.includes('Chromium renderer proof was unavailable after the semantic Pine click, so repeated Ctrl+E recovery was intentionally not trusted.')) {
+      proof.limitations.push('Chromium renderer proof was unavailable after the semantic Pine click, so repeated Ctrl+E recovery was intentionally not trusted.');
+    }
+  } else if (activationProof.observedChange) {
+    if (!proof.boundedClaims.includes('A bounded semantic-icon post-invoke proof observed TradingView state change without a Pine surface anchor.')) {
+      proof.boundedClaims.push('A bounded semantic-icon post-invoke proof observed TradingView state change without a Pine surface anchor.');
+    }
+  } else if (!proof.limitations.includes('A bounded semantic-icon post-invoke proof did not observe any TradingView state change after the Pine click.')) {
+    proof.limitations.push('A bounded semantic-icon post-invoke proof did not observe any TradingView state change after the Pine click.');
+  }
+
+  return proof;
 }
 
 function normalizeProcessNameForForeground(value = '') {
@@ -1207,6 +6659,336 @@ function normalizeQuickSearchInputText(value = '') {
     .replace(/[\u200B-\u200D\uFEFF]/g, '')
     .replace(/\r/g, '')
     .trim();
+}
+
+function normalizePineEditorBufferText(value = '') {
+  return String(value || '')
+    .replace(/\r/g, '')
+    .split('\n')
+    .map((line) => line.replace(/[ \t]+$/g, ''))
+    .join('\n')
+    .trim();
+}
+
+function extractPineEditorDeclarationTitles(value = '') {
+  const source = String(value || '');
+  const titles = [];
+  const regex = /\b(?:indicator|strategy|library)\s*\(\s*["'`](.*?)["'`]/ig;
+
+  let match;
+  while ((match = regex.exec(source)) !== null) {
+    const title = normalizeCompactText(match[1], 120);
+    if (title) {
+      titles.push(title);
+    }
+  }
+
+  return titles;
+}
+
+function buildPineEditorPasteProof(actualText = '', expectedText = '', options = {}) {
+  const normalizedActual = normalizePineEditorBufferText(actualText);
+  const normalizedExpected = normalizePineEditorBufferText(expectedText);
+  const preparedScriptName = normalizeCompactText(options?.pinePreparedScriptName || '', 120);
+  const declarationTitles = extractPineEditorDeclarationTitles(actualText);
+  const starterDefaultVisible = declarationTitles.some((title) => /^(my script|my strategy|my library|untitled(?: script)?)$/i.test(title));
+  const expectedTitleVisible = preparedScriptName
+    ? declarationTitles.some((title) => title.toLowerCase() === preparedScriptName.toLowerCase())
+    : false;
+  const versionDirectiveCount = (String(actualText || '').match(/\/\/\s*@version\s*=\s*\d+/ig) || []).length;
+  const exactMatch = !!normalizedExpected && normalizedActual === normalizedExpected;
+
+  let lifecycleState = 'prepared-script-mismatch';
+  let mismatchReason = 'prepared-script-buffer-diff';
+  if (exactMatch) {
+    lifecycleState = 'prepared-script-verified';
+    mismatchReason = null;
+  } else if (!normalizedActual) {
+    lifecycleState = 'prepared-script-missing';
+    mismatchReason = 'prepared-script-missing';
+  } else if (starterDefaultVisible) {
+    mismatchReason = 'starter-default-content-still-visible';
+  } else if (versionDirectiveCount > 1) {
+    mismatchReason = 'multiple-version-directives-visible';
+  } else if (preparedScriptName && expectedTitleVisible) {
+    mismatchReason = 'expected-title-visible-but-buffer-not-exact';
+  }
+
+  return {
+    exactMatch,
+    lifecycleState,
+    mismatchReason,
+    preparedScriptName: preparedScriptName || null,
+    expectedTitleVisible,
+    starterDefaultVisible,
+    versionDirectiveCount,
+    compactSummary: [
+      `buffer=${exactMatch ? 'verified' : (lifecycleState === 'prepared-script-missing' ? 'missing' : 'mismatch')}`,
+      preparedScriptName ? `title=${expectedTitleVisible ? 'visible' : 'missing'}` : null,
+      starterDefaultVisible ? 'starter=visible' : null,
+      versionDirectiveCount > 1 ? `versions=${versionDirectiveCount}` : null
+    ].filter(Boolean).join(' | ')
+  };
+}
+
+function isTradingViewPineEditorAuthoringPasteAction(action = {}) {
+  const type = String(action?.type || '').trim().toLowerCase();
+  const key = String(action?.key || '').trim().toLowerCase();
+  const route = String(action?.inputSurfaceContract?.route || '').trim().toLowerCase();
+  const preparedScriptText = normalizePineEditorBufferText(action?.pinePreparedScriptText || '');
+  return type === ACTION_TYPES.KEY
+    && key === 'ctrl+v'
+    && route === 'pine-editor-authoring'
+    && !!preparedScriptText;
+}
+
+function isTradingViewPineEditorSaveKeyAction(action = {}) {
+  const type = String(action?.type || '').trim().toLowerCase();
+  const key = String(action?.key || '').trim().toLowerCase();
+  if (type !== ACTION_TYPES.KEY || key !== 'ctrl+s') return false;
+
+  const route = String(action?.inputSurfaceContract?.route || '').trim().toLowerCase();
+  const shortcutId = String(action?.tradingViewShortcut?.id || action?.shortcutId || '').trim().toLowerCase();
+  const surface = String(action?.inputSurfaceContract?.surface || action?.tradingViewShortcut?.surface || '').trim().toLowerCase();
+  const contextText = [
+    action?.reason || '',
+    action?.text || '',
+    action?.description || ''
+  ].filter(Boolean).join(' ');
+
+  return route === 'pine-editor-authoring'
+    || surface === 'pine-editor'
+    || shortcutId === 'save-pine-script'
+    || /\bpine\b/i.test(contextText)
+    || /\bsave\b.{0,24}\bscript\b/i.test(contextText);
+}
+
+async function guardTradingViewPineSaveKeyAction(action = {}, pressKeyImpl = pressKey) {
+  if (!isTradingViewPineEditorSaveKeyAction(action)) {
+    return {
+      applicable: false,
+      allowed: true,
+      success: true
+    };
+  }
+
+  const expectedScriptText = normalizePineEditorBufferText(action?.pinePreparedScriptText || '');
+  if (!expectedScriptText || !looksLikePineScriptPayloadText(expectedScriptText)) {
+    return {
+      applicable: true,
+      allowed: false,
+      success: false,
+      reason: 'missing-prepared-pine-script',
+      error: 'Refusing to save Pine Editor because no verified prepared Pine script payload is attached to this save action.'
+    };
+  }
+
+  let originalClipboard = null;
+  try {
+    originalClipboard = await getClipboardText();
+  } catch {}
+
+  const restoreOriginalClipboard = async () => {
+    if (originalClipboard?.success) {
+      try {
+        await setClipboardText(originalClipboard.text || '');
+      } catch {}
+    }
+  };
+
+  const readback = await readPineEditorBufferFromClipboard(action, pressKeyImpl);
+  await restoreOriginalClipboard();
+  if (!readback?.success) {
+    return {
+      applicable: true,
+      allowed: false,
+      success: false,
+      reason: 'pine-save-buffer-readback-failed',
+      error: `Refusing to save Pine Editor because the editor buffer could not be verified: ${readback?.error || 'clipboard readback failed'}`
+    };
+  }
+
+  const proof = buildPineEditorPasteProof(readback.text, expectedScriptText, {
+    pinePreparedScriptName: action?.pinePreparedScriptName || ''
+  });
+  if (!proof.exactMatch) {
+    return {
+      applicable: true,
+      allowed: false,
+      success: false,
+      reason: proof.mismatchReason || 'pine-save-buffer-mismatch',
+      proof,
+      text: readback.text,
+      error: `Refusing to save Pine Editor because the visible editor buffer does not exactly match the verified prepared script (${proof.compactSummary || 'buffer mismatch'}).`
+    };
+  }
+
+  return {
+    applicable: true,
+    allowed: true,
+    success: true,
+    method: 'ClipboardRoundTrip',
+    proof,
+    text: readback.text
+  };
+}
+
+function isTradingViewPineSaveNameTypeAction(action = {}) {
+  const type = String(action?.type || '').trim().toLowerCase();
+  const route = String(action?.inputSurfaceContract?.route || '').trim().toLowerCase();
+  const desiredText = normalizeCompactText(action?.text ?? '', 180);
+  return type === ACTION_TYPES.TYPE
+    && route === 'pine-save-name'
+    && !!desiredText;
+}
+
+async function readPineEditorBufferFromClipboard(action = {}, pressKeyImpl = pressKey) {
+  await pressKeyImpl('ctrl+a', action);
+  await sleep(120);
+  await pressKeyImpl('ctrl+c', action);
+  await sleep(160);
+
+  const clipboardRead = await getClipboardText();
+  if (!clipboardRead?.success) {
+    return {
+      success: false,
+      error: clipboardRead?.error || 'Clipboard read failed',
+      source: clipboardRead?.source || null
+    };
+  }
+
+  return {
+    success: true,
+    text: String(clipboardRead?.text || ''),
+    source: clipboardRead?.source || null
+  };
+}
+
+async function verifyTradingViewPineEditorPaste(action = {}, pressKeyImpl = pressKey) {
+  if (!isTradingViewPineEditorAuthoringPasteAction(action)) {
+    return {
+      applicable: false,
+      success: true,
+      retryAttempted: false,
+      proof: null
+    };
+  }
+
+  const expectedScriptText = normalizePineEditorBufferText(action?.pinePreparedScriptText || '');
+  if (!expectedScriptText) {
+    return {
+      applicable: false,
+      success: true,
+      retryAttempted: false,
+      proof: null
+    };
+  }
+
+  let originalClipboard = null;
+  try {
+    originalClipboard = await getClipboardText();
+  } catch {}
+
+  const restoreOriginalClipboard = async () => {
+    if (originalClipboard?.success) {
+      try {
+        await setClipboardText(originalClipboard.text || '');
+      } catch {}
+    }
+  };
+
+  try {
+    const initialReadback = await readPineEditorBufferFromClipboard(action, pressKeyImpl);
+    if (!initialReadback.success) {
+      await restoreOriginalClipboard();
+      return {
+        applicable: true,
+        success: false,
+        method: 'ClipboardRoundTrip',
+        retryAttempted: false,
+        proof: null,
+        error: `Pine Editor paste proof could not read the editor buffer: ${initialReadback.error || 'clipboard unavailable'}`
+      };
+    }
+
+    const initialProof = buildPineEditorPasteProof(initialReadback.text, expectedScriptText, {
+      pinePreparedScriptName: action?.pinePreparedScriptName || ''
+    });
+    if (initialProof.exactMatch) {
+      await restoreOriginalClipboard();
+      return {
+        applicable: true,
+        success: true,
+        method: 'ClipboardRoundTrip',
+        retryAttempted: false,
+        proof: initialProof,
+        text: initialReadback.text
+      };
+    }
+
+    try {
+      await setClipboardText(expectedScriptText);
+    } catch {}
+
+    await sleep(80);
+    await pressKeyImpl('ctrl+a', action);
+    await sleep(120);
+    await pressKeyImpl('backspace', { ...action, safePineStarterReset: true });
+    await sleep(120);
+    await pressKeyImpl('ctrl+v', action);
+    await sleep(220);
+
+    const retryReadback = await readPineEditorBufferFromClipboard(action, pressKeyImpl);
+    if (!retryReadback.success) {
+      await restoreOriginalClipboard();
+      return {
+        applicable: true,
+        success: false,
+        method: 'ClipboardRoundTrip',
+        retryAttempted: true,
+        proof: initialProof,
+        error: `Pine Editor paste proof could not read the editor buffer after a single bounded retry: ${retryReadback.error || 'clipboard unavailable'}`
+      };
+    }
+
+    const retryProof = buildPineEditorPasteProof(retryReadback.text, expectedScriptText, {
+      pinePreparedScriptName: action?.pinePreparedScriptName || ''
+    });
+    await restoreOriginalClipboard();
+
+    if (retryProof.exactMatch) {
+      return {
+        applicable: true,
+        success: true,
+        method: 'ClipboardRoundTrip',
+        retryAttempted: true,
+        proof: retryProof,
+        initialProof,
+        text: retryReadback.text
+      };
+    }
+
+    return {
+      applicable: true,
+      success: false,
+      method: 'ClipboardRoundTrip',
+      retryAttempted: true,
+      proof: retryProof,
+      initialProof,
+      text: retryReadback.text,
+      error: `Pine Editor paste proof failed after a single bounded retry (${retryProof.compactSummary || initialProof.compactSummary || 'buffer mismatch'})`
+    };
+  } catch (error) {
+    await restoreOriginalClipboard();
+    return {
+      applicable: true,
+      success: false,
+      method: 'ClipboardRoundTrip',
+      retryAttempted: false,
+      proof: null,
+      error: error?.message || String(error || 'Pine Editor paste proof failed')
+    };
+  }
 }
 
 const DEFAULT_PINE_READBACK_TIMEOUT_MS = 8000;
@@ -1449,53 +7231,472 @@ async function preparePineEditorReadbackAction(action = {}) {
   };
 }
 
+function collectPineEditorSurfaceProbeSyntheticAnchors(probe = null) {
+  if (!probe || typeof probe !== 'object') return [];
+
+  const anchors = [];
+  const seen = new Set();
+  const addAnchor = (value = '') => {
+    const normalized = normalizeCompactText(value, 180);
+    if (!normalized || seen.has(normalized)) return;
+    seen.add(normalized);
+    anchors.push(normalized);
+  };
+
+  for (const anchor of Array.isArray(probe.visibleAnchors) ? probe.visibleAnchors : []) {
+    addAnchor(anchor);
+  }
+
+  addAnchor(probe?.anchorText || '');
+  addAnchor(probe?.rendererProof?.anchorText || '');
+
+  for (const signal of Array.isArray(probe?.rendererProof?.signals) ? probe.rendererProof.signals : []) {
+    addAnchor(signal?.observedText || '');
+    addAnchor(signal?.text || '');
+  }
+
+  return anchors;
+}
+
+function buildPineEditorSurfaceProbeSyntheticReadbackResult(probe = null, method = '') {
+  if (!probe || typeof probe !== 'object') return null;
+  if (probe.active !== true && probe.matched !== true) return null;
+
+  const anchors = collectPineEditorSurfaceProbeSyntheticAnchors(probe);
+  if (!anchors.length) return null;
+
+  return {
+    success: true,
+    text: anchors.join('\n'),
+    method: method || `${getPineEditorSurfaceProbeFallbackMethod(probe)} (pine-editor-fallback:surface-probe)`,
+    element: probe?.element || {
+      name: anchors[0]
+    },
+    pineEditorSurfaceProbe: probe
+  };
+}
+
+function getPineEditorCarriedSurfaceProbeHostGraceMs(action = {}) {
+  return Math.max(
+    120,
+    Math.min(
+      450,
+      Math.round(getPineReadbackTimeoutMs(action) * 0.06) || 180
+    )
+  );
+}
+
+function getPineEditorFreshSaveTitleProofTimeoutMs(action = {}) {
+  return Math.max(
+    420,
+    Math.min(
+      1200,
+      Math.round(getPineReadbackTimeoutMs(action) * 0.14) || 700
+    )
+  );
+}
+
+function shouldRequireFreshPineSaveTitleProof(action = {}, carriedSurfaceProbe = null) {
+  if (!carriedSurfaceProbe || typeof carriedSurfaceProbe !== 'object') return false;
+
+  const evidenceMode = String(action?.pineEvidenceMode || '').trim().toLowerCase();
+  if (evidenceMode !== 'save-status') return false;
+
+  const expectedScriptName = normalizeCompactText(
+    action?.pineExpectedScriptName || action?.expectedScriptName || action?.scriptName || '',
+    180
+  );
+  if (!expectedScriptName) return false;
+
+  const carriedSurfaceState = extractPineEditorSafeAuthoringSurfaceState(carriedSurfaceProbe);
+  if (!carriedSurfaceState?.active || carriedSurfaceState.saveConfirmedVisible !== true) {
+    return false;
+  }
+  if (
+    carriedSurfaceState.saveRequiredVisible
+    || carriedSurfaceState.saveConfirmationVisible
+    || carriedSurfaceState.saveReplaceConfirmationVisible
+    || carriedSurfaceState.renameSurfaceVisible
+  ) {
+    return false;
+  }
+
+  return extractTradingViewPineExpectedTitleProof(
+    carriedSurfaceProbe,
+    expectedScriptName
+  ).visible !== true;
+}
+
+async function getPineEditorFreshSaveTitleHeaderFallback(action = {}) {
+  const expectedScriptName = normalizeCompactText(
+    action?.pineExpectedScriptName || action?.expectedScriptName || action?.scriptName || '',
+    180
+  );
+  if (!expectedScriptName) return null;
+
+  const resolvedScope = await resolveTradingViewPineSurfaceProbeWindowScope({
+    windowHandle: Number(action?.windowHandle || action?.hwnd || 0) || 0,
+    windowInfo: action?.windowInfo || null,
+    foreground: action?.foreground || action?.pineEditorSurfaceProbe?.foreground || null
+  });
+  const targetWindowHandle = Number(resolvedScope?.windowHandle || 0) || 0;
+  const scopedWindowInfo = resolvedScope?.windowInfo || resolvedScope?.foreground || null;
+  if (targetWindowHandle <= 0 || !scopedWindowInfo?.success) {
+    return null;
+  }
+
+  const headerScanBound = buildTradingViewPineSurfaceScanBounds(scopedWindowInfo)
+    .find((entry) => String(entry?.id || '').trim().toLowerCase() === 'panel-header-band')
+    || buildTradingViewPineSurfaceScanBounds(scopedWindowInfo)[0]
+    || null;
+  if (!headerScanBound?.bounds) {
+    return null;
+  }
+
+  const scanAttempts = [];
+  const collectedElements = [];
+  const seenElements = new Set();
+  const scanRegex = buildTradingViewPineSurfaceHostRegex({
+    pineExpectedScriptName: expectedScriptName
+  });
+  const scanViews = ['control', 'content'];
+  const scanTimeoutMs = getPineEditorFreshSaveTitleProofTimeoutMs(action);
+  const buildResultFromAnchors = (anchors = []) => {
+    if (!Array.isArray(anchors) || anchors.length === 0) return null;
+
+    const visibleAnchorEntries = summarizeTradingViewPineVisibleAnchorEntries(
+      anchors,
+      'uia-host-pine-surface-header-scan'
+    );
+    const probe = {
+      active: true,
+      foreground: resolvedScope?.foreground || scopedWindowInfo,
+      windowInfo: scopedWindowInfo,
+      searchBounds: headerScanBound.bounds,
+      scanBounds: [headerScanBound],
+      scanAttempts,
+      documentProbeAttempts: [],
+      documentProbeSignals: [],
+      documentProbeRoots: [],
+      documentProbeElements: [],
+      pointProbeAttempts: [],
+      pointProbeUsedWindowScopedHost: false,
+      pointProbeUsedGlobalFallback: false,
+      diagnosticBounds: [],
+      diagnosticAttempts: [],
+      diagnosticSignals: [],
+      diagnosticElements: [],
+      matchedBy: 'uia-host-pine-surface-header-scan',
+      element: anchors[0]?.element || null,
+      anchorText: anchors[0]?.text || null,
+      pointProbeElements: [],
+      visibleAnchors: visibleAnchorEntries.map((entry) => entry?.text).filter(Boolean).slice(0, 8),
+      visibleAnchorEntries,
+      rendererProof: null
+    };
+
+    return {
+      success: true,
+      text: probe.visibleAnchors.join('\n'),
+      method: 'UIAHostScan (pine-editor-fallback:header-title)',
+      element: probe.element,
+      pineEditorSurfaceProbe: probe
+    };
+  };
+
+  for (const view of scanViews) {
+    const scanResult = await findElementsByWindowWithHost(scanRegex, {
+      windowHandle: targetWindowHandle,
+      timeout: scanTimeoutMs,
+      maxResults: 24,
+      maxDepth: 18,
+      maxVisited: 1400,
+      includeDisabled: true,
+      bounds: headerScanBound.bounds,
+      textMode: 'regex',
+      view
+    });
+    scanAttempts.push({
+      id: headerScanBound.id || 'panel-header-band',
+      bounds: headerScanBound.bounds,
+      view,
+      success: scanResult?.success === true,
+      count: Number(scanResult?.count || 0) || 0,
+      stats: scanResult?.stats || null,
+      error: scanResult?.error || null
+    });
+    if (!scanResult?.success || !Array.isArray(scanResult.elements)) {
+      continue;
+    }
+
+    for (const element of scanResult.elements) {
+      const taggedElement = {
+        ...element,
+        LikuPineProbeScanId: headerScanBound.id || 'panel-header-band',
+        LikuPineProbeView: view,
+        LikuPineProbeSource: 'window-host-header-title-scan'
+      };
+      const bounds = taggedElement?.Bounds || {};
+      const dedupeKey = [
+        normalizeTradingViewPineAnchorText(taggedElement?.Name || ''),
+        Number(taggedElement?.WindowHandle || 0) || 0,
+        Number(bounds?.X || 0) || 0,
+        Number(bounds?.Y || 0) || 0,
+        Number(bounds?.Width || 0) || 0,
+        Number(bounds?.Height || 0) || 0
+      ].join('|');
+      if (seenElements.has(dedupeKey)) continue;
+      seenElements.add(dedupeKey);
+      collectedElements.push(taggedElement);
+    }
+
+    const anchors = collectTradingViewPineEditorHostAnchors(collectedElements, {
+      pineExpectedScriptName: expectedScriptName
+    });
+    if (!anchors.length) {
+      continue;
+    }
+
+    const result = buildResultFromAnchors(anchors);
+    const surfaceState = extractPineEditorSafeAuthoringSurfaceState(result?.pineEditorSurfaceProbe || null);
+    const expectedTitleProof = extractTradingViewPineExpectedTitleProof(
+      result?.pineEditorSurfaceProbe || null,
+      expectedScriptName
+    );
+    if (
+      expectedTitleProof.visible === true
+      || surfaceState.renameSurfaceVisible
+      || surfaceState.saveRequiredVisible
+      || surfaceState.saveConfirmationVisible
+      || surfaceState.saveReplaceConfirmationVisible
+    ) {
+      return result;
+    }
+  }
+
+  return buildResultFromAnchors(collectTradingViewPineEditorHostAnchors(collectedElements, {
+    pineExpectedScriptName: expectedScriptName
+  }));
+}
+
 async function getPineEditorTextFallback(action = {}) {
   const targetText = String(action?.text || action?.criteria?.text || '').trim();
   if (!/pine editor/i.test(targetText)) return null;
 
+  const evidenceMode = String(action?.pineEvidenceMode || 'generic-status').trim().toLowerCase();
+  const disableTradingViewPineReadbackCDP = action?.disableTradingViewPineReadbackCDP === true;
+  const carriedSurfaceProbe = action?.pineEditorSurfaceProbe && typeof action.pineEditorSurfaceProbe === 'object'
+    ? action.pineEditorSurfaceProbe
+    : null;
+  const evidenceModeSupportsSyntheticAnchors = evidenceMode === 'safe-authoring-inspect' || evidenceMode === 'save-status';
+  const carriedSurfaceProbeResult = buildPineEditorSurfaceProbeSyntheticReadbackResult(
+    carriedSurfaceProbe,
+    carriedSurfaceProbe?.active
+      ? `${getPineEditorSurfaceProbeFallbackMethod(carriedSurfaceProbe)} (pine-editor-fallback:carried-probe)`
+      : ''
+  );
+  const requireFreshSaveTitleProof = shouldRequireFreshPineSaveTitleProof(action, carriedSurfaceProbe);
+  let hostSurfaceFallback = null;
+  if (
+    carriedSurfaceProbeResult?.success
+    && evidenceModeSupportsSyntheticAnchors
+    && action?.preferCarriedPineSurfaceProbeOnSlowHost === true
+  ) {
+    if (requireFreshSaveTitleProof) {
+      hostSurfaceFallback = await Promise.resolve()
+        .then(() => getPineEditorFreshSaveTitleHeaderFallback(action))
+        .catch(() => null);
+    } else {
+      const hostSurfaceFallbackPromise = Promise.resolve()
+        .then(() => getPineEditorSurfaceProbeFallback(action))
+        .catch(() => null);
+      const pendingMarker = Symbol('pending-pine-host-surface-fallback');
+      const hostSurfaceFallbackCandidate = await Promise.race([
+        hostSurfaceFallbackPromise,
+        sleep(getPineEditorCarriedSurfaceProbeHostGraceMs(action)).then(() => pendingMarker)
+      ]);
+      if (hostSurfaceFallbackCandidate !== pendingMarker) {
+        hostSurfaceFallback = hostSurfaceFallbackCandidate;
+      }
+    }
+    if (!hostSurfaceFallback?.success) {
+      return carriedSurfaceProbeResult;
+    }
+  } else {
+    hostSurfaceFallback = await getPineEditorSurfaceProbeFallback(action);
+  }
   const ui = require('./ui-automation');
   const host = ui.getSharedUIAHost();
   const baseCriteria = action.criteria && typeof action.criteria === 'object'
     ? { ...action.criteria }
     : {};
-  const evidenceMode = String(action?.pineEvidenceMode || 'generic-status').trim().toLowerCase();
-  const targetWindowHandle = Number(action?.windowHandle || action?.hwnd || 0) || 0;
-  const fallbackCandidates = buildPineEditorFallbackCandidates(evidenceMode);
+  const fallbackCandidates = buildPineEditorFallbackCandidates(evidenceMode, action);
   const syntheticAnchors = [];
   const seenSyntheticAnchors = new Set();
+  const addSyntheticAnchor = (value = '') => {
+    const normalized = normalizeCompactText(value, 180);
+    if (!normalized || seenSyntheticAnchors.has(normalized)) return;
+    seenSyntheticAnchors.add(normalized);
+    syntheticAnchors.push(normalized);
+  };
+  const addSyntheticAnchorsFromProbe = (probe = null) => {
+    for (const anchor of collectPineEditorSurfaceProbeSyntheticAnchors(probe)) {
+      addSyntheticAnchor(anchor);
+    }
+  };
 
-  const hostSurfaceProbe = await probeTradingViewPineEditorSurface({
-    windowHandle: targetWindowHandle,
-    timeout: Math.min(1800, Math.max(350, Math.round(getPineReadbackTimeoutMs(action) * 0.25)))
+  if (carriedSurfaceProbeResult?.success) {
+    addSyntheticAnchorsFromProbe(carriedSurfaceProbe);
+  }
+
+  const carriedProbeMethod = carriedSurfaceProbeResult?.success
+    ? carriedSurfaceProbeResult.method
+    : null;
+  const buildSyntheticAnchorResult = (methodOverride = '') => ({
+    success: true,
+    text: syntheticAnchors.join('\n'),
+    method: methodOverride || (
+      hostSurfaceFallback?.success
+        ? `${hostSurfaceFallback.method} + ElementAnchor (pine-editor-fallback)`
+        : (carriedProbeMethod || 'ElementAnchor (pine-editor-fallback)')
+    ),
+    element: carriedSurfaceProbe?.element
+      || hostSurfaceFallback?.element
+      || {
+        name: syntheticAnchors[0]
+      },
+    pineEditorSurfaceProbe: hostSurfaceFallback?.pineEditorSurfaceProbe || carriedSurfaceProbe || null
   });
-  if (hostSurfaceProbe?.active && Array.isArray(hostSurfaceProbe.visibleAnchors) && hostSurfaceProbe.visibleAnchors.length > 0) {
+
+  if (
+    carriedProbeMethod
+    && syntheticAnchors.length > 0
+    && !hostSurfaceFallback?.success
+    && evidenceModeSupportsSyntheticAnchors
+  ) {
     return {
       success: true,
-      text: hostSurfaceProbe.visibleAnchors.join('\n'),
-      method: 'UIAHostScan (pine-editor-fallback)',
-      element: hostSurfaceProbe.element || null,
-      pineEditorSurfaceProbe: hostSurfaceProbe
+      text: syntheticAnchors.join('\n'),
+      method: carriedProbeMethod,
+      element: carriedSurfaceProbe?.element || {
+        name: syntheticAnchors[0]
+      },
+      pineEditorSurfaceProbe: carriedSurfaceProbe
     };
   }
 
-  for (const candidate of fallbackCandidates) {
+  if (hostSurfaceFallback?.success) {
+    for (const line of String(hostSurfaceFallback.text || '').split(/\r?\n+/)) {
+      addSyntheticAnchor(line);
+    }
+    addSyntheticAnchorsFromProbe(hostSurfaceFallback?.pineEditorSurfaceProbe || null);
+  }
+
+  if (
+    hostSurfaceFallback?.success
+    && syntheticAnchors.length > 0
+    && evidenceModeSupportsSyntheticAnchors
+  ) {
+    const hostSurfaceProbe = hostSurfaceFallback?.pineEditorSurfaceProbe || null;
+    const hostSurfaceState = extractPineEditorSafeAuthoringSurfaceState(hostSurfaceProbe);
+    const expectedScriptName = normalizeCompactText(
+      action?.pineExpectedScriptName || action?.expectedScriptName || action?.scriptName || '',
+      180
+    );
+    const hostExpectedTitleProofVisible = expectedScriptName
+      ? extractTradingViewPineExpectedTitleProof(hostSurfaceProbe, expectedScriptName).visible === true
+      : false;
+    const hostProofDecisive = evidenceMode === 'save-status'
+      ? (
+          hostExpectedTitleProofVisible
+          || hostSurfaceState.renameSurfaceVisible
+          || hostSurfaceState.saveRequiredVisible
+          || hostSurfaceState.saveConfirmationVisible
+          || hostSurfaceState.saveReplaceConfirmationVisible
+        )
+      : hostSurfaceState.active === true;
+    if (hostProofDecisive) {
+      return buildSyntheticAnchorResult();
+    }
+  }
+
+  if (!disableTradingViewPineReadbackCDP && ['safe-authoring-inspect', 'save-status'].includes(evidenceMode)) {
+    let rendererReadbackFallback = null;
+    try {
+      rendererReadbackFallback = await readTradingViewPineEditorContentWithCDP({
+        windowHandle: Number(action?.windowHandle || action?.hwnd || 0) || 0,
+        timeout: Math.max(
+          220,
+          Math.min(1600, Math.round(getPineReadbackTimeoutMs(action) * 0.24))
+        ),
+        pinePreparedScriptName: action?.pineExpectedScriptName || action?.expectedScriptName || action?.scriptName || '',
+        cdpDependencies: action?.cdpDependencies || null
+      });
+    } catch {}
+
+    const rendererBlocks = [];
+    const seenRendererLines = new Set();
+    const addRendererBlock = (value = '') => {
+      for (const line of String(value || '').replace(/\r/g, '').split(/\n+/)) {
+        const normalized = normalizeCompactText(line, 240);
+        if (!normalized || seenRendererLines.has(normalized)) continue;
+        seenRendererLines.add(normalized);
+        rendererBlocks.push(normalized);
+      }
+    };
+
+    const rendererReadbackVisible = !!rendererReadbackFallback && [
+      rendererReadbackFallback.dialogText,
+      rendererReadbackFallback.renderedText,
+      rendererReadbackFallback.text
+    ].some((value) => !!normalizeCompactText(value, 240));
+
+    if (rendererReadbackVisible) {
+      addRendererBlock(rendererReadbackFallback.dialogText || '');
+      addRendererBlock(rendererReadbackFallback.renderedText || '');
+      addRendererBlock(rendererReadbackFallback.text || '');
+    }
+
+    if (rendererBlocks.length > 0) {
+      return {
+        success: true,
+        text: rendererBlocks.join('\n'),
+        method: 'ChromiumCDPRead (pine-editor-fallback)',
+        element: {
+          name: rendererBlocks[0]
+        },
+        pineEditorSurfaceProbe: hostSurfaceFallback?.pineEditorSurfaceProbe || null,
+        pineEditorRendererReadback: rendererReadbackFallback
+      };
+    }
+  }
+
+  const candidatesToProbe = hostSurfaceFallback?.success
+    ? fallbackCandidates.filter((candidate) => String(candidate?.category || '').trim().toLowerCase() === 'confirmation-modal')
+    : fallbackCandidates.filter((candidate) => String(candidate?.category || '').trim().toLowerCase() !== 'save-title');
+
+  for (const candidate of candidatesToProbe) {
     const text = String(candidate?.text || '').trim();
     if (!text) continue;
-    const findResult = await ui.findElement({
-      ...baseCriteria,
-      text,
-      exactText: '',
-      automationId: baseCriteria.automationId || '',
-      controlType: baseCriteria.controlType || ''
-    });
+    let findResult = null;
+    try {
+      findResult = await ui.findElement({
+        ...baseCriteria,
+        text,
+        exactText: '',
+        automationId: baseCriteria.automationId || '',
+        controlType: baseCriteria.controlType || ''
+      });
+    } catch {
+      continue;
+    }
     const element = findResult?.element || null;
     const bounds = element?.bounds || element?.Bounds || null;
     if (!findResult?.success) continue;
 
     const syntheticAnchorText = normalizeCompactText(element?.name || text, 120);
-    if (candidate?.synthetic && syntheticAnchorText && !seenSyntheticAnchors.has(syntheticAnchorText)) {
-      seenSyntheticAnchors.add(syntheticAnchorText);
-      syntheticAnchors.push(syntheticAnchorText);
+    if (candidate?.synthetic && syntheticAnchorText) {
+      addSyntheticAnchor(syntheticAnchorText);
     }
 
     if (!bounds) continue;
@@ -1518,18 +7719,147 @@ async function getPineEditorTextFallback(action = {}) {
     } catch {}
   }
 
-  if (syntheticAnchors.length > 0 && (evidenceMode === 'safe-authoring-inspect' || evidenceMode === 'save-status')) {
-    return {
-      success: true,
-      text: syntheticAnchors.join('\n'),
-      method: 'ElementAnchor (pine-editor-fallback)',
-      element: {
-        name: syntheticAnchors[0]
-      }
-    };
+  if (syntheticAnchors.length > 0 && evidenceModeSupportsSyntheticAnchors) {
+    return buildSyntheticAnchorResult();
+  }
+
+  if (hostSurfaceFallback?.success) {
+    return hostSurfaceFallback;
   }
 
   return null;
+}
+
+function getPineEditorSurfaceProbeFallbackMethod(probe = null) {
+  const matchedBy = String(probe?.matchedBy || '').trim().toLowerCase();
+  if (matchedBy.startsWith('chromium-cdp')) {
+    return 'ChromiumCDP';
+  }
+  if (matchedBy.startsWith('uia-host')) {
+    return 'UIAHostScan';
+  }
+  if (matchedBy.startsWith('watcher')) {
+    return 'WatcherCache';
+  }
+  return 'PineSurfaceProbe';
+}
+
+async function resolveTradingViewPineSurfaceProbeWindowScope(options = {}) {
+  let windowInfo = summarizeTradingViewPineActivationWindowInfo(options?.windowInfo || null);
+  if (!(windowInfo?.success && isTradingViewForegroundWindow(windowInfo))) {
+    windowInfo = null;
+  }
+
+  let foreground = summarizeTradingViewPineActivationForeground(options?.foreground || null);
+  if (!(foreground?.success && isTradingViewForegroundWindow(foreground))) {
+    foreground = null;
+  }
+
+  let windowHandle = Number(
+    options?.windowHandle
+    || options?.hwnd
+    || windowInfo?.hwnd
+    || foreground?.hwnd
+    || 0
+  ) || 0;
+
+  if (windowInfo?.success && windowHandle > 0 && Number(windowInfo?.hwnd || 0) !== windowHandle) {
+    windowInfo = null;
+  }
+  if (foreground?.success && windowHandle > 0 && Number(foreground?.hwnd || 0) !== windowHandle) {
+    foreground = null;
+  }
+
+  if (windowHandle <= 0) {
+    try {
+      const foregroundCandidate = await getForegroundWindowInfo();
+      if (foregroundCandidate?.success && isTradingViewForegroundWindow(foregroundCandidate)) {
+        foreground = foregroundCandidate;
+        windowHandle = Number(foregroundCandidate?.hwnd || 0) || 0;
+        if (!windowInfo?.success) {
+          windowInfo = foregroundCandidate;
+        }
+      }
+    } catch {}
+  }
+
+  if (!windowInfo?.success && windowHandle > 0) {
+    try {
+      const windowCandidate = await getWindowInfoByHandle(windowHandle);
+      if (windowCandidate?.success && isTradingViewForegroundWindow(windowCandidate)) {
+        windowInfo = windowCandidate;
+      }
+    } catch {}
+  }
+
+  if (!windowInfo?.success && foreground?.success && Number(foreground?.hwnd || 0) === windowHandle) {
+    windowInfo = foreground;
+  }
+
+  return {
+    windowHandle,
+    windowInfo: windowInfo?.success ? windowInfo : null,
+    foreground: foreground?.success && Number(foreground?.hwnd || 0) === windowHandle
+      ? foreground
+      : null
+  };
+}
+
+async function getPineEditorSurfaceProbeFallback(action = {}, options = {}) {
+  const targetText = String(action?.text || action?.criteria?.text || '').trim();
+  if (!/pine editor/i.test(targetText)) return null;
+
+  const explicitWindowHandle = Number(
+    action?.windowHandle
+    || options?.windowHandle
+    || action?.hwnd
+    || options?.hwnd
+    || 0
+  ) || 0;
+  const disableTradingViewPineReadbackCDP = action?.disableTradingViewPineReadbackCDP === true;
+  const resolvedScope = await resolveTradingViewPineSurfaceProbeWindowScope({
+    windowHandle: explicitWindowHandle,
+    windowInfo: action?.windowInfo || options?.windowInfo || null,
+    foreground: action?.foreground || options?.foreground || null
+  });
+  const targetWindowHandle = Number(resolvedScope?.windowHandle || 0) || 0;
+  if (targetWindowHandle <= 0) return null;
+  const scopedForeground = resolvedScope?.foreground || null;
+  const scopedWindowInfo = resolvedScope?.windowInfo || scopedForeground || null;
+  const allowRendererProof = !disableTradingViewPineReadbackCDP && (
+    explicitWindowHandle > 0
+    || (
+      scopedForeground?.success
+      && Number(scopedForeground?.hwnd || 0) === targetWindowHandle
+    )
+  );
+  const requestedTimeout = Number(options?.timeoutMs || options?.timeout || 0);
+  const boundedTimeout = Number.isFinite(requestedTimeout) && requestedTimeout > 0
+    ? Math.max(220, Math.min(Math.round(requestedTimeout), 1800))
+    : Math.min(1800, Math.max(350, Math.round(getPineReadbackTimeoutMs(action) * 0.25)));
+  const hostSurfaceProbe = await probeTradingViewPineEditorSurface({
+    windowHandle: targetWindowHandle,
+    windowInfo: scopedWindowInfo,
+    foreground: scopedForeground,
+    resolveWindowState: !(scopedWindowInfo || scopedForeground),
+    timeout: boundedTimeout,
+    allowRendererProof,
+    pineEvidenceMode: action?.pineEvidenceMode || options?.pineEvidenceMode || '',
+    pineExpectedScriptName: action?.pineExpectedScriptName || action?.expectedScriptName || action?.scriptName || '',
+    cdpPort: Number(action?.cdpPort || options?.cdpPort || 0) || 0,
+    cdpDependencies: action?.cdpDependencies || options?.cdpDependencies || null
+  });
+  if (!hostSurfaceProbe?.active || !Array.isArray(hostSurfaceProbe.visibleAnchors) || hostSurfaceProbe.visibleAnchors.length === 0) {
+    return null;
+  }
+
+  return {
+    success: true,
+    text: hostSurfaceProbe.visibleAnchors.join('\n'),
+    method: `${getPineEditorSurfaceProbeFallbackMethod(hostSurfaceProbe)} (pine-editor-fallback)`,
+    element: hostSurfaceProbe.element || null,
+    pineEditorSurfaceProbe: hostSurfaceProbe
+  };
 }
 
 function getPineEditorWatcherFallback(action = {}) {
@@ -1635,16 +7965,27 @@ function getPineEditorWatcherFallback(action = {}) {
   };
 }
 
-function isTradingViewPineEditorOpenShortcutAction(action = {}) {
+function isTradingViewPineEditorOpenAction(action = {}) {
   if (!action || typeof action !== 'object') return false;
   const type = String(action?.type || '').trim().toLowerCase();
   const key = String(action?.key || '').trim().toLowerCase();
   const shortcutId = String(action?.tradingViewShortcut?.id || '').trim().toLowerCase();
-  return type === 'key' && key === 'ctrl+e' && shortcutId === 'open-pine-editor';
+  const routeId = String(
+    action?.searchSurfaceContract?.id
+    || action?.tradingViewShortcut?.id
+    || ''
+  ).trim().toLowerCase();
+  const route = String(
+    action?.searchSurfaceContract?.route
+    || action?.tradingViewShortcut?.route
+    || ''
+  ).trim().toLowerCase();
+  return (type === 'key' && key === 'ctrl+e' && shortcutId === 'open-pine-editor')
+    || (type === 'click_element' && routeId === 'open-pine-editor' && route === 'semantic-icon');
 }
 
-async function maybeBypassTradingViewPineEditorOpenShortcut(action = {}) {
-  if (!isTradingViewPineEditorOpenShortcutAction(action)) {
+async function maybeBypassTradingViewPineEditorOpenAction(action = {}) {
+  if (!isTradingViewPineEditorOpenAction(action)) {
     return {
       bypass: false,
       probe: null
@@ -1667,9 +8008,10 @@ async function maybeBypassTradingViewPineEditorOpenShortcut(action = {}) {
     bypass: true,
     probe,
     skippedReason: 'pine-editor-already-active',
+    skippedActionType: String(action?.type || '').trim().toLowerCase(),
     message: probe?.anchorText
-      ? `Skipped ctrl+e because Pine Editor was already active (${probe.anchorText})`
-      : 'Skipped ctrl+e because Pine Editor was already active'
+      ? `Skipped TradingView Pine opener because Pine Editor was already active (${probe.anchorText})`
+      : 'Skipped TradingView Pine opener because Pine Editor was already active'
   };
 }
 
@@ -3049,6 +9391,7 @@ async function findElementsByWindowWithHost(searchText, options = {}) {
   const {
     controlType = '',
     exact = false,
+    textMode = '',
     windowHandle = 0,
     foregroundOnly = false,
     timeout = 15000,
@@ -3058,7 +9401,8 @@ async function findElementsByWindowWithHost(searchText, options = {}) {
     maxDepth = 16,
     maxVisited = 1000,
     includeOffscreen = false,
-    includeDisabled = true
+    includeDisabled = true,
+    skipRootMatch = false
   } = options;
 
   let hwnd = Number(windowHandle) || 0;
@@ -3074,10 +9418,11 @@ async function findElementsByWindowWithHost(searchText, options = {}) {
     const boundedTimeout = Number.isFinite(Number(timeout)) && Number(timeout) >= 100
       ? Math.min(Math.round(Number(timeout)), 6500)
       : 2500;
+    const normalizedTextMode = String(textMode || '').trim().toLowerCase();
 
     const response = await host.findElementsByWindow(hwnd, {
       text: searchText,
-      textMode: exact ? 'exact' : 'contains',
+      textMode: normalizedTextMode || (exact ? 'exact' : 'contains'),
       controlType,
       view,
       bounds,
@@ -3086,7 +9431,8 @@ async function findElementsByWindowWithHost(searchText, options = {}) {
       maxVisited,
       timeoutMs: boundedTimeout,
       includeOffscreen,
-      includeDisabled
+      includeDisabled,
+      skipRootMatch
     });
 
     const elements = (Array.isArray(response?.elements) ? response.elements : [])
@@ -3106,6 +9452,102 @@ async function findElementsByWindowWithHost(searchText, options = {}) {
       success: false,
       error: error?.message || String(error || 'UIA host find failed'),
       elements: [],
+      source: 'uia-host'
+    };
+  }
+}
+
+async function attemptTradingViewPineSaveNameSemanticWrite(action = {}) {
+  if (!isTradingViewPineSaveNameTypeAction(action)) {
+    return {
+      applicable: false,
+      available: false,
+      success: false,
+      fallbackRecommended: true,
+      method: null,
+      error: null
+    };
+  }
+
+  return await setTradingViewPineSaveDialogNameWithCDP(action);
+}
+
+async function probeWindowAccessibilityWithHost(options = {}) {
+  const {
+    windowHandle = 0,
+    foregroundOnly = false,
+    timeout = 900,
+    bounds = null,
+    maxResults = 24,
+    maxRoots = 4,
+    maxDepth = 18,
+    maxVisited = 1400,
+    includeOffscreen = false,
+    includeDisabled = true,
+    rootControlType = 'Document',
+    rootClassName = 'Chrome_RenderWidgetHostHWND'
+  } = options;
+
+  let hwnd = Number(windowHandle) || 0;
+  try {
+    const ui = require('./ui-automation');
+    const host = ui.getSharedUIAHost();
+    if (typeof host?.probeWindowAccessibility !== 'function') {
+      return {
+        success: false,
+        error: 'UIA host accessibility probe unavailable',
+        elements: [],
+        roots: [],
+        source: 'uia-host'
+      };
+    }
+
+    if (!hwnd && foregroundOnly) {
+      const foreground = await host.getForegroundWindowInfo();
+      hwnd = Number(foreground?.hwnd || 0) || 0;
+    }
+    if (!hwnd) {
+      return null;
+    }
+
+    const boundedTimeout = Number.isFinite(Number(timeout)) && Number(timeout) >= 100
+      ? Math.min(Math.round(Number(timeout)), 3000)
+      : 900;
+    const response = await host.probeWindowAccessibility(hwnd, {
+      bounds,
+      maxResults,
+      maxRoots,
+      maxDepth,
+      maxVisited,
+      timeoutMs: boundedTimeout,
+      includeOffscreen,
+      includeDisabled,
+      rootControlType,
+      rootClassName
+    });
+
+    const elements = (Array.isArray(response?.elements) ? response.elements : [])
+      .map(normalizeHostElementForFind)
+      .filter(Boolean);
+    const roots = (Array.isArray(response?.roots) ? response.roots : [])
+      .map(normalizeHostElementForFind)
+      .filter(Boolean);
+
+    return {
+      success: true,
+      elements,
+      roots,
+      count: elements.length,
+      rootCount: roots.length,
+      source: 'uia-host',
+      stats: response?.stats || null
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: error?.message || String(error || 'UIA host accessibility probe failed'),
+      elements: [],
+      roots: [],
       source: 'uia-host'
     };
   }
@@ -3133,11 +9575,16 @@ function normalizeHostElementForFind(element) {
     AutomationId: element.AutomationId || element.automationId || '',
     ClassName: element.ClassName || element.className || '',
     Value: element.Value || element.value || '',
+    Description: element.Description || element.description || '',
+    DefaultAction: element.DefaultAction || element.defaultAction || '',
+    LegacyRole: element.LegacyRole || element.legacyRole || '',
+    Source: element.Source || element.source || '',
     WindowHandle: Number(element.WindowHandle || element.windowHandle || 0) || 0,
     NativeWindowHandle: Number(element.NativeWindowHandle || element.nativeWindowHandle || 0) || 0,
     Patterns: element.Patterns || element.patterns || [],
     IsEnabled: element.IsEnabled !== undefined ? element.IsEnabled : element.isEnabled,
     IsOffscreen: element.IsOffscreen !== undefined ? element.IsOffscreen : element.isOffscreen,
+    HasKeyboardFocus: element.HasKeyboardFocus !== undefined ? element.HasKeyboardFocus : element.hasKeyboardFocus,
     IsFocusable: element.IsFocusable !== undefined ? element.IsFocusable : element.isFocusable,
     IsClickable: element.IsClickable !== undefined ? element.IsClickable : element.isClickable,
     Bounds: {
@@ -3149,6 +9596,48 @@ function normalizeHostElementForFind(element) {
       CenterY: Math.round(Number(bounds.CenterY ?? bounds.centerY ?? (y + height / 2)))
     }
   };
+}
+
+/**
+ * Return the currently focused UIA element when it belongs to a known window.
+ * This stays bounded to a single top-level window and fails open when the host
+ * is unavailable.
+ */
+async function getFocusedElementInWindowWithHost(windowHandle = 0) {
+  const hwnd = Number(windowHandle) || 0;
+  if (!hwnd) {
+    return {
+      success: false,
+      focused: false,
+      error: 'Host focused-element probe requires windowHandle',
+      source: 'uia-host'
+    };
+  }
+
+  try {
+    const ui = require('./ui-automation');
+    const host = ui.getSharedUIAHost();
+    const response = await host.getFocusedElementInWindow(hwnd);
+    const element = normalizeHostElementForFind(response?.element);
+
+    return {
+      success: true,
+      focused: response?.focused === true && !!element,
+      reason: response?.reason || null,
+      element,
+      targetWindow: response?.targetWindow || null,
+      focusedWindow: response?.focusedWindow || null,
+      stats: response?.stats || null,
+      source: 'uia-host'
+    };
+  } catch (error) {
+    return {
+      success: false,
+      focused: false,
+      error: error?.message || String(error || 'UIA host focused-element probe failed'),
+      source: 'uia-host'
+    };
+  }
 }
 
 async function invokeElementByWindowWithHost(searchText, options = {}) {
@@ -3472,17 +9961,146 @@ try {
  */
 async function clickElementByText(searchText, options = {}) {
   console.log(`[AUTOMATION] Searching for element: "${searchText}"`);
+
+  let rendererFallbackAttempted = false;
+  let rendererFallbackResult = null;
+  const capturePostClickPineSurfaceProbe = async (fallbackWindowHandle = 0) => {
+    const rendererInvoke = options?.rendererInvoke && typeof options.rendererInvoke === 'object'
+      ? options.rendererInvoke
+      : null;
+    const invokeKind = (normalizeCompactText(rendererInvoke?.kind || '', 80) || '').toLowerCase();
+    if (![
+      'unsaved-changes-confirmation',
+      'replace-existing-script-confirmation',
+      'pine-first-save-confirmation'
+    ].includes(invokeKind)) {
+      return null;
+    }
+
+    const resolvedScope = await resolveTradingViewPineSurfaceProbeWindowScope({
+      windowHandle: Number(
+        rendererInvoke?.windowHandle
+        || options?.windowHandle
+        || fallbackWindowHandle
+        || 0
+      ) || 0,
+      hwnd: Number(rendererInvoke?.hwnd || options?.hwnd || 0) || 0,
+      windowInfo: rendererInvoke?.windowInfo || options?.windowInfo || null,
+      foreground: rendererInvoke?.foreground || options?.foreground || null
+    });
+    const targetWindowHandle = Number(resolvedScope?.windowHandle || 0) || 0;
+    if (!targetWindowHandle) {
+      return null;
+    }
+
+    const expectedScriptName = rendererInvoke?.pineExpectedScriptName
+      || options?.pineExpectedScriptName
+      || options?.expectedScriptName
+      || options?.scriptName
+      || '';
+    const scopedWindowInfo = resolvedScope?.windowInfo || null;
+    const scopedForeground = resolvedScope?.foreground || null;
+
+    try {
+      const probe = await probeTradingViewPineEditorSurface({
+        windowHandle: targetWindowHandle,
+        windowInfo: scopedWindowInfo,
+        foreground: scopedForeground,
+        resolveWindowState: !(scopedWindowInfo || scopedForeground),
+        timeout: 950,
+        minScanAttemptTimeout: 140,
+        allowRendererProof: true,
+        allowPointProbe: false,
+        allowDiagnosticScan: false,
+        scanViews: ['content'],
+        pineEvidenceMode: expectedScriptName ? 'save-status' : 'safe-authoring-inspect',
+        pineExpectedScriptName: expectedScriptName,
+        cdpPort: Number(rendererInvoke?.cdpPort || options?.cdpPort || 0) || 0,
+        cdpDependencies: rendererInvoke?.cdpDependencies || options?.cdpDependencies || null
+      });
+      return probe?.active === true ? probe : null;
+    } catch {
+      return null;
+    }
+  };
+  const tryRendererFallback = async (failureReason = '') => {
+    if (rendererFallbackAttempted) {
+      return rendererFallbackResult;
+    }
+    rendererFallbackAttempted = true;
+
+    const rendererInvoke = options?.rendererInvoke && typeof options.rendererInvoke === 'object'
+      ? options.rendererInvoke
+      : null;
+    if (!rendererInvoke) {
+      rendererFallbackResult = null;
+      return null;
+    }
+
+    const invokeResult = await invokeTradingViewRendererButtonWithCDP({
+      ...rendererInvoke,
+      buttonText: rendererInvoke.buttonText || searchText,
+      windowHandle: rendererInvoke.windowHandle || options.windowHandle || 0,
+      hwnd: rendererInvoke.hwnd || options.hwnd || 0,
+      foreground: rendererInvoke.foreground || options.foreground || null,
+      windowInfo: rendererInvoke.windowInfo || options.windowInfo || null,
+      cdpPort: Number(rendererInvoke.cdpPort || options.cdpPort || 0) || 0,
+      pineExpectedScriptName: rendererInvoke.pineExpectedScriptName
+        || options.pineExpectedScriptName
+        || options.expectedScriptName
+        || options.scriptName
+        || '',
+      cdpDependencies: rendererInvoke.cdpDependencies || options.cdpDependencies || null
+    });
+
+    if (invokeResult?.success) {
+      const syntheticPineSurfaceProbe = buildTradingViewPineSurfaceProbeFromRendererInvoke(invokeResult, {
+        windowHandle: Number(options.windowHandle || options.hwnd || 0) || 0
+      });
+      rendererFallbackResult = {
+        success: true,
+        method: invokeResult.method || 'chromium-cdp-ax-dom-click',
+        source: 'chromium-cdp',
+        message: `Invoked "${searchText}" via TradingView renderer accessibility`,
+        element: {
+          Name: searchText,
+          ControlType: 'ControlType.Button',
+          WindowHandle: Number(options.windowHandle || options.hwnd || 0) || 0,
+          BackendDOMNodeId: Number(invokeResult?.axNode?.backendDOMNodeId || 0) || 0
+        },
+        rendererInvoke: invokeResult,
+        pineEditorSurfaceProbe: syntheticPineSurfaceProbe
+      };
+      return rendererFallbackResult;
+    }
+
+    rendererFallbackResult = {
+      success: false,
+      method: invokeResult?.method || 'chromium-cdp',
+      error: invokeResult?.error || failureReason || `No element found containing "${searchText}"`,
+      rendererInvoke: invokeResult || null
+    };
+    return rendererFallbackResult;
+  };
   
   const findResult = await findElementByText(searchText, options);
   
   if (findResult.error) {
-    return { success: false, error: findResult.error };
+    const rendererFallback = await tryRendererFallback(findResult.error);
+    if (rendererFallback?.success) {
+      return rendererFallback;
+    }
+    return { success: false, error: rendererFallback?.error || findResult.error };
   }
   
   if (!findResult.element) {
+    const rendererFallback = await tryRendererFallback(`No element found containing "${searchText}"`);
+    if (rendererFallback?.success) {
+      return rendererFallback;
+    }
     return { 
       success: false, 
-      error: `No element found containing "${searchText}"`,
+      error: rendererFallback?.error || `No element found containing "${searchText}"`,
       searched: searchText
     };
   }
@@ -3504,25 +10122,43 @@ async function clickElementByText(searchText, options = {}) {
     console.log(`[AUTOMATION] Using Invoke pattern for button`);
     const invokeResult = await invokeElementByText(searchText, options);
     if (invokeResult.success) {
-      return invokeResult;
+      const postClickPineSurfaceProbe = await capturePostClickPineSurfaceProbe(
+        Number(invokeResult?.element?.WindowHandle || el.WindowHandle || 0) || 0
+      );
+      return postClickPineSurfaceProbe
+        ? {
+            ...invokeResult,
+            pineEditorSurfaceProbe: postClickPineSurfaceProbe
+          }
+        : invokeResult;
+    }
+    const rendererFallback = await tryRendererFallback(invokeResult.error || `Invoke failed for "${searchText}"`);
+    if (rendererFallback?.success) {
+      return rendererFallback;
     }
     if (options.allowCoordinateFallback === false) {
       return {
         success: false,
-        error: invokeResult.error || `Invoke failed for "${searchText}" and coordinate fallback is disabled`,
+        error: rendererFallback?.error || invokeResult.error || `Invoke failed for "${searchText}" and coordinate fallback is disabled`,
         element: el,
-        method: 'invoke-only'
+        method: 'invoke-only',
+        rendererInvoke: rendererFallback?.rendererInvoke || null
       };
     }
     console.log(`[AUTOMATION] Invoke failed, falling back to mouse click`);
   }
 
   if (options.allowCoordinateFallback === false) {
+    const rendererFallback = await tryRendererFallback(`Element "${searchText}" was found but is not invokable without coordinate fallback`);
+    if (rendererFallback?.success) {
+      return rendererFallback;
+    }
     return {
       success: false,
-      error: `Element "${searchText}" was found but is not invokable without coordinate fallback`,
+      error: rendererFallback?.error || `Element "${searchText}" was found but is not invokable without coordinate fallback`,
       element: el,
-      method: 'invoke-only'
+      method: 'invoke-only',
+      rendererInvoke: rendererFallback?.rendererInvoke || null
     };
   }
   
@@ -4466,7 +11102,31 @@ async function executeAction(action, runtimeOptions = {}) {
             break;
           }
 
-          const quickSearchSemanticWrite = await attemptTradingViewQuickSearchSemanticWrite(effectiveAction);
+          const pineSaveNameSemanticWrite = await attemptTradingViewPineSaveNameSemanticWrite(effectiveAction);
+          if (pineSaveNameSemanticWrite.applicable && pineSaveNameSemanticWrite.success) {
+            result.pineSaveNameSemanticWrite = pineSaveNameSemanticWrite;
+            result.method = pineSaveNameSemanticWrite.method || 'ChromiumCDPDialogSetValue';
+            result.message = `Typed "${effectiveAction.text.substring(0, 30)}${effectiveAction.text.length > 30 ? '...' : ''}" via ${result.method}`;
+            break;
+          }
+
+          if (pineSaveNameSemanticWrite.applicable && !pineSaveNameSemanticWrite.fallbackRecommended) {
+            result.success = false;
+            result.error = pineSaveNameSemanticWrite.error || 'TradingView save-name semantic write failed verification';
+            result.pineSaveNameSemanticWrite = pineSaveNameSemanticWrite;
+            result.message = `Typing failed: ${result.error}`;
+            break;
+          }
+
+          const quickSearchSemanticWrite = pineSaveNameSemanticWrite.applicable
+            ? {
+                applicable: false,
+                success: false,
+                fallbackRecommended: true,
+                method: null,
+                error: null
+              }
+            : await attemptTradingViewQuickSearchSemanticWrite(effectiveAction);
           if (quickSearchSemanticWrite.applicable && quickSearchSemanticWrite.success) {
             result.quickSearchSemanticWrite = quickSearchSemanticWrite;
             result.method = quickSearchSemanticWrite.method;
@@ -4483,7 +11143,12 @@ async function executeAction(action, runtimeOptions = {}) {
           }
 
           await typeTextImpl(effectiveAction.text);
-          if (quickSearchSemanticWrite.applicable) {
+          if (pineSaveNameSemanticWrite.applicable) {
+            result.pineSaveNameSemanticWrite = pineSaveNameSemanticWrite;
+            result.fallback = true;
+            result.method = 'SendKeys';
+            result.message = `Typed "${effectiveAction.text.substring(0, 30)}${effectiveAction.text.length > 30 ? '...' : ''}" via SendKeys fallback after Pine save-name semantic write was unavailable`;
+          } else if (quickSearchSemanticWrite.applicable) {
             result.quickSearchSemanticWrite = quickSearchSemanticWrite;
             result.fallback = true;
             result.method = 'SendKeys';
@@ -4496,17 +11161,85 @@ async function executeAction(action, runtimeOptions = {}) {
         
       case ACTION_TYPES.KEY:
         {
-          const pineEditorShortcutBypass = await maybeBypassTradingViewPineEditorOpenShortcut(effectiveAction);
-          if (pineEditorShortcutBypass?.bypass) {
+          const pineEditorOpenBypass = await maybeBypassTradingViewPineEditorOpenAction(effectiveAction);
+          if (pineEditorOpenBypass?.bypass) {
             result.skipped = true;
-            result.skippedReason = pineEditorShortcutBypass.skippedReason || 'pine-editor-already-active';
+            result.skippedReason = pineEditorOpenBypass.skippedReason || 'pine-editor-already-active';
             result.method = 'UIAHostScan';
-            result.pineEditorSurfaceProbe = pineEditorShortcutBypass.probe || null;
-            result.message = pineEditorShortcutBypass.message || `Skipped ${effectiveAction.key}`;
+            result.pineEditorSurfaceProbe = pineEditorOpenBypass.probe || null;
+            result.message = pineEditorOpenBypass.message || `Skipped ${effectiveAction.key}`;
             break;
           }
 
+          const disableTradingViewPineAuthoringCDP = effectiveAction?.disableTradingViewPineAuthoringCDP === true
+            || runtimeOptions?.disableTradingViewPineAuthoringCDP === true;
+          const pineAuthoringCdpWrite = disableTradingViewPineAuthoringCDP
+            || !isTradingViewPineEditorAuthoringPasteAction(effectiveAction)
+            ? null
+            : await setTradingViewPineEditorContentWithCDP({
+                ...effectiveAction,
+                cdpDependencies: effectiveAction?.cdpDependencies || runtimeOptions?.cdpDependencies || null
+              });
+
+          if (pineAuthoringCdpWrite?.applicable) {
+            result.pineAuthoringCdpWrite = pineAuthoringCdpWrite;
+
+            if (pineAuthoringCdpWrite.success) {
+              result.pineAuthoringPasteProof = pineAuthoringCdpWrite;
+              result.method = pineAuthoringCdpWrite.method || 'ChromiumCDP';
+              result.message = `Replaced the Pine buffer via ${result.method} and verified the prepared script`;
+              break;
+            }
+
+            if (!pineAuthoringCdpWrite.fallbackRecommended) {
+              result.success = false;
+              result.error = pineAuthoringCdpWrite.error || 'TradingView Pine editor CDP write failed';
+              result.message = `Key press failed: ${result.error}`;
+              break;
+            }
+          }
+
+          const pineSaveGuard = await guardTradingViewPineSaveKeyAction(effectiveAction, pressKeyImpl);
+          if (pineSaveGuard?.applicable) {
+            result.pineSaveGuard = pineSaveGuard;
+            if (!pineSaveGuard.allowed) {
+              result.success = false;
+              result.error = pineSaveGuard.error || 'TradingView Pine save guard blocked this save action';
+              result.message = `Key press failed: ${result.error}`;
+              break;
+            }
+          }
+
           await pressKeyImpl(effectiveAction.key, effectiveAction);
+          const pinePasteProof = await verifyTradingViewPineEditorPaste(effectiveAction, pressKeyImpl);
+          if (pinePasteProof?.applicable) {
+            result.pineAuthoringPasteProof = pinePasteProof;
+            result.method = pinePasteProof.method || result.method;
+
+            if (!pinePasteProof.success) {
+              result.success = false;
+              result.error = pinePasteProof.error || 'Pine Editor paste proof failed';
+              if (pineAuthoringCdpWrite?.applicable && pineAuthoringCdpWrite.success !== true) {
+                result.error = `${result.error} (after CDP write fallback: ${pineAuthoringCdpWrite.reason || pineAuthoringCdpWrite.error || 'renderer route unavailable'})`;
+              }
+              result.message = `Key press failed: ${result.error}`;
+              break;
+            }
+
+            if (pineAuthoringCdpWrite?.applicable && pineAuthoringCdpWrite.success !== true) {
+              result.fallback = true;
+              result.fallbackReason = pineAuthoringCdpWrite.reason || pineAuthoringCdpWrite.error || 'renderer-route-unavailable';
+              result.message = pinePasteProof.retryAttempted
+                ? `Pressed ${effectiveAction.key} after CDP fallback and repaired the Pine buffer after a single bounded retry`
+                : `Pressed ${effectiveAction.key} after CDP fallback and verified the Pine buffer`;
+            } else {
+              result.message = pinePasteProof.retryAttempted
+                ? `Pressed ${effectiveAction.key} and repaired the Pine buffer after a single bounded retry`
+                : `Pressed ${effectiveAction.key} and verified the Pine buffer`;
+            }
+            break;
+          }
+
           result.message = `Pressed ${effectiveAction.key}`;
         }
         break;
@@ -4539,6 +11272,35 @@ async function executeAction(action, runtimeOptions = {}) {
       
       // Semantic element-based actions (MORE RELIABLE than coordinates)
       case ACTION_TYPES.CLICK_ELEMENT: {
+        const pineEditorOpenBypass = await maybeBypassTradingViewPineEditorOpenAction(effectiveAction);
+        if (pineEditorOpenBypass?.bypass) {
+          result.skipped = true;
+          result.skippedReason = pineEditorOpenBypass.skippedReason || 'pine-editor-already-active';
+          result.method = 'UIAHostScan';
+          result.pineEditorSurfaceProbe = pineEditorOpenBypass.probe || null;
+          result.message = pineEditorOpenBypass.message || 'Skipped TradingView Pine opener';
+          break;
+        }
+
+        let pineActivationProofContext = null;
+        if (isTradingViewSemanticPineIconAction(effectiveAction)) {
+          try {
+            pineActivationProofContext = await prepareTradingViewPineActivationProofContext(effectiveAction);
+          } catch (error) {
+            pineActivationProofContext = {
+              applicable: true,
+              startedAt: Date.now(),
+              timeoutMs: getTradingViewPineActivationProofTimeoutMs(),
+              windowHandle: Number(effectiveAction?.windowHandle || effectiveAction?.hwnd || 0) || 0,
+              before: {
+                captured: false,
+                reason: 'pre-invoke-proof-failed',
+                error: error?.message || String(error || 'Pre-invoke Pine proof failed')
+              }
+            };
+          }
+        }
+
         const criteria = effectiveAction.criteria && typeof effectiveAction.criteria === 'object'
           ? effectiveAction.criteria
           : null;
@@ -4561,9 +11323,47 @@ async function executeAction(action, runtimeOptions = {}) {
             exact: effectiveAction.exact || false,
             windowHandle: effectiveAction.windowHandle || effectiveAction.hwnd || 0,
             foregroundOnly: !!effectiveAction.foregroundOnly,
-            allowCoordinateFallback: effectiveAction.allowCoordinateFallback !== false
+            allowCoordinateFallback: effectiveAction.allowCoordinateFallback !== false,
+            pineExpectedScriptName: effectiveAction.pineExpectedScriptName || effectiveAction.expectedScriptName || effectiveAction.scriptName || '',
+            cdpPort: Number(effectiveAction.cdpPort || 0) || 0,
+            rendererInvoke: effectiveAction.tradingViewRendererInvoke || effectiveAction.rendererInvoke || null,
+            cdpDependencies: effectiveAction.cdpDependencies || null
           });
           result = { ...result, ...clickResult };
+        }
+
+        if (pineActivationProofContext?.applicable) {
+          try {
+            result.tradingViewPineActivationProof = await finalizeTradingViewPineActivationProofContext(
+              pineActivationProofContext,
+              result,
+              effectiveAction
+            );
+          } catch (error) {
+            result.tradingViewPineActivationProof = {
+              applicable: true,
+              route: 'semantic-icon',
+              expectedSurface: 'pine-editor',
+              windowHandle: Number(
+                result?.element?.WindowHandle
+                || result?.element?.windowHandle
+                || pineActivationProofContext?.windowHandle
+                || 0
+              ) || 0,
+              actionSucceeded: result?.success === true,
+              observedChange: false,
+              pineSurfaceObserved: false,
+              disposition: 'proof-error',
+              likelyMeaning: 'The semantic Pine post-invoke proof failed before it could compare TradingView state.',
+              error: error?.message || String(error || 'Semantic Pine post-invoke proof failed'),
+              before: pineActivationProofContext?.before || null,
+              after: null,
+              startedAt: Number(pineActivationProofContext?.startedAt || 0) || 0,
+              finishedAt: Date.now(),
+              durationMs: Math.max(0, Date.now() - (Number(pineActivationProofContext?.startedAt || 0) || Date.now())),
+              signals: []
+            };
+          }
         }
         break;
       }
@@ -4765,7 +11565,15 @@ async function executeAction(action, runtimeOptions = {}) {
           break;
         }
 
-        const getTextAction = pineReadbackPreparation?.action || effectiveAction;
+        const getTextActionBase = pineReadbackPreparation?.action || effectiveAction;
+        const disableTradingViewPineReadbackCDP = getTextActionBase?.disableTradingViewPineReadbackCDP === true
+          || runtimeOptions?.disableTradingViewPineReadbackCDP === true;
+        const getTextAction = disableTradingViewPineReadbackCDP
+          ? {
+              ...getTextActionBase,
+              disableTradingViewPineReadbackCDP: true
+            }
+          : getTextActionBase;
         const getTextCriteria = getTextAction.criteria || {
           text: getTextAction.text,
           automationId: getTextAction.automationId,
@@ -4775,9 +11583,40 @@ async function executeAction(action, runtimeOptions = {}) {
         const pineReadbackTimeoutMs = pineReadbackAction
           ? getPineReadbackTimeoutMs(getTextAction)
           : 0;
-        let gtResult;
+        let gtResult = null;
+        const pineSyntheticReadbackPreferred = pineReadbackAction
+          && ['safe-authoring-inspect', 'save-status'].includes(
+            String(getTextAction?.pineEvidenceMode || '').trim().toLowerCase()
+          );
+        const pineSyntheticReadbackAction = pineSyntheticReadbackPreferred
+          ? {
+              ...getTextAction,
+              preferCarriedPineSurfaceProbeOnSlowHost: true
+            }
+          : getTextAction;
 
-        if (pineReadbackAction) {
+        if (pineSyntheticReadbackPreferred) {
+          try {
+            gtResult = await runWithTimeout(
+              () => getPineEditorTextFallback(pineSyntheticReadbackAction),
+              Math.max(
+                260,
+                Math.min(
+                  1800,
+                  Math.round((pineReadbackTimeoutMs || getPineReadbackTimeoutMs(getTextAction)) * 0.22)
+                )
+              ),
+              'Pine Editor bounded surface readback'
+            );
+            if (!gtResult?.success) {
+              gtResult = null;
+            }
+          } catch {
+            gtResult = null;
+          }
+        }
+
+        if (!gtResult && pineReadbackAction) {
           try {
             gtResult = await runWithTimeout(
               () => uia.getElementText(getTextCriteria),
@@ -4787,20 +11626,57 @@ async function executeAction(action, runtimeOptions = {}) {
           } catch (error) {
             gtResult = createTimedOutActionResult(error, 'Pine Editor primary readback timed out');
           }
-        } else {
+        } else if (!gtResult) {
           gtResult = await uia.getElementText(getTextCriteria);
         }
 
         if (!gtResult?.success) {
           const pineWatcherFallbackResult = getPineEditorWatcherFallback(getTextAction);
+          const pineCarriedSurfaceProbeFallbackResult = pineReadbackAction
+            ? buildPineEditorSurfaceProbeSyntheticReadbackResult(
+                getTextAction?.pineEditorSurfaceProbe || null,
+                getTextAction?.pineEditorSurfaceProbe
+                  ? `${getPineEditorSurfaceProbeFallbackMethod(getTextAction.pineEditorSurfaceProbe)} (pine-editor-fallback:carried-probe-timeout)`
+                  : ''
+              )
+            : null;
 
           if (gtResult?.timedOut) {
-            if (pineWatcherFallbackResult?.success) {
+            let pineSurfaceProbeFallbackResult = null;
+            if (pineReadbackAction) {
+              try {
+                pineSurfaceProbeFallbackResult = await runWithTimeout(
+                  () => getPineEditorSurfaceProbeFallback(getTextAction, {
+                    timeoutMs: Math.max(
+                      220,
+                      Math.min(
+                        1800,
+                        Math.round((pineReadbackTimeoutMs || getPineReadbackTimeoutMs(getTextAction)) * 0.35)
+                      )
+                    )
+                  }),
+                  Math.max(
+                    260,
+                    Math.min(
+                      2200,
+                      Math.round((pineReadbackTimeoutMs || getPineReadbackTimeoutMs(getTextAction)) * 0.45)
+                    )
+                  ),
+                  'Pine Editor timeout surface probe'
+                );
+              } catch {}
+            }
+
+            if (pineSurfaceProbeFallbackResult?.success) {
+              gtResult = pineSurfaceProbeFallbackResult;
+            } else if (pineCarriedSurfaceProbeFallbackResult?.success) {
+              gtResult = pineCarriedSurfaceProbeFallbackResult;
+            } else if (pineWatcherFallbackResult?.success) {
               gtResult = pineWatcherFallbackResult;
             } else {
               gtResult = {
                 ...gtResult,
-                error: `${gtResult.error}. Pine Editor was not confirmed active and no watcher-backed Pine anchors were visible.`
+                error: `${gtResult.error}. Pine Editor was not confirmed active and no host-backed or watcher-backed Pine anchors were visible.`
               };
             }
           } else {
@@ -4821,6 +11697,8 @@ async function executeAction(action, runtimeOptions = {}) {
 
             if (pineFallbackResult?.success) {
               gtResult = pineFallbackResult;
+            } else if (pineCarriedSurfaceProbeFallbackResult?.success) {
+              gtResult = pineCarriedSurfaceProbeFallbackResult;
             } else if (pineWatcherFallbackResult?.success) {
               gtResult = pineWatcherFallbackResult;
             } else if (pineFallbackResult?.timedOut) {
@@ -4843,7 +11721,13 @@ async function executeAction(action, runtimeOptions = {}) {
           result.pineStructuredSummary = buildPineProfilerStructuredSummary(gtResult.text);
         } else if (gtResult.success && /pine editor/i.test(pineTargetText)) {
           if (getTextAction?.pineEvidenceMode === 'safe-authoring-inspect') {
-            result.pineStructuredSummary = buildPineEditorSafeAuthoringSummary(gtResult.text);
+            result.pineStructuredSummary = buildPineEditorSafeAuthoringSummary(
+              gtResult.text,
+              {
+                ...getTextAction,
+                pineEditorSurfaceProbe: gtResult?.pineEditorSurfaceProbe || getTextAction?.pineEditorSurfaceProbe || null
+              }
+            );
           } else if (
             getTextAction?.pineEvidenceMode === 'compile-result'
             || getTextAction?.pineEvidenceMode === 'diagnostics'
@@ -4851,7 +11735,14 @@ async function executeAction(action, runtimeOptions = {}) {
             || getTextAction?.pineEvidenceMode === 'save-status'
             || getTextAction?.pineEvidenceMode === 'generic-status'
           ) {
-            result.pineStructuredSummary = buildPineEditorDiagnosticsStructuredSummary(gtResult.text, getTextAction.pineEvidenceMode);
+            result.pineStructuredSummary = buildPineEditorDiagnosticsStructuredSummary(
+              gtResult.text,
+              getTextAction.pineEvidenceMode,
+              {
+                ...getTextAction,
+                pineEditorSurfaceProbe: gtResult?.pineEditorSurfaceProbe || getTextAction?.pineEditorSurfaceProbe || null
+              }
+            );
           }
         }
         result.message = gtResult.success
@@ -4920,6 +11811,7 @@ async function executeAction(action, runtimeOptions = {}) {
     errorMessage: result.error || null,
     errorCode: result.errorCode || null
   });
+  appendTradingViewPineActivationProofToExecutionProof(result.proof, result.tradingViewPineActivationProof);
   
   result.duration = Date.now() - startTime;
 
@@ -5249,8 +12141,19 @@ module.exports = {
   // Semantic element-based automation (preferred approach)
   findElementByText,
   findElementsByWindowWithHost,
+  probeWindowAccessibilityWithHost,
+  getFocusedElementInWindowWithHost,
   invokeElementByWindowWithHost,
   probeTradingViewPineEditorSurface,
+  probeTradingViewPineEditorRendererWithCDP,
+  invokeTradingViewRendererButtonWithCDP,
+  buildTradingViewPineSurfaceProbeFromRendererInvoke,
+  focusTradingViewPineEditorWithCDP,
+  readTradingViewPineEditorContentWithCDP,
+  setTradingViewPineEditorContentWithCDP,
+  setTradingViewPineSaveDialogNameWithCDP,
+  captureTradingViewPineActivationSnapshot,
+  buildTradingViewPineActivationTransitionProof,
   clickElementByText,
   // v0.0.5: Command execution
   DANGEROUS_COMMAND_PATTERNS,
@@ -5258,6 +12161,7 @@ module.exports = {
   truncateOutput,
   executeCommand,
   buildPineVersionHistoryStructuredSummary,
+  extractPineEditorSafeAuthoringSurfaceState,
   buildPineEditorSafeAuthoringSummary,
   buildPineEditorDiagnosticsStructuredSummary,
   buildPineLogsStructuredSummary,
