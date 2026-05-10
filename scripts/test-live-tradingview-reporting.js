@@ -8,7 +8,10 @@ const path = require('path');
 const {
   summarizeResult,
   readRuntimeTraceTerminalEvent,
-  deriveScenarioOutcome
+  deriveScenarioOutcome,
+  scenarioBlockedByLaunchProfile,
+  everyScenarioBlockedByLaunchProfile,
+  shouldUseLightweightFailureArtifact
 } = require(path.join(__dirname, 'live-tradingview-smoke.js'));
 
 let passed = 0;
@@ -168,6 +171,63 @@ test('summarizeResult preserves Pine authoring telemetry and primary strategy de
   assert.strictEqual(summary.pineAuthoringWriteTelemetry.primaryStrategy, 'monaco-editor-model');
   assert.strictEqual(summary.pineAuthoringWriteTelemetry.primaryAttemptSummary, 'monaco-editor-model:ok:editor-executeEdits');
   assert.strictEqual(summary.pineAuthoringWriteTelemetry.primaryAttempts[0].method, 'editor-executeEdits');
+});
+
+test('shouldUseLightweightFailureArtifact returns true for launch-profile precondition failures before any action executes', () => {
+  const lightweight = shouldUseLightweightFailureArtifact({
+    scenarioError: new Error('pine-editor requires an automation-ready TradingView launch profile. TradingView is running in the normal interactive launch profile.'),
+    execResult: null,
+    actionTimeline: [],
+    launchProfile: {
+      inspectionAvailable: true,
+      automationReady: false,
+      profile: 'interactive-no-cdp'
+    }
+  });
+
+  assert.strictEqual(lightweight, true);
+});
+
+test('shouldUseLightweightFailureArtifact stays disabled once action execution has started', () => {
+  const lightweight = shouldUseLightweightFailureArtifact({
+    scenarioError: new Error('pine-editor requires an automation-ready TradingView launch profile.'),
+    execResult: null,
+    actionTimeline: [{
+      index: 0,
+      action: 'bring_window_to_front'
+    }],
+    launchProfile: {
+      inspectionAvailable: true,
+      automationReady: false,
+      profile: 'interactive-no-cdp'
+    }
+  });
+
+  assert.strictEqual(lightweight, false);
+});
+
+test('scenarioBlockedByLaunchProfile only blocks Pine/CDP scenarios when inspection is available and automation is not ready', () => {
+  const launchProfile = {
+    inspectionAvailable: true,
+    automationReady: false,
+    profile: 'interactive-no-cdp'
+  };
+
+  assert.strictEqual(scenarioBlockedByLaunchProfile('pine-editor', launchProfile), true);
+  assert.strictEqual(scenarioBlockedByLaunchProfile('pine-create-save', launchProfile), true);
+  assert.strictEqual(scenarioBlockedByLaunchProfile('focus', launchProfile), false);
+});
+
+test('everyScenarioBlockedByLaunchProfile only returns true when the entire requested plan is launch-profile gated', () => {
+  const launchProfile = {
+    inspectionAvailable: true,
+    automationReady: false,
+    profile: 'interactive-no-cdp'
+  };
+
+  assert.strictEqual(everyScenarioBlockedByLaunchProfile([{ id: 'pine-editor' }], launchProfile), true);
+  assert.strictEqual(everyScenarioBlockedByLaunchProfile([{ id: 'pine-editor' }, { id: 'pine-create-save' }], launchProfile), true);
+  assert.strictEqual(everyScenarioBlockedByLaunchProfile([{ id: 'focus' }, { id: 'pine-editor' }], launchProfile), false);
 });
 
 console.log(`\nLive TradingView reporting tests: ${passed} passed, ${failed} failed`);

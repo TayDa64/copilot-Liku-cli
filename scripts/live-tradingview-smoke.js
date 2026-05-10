@@ -20,7 +20,15 @@ const {
   buildTradingViewTimeframeWorkflowActions
 } = require(path.join(__dirname, '..', 'src', 'main', 'tradingview', 'chart-verification.js'));
 const {
-  writeFailureArtifactBundle
+  DEFAULT_TRADINGVIEW_CDP_PORT,
+  detectTradingViewLaunchProfile,
+  summarizeTradingViewLaunchProfile,
+  scenarioRequiresTradingViewAutomationReadyLaunch,
+  buildTradingViewLaunchProfilePreconditionMessage
+} = require(path.join(__dirname, '..', 'src', 'main', 'tradingview', 'launch-profile.js'));
+const {
+  writeFailureArtifactBundle,
+  writeFailureArtifactBundleSync
 } = require(path.join(__dirname, 'lib', 'failure-artifacts.js'));
 
 const DEFAULT_ARTIFACT_DIR = path.join(__dirname, '..', 'artifacts', 'live-validation');
@@ -115,6 +123,18 @@ function sanitizeFileSegment(value, fallback = 'scenario') {
     .replace(/[^a-z0-9._-]+/g, '-')
     .replace(/^-+|-+$/g, '');
   return sanitized || fallback;
+}
+
+function normalizeSmokePreflightProcessEntry(entry = {}) {
+  return {
+    pid: Number(entry?.pid || 0) || 0,
+    processName: String(entry?.processName || entry?.name || '').trim(),
+    mainWindowTitle: String(entry?.mainWindowTitle || '').trim(),
+    startTime: entry?.startTime || null,
+    packagedExecutable: entry?.packagedExecutable === true,
+    remoteDebuggingPorts: Array.isArray(entry?.remoteDebuggingPorts) ? entry.remoteDebuggingPorts.slice(0, 4) : [],
+    rendererAccessibilityConfigured: entry?.rendererAccessibilityConfigured === true
+  };
 }
 
 function summarizeAction(action = {}) {
@@ -477,6 +497,27 @@ function deriveScenarioOutcome(options = {}) {
   };
 }
 
+function shouldUseLightweightFailureArtifact(options = {}) {
+  const scenarioError = options.scenarioError || null;
+  const execResult = options.execResult && typeof options.execResult === 'object'
+    ? options.execResult
+    : null;
+  const launchProfile = options.launchProfile && typeof options.launchProfile === 'object'
+    ? options.launchProfile
+    : null;
+  const actionTimeline = Array.isArray(options.actionTimeline) ? options.actionTimeline : [];
+  const errorMessage = String(scenarioError?.message || scenarioError || '').trim();
+
+  if (!scenarioError || execResult || actionTimeline.length > 0) {
+    return false;
+  }
+  if (launchProfile?.inspectionAvailable !== true || launchProfile?.automationReady === true) {
+    return false;
+  }
+
+  return /requires an automation-ready tradingview launch profile/i.test(errorMessage);
+}
+
 function createSystemAutomationProfiler(systemAutomation, expectedWindow = null) {
   const originals = new Map();
   const methodStats = new Map();
@@ -820,6 +861,12 @@ function pickPreferredTradingViewWindow(windows = [], foreground = null) {
 }
 
 async function findTradingViewContext() {
+  return findTradingViewContextWithOptions();
+}
+
+async function findTradingViewContextWithOptions(options = {}) {
+  const includeProcesses = options?.includeProcesses !== false;
+  const fastWindowDiscovery = options?.fastWindowDiscovery === true;
   const verifyTarget = buildVerifyTargetHintFromAppName('TradingView');
   const foreground = await aiService.systemAutomation.getForegroundWindowInfo();
   const knownProcessNames = Array.from(new Set([
@@ -827,11 +874,13 @@ async function findTradingViewContext() {
     'tradingview'
   ].map((value) => String(value || '').trim()).filter(Boolean)));
 
-  const titleSearches = Array.from(new Set([
-    'TradingView',
-    ...(Array.isArray(verifyTarget?.titleHints) ? verifyTarget.titleHints : []),
-    ...(Array.isArray(verifyTarget?.dialogTitleHints) ? verifyTarget.dialogTitleHints : [])
-  ].map((value) => String(value || '').trim()).filter(Boolean)));
+  const titleSearches = fastWindowDiscovery
+    ? []
+    : Array.from(new Set([
+        'TradingView',
+        ...(Array.isArray(verifyTarget?.titleHints) ? verifyTarget.titleHints : []),
+        ...(Array.isArray(verifyTarget?.dialogTitleHints) ? verifyTarget.dialogTitleHints : [])
+      ].map((value) => String(value || '').trim()).filter(Boolean)));
 
   const windowsByHint = [];
   for (const processName of knownProcessNames) {
@@ -856,7 +905,7 @@ async function findTradingViewContext() {
     .filter(Boolean)));
 
   let processes = [];
-  if (processNames.length > 0) {
+  if (includeProcesses && processNames.length > 0) {
     processes = await aiService.systemAutomation.getRunningProcessesByNames(processNames);
   }
 
@@ -1326,8 +1375,26 @@ async function shutdownWatcherRuntime(watcherRuntime = null) {
   }
 }
 
-async function gatherPreflight() {
-  return findTradingViewContext();
+async function gatherPreflight(options = {}) {
+  return findTradingViewContextWithOptions(options);
+}
+
+function scenarioBlockedByLaunchProfile(scenarioId = '', launchProfile = null) {
+  const summarizedLaunchProfile = summarizeTradingViewLaunchProfile(launchProfile);
+  return (
+    summarizedLaunchProfile?.inspectionAvailable === true
+    && scenarioRequiresTradingViewAutomationReadyLaunch(scenarioId)
+    && summarizedLaunchProfile.automationReady !== true
+  );
+}
+
+function everyScenarioBlockedByLaunchProfile(scenarios = [], launchProfile = null) {
+  const plannedScenarios = Array.isArray(scenarios) ? scenarios : [];
+  if (plannedScenarios.length === 0) {
+    return false;
+  }
+
+  return plannedScenarios.every((scenario) => scenarioBlockedByLaunchProfile(scenario?.id || scenario, launchProfile));
 }
 
 async function runScenario(scenario, context) {
@@ -1338,73 +1405,91 @@ async function runScenario(scenario, context) {
   let lastActionCompletedAtMs = null;
   const actionTimeline = [];
   const automationProfiler = createSystemAutomationProfiler(aiService.systemAutomation, context.detectedWindow);
+  const launchProfile = context.launchProfile && typeof context.launchProfile === 'object'
+    ? context.launchProfile
+    : null;
+  const summarizedLaunchProfile = summarizeTradingViewLaunchProfile(launchProfile);
 
   console.log(`\n=== Scenario: ${effectiveScenario.id} ===`);
   console.log(effectiveScenario.description);
   console.log(`Actions: ${(effectiveScenario.actionData.actions || []).map(summarizeAction).join(' -> ')}`);
+  if (summarizedLaunchProfile) {
+    console.log(`Launch profile: ${JSON.stringify({
+      profile: summarizedLaunchProfile.profile || null,
+      automationReady: summarizedLaunchProfile.automationReady === true,
+      reason: summarizedLaunchProfile.reason || null,
+      expectedPort: summarizedLaunchProfile.expectedCdpPort || null,
+      effectivePort: summarizedLaunchProfile.effectivePort || null
+    })}`);
+  }
 
   let execResult = null;
   let scenarioError = null;
 
-  try {
-    execResult = await automationProfiler.run(() => aiService.executeActions(
-      effectiveScenario.actionData,
-      (result, index, total) => {
-        const completedAtMs = Date.now();
-        const label = `${index + 1}/${total}`;
-        const summary = result?.success
-          ? (result?.message || 'ok')
-          : (result?.error || 'failed');
-        actionTimeline.push({
-          index,
-          total,
-          action: result?.action || null,
-          success: result?.success === true,
-          completedAt: new Date(completedAtMs).toISOString(),
-          elapsedMs: Math.max(0, completedAtMs - scenarioStartedAtMs),
-          sincePreviousMs: lastActionCompletedAtMs === null ? null : Math.max(0, completedAtMs - lastActionCompletedAtMs),
-          message: result?.message || null,
-          error: result?.error || null,
-          quickSearchPreflight: result?.quickSearchPreflight?.applicable
-            ? {
-                ready: result.quickSearchPreflight.ready === true,
-                timedOut: result.quickSearchPreflight.timedOut === true,
-                clearedBy: result.quickSearchPreflight.clearedBy || null,
-                fallbackAssumedFocused: result.quickSearchPreflight.fallbackAssumedFocused === true
-              }
-            : null,
-          quickSearchTypedVerification: result?.quickSearchTypedVerification?.applicable
-            ? {
-                verified: result.quickSearchTypedVerification.verified === true,
-                satisfiedBy: result.quickSearchTypedVerification.satisfiedBy || null
-              }
-            : null
-        });
-        lastActionCompletedAtMs = completedAtMs;
+  if (scenarioBlockedByLaunchProfile(effectiveScenario.id, summarizedLaunchProfile)) {
+    scenarioError = new Error(buildTradingViewLaunchProfilePreconditionMessage(summarizedLaunchProfile, effectiveScenario.id));
+    console.log(`[LAUNCH-PROFILE] ${scenarioError.message}`);
+  } else {
+    try {
+      execResult = await automationProfiler.run(() => aiService.executeActions(
+        effectiveScenario.actionData,
+        (result, index, total) => {
+          const completedAtMs = Date.now();
+          const label = `${index + 1}/${total}`;
+          const summary = result?.success
+            ? (result?.message || 'ok')
+            : (result?.error || 'failed');
+          actionTimeline.push({
+            index,
+            total,
+            action: result?.action || null,
+            success: result?.success === true,
+            completedAt: new Date(completedAtMs).toISOString(),
+            elapsedMs: Math.max(0, completedAtMs - scenarioStartedAtMs),
+            sincePreviousMs: lastActionCompletedAtMs === null ? null : Math.max(0, completedAtMs - lastActionCompletedAtMs),
+            message: result?.message || null,
+            error: result?.error || null,
+            quickSearchPreflight: result?.quickSearchPreflight?.applicable
+              ? {
+                  ready: result.quickSearchPreflight.ready === true,
+                  timedOut: result.quickSearchPreflight.timedOut === true,
+                  clearedBy: result.quickSearchPreflight.clearedBy || null,
+                  fallbackAssumedFocused: result.quickSearchPreflight.fallbackAssumedFocused === true
+                }
+              : null,
+            quickSearchTypedVerification: result?.quickSearchTypedVerification?.applicable
+              ? {
+                  verified: result.quickSearchTypedVerification.verified === true,
+                  satisfiedBy: result.quickSearchTypedVerification.satisfiedBy || null
+                }
+              : null
+          });
+          lastActionCompletedAtMs = completedAtMs;
 
-        console.log(`[${label}] ${result?.action || 'action'}: ${summary}`);
+          console.log(`[${label}] ${result?.action || 'action'}: ${summary}`);
 
-        if (result?.quickSearchPreflight?.applicable) {
-          const preflight = result.quickSearchPreflight;
-          console.log(
-            `    quick-search preflight: ready=${preflight.ready === true} clearedBy=${preflight.clearedBy || 'n/a'} fallbackAssumedFocused=${preflight.fallbackAssumedFocused === true} expected=${JSON.stringify(preflight.expectedText || '')}${preflight.error ? ` error=${JSON.stringify(preflight.error)}` : ''}`
-          );
+          if (result?.quickSearchPreflight?.applicable) {
+            const preflight = result.quickSearchPreflight;
+            console.log(
+              `    quick-search preflight: ready=${preflight.ready === true} clearedBy=${preflight.clearedBy || 'n/a'} fallbackAssumedFocused=${preflight.fallbackAssumedFocused === true} expected=${JSON.stringify(preflight.expectedText || '')}${preflight.error ? ` error=${JSON.stringify(preflight.error)}` : ''}`
+            );
+          }
+
+          if (result?.quickSearchTypedVerification?.applicable) {
+            const typedVerification = result.quickSearchTypedVerification;
+            console.log(
+              `    quick-search typed-check: verified=${typedVerification.verified === true} via=${typedVerification.satisfiedBy || 'n/a'} expected=${JSON.stringify(typedVerification.expectedText || '')} actual=${JSON.stringify(typedVerification.actualText || '')}${typedVerification.error ? ` error=${JSON.stringify(typedVerification.error)}` : ''}`
+            );
+          }
+        },
+        null,
+        {
+          userMessage: effectiveScenario.userMessage
         }
-
-        if (result?.quickSearchTypedVerification?.applicable) {
-          const typedVerification = result.quickSearchTypedVerification;
-          console.log(
-            `    quick-search typed-check: verified=${typedVerification.verified === true} via=${typedVerification.satisfiedBy || 'n/a'} expected=${JSON.stringify(typedVerification.expectedText || '')} actual=${JSON.stringify(typedVerification.actualText || '')}${typedVerification.error ? ` error=${JSON.stringify(typedVerification.error)}` : ''}`
-          );
-        }
-      },
-      null,
-      {
-        userMessage: effectiveScenario.userMessage
-      }
-    ));
-  } catch (error) {
-    scenarioError = error;
+      ));
+    } catch (error) {
+      scenarioError = error;
+    }
   }
 
   const automationProfile = automationProfiler.summarize();
@@ -1426,14 +1511,21 @@ async function runScenario(scenario, context) {
     runtimeTraceSummary: execResult?.runtimeTraceSummary || fallbackRuntimeTraceSummary || null,
     runtimeTraceTerminalEvent
   });
-
-  const postForeground = await aiService.systemAutomation.getForegroundWindowInfo();
+  const useLightweightFailureArtifact = shouldUseLightweightFailureArtifact({
+    scenarioError,
+    execResult,
+    launchProfile: summarizedLaunchProfile,
+    actionTimeline
+  });
+  const postForeground = useLightweightFailureArtifact
+    ? null
+    : await aiService.systemAutomation.getForegroundWindowInfo();
   const summarizedResults = Array.isArray(execResult?.results) ? execResult.results.map(summarizeResult) : [];
   const metrics = buildScenarioMetrics(summarizedResults, actionTimeline, automationProfile);
   let failureArtifact = null;
 
   if (scenarioOutcome.success !== true) {
-    failureArtifact = await writeFailureArtifactBundle({
+    const failureArtifactOptions = {
       artifactDir,
       suiteName: 'live-tradingview-smoke',
       failureName: `${effectiveScenario.id}-failure`,
@@ -1441,15 +1533,12 @@ async function runScenario(scenario, context) {
       scenarioId: effectiveScenario.id,
       error: scenarioError || new Error(scenarioOutcome.error || execResult?.error || 'One or more actions failed'),
       aiService,
-      systemAutomation: aiService.systemAutomation,
       watcher: typeof aiService.getUIWatcher === 'function' ? aiService.getUIWatcher() : null,
-      captureTargetWindowHandle: context.detectedWindow?.hwnd || null,
-      captureForegroundWindow: true,
-      tradingViewContextFn: findTradingViewContext,
       extra: {
         runTag,
         scenarioTag,
         boundWindow: context.detectedWindow || null,
+        launchProfile: summarizedLaunchProfile,
         actionSummary: (effectiveScenario.actionData.actions || []).map(summarizeAction),
         actionTimeline,
         metrics,
@@ -1457,7 +1546,17 @@ async function runScenario(scenario, context) {
         runtimeTraceSummary: execResult?.runtimeTraceSummary || fallbackRuntimeTraceSummary || null,
         results: summarizedResults
       }
-    });
+    };
+
+    failureArtifact = useLightweightFailureArtifact
+      ? writeFailureArtifactBundleSync(failureArtifactOptions)
+      : await writeFailureArtifactBundle({
+          ...failureArtifactOptions,
+          systemAutomation: aiService.systemAutomation,
+          captureTargetWindowHandle: context.detectedWindow?.hwnd || null,
+          captureForegroundWindow: true,
+          tradingViewContextFn: findTradingViewContext
+        });
   }
 
   const summary = {
@@ -1470,6 +1569,7 @@ async function runScenario(scenario, context) {
     error: scenarioOutcome.error || null,
     pendingConfirmation: execResult?.pendingConfirmation === true,
     boundWindow: context.detectedWindow || null,
+    launchProfile: summarizedLaunchProfile,
     actionSummary: (effectiveScenario.actionData.actions || []).map(summarizeAction),
     observationCheckpointCount: Array.isArray(execResult?.observationCheckpoints)
       ? execResult.observationCheckpoints.length
@@ -1561,6 +1661,10 @@ async function main() {
   let watcherRuntime = { watcher: null, startedHere: false };
   let fatalError = null;
   let selectedWindow = null;
+  const configuredTradingViewCdpPort = Number(getEnvValue('LIKU_TRADINGVIEW_CDP_PORT'));
+  const expectedTradingViewCdpPort = Number.isFinite(configuredTradingViewCdpPort) && configuredTradingViewCdpPort > 0
+    ? Math.round(configuredTradingViewCdpPort)
+    : DEFAULT_TRADINGVIEW_CDP_PORT;
 
   console.log('========================================');
   console.log(' TradingView Live Smoke Harness');
@@ -1571,18 +1675,31 @@ async function main() {
   console.log(`Watcher poll: ${pollInterval}ms`);
 
   try {
-    const preflight = await gatherPreflight();
+    const launchProfile = await detectTradingViewLaunchProfile({
+      expectedCdpPort: expectedTradingViewCdpPort
+    });
+    const summarizedLaunchProfile = summarizeTradingViewLaunchProfile(launchProfile);
+    const allScenariosLaunchBlocked = everyScenarioBlockedByLaunchProfile(scenarios, summarizedLaunchProfile);
+    const preflight = await gatherPreflight({
+      includeProcesses: !allScenariosLaunchBlocked,
+      fastWindowDiscovery: allScenariosLaunchBlocked
+    });
     const { processes, foreground, windows, selectedWindow: detectedWindow } = preflight;
     selectedWindow = detectedWindow || null;
+    const preflightProcessSource = Array.isArray(processes) && processes.length > 0
+      ? processes
+      : (Array.isArray(summarizedLaunchProfile?.processes) ? summarizedLaunchProfile.processes : []);
+    const preflightProcesses = preflightProcessSource.map(normalizeSmokePreflightProcessEntry);
     manifest.preflight = {
-      processes,
+      processes: preflightProcesses,
       processNames: Array.isArray(preflight?.processNames) ? preflight.processNames : [],
       windows,
       selectedWindow: detectedWindow,
-      foreground
+      foreground,
+      launchProfile: summarizedLaunchProfile
     };
 
-    if (!detectedWindow) {
+    if (!detectedWindow && !allScenariosLaunchBlocked) {
       throw new Error('No TradingView-like window was detected via UIA/window discovery. Make sure an actual TradingView desktop window or browser tab is open and visible, then rerun the live smoke harness.');
     }
 
@@ -1597,9 +1714,9 @@ async function main() {
       windowKind: detectedWindow?.windowKind || null,
       isMinimized: !!detectedWindow?.isMinimized
     })}`);
-    if (Array.isArray(processes) && processes.length > 0) {
-      console.log(`Backing processes detected: ${processes.length}`);
-      processes.slice(0, 5).forEach((proc, index) => {
+    if (Array.isArray(preflightProcesses) && preflightProcesses.length > 0) {
+      console.log(`Backing processes detected: ${preflightProcesses.length}`);
+      preflightProcesses.slice(0, 5).forEach((proc, index) => {
         console.log(`  [${index}] pid=${proc.pid} process=${proc.processName} title=${JSON.stringify(proc.mainWindowTitle || '')}`);
       });
     }
@@ -1609,15 +1726,33 @@ async function main() {
       hwnd: foreground?.hwnd || null,
       windowKind: foreground?.windowKind || null
     })}`);
+    if (summarizedLaunchProfile) {
+      console.log(`TradingView launch profile: ${JSON.stringify({
+        profile: summarizedLaunchProfile.profile || null,
+        automationReady: summarizedLaunchProfile.automationReady === true,
+        reason: summarizedLaunchProfile.reason || null,
+        expectedPort: summarizedLaunchProfile.expectedCdpPort || null,
+        effectivePort: summarizedLaunchProfile.effectivePort || null,
+        inspectionAvailable: summarizedLaunchProfile.inspectionAvailable !== false
+      })}`);
+      for (const warning of Array.isArray(summarizedLaunchProfile.warnings) ? summarizedLaunchProfile.warnings : []) {
+        console.log(`[LAUNCH-PROFILE] ${warning}`);
+      }
+    }
 
-    watcherRuntime = await startWatcher(pollInterval);
-    await sleep(Math.max(300, pollInterval * 2));
+    if (allScenariosLaunchBlocked) {
+      console.log('[LAUNCH-PROFILE] Skipping watcher startup and heavy process revalidation because every requested scenario is blocked before execution.');
+    } else {
+      watcherRuntime = await startWatcher(pollInterval);
+      await sleep(Math.max(300, pollInterval * 2));
+    }
 
     for (const scenario of scenarios) {
       const summary = await runScenario(scenario, {
         runTag,
         artifactDir,
-        detectedWindow
+        detectedWindow,
+        launchProfile
       });
       manifest.scenarios.push(summary);
     }
@@ -1689,12 +1824,16 @@ if (require.main === module) {
     windowLooksLikeTradingView,
     pickPreferredTradingViewWindow,
     findTradingViewContext,
+    findTradingViewContextWithOptions,
     summarizeResult,
     buildScenarioMetrics,
     buildPineCreateSaveScenario,
     buildScenarioPlan,
     readRuntimeTraceTerminalEvent,
     deriveScenarioOutcome,
+    scenarioBlockedByLaunchProfile,
+    everyScenarioBlockedByLaunchProfile,
+    shouldUseLightweightFailureArtifact,
     shutdownWatcherRuntime
   };
 }

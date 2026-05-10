@@ -37,9 +37,14 @@ docs/pdf/*.txt
 .tmp-hook-check/
 .tmp-test-logs/
 artifacts/live-validation/
+artifacts/test-failures/
+artifacts/tmp/
+artifacts/uia-probes/
 
 # Local runtime / scratch artifacts
 .liku/
 .tmp_*.py
 TradingView-Global-to-Modular-Refactoring-Blueprint.pdf
 tmp-websearch-*.html
+tv_workflow_out.txt
+tv_workflow_err.txt
