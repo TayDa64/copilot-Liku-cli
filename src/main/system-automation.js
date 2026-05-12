@@ -10988,18 +10988,23 @@ public class DblClickThrough {
  * Type text using SendKeys
  */
 async function typeText(text) {
-  // Escape special characters for SendKeys
-  const escaped = text
-    .replace(/\+/g, '{+}')
-    .replace(/\^/g, '{^}')
-    .replace(/%/g, '{%}')
-    .replace(/~/g, '{~}')
-    .replace(/\(/g, '{(}')
-    .replace(/\)/g, '{)}')
-    .replace(/\[/g, '{[}')
-    .replace(/\]/g, '{]}')
-    .replace(/\{/g, '{{}')
-    .replace(/\}/g, '{}}');
+  // Build the SendKeys literal token stream character-by-character so the
+  // braces introduced by escaping do not get re-escaped by later replacements.
+  const sendKeysLiteralMap = {
+    '+': '{+}',
+    '^': '{^}',
+    '%': '{%}',
+    '~': '{~}',
+    '(': '{(}',
+    ')': '{)}',
+    '[': '{[}',
+    ']': '{]}',
+    '{': '{{}',
+    '}': '{}}'
+  };
+  const escaped = Array.from(String(text || ''))
+    .map((char) => sendKeysLiteralMap[char] || char)
+    .join('');
   
   const script = `
 Add-Type -AssemblyName System.Windows.Forms

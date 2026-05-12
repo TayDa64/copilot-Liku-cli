@@ -39,6 +39,7 @@ docs/pdf/*.txt
 artifacts/live-validation/
 artifacts/test-failures/
 artifacts/tmp/
+artifacts/tranche0/
 artifacts/uia-probes/
 
 # Local runtime / scratch artifacts

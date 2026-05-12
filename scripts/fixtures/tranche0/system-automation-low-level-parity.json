@@ -1,0 +1,429 @@
+{
+  "version": 1,
+  "description": "Deterministic golden parity fixtures for the low-level Windows helper contracts exposed by src/main/system-automation.js.",
+  "notes": [
+    "These fixtures intentionally prove the contract surface, not the real OS side effects.",
+    "Host-backed and PowerShell-backed structured helpers are compared after normalization so implementation migration does not silently drift the public API."
+  ],
+  "cases": [
+    {
+      "id": "focusWindow.missing-target",
+      "helper": "focusWindow",
+      "mode": "direct",
+      "args": [0],
+      "expectedResult": {
+        "success": false,
+        "requestedWindowHandle": 0,
+        "actualForegroundHandle": 0,
+        "actualForeground": null,
+        "exactMatch": false,
+        "outcome": "missing-target"
+      },
+      "expectedExecCallCount": 0
+    },
+    {
+      "id": "focusWindow.host.exact",
+      "helper": "focusWindow",
+      "mode": "host",
+      "mockId": "focusWindow.hostExact",
+      "args": [987],
+      "expectedResult": {
+        "success": true,
+        "requestedWindowHandle": 987,
+        "actualForegroundHandle": 987,
+        "exactMatch": true,
+        "outcome": "exact",
+        "actualForeground": {
+          "success": true,
+          "hwnd": 987,
+          "pid": 4242,
+          "processName": "TradingView",
+          "title": "TradingView - Pine Editor",
+          "ownerHwnd": 0,
+          "isTopmost": false,
+          "isToolWindow": false,
+          "isMinimized": false,
+          "isMaximized": true,
+          "windowKind": "main",
+          "bounds": {
+            "x": 100,
+            "y": 80,
+            "width": 1400,
+            "height": 900
+          },
+          "source": "uia-host"
+        }
+      },
+      "expectedExecCallCount": 0,
+      "parityGroup": "focusWindow.exact",
+      "normalizeAs": "focusWindow"
+    },
+    {
+      "id": "focusWindow.powershell.exact",
+      "helper": "focusWindow",
+      "mode": "powershell",
+      "mockId": "focusWindow.powershellExact",
+      "args": [987],
+      "expectedResult": {
+        "success": true,
+        "requestedWindowHandle": 987,
+        "actualForegroundHandle": 987,
+        "exactMatch": true,
+        "outcome": "exact",
+        "actualForeground": {
+          "success": true,
+          "hwnd": 987,
+          "pid": 4242,
+          "processName": "TradingView",
+          "title": "TradingView - Pine Editor",
+          "ownerHwnd": 0,
+          "isTopmost": false,
+          "isToolWindow": false,
+          "isMinimized": false,
+          "isMaximized": true,
+          "windowKind": "main",
+          "bounds": {
+            "x": 100,
+            "y": 80,
+            "width": 1400,
+            "height": 900
+          }
+        }
+      },
+      "expectedExecCallCount": 3,
+      "expectedScriptMarkers": [
+        ["public class WindowFocus", "Focus([IntPtr]::new(987))"],
+        ["public class ForegroundHandle", "GetForegroundWindow"],
+        ["public class ForegroundInfo", "ConvertTo-Json -Compress"]
+      ],
+      "parityGroup": "focusWindow.exact",
+      "normalizeAs": "focusWindow"
+    },
+    {
+      "id": "getForegroundWindowInfo.host",
+      "helper": "getForegroundWindowInfo",
+      "mode": "host",
+      "mockId": "getForegroundWindowInfo.host",
+      "args": [],
+      "expectedResult": {
+        "success": true,
+        "hwnd": 987,
+        "pid": 4242,
+        "processName": "TradingView",
+        "title": "TradingView - Pine Editor",
+        "ownerHwnd": 0,
+        "isTopmost": false,
+        "isToolWindow": false,
+        "isMinimized": false,
+        "isMaximized": true,
+        "windowKind": "main",
+        "bounds": {
+          "x": 100,
+          "y": 80,
+          "width": 1400,
+          "height": 900
+        },
+        "source": "uia-host"
+      },
+      "expectedExecCallCount": 0,
+      "parityGroup": "windowInfo.foreground",
+      "normalizeAs": "windowInfo"
+    },
+    {
+      "id": "getForegroundWindowInfo.powershell",
+      "helper": "getForegroundWindowInfo",
+      "mode": "powershell",
+      "mockId": "getForegroundWindowInfo.powershell",
+      "args": [],
+      "expectedResult": {
+        "success": true,
+        "hwnd": 987,
+        "pid": 4242,
+        "processName": "TradingView",
+        "title": "TradingView - Pine Editor",
+        "ownerHwnd": 0,
+        "isTopmost": false,
+        "isToolWindow": false,
+        "isMinimized": false,
+        "isMaximized": true,
+        "windowKind": "main",
+        "bounds": {
+          "x": 100,
+          "y": 80,
+          "width": 1400,
+          "height": 900
+        }
+      },
+      "expectedExecCallCount": 1,
+      "expectedScriptMarkers": [
+        ["public class ForegroundInfo", "ConvertTo-Json -Compress"]
+      ],
+      "parityGroup": "windowInfo.foreground",
+      "normalizeAs": "windowInfo"
+    },
+    {
+      "id": "getWindowInfoByHandle.invalid-handle",
+      "helper": "getWindowInfoByHandle",
+      "mode": "direct",
+      "args": [0],
+      "expectedResult": {
+        "success": false,
+        "error": "Invalid window handle"
+      },
+      "expectedExecCallCount": 0
+    },
+    {
+      "id": "getWindowInfoByHandle.host",
+      "helper": "getWindowInfoByHandle",
+      "mode": "host",
+      "mockId": "getWindowInfoByHandle.host",
+      "args": [654],
+      "expectedResult": {
+        "success": true,
+        "hwnd": 654,
+        "pid": 4242,
+        "processName": "TradingView",
+        "title": "TradingView - Layout 1",
+        "ownerHwnd": 222,
+        "isTopmost": true,
+        "isToolWindow": true,
+        "isMinimized": false,
+        "isMaximized": false,
+        "windowKind": "palette",
+        "bounds": {
+          "x": 40,
+          "y": 20,
+          "width": 1100,
+          "height": 760
+        },
+        "source": "uia-host"
+      },
+      "expectedExecCallCount": 0,
+      "parityGroup": "windowInfo.byHandle",
+      "normalizeAs": "windowInfo"
+    },
+    {
+      "id": "getWindowInfoByHandle.powershell",
+      "helper": "getWindowInfoByHandle",
+      "mode": "powershell",
+      "mockId": "getWindowInfoByHandle.powershell",
+      "args": [654],
+      "expectedResult": {
+        "success": true,
+        "hwnd": 654,
+        "pid": 4242,
+        "processName": "TradingView",
+        "title": "TradingView - Layout 1",
+        "ownerHwnd": 222,
+        "isTopmost": true,
+        "isToolWindow": true,
+        "isMinimized": false,
+        "isMaximized": false,
+        "windowKind": "palette",
+        "bounds": {
+          "x": 40,
+          "y": 20,
+          "width": 1100,
+          "height": 760
+        }
+      },
+      "expectedExecCallCount": 1,
+      "expectedScriptMarkers": [
+        ["public class WindowInfo", "[IntPtr]::new([int64]654)"]
+      ],
+      "parityGroup": "windowInfo.byHandle",
+      "normalizeAs": "windowInfo"
+    },
+    {
+      "id": "getClipboardText.host",
+      "helper": "getClipboardText",
+      "mode": "host",
+      "mockId": "getClipboardText.host",
+      "args": [],
+      "expectedResult": {
+        "success": true,
+        "text": "//@version=6\nindicator(\"Parity Fixture\", overlay=false)\nplot(close)",
+        "error": null,
+        "source": "uia-host"
+      },
+      "expectedExecCallCount": 0,
+      "parityGroup": "clipboard.read",
+      "normalizeAs": "clipboardRead"
+    },
+    {
+      "id": "getClipboardText.powershell",
+      "helper": "getClipboardText",
+      "mode": "powershell",
+      "mockId": "getClipboardText.powershell",
+      "args": [],
+      "expectedResult": {
+        "success": true,
+        "text": "//@version=6\nindicator(\"Parity Fixture\", overlay=false)\nplot(close)",
+        "error": null,
+        "source": "powershell"
+      },
+      "expectedExecCallCount": 1,
+      "expectedScriptMarkers": [
+        ["Get-Clipboard -Raw", "ConvertTo-Json -Compress"]
+      ],
+      "parityGroup": "clipboard.read",
+      "normalizeAs": "clipboardRead"
+    },
+    {
+      "id": "setClipboardText.host",
+      "helper": "setClipboardText",
+      "mode": "host",
+      "mockId": "setClipboardText.host",
+      "args": ["//@version=6\nindicator(\"Parity Fixture\", overlay=false)\nplot(close)"],
+      "expectedResult": {
+        "success": true,
+        "error": null,
+        "source": "uia-host"
+      },
+      "expectedExecCallCount": 0,
+      "parityGroup": "clipboard.write",
+      "normalizeAs": "clipboardWrite"
+    },
+    {
+      "id": "setClipboardText.powershell",
+      "helper": "setClipboardText",
+      "mode": "powershell",
+      "mockId": "setClipboardText.powershell",
+      "args": ["//@version=6\nindicator(\"Parity Fixture\", overlay=false)\nplot(close)"],
+      "expectedResult": {
+        "success": true,
+        "error": null,
+        "source": "powershell"
+      },
+      "expectedExecCallCount": 1,
+      "expectedScriptMarkers": [
+        ["FromBase64String", "Set-Clipboard -Value $value"]
+      ],
+      "parityGroup": "clipboard.write",
+      "normalizeAs": "clipboardWrite"
+    },
+    {
+      "id": "typeText.escaped-sendkeys",
+      "helper": "typeText",
+      "mode": "powershell",
+      "args": ["Pine+RSI^[]()%~"],
+      "expectedExecCallCount": 1,
+      "expectedScriptMarkers": [
+        ["SendWait(\"Pine{+}RSI{^}{[}{]}{(}{)}{%}{~}\")"]
+      ]
+    },
+    {
+      "id": "pressKey.sendkeys.ctrl-shift-p",
+      "helper": "pressKey",
+      "mode": "powershell",
+      "args": ["ctrl+shift+p"],
+      "expectedExecCallCount": 1,
+      "expectedScriptMarkers": [
+        ["SendWait(\"^+(p)\")"]
+      ]
+    },
+    {
+      "id": "pressKey.sendinput.tradingview-ctrl-k",
+      "helper": "pressKey",
+      "mode": "powershell",
+      "args": [
+        "ctrl+k",
+        {
+          "searchSurfaceContract": {
+            "id": "open-command-search",
+            "route": "command-search",
+            "surface": "command-search",
+            "appName": "TradingView"
+          },
+          "targetWindow": {
+            "processName": "TradingView",
+            "title": "TradingView"
+          }
+        }
+      ],
+      "expectedExecCallCount": 1,
+      "expectedScriptMarkers": [
+        ["public class WinKeyPress", "VK_CONTROL", "KeyDown(75)", "KeyUp(75)"]
+      ]
+    },
+    {
+      "id": "pressKey.sendkeys.tradingview-ctrl-e-special-case",
+      "helper": "pressKey",
+      "mode": "powershell",
+      "args": [
+        "ctrl+e",
+        {
+          "tradingViewShortcut": {
+            "id": "open-pine-editor"
+          },
+          "targetWindow": {
+            "processName": "TradingView",
+            "title": "TradingView"
+          }
+        }
+      ],
+      "expectedExecCallCount": 1,
+      "expectedScriptMarkers": [
+        ["SendWait(\"^(e)\")"]
+      ],
+      "forbidScriptMarkers": [
+        "public class WinKeyPress"
+      ]
+    },
+    {
+      "id": "pressKey.sendinput.win-r",
+      "helper": "pressKey",
+      "mode": "powershell",
+      "args": ["win+r"],
+      "expectedExecCallCount": 1,
+      "expectedScriptMarkers": [
+        ["public class WinKeyPress", "VK_LWIN", "KeyDown(82)", "KeyUp(82)"]
+      ]
+    },
+    {
+      "id": "click.left",
+      "helper": "click",
+      "mode": "powershell",
+      "args": [120, 240, "left"],
+      "expectedExecCallCount": 2,
+      "expectedScriptMarkers": [
+        ["Cursor]::Position = New-Object System.Drawing.Point(120, 240)"],
+        ["public class ClickThrough", "ClickAt(120, 240, $false)"]
+      ]
+    },
+    {
+      "id": "doubleClick.left",
+      "helper": "doubleClick",
+      "mode": "powershell",
+      "args": [130, 260],
+      "expectedExecCallCount": 2,
+      "expectedScriptMarkers": [
+        ["Cursor]::Position = New-Object System.Drawing.Point(130, 260)"],
+        ["public class DblClickThrough", "DoubleClickAt(130, 260)"]
+      ]
+    },
+    {
+      "id": "scroll.down",
+      "helper": "scroll",
+      "mode": "powershell",
+      "args": ["down", 2],
+      "expectedExecCallCount": 1,
+      "expectedScriptMarkers": [
+        ["public class MouseScroll", "Scroll(-240)"]
+      ]
+    },
+    {
+      "id": "drag.basic",
+      "helper": "drag",
+      "mode": "powershell",
+      "args": [10, 20, 110, 120],
+      "expectedExecCallCount": 4,
+      "expectedScriptMarkers": [
+        ["Cursor]::Position = New-Object System.Drawing.Point(10, 20)"],
+        ["public class DragThrough", "GetRealWindowFromPoint(10, 20)", "MouseDown()"],
+        ["Cursor]::Position = New-Object System.Drawing.Point(110, 120)"],
+        ["MouseUp()"]
+      ]
+    }
+  ]
+}

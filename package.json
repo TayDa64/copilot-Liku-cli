@@ -10,6 +10,7 @@
     "start": "node scripts/start.js",
     "test": "node scripts/test-grid.js",
     "test:ui": "node scripts/test-ui-automation-baseline.js",
+    "test:system-automation-parity": "node scripts/test-system-automation-parity.js",
     "test:windows-observation-flow": "node scripts/test-windows-observation-flow.js",
     "test:chat-actionability": "node scripts/test-chat-actionability.js",
     "test:tradingview-registry": "node scripts/test-tradingview-registry-parity.js",
