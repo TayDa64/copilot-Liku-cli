@@ -337,31 +337,52 @@ $result | ConvertTo-Json -Compress -Depth 5
       ? processPayload
       : (processPayload ? [processPayload] : []);
     const processIds = processes.map((entry) => Number(entry?.pid || 0) || 0).filter((pid) => pid > 0);
+    const configuredPorts = Array.from(new Set(
+      processes
+        .flatMap((entry) => parseRemoteDebuggingPortsFromCommandLine(entry?.commandLine || ''))
+        .filter((port) => port > 0)
+    ));
 
     let listeners = [];
-    if (processIds.length > 0) {
+    if (processIds.length > 0 || configuredPorts.length > 0 || expectedCdpPort > 0) {
       const processIdLiteral = processIds.join(', ');
-      const portLiteral = expectedCdpPort > 0 ? String(expectedCdpPort) : '';
+      const candidatePorts = Array.from(new Set(
+        [expectedCdpPort, ...configuredPorts]
+          .map((value) => normalizePort(value))
+          .filter((value) => value > 0)
+      ));
+      const portLiteral = candidatePorts.join(', ');
       const listenerScript = `
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $targetIds = @(${processIdLiteral})
 $targetPorts = @(${portLiteral})
-$result = @()
+$rawConnections = @()
+$output = @()
 
-$connections = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object {
-  $targetIds -contains [int]$_.OwningProcess -or ($targetPorts.Count -gt 0 -and $targetPorts -contains [int]$_.LocalPort)
-})
+if ($targetPorts.Count -gt 0) {
+  foreach ($targetPort in $targetPorts) {
+    $rawConnections += @(Get-NetTCPConnection -LocalPort $targetPort -ErrorAction SilentlyContinue | Where-Object {
+      ([string]$_.State -eq 'Listen' -or [int]$_.State -eq 2) -and ($targetIds.Count -eq 0 -or $targetIds -contains [int]$_.OwningProcess)
+    })
+  }
+} elseif ($targetIds.Count -gt 0) {
+  foreach ($targetId in $targetIds) {
+    $rawConnections += @(Get-NetTCPConnection -OwningProcess $targetId -ErrorAction SilentlyContinue | Where-Object {
+      [string]$_.State -eq 'Listen' -or [int]$_.State -eq 2
+    })
+  }
+}
 
-foreach ($connection in $connections) {
-  $result += [PSCustomObject]@{
+foreach ($connection in @($rawConnections | Group-Object OwningProcess, LocalPort, LocalAddress | ForEach-Object { $_.Group | Select-Object -First 1 })) {
+  $output += [PSCustomObject]@{
     pid = [int]$connection.OwningProcess
     port = [int]$connection.LocalPort
     address = [string]$connection.LocalAddress
   }
 }
 
-$result | ConvertTo-Json -Compress -Depth 4
+$output | ConvertTo-Json -Compress -Depth 4
 `;
       const listenerPayload = await runPowerShellJson(listenerScript, timeoutMs, {
         executePowerShellScript: options.executePowerShellScript

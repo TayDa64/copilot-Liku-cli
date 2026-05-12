@@ -155,6 +155,32 @@ async function main() {
     assert.strictEqual(profile.reason, 'remote-debugging-port-not-configured');
   });
 
+  await test('detectTradingViewLaunchProfile reports automation-ready when the listener probe returns the expected port', async () => {
+    let callCount = 0;
+    const profile = await detectTradingViewLaunchProfile({
+      expectedCdpPort: 9333,
+      executePowerShellScript: async () => {
+        callCount += 1;
+        if (callCount === 1) {
+          return {
+            stdout: '[{"pid":4242,"name":"TradingView.exe","commandLine":"\\"C:\\\\TradingView\\\\TradingView.exe\\" --remote-debugging-port=9333 --force-renderer-accessibility","mainWindowTitle":"MN / Unnamed"}]'
+          };
+        }
+        return {
+          stdout: '{"pid":4242,"port":9333,"address":"127.0.0.1"}'
+        };
+      }
+    });
+
+    assert.strictEqual(profile.inspectionAvailable, true);
+    assert.strictEqual(profile.running, true);
+    assert.strictEqual(profile.profile, 'automation-ready');
+    assert.strictEqual(profile.automationReady, true);
+    assert.strictEqual(profile.effectivePort, 9333);
+    assert.strictEqual(profile.listenerActive, true);
+    assert.deepStrictEqual(profile.listenerPorts, [9333]);
+  });
+
   clearTimeout(forcedExitTimer);
   console.log(`\nTradingView launch-profile tests: ${passed} passed, ${failed} failed`);
   process.exit(failed > 0 ? 1 : 0);

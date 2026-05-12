@@ -23,9 +23,23 @@ const {
   DEFAULT_TRADINGVIEW_CDP_PORT,
   detectTradingViewLaunchProfile,
   summarizeTradingViewLaunchProfile,
-  scenarioRequiresTradingViewAutomationReadyLaunch,
-  buildTradingViewLaunchProfilePreconditionMessage
+  scenarioRequiresTradingViewAutomationReadyLaunch
 } = require(path.join(__dirname, '..', 'src', 'main', 'tradingview', 'launch-profile.js'));
+const {
+  detectTradingViewLaunchCapability,
+  summarizeTradingViewLaunchCapability
+} = require(path.join(__dirname, '..', 'src', 'main', 'tradingview', 'launch-capability.js'));
+const {
+  resolveTradingViewAutomationLaunchContract,
+  summarizeTradingViewAutomationLaunchContract,
+  buildTradingViewAutomationLaunchPreconditionMessage
+} = require(path.join(__dirname, '..', 'src', 'main', 'tradingview', 'launch-contract.js'));
+const {
+  DEFAULT_TRADINGVIEW_AUTOMATION_RELAUNCH_TIMEOUT_MS,
+  DEFAULT_TRADINGVIEW_AUTOMATION_RELAUNCH_POLL_INTERVAL_MS,
+  attemptTradingViewAutomationRelaunch,
+  summarizeTradingViewAutomationRelaunch
+} = require(path.join(__dirname, '..', 'src', 'main', 'tradingview', 'launch-executor.js'));
 const {
   writeFailureArtifactBundle,
   writeFailureArtifactBundleSync
@@ -67,6 +81,75 @@ function hasFlag(flagName) {
   if (process.argv.includes(flagName)) return true;
   const envName = `npm_config_${String(flagName || '').replace(/^--/, '').replace(/-/g, '_')}`;
   return /^(1|true|yes)$/i.test(String(process.env[envName] || ''));
+}
+
+function hasTruthyValue(value) {
+  return /^(1|true|yes|y|on)$/i.test(String(value || '').trim());
+}
+
+function parseBoundedNumber(value, fallback, min, max) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return fallback;
+  return Math.max(min, Math.min(Math.round(numeric), max));
+}
+
+function isTradingViewAutomationRelaunchRequested() {
+  return hasFlag('--relaunch-tradingview-via-contract')
+    || hasTruthyValue(process.env.LIKU_TRADINGVIEW_AUTOMATION_RELAUNCH);
+}
+
+function getTradingViewAutomationRelaunchTimeoutMs() {
+  return parseBoundedNumber(
+    getArgValue('--relaunch-timeout-ms') || getEnvValue('LIKU_TRADINGVIEW_AUTOMATION_RELAUNCH_TIMEOUT_MS'),
+    DEFAULT_TRADINGVIEW_AUTOMATION_RELAUNCH_TIMEOUT_MS,
+    2000,
+    120000
+  );
+}
+
+function getTradingViewAutomationRelaunchPollIntervalMs() {
+  return parseBoundedNumber(
+    getArgValue('--relaunch-poll-interval-ms') || getEnvValue('LIKU_TRADINGVIEW_AUTOMATION_RELAUNCH_POLL_INTERVAL_MS'),
+    DEFAULT_TRADINGVIEW_AUTOMATION_RELAUNCH_POLL_INTERVAL_MS,
+    150,
+    5000
+  );
+}
+
+function buildTradingViewLaunchProfileDetectOptions(launchContract = null, fallbackExpectedPort = DEFAULT_TRADINGVIEW_CDP_PORT) {
+  const summarizedLaunchContract = summarizeTradingViewAutomationLaunchContract(launchContract);
+  if (summarizedLaunchContract?.status === 'configured') {
+    return {
+      expectedCdpPort: Number(summarizedLaunchContract.expected?.cdpPort || fallbackExpectedPort) || fallbackExpectedPort,
+      processNames: Array.isArray(summarizedLaunchContract.expected?.processNames)
+        ? summarizedLaunchContract.expected.processNames.slice()
+        : undefined
+    };
+  }
+  return {
+    expectedCdpPort: fallbackExpectedPort
+  };
+}
+
+function buildTradingViewLaunchBlockedMessage(options = {}) {
+  const baseMessage = buildTradingViewAutomationLaunchPreconditionMessage({
+    scenarioId: options?.scenarioId,
+    launchProfile: options?.launchProfile,
+    launchCapability: options?.launchCapability,
+    launchContract: options?.launchContract
+  });
+  const summarizedLaunchRelaunch = summarizeTradingViewAutomationRelaunch(options?.launchRelaunch || null);
+  if (!summarizedLaunchRelaunch || summarizedLaunchRelaunch.success === true || !summarizedLaunchRelaunch.status) {
+    return baseMessage;
+  }
+
+  const relaunchDetails = [
+    `Relaunch status=${summarizedLaunchRelaunch.status}.`,
+    summarizedLaunchRelaunch.message || null,
+    summarizedLaunchRelaunch.error ? `Error: ${summarizedLaunchRelaunch.error}` : null
+  ].filter(Boolean).join(' ');
+
+  return relaunchDetails ? `${baseMessage} ${relaunchDetails}` : baseMessage;
 }
 
 function sleep(ms) {
@@ -113,7 +196,7 @@ function ensureDir(dirPath) {
 function buildTimestampTag() {
   const now = new Date();
   const pad = (value) => String(value).padStart(2, '0');
-  return `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+  return `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}${String(now.getMilliseconds()).padStart(3, '0')}`;
 }
 
 function sanitizeFileSegment(value, fallback = 'scenario') {
@@ -745,6 +828,21 @@ function normalizeText(value) {
   return String(value || '').trim().toLowerCase();
 }
 
+function normalizeProcessIds(values = []) {
+  const input = Array.isArray(values) ? values : [values];
+  const seen = new Set();
+  const result = [];
+  for (const value of input) {
+    const pid = Number(value);
+    if (!Number.isFinite(pid)) continue;
+    const normalized = Math.round(pid);
+    if (normalized <= 0 || seen.has(normalized)) continue;
+    seen.add(normalized);
+    result.push(normalized);
+  }
+  return result;
+}
+
 function isBrowserHostedWindowProcess(processName = '') {
   return /^(msedge|chrome|brave|firefox|opera|vivaldi|arc|iexplore|safari)$/i.test(String(processName || '').trim());
 }
@@ -757,13 +855,25 @@ function titleLooksLikeTradingViewActiveSurface(title = '') {
   return /\b(supercharts?|chart(?:s|ing)?|watchlist|paper trading|depth of market|pine editor|object tree|trading panel|strategy tester|stock screener|heatmap|alerts?|screener|ideas)\b/i.test(String(title || ''));
 }
 
-function classifyTradingViewWindow(windowInfo = {}, foregroundHwnd = 0) {
+function windowMatchesPreferredProcess(windowInfo = {}, preferredProcessIds = []) {
+  const preferredProcessIdSet = preferredProcessIds instanceof Set
+    ? preferredProcessIds
+    : new Set(normalizeProcessIds(preferredProcessIds));
+  const pid = Number(windowInfo?.pid || windowInfo?.processId || 0) || 0;
+  return pid > 0 && preferredProcessIdSet.has(pid);
+}
+
+function classifyTradingViewWindow(windowInfo = {}, foreground = null, options = {}) {
   const title = normalizeText(windowInfo?.title);
   const processName = normalizeText(windowInfo?.processName);
   const windowKind = normalizeText(windowInfo?.windowKind);
-  const isForeground = Number(windowInfo?.hwnd || 0) === Number(foregroundHwnd || 0);
+  const foregroundHwnd = Number(foreground?.hwnd || foreground || 0) || 0;
+  const foregroundPid = Number(foreground?.pid || foreground?.processId || 0) || 0;
+  const windowPid = Number(windowInfo?.pid || windowInfo?.processId || 0) || 0;
+  const isForeground = Number(windowInfo?.hwnd || 0) === foregroundHwnd;
   const isDedicatedTradingViewProcess = processName === 'tradingview';
   const isBrowserHosted = isBrowserHostedWindowProcess(processName);
+  const isPreferredProcess = windowMatchesPreferredProcess(windowInfo, options?.preferredProcessIds || []);
   const looksLikeReferencePage = isBrowserHosted
     && titleLooksLikeTradingViewReferencePage(title)
     && !titleLooksLikeTradingViewActiveSurface(title);
@@ -771,6 +881,7 @@ function classifyTradingViewWindow(windowInfo = {}, foregroundHwnd = 0) {
     || titleLooksLikeTradingViewActiveSurface(title);
 
   let score = 0;
+  if (isPreferredProcess) score += 320;
   if (isDedicatedTradingViewProcess) score += 180;
   if (looksLikeActiveSurface) score += isDedicatedTradingViewProcess ? 40 : 70;
   if (/tradingview|trading\s+view/.test(title)) score += 18;
@@ -779,11 +890,13 @@ function classifyTradingViewWindow(windowInfo = {}, foregroundHwnd = 0) {
   if (windowKind === 'main') score += 15;
   if (windowKind === 'owned' || windowKind === 'palette') score += 6;
   if (isForeground) score += isDedicatedTradingViewProcess ? 30 : (looksLikeActiveSurface ? 12 : 4);
+  if (foregroundPid > 0 && windowPid === foregroundPid && isPreferredProcess) score += 25;
   if (looksLikeReferencePage) score -= 220;
 
   return {
     score,
     isForeground,
+    isPreferredProcess,
     isDedicatedTradingViewProcess,
     isBrowserHosted,
     looksLikeReferencePage,
@@ -828,13 +941,15 @@ function dedupeWindows(windows = []) {
   return unique;
 }
 
-function pickPreferredTradingViewWindow(windows = [], foreground = null) {
-  const foregroundHwnd = Number(foreground?.hwnd || 0) || 0;
+function pickPreferredTradingViewWindow(windows = [], foreground = null, options = {}) {
+  const preferredProcessIds = normalizeProcessIds(options?.preferredProcessIds || []);
 
   const scored = windows
     .map((win) => {
       const title = normalizeText(win?.title);
-      const classification = classifyTradingViewWindow(win, foregroundHwnd);
+      const classification = classifyTradingViewWindow(win, foreground, {
+        preferredProcessIds
+      });
       let score = classification.score;
       if (/pine editor|paper trading|depth of market|trading panel|object tree/.test(title)) score += 6;
       return {
@@ -845,6 +960,9 @@ function pickPreferredTradingViewWindow(windows = [], foreground = null) {
     })
     .sort((a, b) => {
       if (b.score !== a.score) return b.score - a.score;
+      if (a.classification.isPreferredProcess !== b.classification.isPreferredProcess) {
+        return a.classification.isPreferredProcess ? -1 : 1;
+      }
       if (a.classification.isDedicatedTradingViewProcess !== b.classification.isDedicatedTradingViewProcess) {
         return a.classification.isDedicatedTradingViewProcess ? -1 : 1;
       }
@@ -864,9 +982,43 @@ async function findTradingViewContext() {
   return findTradingViewContextWithOptions();
 }
 
+async function collectTradingViewCandidateWindows(options = {}) {
+  const preferredProcessIds = normalizeProcessIds(options?.preferredProcessIds || []);
+  const knownProcessNames = Array.isArray(options?.knownProcessNames) ? options.knownProcessNames : [];
+  const titleSearches = Array.isArray(options?.titleSearches) ? options.titleSearches : [];
+  const windowsByHint = [];
+
+  for (const pid of preferredProcessIds) {
+    try {
+      const found = await windowManager.findWindows({ pid, includeUntitled: true });
+      windowsByHint.push(...(Array.isArray(found) ? found : []));
+    } catch {}
+  }
+
+  for (const processName of knownProcessNames) {
+    try {
+      const found = await windowManager.findWindows({ processName, includeUntitled: true });
+      windowsByHint.push(...(Array.isArray(found) ? found : []));
+    } catch {}
+  }
+
+  for (const title of titleSearches) {
+    try {
+      const found = await windowManager.findWindows({ title });
+      windowsByHint.push(...(Array.isArray(found) ? found : []));
+    } catch {}
+  }
+
+  return windowsByHint;
+}
+
 async function findTradingViewContextWithOptions(options = {}) {
   const includeProcesses = options?.includeProcesses !== false;
   const fastWindowDiscovery = options?.fastWindowDiscovery === true;
+  const preferredProcessIds = normalizeProcessIds(options?.preferredProcessIds || options?.pinnedProcessIds || []);
+  const preferredProcessWaitMs = preferredProcessIds.length > 0
+    ? Math.max(0, Math.min(Number(options?.preferredProcessWaitMs || 2500) || 2500, 10000))
+    : 0;
   const verifyTarget = buildVerifyTargetHintFromAppName('TradingView');
   const foreground = await aiService.systemAutomation.getForegroundWindowInfo();
   const knownProcessNames = Array.from(new Set([
@@ -882,23 +1034,35 @@ async function findTradingViewContextWithOptions(options = {}) {
         ...(Array.isArray(verifyTarget?.dialogTitleHints) ? verifyTarget.dialogTitleHints : [])
       ].map((value) => String(value || '').trim()).filter(Boolean)));
 
-  const windowsByHint = [];
-  for (const processName of knownProcessNames) {
-    try {
-      const found = await windowManager.findWindows({ processName, includeUntitled: true });
-      windowsByHint.push(...(Array.isArray(found) ? found : []));
-    } catch {}
+  const preferredProcessIdSet = new Set(preferredProcessIds);
+  const preferredWindowDeadline = Date.now() + preferredProcessWaitMs;
+  let windows = [];
+
+  while (true) {
+    const windowsByHint = await collectTradingViewCandidateWindows({
+      preferredProcessIds,
+      knownProcessNames,
+      titleSearches
+    });
+    const candidateWindows = foreground && windowLooksLikeTradingView(foreground)
+      ? [foreground, ...windowsByHint]
+      : windowsByHint;
+    windows = dedupeWindows(candidateWindows).filter(windowLooksLikeTradingView);
+
+    if (
+      preferredProcessIdSet.size === 0
+      || windows.some((win) => windowMatchesPreferredProcess(win, preferredProcessIdSet))
+      || Date.now() >= preferredWindowDeadline
+    ) {
+      break;
+    }
+
+    await sleep(Math.min(250, Math.max(0, preferredWindowDeadline - Date.now())));
   }
 
-  for (const title of titleSearches) {
-    try {
-      const found = await windowManager.findWindows({ title });
-      windowsByHint.push(...(Array.isArray(found) ? found : []));
-    } catch {}
-  }
-
-  const windows = dedupeWindows(windowsByHint).filter(windowLooksLikeTradingView);
-  const selectedWindow = pickPreferredTradingViewWindow(windows, foreground);
+  const selectedWindow = pickPreferredTradingViewWindow(windows, foreground, {
+    preferredProcessIds
+  });
 
   const processNames = Array.from(new Set(windows
     .map((win) => String(win?.processName || '').trim().toLowerCase())
@@ -1294,6 +1458,7 @@ Default behavior:
   - runs non-destructive focus + Pine Editor smoke checks
   - starts a fast UI watcher for watcher-backed surface proof
   - exports runtime traces and a manifest to artifacts/live-validation/
+  - does not relaunch TradingView unless you explicitly opt in
 
 Options:
   --scenarios <csv>            Scenarios to run: focus,pine-editor,pine-create-save,symbol,timeframe
@@ -1305,6 +1470,11 @@ Options:
   --allow-timeframe-change     Explicitly allow timeframe mutation
   --artifact-dir <path>        Output directory (default: artifacts/live-validation)
   --poll-interval <ms>         UI watcher poll interval (default: ${DEFAULT_POLL_INTERVAL_MS})
+  --relaunch-tradingview-via-contract
+                               Opt in to relaunch TradingView through the configured automation wrapper contract
+  --relaunch-timeout-ms <ms>   Relaunch wait budget (default: ${DEFAULT_TRADINGVIEW_AUTOMATION_RELAUNCH_TIMEOUT_MS})
+  --relaunch-poll-interval-ms <ms>
+                               Relaunch profile poll interval (default: ${DEFAULT_TRADINGVIEW_AUTOMATION_RELAUNCH_POLL_INTERVAL_MS})
   --dry-run                    Print the planned scenarios and exit
   --help                       Show this help text
 
@@ -1312,6 +1482,7 @@ Examples:
   node scripts/live-tradingview-smoke.js
   node scripts/live-tradingview-smoke.js --dry-run
   node scripts/live-tradingview-smoke.js --scenarios focus,pine-editor
+  node scripts/live-tradingview-smoke.js --scenarios pine-editor --relaunch-tradingview-via-contract
   node scripts/live-tradingview-smoke.js --scenarios pine-create-save
   node scripts/live-tradingview-smoke.js --scenarios symbol --symbol BTCUSD --allow-symbol-change
   node scripts/live-tradingview-smoke.js --scenarios timeframe --timeframe 5m --allow-timeframe-change
@@ -1408,7 +1579,19 @@ async function runScenario(scenario, context) {
   const launchProfile = context.launchProfile && typeof context.launchProfile === 'object'
     ? context.launchProfile
     : null;
+  const launchContract = context.launchContract && typeof context.launchContract === 'object'
+    ? context.launchContract
+    : null;
+  const launchCapability = context.launchCapability && typeof context.launchCapability === 'object'
+    ? context.launchCapability
+    : null;
+  const launchRelaunch = context.launchRelaunch && typeof context.launchRelaunch === 'object'
+    ? context.launchRelaunch
+    : null;
   const summarizedLaunchProfile = summarizeTradingViewLaunchProfile(launchProfile);
+  const summarizedLaunchContract = summarizeTradingViewAutomationLaunchContract(launchContract);
+  const summarizedLaunchCapability = summarizeTradingViewLaunchCapability(launchCapability);
+  const summarizedLaunchRelaunch = summarizeTradingViewAutomationRelaunch(launchRelaunch);
 
   console.log(`\n=== Scenario: ${effectiveScenario.id} ===`);
   console.log(effectiveScenario.description);
@@ -1422,12 +1605,47 @@ async function runScenario(scenario, context) {
       effectivePort: summarizedLaunchProfile.effectivePort || null
     })}`);
   }
+  if (summarizedLaunchCapability) {
+    console.log(`Launch capability: ${JSON.stringify({
+      capabilityProfile: summarizedLaunchCapability.capabilityProfile || null,
+      automationLaunchSurfaceDetected: summarizedLaunchCapability.automationLaunchSurfaceDetected === true,
+      reason: summarizedLaunchCapability.reason || null,
+      shellLaunchTarget: summarizedLaunchCapability.launchIdentity?.shellLaunchTarget || null
+    })}`);
+  }
+  if (summarizedLaunchContract) {
+    console.log(`Launch contract: ${JSON.stringify({
+      status: summarizedLaunchContract.status || null,
+      source: summarizedLaunchContract.source || null,
+      kind: summarizedLaunchContract.kind || null,
+      displayName: summarizedLaunchContract.displayName || null,
+      command: summarizedLaunchContract.command || null,
+      expectedPort: summarizedLaunchContract.expected?.cdpPort || null,
+      rendererAccessibility: summarizedLaunchContract.expected?.rendererAccessibility === true
+    })}`);
+  }
+  if (summarizedLaunchRelaunch) {
+    console.log(`Launch relaunch: ${JSON.stringify({
+      attempted: summarizedLaunchRelaunch.attempted === true,
+      success: summarizedLaunchRelaunch.success === true,
+      status: summarizedLaunchRelaunch.status || null,
+      message: summarizedLaunchRelaunch.message || null,
+      launcherPid: summarizedLaunchRelaunch.launcher?.pid || null,
+      newRunningPids: summarizedLaunchRelaunch.readiness?.newRunningPids || []
+    })}`);
+  }
 
   let execResult = null;
   let scenarioError = null;
 
   if (scenarioBlockedByLaunchProfile(effectiveScenario.id, summarizedLaunchProfile)) {
-    scenarioError = new Error(buildTradingViewLaunchProfilePreconditionMessage(summarizedLaunchProfile, effectiveScenario.id));
+    scenarioError = new Error(buildTradingViewLaunchBlockedMessage({
+      scenarioId: effectiveScenario.id,
+      launchProfile: summarizedLaunchProfile,
+      launchCapability: summarizedLaunchCapability,
+      launchContract: summarizedLaunchContract,
+      launchRelaunch: summarizedLaunchRelaunch
+    }));
     console.log(`[LAUNCH-PROFILE] ${scenarioError.message}`);
   } else {
     try {
@@ -1539,6 +1757,9 @@ async function runScenario(scenario, context) {
         scenarioTag,
         boundWindow: context.detectedWindow || null,
         launchProfile: summarizedLaunchProfile,
+        launchContract: summarizedLaunchContract,
+        launchCapability: summarizedLaunchCapability,
+        launchRelaunch: summarizedLaunchRelaunch,
         actionSummary: (effectiveScenario.actionData.actions || []).map(summarizeAction),
         actionTimeline,
         metrics,
@@ -1570,6 +1791,9 @@ async function runScenario(scenario, context) {
     pendingConfirmation: execResult?.pendingConfirmation === true,
     boundWindow: context.detectedWindow || null,
     launchProfile: summarizedLaunchProfile,
+    launchContract: summarizedLaunchContract,
+    launchCapability: summarizedLaunchCapability,
+    launchRelaunch: summarizedLaunchRelaunch,
     actionSummary: (effectiveScenario.actionData.actions || []).map(summarizeAction),
     observationCheckpointCount: Array.isArray(execResult?.observationCheckpoints)
       ? execResult.observationCheckpoints.length
@@ -1661,8 +1885,11 @@ async function main() {
   let watcherRuntime = { watcher: null, startedHere: false };
   let fatalError = null;
   let selectedWindow = null;
+  const requestedTradingViewAutomationRelaunch = isTradingViewAutomationRelaunchRequested();
+  const tradingViewAutomationRelaunchTimeoutMs = getTradingViewAutomationRelaunchTimeoutMs();
+  const tradingViewAutomationRelaunchPollIntervalMs = getTradingViewAutomationRelaunchPollIntervalMs();
   const configuredTradingViewCdpPort = Number(getEnvValue('LIKU_TRADINGVIEW_CDP_PORT'));
-  const expectedTradingViewCdpPort = Number.isFinite(configuredTradingViewCdpPort) && configuredTradingViewCdpPort > 0
+  const defaultExpectedTradingViewCdpPort = Number.isFinite(configuredTradingViewCdpPort) && configuredTradingViewCdpPort > 0
     ? Math.round(configuredTradingViewCdpPort)
     : DEFAULT_TRADINGVIEW_CDP_PORT;
 
@@ -1673,16 +1900,77 @@ async function main() {
   console.log(`Run tag:      ${runTag}`);
   console.log(`Scenarios:    ${scenarios.map((scenario) => scenario.id).join(', ')}`);
   console.log(`Watcher poll: ${pollInterval}ms`);
+  console.log(`Wrapper relaunch: ${requestedTradingViewAutomationRelaunch ? 'enabled' : 'disabled'}`);
 
   try {
-    const launchProfile = await detectTradingViewLaunchProfile({
-      expectedCdpPort: expectedTradingViewCdpPort
-    });
-    const summarizedLaunchProfile = summarizeTradingViewLaunchProfile(launchProfile);
+    const requiresAutomationReadyLaunchInspection = scenarios.some((scenario) => (
+      scenarioRequiresTradingViewAutomationReadyLaunch(scenario?.id || scenario)
+    ));
+    const launchContract = requiresAutomationReadyLaunchInspection
+      ? resolveTradingViewAutomationLaunchContract()
+      : null;
+    const summarizedLaunchContract = summarizeTradingViewAutomationLaunchContract(launchContract);
+    const launchProfileDetectOptions = buildTradingViewLaunchProfileDetectOptions(
+      launchContract,
+      defaultExpectedTradingViewCdpPort
+    );
+    let launchProfile = await detectTradingViewLaunchProfile(launchProfileDetectOptions);
+    let summarizedLaunchProfile = summarizeTradingViewLaunchProfile(launchProfile);
+    const needsAutomationReadyLaunchPrecondition = requiresAutomationReadyLaunchInspection
+      && summarizedLaunchProfile?.automationReady !== true;
+    const shouldInspectLaunchCapability = needsAutomationReadyLaunchPrecondition
+      && summarizedLaunchContract?.status === 'not-configured';
+    const launchCapability = shouldInspectLaunchCapability
+      ? await detectTradingViewLaunchCapability()
+      : null;
+    const summarizedLaunchCapability = summarizeTradingViewLaunchCapability(launchCapability);
+    let launchRelaunch = null;
+
+    if (needsAutomationReadyLaunchPrecondition && requestedTradingViewAutomationRelaunch) {
+      launchRelaunch = await attemptTradingViewAutomationRelaunch({
+        launchContract,
+        launchProfile,
+        cwd: process.cwd(),
+        timeoutMs: tradingViewAutomationRelaunchTimeoutMs,
+        pollIntervalMs: tradingViewAutomationRelaunchPollIntervalMs
+      });
+      const summarizedLaunchRelaunch = summarizeTradingViewAutomationRelaunch(launchRelaunch);
+      if (summarizedLaunchRelaunch) {
+        console.log(`TradingView launch relaunch: ${JSON.stringify({
+          attempted: summarizedLaunchRelaunch.attempted === true,
+          success: summarizedLaunchRelaunch.success === true,
+          status: summarizedLaunchRelaunch.status || null,
+          launcherPid: summarizedLaunchRelaunch.launcher?.pid || null,
+          requestedInvocationPreview: summarizedLaunchRelaunch.launcher?.requestedInvocationPreview || null,
+          durationMs: summarizedLaunchRelaunch.readiness?.durationMs || null,
+          newRunningPids: summarizedLaunchRelaunch.readiness?.newRunningPids || []
+        })}`);
+        for (const warning of Array.isArray(summarizedLaunchRelaunch.warnings) ? summarizedLaunchRelaunch.warnings : []) {
+          console.log(`[LAUNCH-RELAUNCH] ${warning}`);
+        }
+        if (summarizedLaunchRelaunch.message) {
+          console.log(`[LAUNCH-RELAUNCH] ${summarizedLaunchRelaunch.message}`);
+        }
+        if (summarizedLaunchRelaunch.error) {
+          console.log(`[LAUNCH-RELAUNCH] ${summarizedLaunchRelaunch.error}`);
+        }
+      }
+      launchProfile = launchRelaunch?.postLaunchProfile || launchProfile;
+      summarizedLaunchProfile = summarizeTradingViewLaunchProfile(launchProfile);
+    } else if (needsAutomationReadyLaunchPrecondition && summarizedLaunchContract?.status === 'configured') {
+      console.log('[LAUNCH-CONTRACT] A TradingView automation wrapper contract is configured, but relaunch is opt-in. Re-run with --relaunch-tradingview-via-contract or set LIKU_TRADINGVIEW_AUTOMATION_RELAUNCH=1 to let the harness relaunch TradingView.');
+    }
+
+    const summarizedLaunchRelaunch = summarizeTradingViewAutomationRelaunch(launchRelaunch);
+    const preferredTradingViewWindowPids = Array.isArray(summarizedLaunchRelaunch?.readiness?.newRunningPids)
+      ? summarizedLaunchRelaunch.readiness.newRunningPids
+      : [];
     const allScenariosLaunchBlocked = everyScenarioBlockedByLaunchProfile(scenarios, summarizedLaunchProfile);
     const preflight = await gatherPreflight({
       includeProcesses: !allScenariosLaunchBlocked,
-      fastWindowDiscovery: allScenariosLaunchBlocked
+      fastWindowDiscovery: allScenariosLaunchBlocked,
+      preferredProcessIds: preferredTradingViewWindowPids,
+      preferredProcessWaitMs: preferredTradingViewWindowPids.length > 0 ? 2500 : 0
     });
     const { processes, foreground, windows, selectedWindow: detectedWindow } = preflight;
     selectedWindow = detectedWindow || null;
@@ -1696,7 +1984,11 @@ async function main() {
       windows,
       selectedWindow: detectedWindow,
       foreground,
-      launchProfile: summarizedLaunchProfile
+      launchProfile: summarizedLaunchProfile,
+      launchContract: summarizedLaunchContract,
+      launchCapability: summarizedLaunchCapability,
+      launchRelaunch: summarizedLaunchRelaunch,
+      launchRelaunchRequested: requestedTradingViewAutomationRelaunch
     };
 
     if (!detectedWindow && !allScenariosLaunchBlocked) {
@@ -1709,6 +2001,7 @@ async function main() {
     });
     console.log(`Selected window: ${JSON.stringify({
       hwnd: detectedWindow?.hwnd || null,
+      pid: detectedWindow?.pid || detectedWindow?.processId || null,
       title: detectedWindow?.title || null,
       processName: detectedWindow?.processName || null,
       windowKind: detectedWindow?.windowKind || null,
@@ -1723,6 +2016,7 @@ async function main() {
     console.log(`Initial foreground: ${JSON.stringify({
       title: foreground?.title || null,
       processName: foreground?.processName || null,
+      pid: foreground?.pid || foreground?.processId || null,
       hwnd: foreground?.hwnd || null,
       windowKind: foreground?.windowKind || null
     })}`);
@@ -1739,6 +2033,51 @@ async function main() {
         console.log(`[LAUNCH-PROFILE] ${warning}`);
       }
     }
+    if (summarizedLaunchCapability) {
+      console.log(`TradingView launch capability: ${JSON.stringify({
+        capabilityProfile: summarizedLaunchCapability.capabilityProfile || null,
+        automationLaunchSurfaceDetected: summarizedLaunchCapability.automationLaunchSurfaceDetected === true,
+        reason: summarizedLaunchCapability.reason || null,
+        shellLaunchTarget: summarizedLaunchCapability.launchIdentity?.shellLaunchTarget || null,
+        inspectionAvailable: summarizedLaunchCapability.inspectionAvailable !== false
+      })}`);
+      for (const warning of Array.isArray(summarizedLaunchCapability.warnings) ? summarizedLaunchCapability.warnings : []) {
+        console.log(`[LAUNCH-CAPABILITY] ${warning}`);
+      }
+    }
+    if (summarizedLaunchContract) {
+      console.log(`TradingView launch contract: ${JSON.stringify({
+        status: summarizedLaunchContract.status || null,
+        source: summarizedLaunchContract.source || null,
+        kind: summarizedLaunchContract.kind || null,
+        displayName: summarizedLaunchContract.displayName || null,
+        command: summarizedLaunchContract.command || null,
+        expectedPort: summarizedLaunchContract.expected?.cdpPort || null,
+        rendererAccessibility: summarizedLaunchContract.expected?.rendererAccessibility === true
+      })}`);
+      for (const warning of Array.isArray(summarizedLaunchContract.warnings) ? summarizedLaunchContract.warnings : []) {
+        console.log(`[LAUNCH-CONTRACT] ${warning}`);
+      }
+      if (summarizedLaunchContract.error) {
+        console.log(`[LAUNCH-CONTRACT] ${summarizedLaunchContract.error}`);
+      }
+    }
+    if (summarizedLaunchRelaunch) {
+      console.log(`TradingView launch relaunch result: ${JSON.stringify({
+        attempted: summarizedLaunchRelaunch.attempted === true,
+        success: summarizedLaunchRelaunch.success === true,
+        status: summarizedLaunchRelaunch.status || null,
+        durationMs: summarizedLaunchRelaunch.readiness?.durationMs || null,
+        newRunningPids: summarizedLaunchRelaunch.readiness?.newRunningPids || []
+      })}`);
+      if (
+        preferredTradingViewWindowPids.length > 0
+        && detectedWindow
+        && !preferredTradingViewWindowPids.includes(Number(detectedWindow?.pid || detectedWindow?.processId || 0))
+      ) {
+        console.log(`[LAUNCH-RELAUNCH] Preferred post-relaunch TradingView PID(s) ${preferredTradingViewWindowPids.join(', ')} were not selected during preflight. Selected hwnd=${detectedWindow.hwnd} pid=${detectedWindow.pid || detectedWindow.processId || 'n/a'}.`);
+      }
+    }
 
     if (allScenariosLaunchBlocked) {
       console.log('[LAUNCH-PROFILE] Skipping watcher startup and heavy process revalidation because every requested scenario is blocked before execution.');
@@ -1752,7 +2091,10 @@ async function main() {
         runTag,
         artifactDir,
         detectedWindow,
-        launchProfile
+        launchProfile,
+        launchContract,
+        launchCapability,
+        launchRelaunch
       });
       manifest.scenarios.push(summary);
     }
