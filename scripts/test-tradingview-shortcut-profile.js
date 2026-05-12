@@ -6,16 +6,21 @@ const path = require('path');
 const {
   TRADINGVIEW_SHORTCUTS_OFFICIAL_URL,
   TRADINGVIEW_SHORTCUTS_SECONDARY_URL,
+  buildTradingViewPineEditorAutomationGuidanceLines,
   buildTradingViewShortcutAction,
   buildTradingViewShortcutRoute,
   getTradingViewShortcut,
   getTradingViewShortcutKey,
   getTradingViewShortcutMatchTerms,
+  getTradingViewPineEditorAutomationPolicy,
   listTradingViewShortcuts,
   messageMentionsTradingViewShortcut,
   matchesTradingViewShortcutAction,
   resolveTradingViewShortcutId
 } = require(path.join(__dirname, '..', 'src', 'main', 'tradingview', 'shortcut-profile.js'));
+const {
+  TRADINGVIEW_PINE_PROMPT_OVERLAY
+} = require(path.join(__dirname, '..', 'src', 'main', 'ai-service', 'system-prompt.js'));
 
 function test(name, fn) {
   try {
@@ -127,23 +132,53 @@ test('shortcut profile exposes reusable phrase matching helpers for workflow inf
   assert(messageMentionsTradingViewShortcut('open the pine script editor in tradingview', 'open-pine-editor'));
 });
 
-test('pine editor opener uses chart Ctrl+E and keeps quick-search fallback route', () => {
+test('pine editor shortcut profile exposes semantic icon primary plus explicit direct and quick-search routes', () => {
   const pineEditor = getTradingViewShortcut('open-pine-editor');
   const directAction = buildTradingViewShortcutAction('open-pine-editor');
+  const defaultRouteActions = buildTradingViewShortcutRoute('open-pine-editor');
   const directRouteActions = buildTradingViewShortcutRoute('open-pine-editor', { routeStrategy: 'official-direct' });
-  const fallbackRouteActions = buildTradingViewShortcutRoute('open-pine-editor');
+  const quickSearchRouteActions = buildTradingViewShortcutRoute('open-pine-editor', { routeStrategy: 'quick-search' });
 
   assert(pineEditor, 'pine editor shortcut profile should exist');
   assert.strictEqual(pineEditor.key, 'ctrl+e', 'chart-focused Pine Editor opener should be Ctrl+E');
   assert(/Ctrl\+E opens the Pine Script editor/i.test(pineEditor.notes.join(' ')), 'pine editor notes should document the chart-focused opener');
   assert.strictEqual(directAction.key, 'ctrl+e', 'pine editor direct action should use the chart-focused opener');
+  assert(Array.isArray(defaultRouteActions) && defaultRouteActions[0]?.type === 'click_element', 'default Pine route should use the semantic icon path');
+  assert.strictEqual(defaultRouteActions[0]?.text, 'Pine');
+  assert.strictEqual(defaultRouteActions[0]?.allowCoordinateFallback, false);
   assert(Array.isArray(directRouteActions) && directRouteActions[0]?.key === 'ctrl+e', 'official-direct route should use Ctrl+E');
-  assert(Array.isArray(fallbackRouteActions) && fallbackRouteActions.length >= 5, 'pine editor should keep a TradingView quick-search fallback route sequence');
-  assert.strictEqual(fallbackRouteActions[0].key, 'ctrl+k');
-  assert.strictEqual(fallbackRouteActions[6].type, 'type');
-  assert.strictEqual(fallbackRouteActions[6].text, 'Pine Editor');
-  assert.strictEqual(fallbackRouteActions[8].type, 'key');
-  assert.strictEqual(fallbackRouteActions[8].key, 'enter');
+  assert(Array.isArray(quickSearchRouteActions) && quickSearchRouteActions.length >= 5, 'pine editor should keep a TradingView quick-search fallback route sequence');
+  assert.strictEqual(quickSearchRouteActions[0].key, 'ctrl+k');
+  assert.strictEqual(quickSearchRouteActions[6].type, 'type');
+  assert.strictEqual(quickSearchRouteActions[6].text, 'Pine Editor');
+  assert.strictEqual(quickSearchRouteActions[8].type, 'key');
+  assert.strictEqual(quickSearchRouteActions[8].key, 'enter');
+});
+
+test('pine editor semantic icon route targets the invokable Pine toolbar button without coordinates', () => {
+  const routeActions = buildTradingViewShortcutRoute('open-pine-editor', { routeStrategy: 'semantic-icon' });
+
+  assert(Array.isArray(routeActions) && routeActions.length >= 1, 'semantic icon route should emit an action');
+  assert.strictEqual(routeActions[0].type, 'click_element');
+  assert.strictEqual(routeActions[0].text, 'Pine');
+  assert.strictEqual(routeActions[0].controlType, 'Button');
+  assert.strictEqual(routeActions[0].exact, true);
+  assert.strictEqual(routeActions[0].allowCoordinateFallback, false);
+});
+
+test('pine prompt overlay matches the shortcut policy guidance contract', () => {
+  const policy = getTradingViewPineEditorAutomationPolicy();
+  const guidanceLines = buildTradingViewPineEditorAutomationGuidanceLines();
+
+  assert.strictEqual(policy.preferredRoute, 'semantic-icon');
+  assert.strictEqual(policy.directShortcutRoute?.route, 'official-direct');
+  assert.strictEqual(policy.quickSearchFallback?.route, 'quick-search');
+  assert.strictEqual(policy.quickSearchFallback?.requiresCommandSurface, true);
+  assert.strictEqual(policy.semanticIconRoute?.requiresHostProbe, true);
+  assert(TRADINGVIEW_PINE_PROMPT_OVERLAY.includes('host-backed semantic Pine toolbar icon route first'), 'system prompt should make the semantic Pine icon the primary opener');
+  guidanceLines.forEach((line) => {
+    assert(TRADINGVIEW_PINE_PROMPT_OVERLAY.includes(line), `system prompt should include Pine route guidance line: ${line}`);
+  });
 });
 
 test('pine authoring shortcuts expose normalized capability metadata and chorded sequences', () => {
@@ -170,6 +205,9 @@ test('generic shortcut route builder emits a chord sequence with final verificat
 
   assert(Array.isArray(routeActions) && routeActions.length >= 4, 'new indicator route should emit multiple steps');
   assert.deepStrictEqual(keyActions.map((action) => action.key), ['ctrl+k', 'ctrl+i']);
+  assert.strictEqual(keyActions[0].verify.target, 'quick-search');
+  assert.strictEqual(keyActions[0].searchSurfaceContract.route, 'quick-search');
   assert.strictEqual(keyActions[1].verify.kind, 'editor-active');
+  assert.strictEqual(keyActions[1].verify.pineSurfaceExpectation, 'fresh-script');
   assert.strictEqual(keyActions[1].tradingViewShortcut.id, 'new-pine-indicator');
 });

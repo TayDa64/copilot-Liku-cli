@@ -269,6 +269,7 @@ const TRADINGVIEW_SHORTCUTS = Object.freeze({
       appName: 'TradingView',
       target: 'pine-editor',
       keywords: ['pine', 'pine editor', 'script'],
+      pineSurfaceExpectation: 'fresh-script',
       requiresObservedChange: true
     },
     fallbackPolicy: 'none'
@@ -459,6 +460,46 @@ function getTradingViewShortcutKey(id) {
   return getTradingViewShortcut(id)?.key || null;
 }
 
+function getTradingViewPineEditorAutomationPolicy() {
+  return cloneValue({
+    shortcutId: 'open-pine-editor',
+    preferredRoute: 'semantic-icon',
+    preferredRouteReason: 'Use the host-probed TradingView Pine toolbar icon as the primary Pine activation route inside the bound TradingView window.',
+    requiresChartFocus: false,
+    directShortcutRoute: {
+      route: 'official-direct',
+      reason: 'If Pine activation is not observed after the semantic icon route, retry through a bounded chart-focus Ctrl+E path.',
+      requiresChartFocus: true
+    },
+    quickSearchFallback: {
+      route: 'quick-search',
+      reason: 'Use the TradingView command quick-search route only as a fail-closed recovery after semantic icon and bounded Ctrl+E activation do not expose Pine Editor.',
+      requiresCommandSurface: true,
+      typedQuery: 'Pine Editor'
+    },
+    semanticIconRoute: {
+      route: 'semantic-icon',
+      reason: 'Use the Pine toolbar icon as the primary Pine activation route when the host can resolve it inside the bound TradingView window.',
+      allowImplicitSubstitution: true,
+      requiresHostProbe: true
+    },
+    textEntryRule: 'Literal "Pine Editor" text is only valid inside verified TradingView command quick-search.'
+  });
+}
+
+function buildTradingViewPineEditorAutomationGuidanceLines() {
+  const policy = getTradingViewPineEditorAutomationPolicy();
+  const quickSearchFallback = policy.quickSearchFallback || {};
+  const typedQuery = String(quickSearchFallback.typedQuery || 'Pine Editor').trim() || 'Pine Editor';
+
+  return [
+    'Prefer the host-backed semantic Pine toolbar icon route when TradingView is bound and foregrounded.',
+    'If Pine activation is not observed after the semantic icon route, retry through a bounded chart-focus Ctrl+E path.',
+    'Use the TradingView command quick-search route only as a verified recovery path after the semantic icon route and bounded Ctrl+E retry both fail.',
+    `Literal "${typedQuery}" text is only valid inside verified TradingView command quick-search, not symbol search, chat, or another foreground app.`
+  ];
+}
+
 function buildTradingViewShortcutMetadata(shortcut) {
   if (!shortcut) return null;
   return {
@@ -520,6 +561,13 @@ function buildTradingViewShortcutSequenceRoute(shortcut, overrides = {}) {
   if (keySequence.length === 0) return null;
 
   const routeMetadata = buildTradingViewShortcutMetadata(shortcut);
+  const quickSearchShortcut = getTradingViewShortcut('symbol-search');
+  const commandSurfaceRouteMetadata = {
+    ...routeMetadata,
+    route: 'quick-search',
+    surface: 'quick-search',
+    requiresCommandSurface: true
+  };
   const actions = [];
   const finalActionOverrides = overrides.finalActionOverrides && typeof overrides.finalActionOverrides === 'object'
     ? overrides.finalActionOverrides
@@ -539,6 +587,15 @@ function buildTradingViewShortcutSequenceRoute(shortcut, overrides = {}) {
           : `Execute TradingView shortcut step ${index + 1} for ${shortcut.surface}`),
       tradingViewShortcut: routeMetadata
     };
+    if (
+      index === 0
+      && key.toLowerCase() === 'ctrl+k'
+      && shortcut?.surface === 'pine-editor'
+      && quickSearchShortcut?.verificationContract
+    ) {
+      baseAction.verify = cloneValue(quickSearchShortcut.verificationContract);
+      baseAction.searchSurfaceContract = commandSurfaceRouteMetadata;
+    }
     if (isLast) {
       if (overrides.verify || shortcut.verificationContract) {
         baseAction.verify = cloneValue(overrides.verify || shortcut.verificationContract);
@@ -568,7 +625,50 @@ function buildTradingViewShortcutRoute(id, overrides = {}) {
   if (!shortcut) return null;
 
   if (shortcut.id === 'open-pine-editor') {
-    if (overrides.routeStrategy === 'official-direct') {
+    const preferredRoute = overrides.routeStrategy
+      || getTradingViewPineEditorAutomationPolicy().preferredRoute
+      || 'semantic-icon';
+
+    if (preferredRoute === 'semantic-icon') {
+      const iconText = overrides.iconText || overrides.text || 'Pine';
+      const exactIconText = overrides.exactIconText !== undefined
+        ? overrides.exactIconText === true
+        : iconText === 'Pine';
+      const iconActionOverrides = overrides.iconActionOverrides && typeof overrides.iconActionOverrides === 'object'
+        ? overrides.iconActionOverrides
+        : {};
+      const verify = iconActionOverrides.verify || overrides.verify || cloneValue(shortcut.verificationContract) || {
+        kind: 'editor-active',
+        appName: 'TradingView',
+        target: 'pine-editor',
+        keywords: ['pine', 'pine editor', 'script'],
+        requiresObservedChange: true
+      };
+      const verifyTarget = iconActionOverrides.verifyTarget || overrides.verifyTarget;
+      const routeMetadata = {
+        ...buildTradingViewShortcutMetadata(shortcut),
+        route: 'semantic-icon',
+        surface: 'pine-editor'
+      };
+      return [
+        mergeAction({
+          type: 'click_element',
+          text: iconText,
+          controlType: overrides.iconControlType || 'Button',
+          exact: exactIconText,
+          foregroundOnly: true,
+          allowCoordinateFallback: false,
+          reason: overrides.iconReason || 'Invoke the TradingView Pine Editor toolbar icon without coordinate fallback',
+          tradingViewShortcut: routeMetadata,
+          searchSurfaceContract: routeMetadata,
+          verify,
+          verifyTarget
+        }, iconActionOverrides),
+        { type: 'wait', ms: Number.isFinite(Number(overrides.iconWaitMs)) ? Number(overrides.iconWaitMs) : 260 }
+      ];
+    }
+
+    if (preferredRoute === 'official-direct') {
       const enterActionOverrides = overrides.enterActionOverrides && typeof overrides.enterActionOverrides === 'object'
         ? overrides.enterActionOverrides
         : {};
@@ -588,7 +688,8 @@ function buildTradingViewShortcutRoute(id, overrides = {}) {
 
     const routeMetadata = {
       ...buildTradingViewShortcutMetadata(shortcut),
-      route: 'quick-search'
+      route: 'quick-search',
+      requiresCommandSurface: true
     };
 
     const selectionActionOverrides = overrides.selectionActionOverrides && typeof overrides.selectionActionOverrides === 'object'
@@ -670,8 +771,10 @@ module.exports = {
   getTradingViewShortcut,
   getTradingViewShortcutKey,
   getTradingViewShortcutMatchTerms,
+  getTradingViewPineEditorAutomationPolicy,
   listTradingViewShortcuts,
   messageMentionsTradingViewShortcut,
   matchesTradingViewShortcutAction,
-  resolveTradingViewShortcutId
+  resolveTradingViewShortcutId,
+  buildTradingViewPineEditorAutomationGuidanceLines
 };

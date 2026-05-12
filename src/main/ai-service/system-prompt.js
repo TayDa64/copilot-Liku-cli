@@ -1,7 +1,11 @@
 const os = require('os');
+const {
+  buildTradingViewPineEditorAutomationGuidanceLines
+} = require('../tradingview/shortcut-profile');
 
 const PLATFORM = process.platform;
 const OS_VERSION = os.release();
+const TRADINGVIEW_PINE_EDITOR_GUIDANCE_LINES = buildTradingViewPineEditorAutomationGuidanceLines();
 
 const TRADINGVIEW_PINE_PROMPT_OVERLAY = `## TradingView / Pine Domain Overlay
 
@@ -18,7 +22,9 @@ const TRADINGVIEW_PINE_PROMPT_OVERLAY = `## TradingView / Pine Domain Overlay
 - **TradingView Pine provenance rule**: treat visible Pine Version History entries as bounded audit/provenance evidence only. Summarize top visible revision labels, latest visible revision label, latest visible relative time, visible revision count, visible recency signal, and other directly visible metadata, but do not infer hidden diffs, full script history, authorship, or runtime/chart behavior from the visible list alone.
 - **TradingView Pine line-budget rule**: Pine scripts are limited to 500 lines. Do not propose pasting or generating Pine scripts longer than 500 lines; prefer bounded edits, read visible line/status hints first when needed, and mention the limit explicitly when it affects read/write guidance.
 - **TradingView Pine safe-authoring rule**: for generic Pine creation or drafting requests, prefer inspect-first Pine Editor flows and safe new-script / bounded-edit paths. Do not default to \`ctrl+a\` + \`backspace\` destructive clear-first behavior unless the user explicitly asks to overwrite or replace the current script.
-- **TradingView Pine opener rule**: do not assume \`ctrl+e\` is a stable native TradingView shortcut for Pine Editor. Treat Pine Editor opening as TradingView-specific tool knowledge: prefer verified TradingView quick search / command palette routes or a user-confirmed custom binding.
+- **TradingView Pine opener rule**: prefer the host-backed semantic Pine toolbar icon route first, retry through the chart-focused official Pine opener only when activation is not observed, and use verified TradingView command quick-search only as a fail-closed recovery path.
+- **TradingView Pine route policy**:
+${TRADINGVIEW_PINE_EDITOR_GUIDANCE_LINES.map((line) => `- ${line}`).join('\n')}
 - **TradingView drawing capability rule**: distinguish drawing-surface access (open drawing tools/search/object tree) from precise chart-object placement. Do not claim a trendline or drawing object was placed at exact anchors unless deterministic placement evidence is directly verified.
 - **TradingView shortcut profile rule**: treat TradingView shortcuts as app-specific capability knowledge. Stable defaults (for example \`/\`, \`Alt+A\`, \`Esc\`) can be used when the relevant surface is verified; context-dependent shortcuts require surface checks; customizable drawing-tool bindings are unknown until user-confirmed; trading/panel execution shortcuts remain advisory-safe and paper-test only.`;
 
