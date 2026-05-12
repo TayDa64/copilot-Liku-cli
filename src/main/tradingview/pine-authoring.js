@@ -4,6 +4,13 @@ const {
   detectRequestedPineVersion,
   normalizePineScriptSource
 } = require('../tools/tradingview-tool');
+const {
+  applyPineScriptTitleContract,
+  synthesizePineScriptTitleContract
+} = require('./pine-title-synthesis');
+const {
+  buildTradingViewPineEditorAutomationGuidanceLines
+} = require('./shortcut-profile');
 
 function createTradingViewPineAuthoringHelpers(deps = {}) {
   const {
@@ -17,7 +24,11 @@ function createTradingViewPineAuthoringHelpers(deps = {}) {
   function isIncompleteTradingViewPineAuthoringPlan(actionBlock, userMessage = '') {
     const normalizedMessage = String(userMessage || '').toLowerCase();
     if (!/\btradingview\b/.test(normalizedMessage)) return false;
-    if (!/\bpine\b/.test(normalizedMessage) && !/\bscript\b/.test(normalizedMessage)) return false;
+    if (
+      !/\bpine\b/.test(normalizedMessage)
+      && !/\bscript\b/.test(normalizedMessage)
+      && !/\b(indicator|strategy|library)\b/.test(normalizedMessage)
+    ) return false;
     if (!/\b(create|build|generate|write|draft|make|replace|overwrite|rewrite)\b/.test(normalizedMessage)) return false;
 
     const collectNestedActions = (items = [], seen = new Set()) => {
@@ -28,6 +39,14 @@ function createTradingViewPineAuthoringHelpers(deps = {}) {
         collected.push(action);
         if (Array.isArray(action.continueActions)) {
           collected.push(...collectNestedActions(action.continueActions, seen));
+        }
+        const stateBranches = action.continueActionsByPineEditorState;
+        if (stateBranches && typeof stateBranches === 'object') {
+          for (const branchActions of Object.values(stateBranches)) {
+            if (Array.isArray(branchActions)) {
+              collected.push(...collectNestedActions(branchActions, seen));
+            }
+          }
         }
         const lifecycleBranches = action.continueActionsByPineLifecycleState;
         if (lifecycleBranches && typeof lifecycleBranches === 'object') {
@@ -117,9 +136,11 @@ function createTradingViewPineAuthoringHelpers(deps = {}) {
     const hasAuthoringVerb = /\b(create|build|generate|write|draft|make|replace|overwrite|rewrite|fix|update|convert|migrate)\b/.test(normalizedMessage);
     const mentionsTradingViewPine = /\btradingview\b/.test(normalizedMessage)
       && (/\bpine\b/.test(normalizedMessage) || /\bscript\b/.test(normalizedMessage));
+    const mentionsTradingViewAuthoringTarget = /\btradingview\b/.test(normalizedMessage)
+      && /\b(indicator|strategy|library)\b/.test(normalizedMessage);
     const mentionsStandalonePineAuthoring = /\bpine(?:\s+script)?\b/.test(normalizedMessage)
       && /\b(indicator|strategy|library|script)\b/.test(normalizedMessage);
-    return hasAuthoringVerb && (mentionsTradingViewPine || mentionsStandalonePineAuthoring);
+    return hasAuthoringVerb && (mentionsTradingViewPine || mentionsTradingViewAuthoringTarget || mentionsStandalonePineAuthoring);
   }
 
   function requestRequiresFreshTradingViewPineIndicator(userMessage = '') {
@@ -140,11 +161,12 @@ function createTradingViewPineAuthoringHelpers(deps = {}) {
     const requestedVisibleResult = /\b(report|read|summari[sz]e|tell me|show me|capture)\b.{0,40}\b(?:compile|apply|result|status|error|warning)\b/.test(normalized)
       || /\bvisible\s+(?:compile|apply|compiler|result|status|error|warning)\b/.test(normalized);
     const requiresFreshIndicator = requestRequiresFreshTradingViewPineIndicator(userMessage);
+    const pineEditorRouteGuidanceLines = buildTradingViewPineEditorAutomationGuidanceLines();
 
     const lines = [
       'TRADINGVIEW PINE AUTHORING CONTRACT:',
       '- Return a complete executable TradingView Pine workflow, not just window activation.',
-      '- Open Pine Editor through the verified TradingView quick-search route.',
+      ...pineEditorRouteGuidanceLines.map((line) => `- ${line}`),
       '- Inspect visible Pine Editor state before editing.',
       requiresFreshIndicator
         ? '- This request requires a fresh TradingView indicator script. Use the new-indicator flow and do not reuse or inspect-copy the existing script buffer as the authoring payload.'
@@ -183,10 +205,16 @@ function createTradingViewPineAuthoringHelpers(deps = {}) {
     if (!normalized) return '';
 
     const requestedVersion = detectRequestedPineVersion(options.userMessage || options.intent || '', normalized);
-    return normalizePineScriptSource(normalized, {
+    const normalizedSource = normalizePineScriptSource(normalized, {
       intent: options.userMessage || options.intent || '',
       version: requestedVersion
     }).trim();
+    const titleContract = synthesizePineScriptTitleContract({
+      userMessage: options.userMessage || options.intent || '',
+      source: normalizedSource,
+      canonicalTitle: options.canonicalTitle || ''
+    });
+    return applyPineScriptTitleContract(normalizedSource, titleContract).trim();
   }
 
   function buildPineClipboardPreparationCommand(pineScript = '', options = {}) {
@@ -200,10 +228,12 @@ function createTradingViewPineAuthoringHelpers(deps = {}) {
 
     const requiresFreshIndicator = requestRequiresFreshTradingViewPineIndicator(userMessage);
     const pineVersion = detectRequestedPineVersion(userMessage);
+    const titleContract = synthesizePineScriptTitleContract({ userMessage });
     return [
       'Return only Pine Script source code for this TradingView request.',
       'No markdown. No prose. No JSON. No tool calls.',
       `The first line must be exactly \`//@version=${pineVersion}\`.`,
+      `Use this exact script title in the declaration: "${titleContract.title}".`,
       requiresFreshIndicator
         ? 'Generate a fresh indicator script for a new interactive chart indicator.'
         : 'Generate an indicator unless the user explicitly requested a strategy.',
@@ -216,14 +246,16 @@ function createTradingViewPineAuthoringHelpers(deps = {}) {
     if (!isTradingViewPineAuthoringRequest(userMessage)) return '';
 
     const pineVersion = detectRequestedPineVersion(userMessage);
+    const titleContract = synthesizePineScriptTitleContract({ userMessage });
 
-    return `Return only Pine Script code. First line exactly //@version=${pineVersion}. No markdown, no prose, no JSON, no tool calls. Fresh indicator script. Request: ${String(userMessage || '').trim()}`;
+    return `Return only Pine Script code. First line exactly //@version=${pineVersion}. Use this exact declaration title: "${titleContract.title}". No markdown, no prose, no JSON, no tool calls. Fresh indicator script. Request: ${String(userMessage || '').trim()}`;
   }
 
   function buildTradingViewPineCodeValidationRetryPrompt(userMessage = '', validation = null) {
     if (!isTradingViewPineAuthoringRequest(userMessage)) return '';
 
     const pineVersion = detectRequestedPineVersion(userMessage);
+    const titleContract = synthesizePineScriptTitleContract({ userMessage });
 
     const issueLines = Array.isArray(validation?.issues)
       ? validation.issues
@@ -235,6 +267,7 @@ function createTradingViewPineAuthoringHelpers(deps = {}) {
     return [
       'Return only Pine Script code.',
       `First line exactly //@version=${pineVersion}.`,
+      `Use this exact declaration title: "${titleContract.title}".`,
       'No markdown, no prose, no JSON, no tool calls.',
       'The previous Pine draft failed local validation and must be regenerated cleanly.',
       '- Do not include Pine Editor UI text anywhere inside the code body.',
@@ -271,6 +304,7 @@ function createTradingViewPineAuthoringHelpers(deps = {}) {
     const normalized = raw.toLowerCase();
     const requestedAddToChart = /\bctrl\s*\+\s*enter\b/.test(normalized)
       || /\b(add|apply|load|put)\b.{0,20}\bchart\b/.test(normalized);
+    const pineEditorRouteGuidanceLines = buildTradingViewPineEditorAutomationGuidanceLines();
 
     return [
       'Retry the blocked TradingView Pine authoring task.',
@@ -279,7 +313,7 @@ function createTradingViewPineAuthoringHelpers(deps = {}) {
       'Return an object with keys: thought, actions, verification.',
       'Requirements:',
       '- Produce a complete executable TradingView Pine workflow, not just window activation.',
-      '- Open TradingView Pine Editor through a verified TradingView route.',
+      ...pineEditorRouteGuidanceLines.map((line) => `- ${line}`),
       '- Inspect the visible Pine Editor state before editing.',
       '- Do not overwrite an existing visible script implicitly; prefer a safe new-script or bounded starter-script path unless the user explicitly asked to replace the current script.',
       '- Insert the Pine script content using substantive authoring actions such as Set-Clipboard plus Ctrl+V or direct Pine code typing.',

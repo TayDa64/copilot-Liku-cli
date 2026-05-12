@@ -1258,6 +1258,7 @@ const MIN_TRADINGVIEW_PINE_RENDERER_DISCOVERY_TIMEOUT_MS = 650;
 const DEFAULT_TRADINGVIEW_PINE_EDITOR_CDP_TIMEOUT_MS = 1200;
 const MIN_TRADINGVIEW_PINE_EDITOR_CDP_TIMEOUT_MS = 300;
 const DEFAULT_TRADINGVIEW_PINE_EDITOR_CDP_PREVIEW_LIMIT = 320;
+const DEFAULT_TRADINGVIEW_REMOTE_DEBUGGING_PORT = 9222;
 
 function normalizeBoundsRect(bounds = null) {
   if (!bounds || typeof bounds !== 'object') return null;
@@ -1292,6 +1293,29 @@ function normalizeBoundsRect(bounds = null) {
     width: Math.round(width),
     height: Math.round(height)
   };
+}
+
+function shouldUseTradingViewFallbackCdpPortHint(cdpDependencies = null) {
+  const deps = cdpDependencies && typeof cdpDependencies === 'object'
+    ? cdpDependencies
+    : null;
+  if (!deps) {
+    return true;
+  }
+  if (deps.allowFallbackPortHint === true) {
+    return true;
+  }
+  if (deps.allowFallbackPortHint === false) {
+    return false;
+  }
+  const hasCustomDiscoveryHooks = [
+    'fetchImpl',
+    'WebSocketCtor',
+    'processInspector',
+    'listeningPortInspector',
+    'executePowerShellScript'
+  ].some((key) => typeof deps[key] === 'function');
+  return !hasCustomDiscoveryHooks;
 }
 
 function buildTradingViewPineSurfaceScanBounds(windowInfo = {}) {
@@ -3085,13 +3109,16 @@ async function invokeTradingViewPineTitleMenuItemWithCDPSession(session, options
     terminalClickResult = await clickTradingViewRendererAxNodeWithCDPSession(session, menuItemNode);
   }
 
-  await sleep(120);
   let postClickPineRendererProof = null;
-  try {
-    postClickPineRendererProof = await probeTradingViewPineEditorRendererWithCDPSession(session, {
-      pineExpectedScriptName: normalizeCompactText(options?.pineExpectedScriptName || '', 180)
-    });
-  } catch {}
+  const deferredEffectProof = options?.deferEffectProofToFollowUpAction === true;
+  if (terminalClickResult?.success === true) {
+    await sleep(deferredEffectProof ? 90 : 120);
+    try {
+      postClickPineRendererProof = await probeTradingViewPineEditorRendererWithCDPSession(session, {
+        pineExpectedScriptName: normalizeCompactText(options?.pineExpectedScriptName || '', 180)
+      });
+    } catch {}
+  }
 
   return {
     success: terminalClickResult?.success === true,
@@ -3127,6 +3154,7 @@ async function invokeTradingViewPineTitleMenuItemWithCDPSession(session, options
         }
       : null,
     clickResult: terminalClickResult?.clickResult || null,
+    deferredEffectProof,
     postClickPineRendererProof
   };
 }
@@ -3660,7 +3688,11 @@ function buildTradingViewPineSurfaceProbeFromRendererInvoke(invokeResult = {}, o
     || invokeResult?.windowInfo?.hwnd
     || 0
   ) || 0;
-  if (effectProof?.success === true && postClickPineRendererProof?.available === true && postClickPineRendererProof?.active === true) {
+  if (
+    postClickPineRendererProof?.available === true
+    && postClickPineRendererProof?.active === true
+    && (effectProof?.success === true || effectProof?.deferredToFollowUpAction === true)
+  ) {
     const matchedBy = String(postClickPineRendererProof?.matchedBy || 'chromium-cdp-post-click-surface').trim() || 'chromium-cdp-post-click-surface';
     const visibleAnchorEntries = summarizeTradingViewPineVisibleAnchorEntries(
       Array.isArray(postClickPineRendererProof?.signals) ? postClickPineRendererProof.signals : [],
@@ -3935,8 +3967,13 @@ async function probeTradingViewPineEditorRendererWithCDP(options = {}) {
   const cdpDependencies = options?.cdpDependencies && typeof options.cdpDependencies === 'object'
     ? options.cdpDependencies
     : {};
+  const fallbackPorts = shouldUseTradingViewFallbackCdpPortHint(cdpDependencies)
+    ? [DEFAULT_TRADINGVIEW_REMOTE_DEBUGGING_PORT]
+    : [];
   const discoveryOptions = {
     port: options?.cdpPort || 0,
+    fallbackPorts,
+    fallbackPortLabel: 'tradingview-default',
     processIds: [windowInfo?.pid || windowInfo?.processId || 0],
     processNames: [
       windowInfo?.processName || '',
@@ -4052,6 +4089,7 @@ async function invokeTradingViewRendererButtonWithCDP(options = {}) {
     Math.min(700, Math.round(discoveryTimeoutMs * 0.36))
   );
   const invokeKind = (normalizeCompactText(options?.kind || '', 80) || '').toLowerCase();
+  const deferEffectProofToFollowUpAction = options?.deferEffectProofToFollowUpAction === true;
   const pineExpectedScriptName = normalizeCompactText(
     options?.pineExpectedScriptName || options?.expectedScriptName || options?.scriptName || '',
     180
@@ -4109,8 +4147,13 @@ async function invokeTradingViewRendererButtonWithCDP(options = {}) {
   const cdpDependencies = options?.cdpDependencies && typeof options.cdpDependencies === 'object'
     ? options.cdpDependencies
     : {};
+  const fallbackPorts = shouldUseTradingViewFallbackCdpPortHint(cdpDependencies)
+    ? [DEFAULT_TRADINGVIEW_REMOTE_DEBUGGING_PORT]
+    : [];
   const discoveryOptions = {
     port: options?.cdpPort || 0,
+    fallbackPorts,
+    fallbackPortLabel: 'tradingview-default',
     processIds: [windowInfo?.pid || windowInfo?.processId || 0],
     processNames: [
       windowInfo?.processName || '',
@@ -4194,6 +4237,7 @@ async function invokeTradingViewRendererButtonWithCDP(options = {}) {
                 buttonText,
                 menuItemText: options?.menuItemText || buttonText,
                 submenuItemText: options?.submenuItemText || '',
+                deferEffectProofToFollowUpAction,
                 requiredTexts,
                 pineExpectedScriptName,
                 currentTitleHint: options?.currentTitleHint || options?.pineCurrentTitle || '',
@@ -4229,7 +4273,15 @@ async function invokeTradingViewRendererButtonWithCDP(options = {}) {
                       requiredTexts: requiredTexts.slice(0, 6),
                       postClickPineRendererProof: menuItemResult.postClickPineRendererProof
                     }
-                  : null
+                  : (menuItemResult?.deferredEffectProof === true
+                    ? {
+                        applicable: false,
+                        deferredToFollowUpAction: true,
+                        kind: invokeKind,
+                        surface: describeTradingViewRendererInvokeSurface(invokeKind),
+                        buttonText
+                      }
+                    : null)
               };
             }
 
@@ -4345,9 +4397,27 @@ async function invokeTradingViewRendererButtonWithCDP(options = {}) {
               } catch {}
             }
 
-            const effectProof = clickPayload?.clicked === false
-              ? null
-              : await verifyTradingViewRendererInvokeEffectWithCDPSession(session, {
+            let effectProof = null;
+            if (clickPayload?.clicked !== false) {
+              if (deferEffectProofToFollowUpAction) {
+                let postClickPineRendererProof = null;
+                await sleep(90);
+                try {
+                  postClickPineRendererProof = await probeTradingViewPineEditorRendererWithCDPSession(session, {
+                    pineExpectedScriptName,
+                    captureTitleButton: true
+                  });
+                } catch {}
+                effectProof = {
+                  applicable: false,
+                  deferredToFollowUpAction: true,
+                  kind: invokeKind,
+                  surface: describeTradingViewRendererInvokeSurface(invokeKind),
+                  buttonText,
+                  postClickPineRendererProof
+                };
+              } else {
+                effectProof = await verifyTradingViewRendererInvokeEffectWithCDPSession(session, {
                   kind: invokeKind,
                   buttonText,
                   requiredTexts,
@@ -4355,7 +4425,11 @@ async function invokeTradingViewRendererButtonWithCDP(options = {}) {
                   pineExpectedScriptName,
                   capturePineSurfaceAfterClear: true
                 });
-            const effectVerified = !effectProof || effectProof.success === true;
+              }
+            }
+            const effectVerified = !effectProof
+              || effectProof.success === true
+              || effectProof.deferredToFollowUpAction === true;
 
             return {
               success: clickPayload?.clicked !== false && effectVerified,
@@ -4527,8 +4601,13 @@ async function resolveTradingViewRendererCdpContext(options = {}) {
   const cdpDependencies = options?.cdpDependencies && typeof options.cdpDependencies === 'object'
     ? options.cdpDependencies
     : {};
+  const fallbackPorts = shouldUseTradingViewFallbackCdpPortHint(cdpDependencies)
+    ? [DEFAULT_TRADINGVIEW_REMOTE_DEBUGGING_PORT]
+    : [];
   const discovery = await discoverChromiumRemoteDebuggingTarget({
     port: options?.cdpPort || 0,
+    fallbackPorts,
+    fallbackPortLabel: 'tradingview-default',
     processIds: [windowInfo?.pid || windowInfo?.processId || 0],
     processNames: [
       windowInfo?.processName || '',
@@ -8550,6 +8629,14 @@ async function guardPineEditorCommandTextInsertion(action = {}) {
     return { allowed: true, applicable: false };
   }
 
+  if (hasTrustedTradingViewQuickSearchPreflight(action)) {
+    return {
+      allowed: true,
+      applicable: true,
+      trustedQuickSearchPreflight: true
+    };
+  }
+
   let foreground = null;
   try {
     foreground = await getForegroundWindowInfo();
@@ -8708,15 +8795,17 @@ async function guardTradingViewPineSaveKeyAction(action = {}, pressKeyImpl = pre
     };
   }
 
-  let originalClipboard = null;
+  let originalClipboardState = null;
+  const saveClipboardStateFn = getOverridableSystemAutomationFunction('saveClipboardState', saveClipboardState);
+  const restoreClipboardStateFn = getOverridableSystemAutomationFunction('restoreClipboardState', restoreClipboardState);
   try {
-    originalClipboard = await getClipboardText();
+    originalClipboardState = await saveClipboardStateFn();
   } catch {}
 
   const restoreOriginalClipboard = async () => {
-    if (originalClipboard?.success) {
+    if (originalClipboardState?.success) {
       try {
-        await setClipboardText(originalClipboard.text || '');
+        await restoreClipboardStateFn(originalClipboardState);
       } catch {}
     }
   };
@@ -8773,7 +8862,8 @@ async function readPineEditorBufferFromClipboard(action = {}, pressKeyImpl = pre
   await pressKeyImpl('ctrl+c', action);
   await sleep(160);
 
-  const clipboardRead = await getClipboardText();
+  const getClipboardTextFn = getOverridableSystemAutomationFunction('getClipboardText', getClipboardText);
+  const clipboardRead = await getClipboardTextFn();
   if (!clipboardRead?.success) {
     return {
       success: false,
@@ -8809,15 +8899,18 @@ async function verifyTradingViewPineEditorPaste(action = {}, pressKeyImpl = pres
     };
   }
 
-  let originalClipboard = null;
+  let originalClipboardState = null;
+  const saveClipboardStateFn = getOverridableSystemAutomationFunction('saveClipboardState', saveClipboardState);
+  const restoreClipboardStateFn = getOverridableSystemAutomationFunction('restoreClipboardState', restoreClipboardState);
+  const setClipboardTextFn = getOverridableSystemAutomationFunction('setClipboardText', setClipboardText);
   try {
-    originalClipboard = await getClipboardText();
+    originalClipboardState = await saveClipboardStateFn();
   } catch {}
 
   const restoreOriginalClipboard = async () => {
-    if (originalClipboard?.success) {
+    if (originalClipboardState?.success) {
       try {
-        await setClipboardText(originalClipboard.text || '');
+        await restoreClipboardStateFn(originalClipboardState);
       } catch {}
     }
   };
@@ -8852,7 +8945,7 @@ async function verifyTradingViewPineEditorPaste(action = {}, pressKeyImpl = pres
     }
 
     try {
-      await setClipboardText(expectedScriptText);
+      await setClipboardTextFn(expectedScriptText);
     } catch {}
 
     await sleep(80);
@@ -9073,6 +9166,18 @@ function isTradingViewQuickSearchTypeAction(action = {}) {
     || /tradingview/.test(processName)
     || shortcutSurface === 'quick-search'
     || shortcutSurface === 'pine-editor';
+}
+
+function hasTrustedTradingViewQuickSearchPreflight(action = {}) {
+  if (!isTradingViewQuickSearchTypeAction(action)) {
+    return false;
+  }
+
+  if (action?.quickSearchPreflight?.ready !== true) {
+    return false;
+  }
+
+  return !!getQuickSearchSemanticInputBounds(action);
 }
 
 async function attemptTradingViewQuickSearchSemanticWrite(action = {}) {
@@ -9475,6 +9580,10 @@ async function getPineEditorTextFallback(action = {}) {
 
   const evidenceMode = String(action?.pineEvidenceMode || 'generic-status').trim().toLowerCase();
   const disableTradingViewPineReadbackCDP = action?.disableTradingViewPineReadbackCDP === true;
+  const expectedScriptName = normalizeCompactText(
+    action?.pineExpectedScriptName || action?.expectedScriptName || action?.scriptName || '',
+    180
+  );
   const carriedSurfaceProbe = action?.pineEditorSurfaceProbe && typeof action.pineEditorSurfaceProbe === 'object'
     ? action.pineEditorSurfaceProbe
     : null;
@@ -9486,6 +9595,14 @@ async function getPineEditorTextFallback(action = {}) {
       : ''
   );
   const requireFreshSaveTitleProof = shouldRequireFreshPineSaveTitleProof(action, carriedSurfaceProbe);
+  if (evidenceMode === 'save-status' && expectedScriptName && !carriedSurfaceProbeResult?.success) {
+    const freshHeaderTitleFallback = await Promise.resolve()
+      .then(() => getPineEditorFreshSaveTitleHeaderFallback(action))
+      .catch(() => null);
+    if (freshHeaderTitleFallback?.success) {
+      return freshHeaderTitleFallback;
+    }
+  }
   let hostSurfaceFallback = null;
   if (
     carriedSurfaceProbeResult?.success
@@ -9589,10 +9706,6 @@ async function getPineEditorTextFallback(action = {}) {
   ) {
     const hostSurfaceProbe = hostSurfaceFallback?.pineEditorSurfaceProbe || null;
     const hostSurfaceState = extractPineEditorSafeAuthoringSurfaceState(hostSurfaceProbe);
-    const expectedScriptName = normalizeCompactText(
-      action?.pineExpectedScriptName || action?.expectedScriptName || action?.scriptName || '',
-      180
-    );
     const hostExpectedTitleProofVisible = expectedScriptName
       ? extractTradingViewPineExpectedTitleProof(hostSurfaceProbe, expectedScriptName).visible === true
       : false;
@@ -10136,6 +10249,7 @@ function buildPineProfilerStructuredSummary(text) {
  * This is critical for SendKeys/SendInput to reach the correct target
  */
 async function focusDesktop() {
+  throwIfHermeticAutomationBlocked({ type: 'focus_desktop' });
   const script = `
 Add-Type @"
 using System;
@@ -10162,6 +10276,7 @@ Start-Sleep -Milliseconds 50
  * Move mouse to coordinates (Windows)
  */
 async function moveMouse(x, y) {
+  throwIfHermeticAutomationBlocked({ type: ACTION_TYPES.MOVE_MOUSE });
   const script = `
 Add-Type -AssemblyName System.Windows.Forms
 [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point(${Math.round(x)}, ${Math.round(y)})
@@ -10183,6 +10298,7 @@ Add-Type -AssemblyName System.Windows.Forms
  * 3. SetForegroundWindow to activate target before clicking
  */
 async function click(x, y, button = 'left') {
+  throwIfHermeticAutomationBlocked({ type: button === 'right' ? ACTION_TYPES.RIGHT_CLICK : ACTION_TYPES.CLICK });
   // Move mouse first
   await moveMouse(x, y);
   
@@ -10424,6 +10540,8 @@ async function focusWindow(hwnd) {
       outcome: 'missing-target'
     };
   }
+
+  throwIfHermeticAutomationBlocked({ type: ACTION_TYPES.FOCUS_WINDOW, windowHandle: numericHandle });
 
   const hostAttempt = await tryAutomationHostSystemCall('focusWindow', (host) => host.focusWindow(numericHandle));
   if (hostAttempt.used) {
@@ -10771,6 +10889,7 @@ Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -
 }
 
 async function minimizeWindow(hwnd) {
+  throwIfHermeticAutomationBlocked({ type: ACTION_TYPES.MINIMIZE_WINDOW, windowHandle: Number(hwnd || 0) || 0 });
   const script = `
 Add-Type @'
 using System;
@@ -10792,6 +10911,8 @@ async function restoreWindow(hwnd) {
       error: 'Invalid window handle'
     };
   }
+
+  throwIfHermeticAutomationBlocked({ type: ACTION_TYPES.RESTORE_WINDOW, windowHandle: numericHandle });
 
   const hostAttempt = await tryAutomationHostSystemCall('restoreWindow', (host) => host.restoreWindow(numericHandle));
   if (hostAttempt.used) {
@@ -10840,6 +10961,7 @@ public class WinRestore {
 }
 
 async function sendWindowToBack(hwnd) {
+  throwIfHermeticAutomationBlocked({ type: ACTION_TYPES.SEND_WINDOW_TO_BACK, windowHandle: Number(hwnd || 0) || 0 });
   const script = `
 Add-Type @'
 using System;
@@ -10862,6 +10984,7 @@ public class WinZ {
  * Double click at coordinates - FIXED for transparent overlay click-through
  */
 async function doubleClick(x, y) {
+  throwIfHermeticAutomationBlocked({ type: ACTION_TYPES.DOUBLE_CLICK });
   await moveMouse(x, y);
   await sleep(50);
   
@@ -10988,6 +11111,7 @@ public class DblClickThrough {
  * Type text using SendKeys
  */
 async function typeText(text) {
+  throwIfHermeticAutomationBlocked({ type: ACTION_TYPES.TYPE, text: String(text || '') });
   // Build the SendKeys literal token stream character-by-character so the
   // braces introduced by escaping do not get re-escaped by later replacements.
   const sendKeysLiteralMap = {
@@ -11019,6 +11143,7 @@ Add-Type -AssemblyName System.Windows.Forms
  * Now supports Windows key using SendInput with virtual key codes
  */
 async function pressKey(keyCombo, options = {}) {
+  throwIfHermeticAutomationBlocked({ type: ACTION_TYPES.KEY, key: String(keyCombo || '') }, options);
   const parts = normalizeKeyComboParts(keyCombo);
   
   // Check if Windows key is involved - requires special handling
@@ -11073,6 +11198,7 @@ Add-Type -AssemblyName System.Windows.Forms
  * Scroll at current position
  */
 async function scroll(direction, amount = 3) {
+  throwIfHermeticAutomationBlocked({ type: ACTION_TYPES.SCROLL, direction, amount });
   const scrollAmount = direction === 'up' ? amount * 120 : -amount * 120;
   
   const script = `
@@ -11098,6 +11224,7 @@ public class MouseScroll {
  * Drag from one point to another - FIXED for transparent overlay click-through
  */
 async function drag(fromX, fromY, toX, toY) {
+  throwIfHermeticAutomationBlocked({ type: ACTION_TYPES.DRAG });
   await moveMouse(fromX, fromY);
   await sleep(100);
   
@@ -12459,6 +12586,19 @@ function useAutomationHostForSystemOps() {
   return flag === '1' || flag === 'true' || flag === 'yes' || flag === 'on';
 }
 
+function getOverridableSystemAutomationFunction(exportName, fallback) {
+  if (!exportName || typeof fallback !== 'function') {
+    return fallback;
+  }
+
+  const exportedCandidate = typeof module.exports?.[exportName] === 'function'
+    ? module.exports[exportName]
+    : null;
+  return exportedCandidate && exportedCandidate !== fallback
+    ? exportedCandidate
+    : fallback;
+}
+
 function getAutomationHostInstance() {
   const ui = require('./ui-automation');
   return ui.getSharedUIAHost();
@@ -12842,11 +12982,104 @@ try {
 }
 
 /**
+ * Save current clipboard state.
+ * Uses the persistent automation host token contract when available,
+ * and falls back to reading the clipboard text for later restoration.
+ */
+async function saveClipboardState() {
+  const hostAttempt = await tryAutomationHostSystemCall('saveClipboardState', (host) => host.saveClipboardState());
+  if (hostAttempt.used) {
+    return {
+      success: true,
+      token: String(hostAttempt.result?.token || ''),
+      mode: 'host-token',
+      containsText: hostAttempt.result?.containsText === true,
+      textLength: Number(hostAttempt.result?.textLength || 0) || 0,
+      error: null,
+      source: 'uia-host'
+    };
+  }
+
+  const getClipboardTextFn = getOverridableSystemAutomationFunction('getClipboardText', getClipboardText);
+  const fallbackRead = await getClipboardTextFn();
+  if (!fallbackRead?.success) {
+    return {
+      success: false,
+      token: '',
+      mode: 'text',
+      text: '',
+      error: fallbackRead?.error || hostAttempt.error || 'Clipboard state save failed',
+      source: fallbackRead?.source || (hostAttempt.error ? 'powershell-fallback' : 'powershell')
+    };
+  }
+
+  return {
+    success: true,
+    token: '',
+    mode: 'text',
+    text: String(fallbackRead?.text || ''),
+    containsText: true,
+    textLength: String(fallbackRead?.text || '').length,
+    error: null,
+    source: fallbackRead?.source || (hostAttempt.error ? 'powershell-fallback' : 'powershell'),
+    hostError: hostAttempt.error || undefined
+  };
+}
+
+/**
+ * Restore a previously saved clipboard state.
+ * Restores via the persistent automation host token contract when available,
+ * and falls back to writing the saved text payload otherwise.
+ */
+async function restoreClipboardState(savedState = null) {
+  throwIfHermeticAutomationBlocked({ type: 'restore_clipboard_state' });
+  if (!savedState || savedState.success !== true) {
+    return {
+      success: false,
+      error: 'Clipboard state was not saved successfully',
+      source: 'invalid-state'
+    };
+  }
+
+  if (String(savedState?.mode || '').trim().toLowerCase() === 'host-token') {
+    const token = String(savedState?.token || '').trim();
+    if (!token) {
+      return {
+        success: false,
+        error: 'Clipboard state token was not provided',
+        source: 'invalid-state'
+      };
+    }
+
+    const hostAttempt = await tryAutomationHostSystemCall('restoreClipboardState', (host) => host.restoreClipboardState(token));
+    if (hostAttempt.used) {
+      return {
+        success: true,
+        error: null,
+        token,
+        source: 'uia-host'
+      };
+    }
+
+    return {
+      success: false,
+      error: hostAttempt.error || 'Clipboard state restore failed',
+      token,
+      source: 'uia-host'
+    };
+  }
+
+  const setClipboardTextFn = getOverridableSystemAutomationFunction('setClipboardText', setClipboardText);
+  return setClipboardTextFn(savedState?.text || '');
+}
+
+/**
  * Set current clipboard text.
  * Uses the persistent automation host when LIKU_USE_AUTOMATION_HOST is enabled,
  * and falls back to PowerShell otherwise.
  */
 async function setClipboardText(text = '') {
+  throwIfHermeticAutomationBlocked({ type: 'set_clipboard_text' });
   const normalizedText = String(text ?? '');
   const hostAttempt = await tryAutomationHostSystemCall('setClipboardText', (host) => host.setClipboardText(normalizedText));
   if (hostAttempt.used) {
@@ -12919,6 +13152,18 @@ async function getRunningProcessesByNames(processNames = []) {
     return [];
   }
 
+  const hostAttempt = await tryAutomationHostSystemCall('getRunningProcessesByNames', (host) => host.getRunningProcessesByNames(normalized));
+  if (hostAttempt.used) {
+    return (Array.isArray(hostAttempt.result) ? hostAttempt.result : [])
+      .map((entry) => ({
+        pid: Number(entry?.pid || 0) || 0,
+        processName: String(entry?.processName || ''),
+        mainWindowTitle: String(entry?.mainWindowTitle || ''),
+        startTime: String(entry?.startTime || '')
+      }))
+      .filter((entry) => entry.pid > 0 && entry.processName);
+  }
+
   const jsonNames = JSON.stringify(normalized);
   const script = `
 $ErrorActionPreference = 'Stop'
@@ -12966,6 +13211,65 @@ if (-not $procs) {
   } catch {
     return [];
   }
+}
+
+const HERMETIC_AUTOMATION_BLOCKED_ACTION_TYPES = new Set([
+  ACTION_TYPES.BRING_WINDOW_TO_FRONT,
+  ACTION_TYPES.FOCUS_WINDOW,
+  ACTION_TYPES.CLICK,
+  ACTION_TYPES.CLICK_ELEMENT,
+  ACTION_TYPES.DOUBLE_CLICK,
+  ACTION_TYPES.RIGHT_CLICK,
+  ACTION_TYPES.MOVE_MOUSE,
+  ACTION_TYPES.TYPE,
+  ACTION_TYPES.KEY,
+  ACTION_TYPES.DRAG,
+  ACTION_TYPES.SCROLL,
+  ACTION_TYPES.RUN_COMMAND,
+  ACTION_TYPES.MINIMIZE_WINDOW,
+  ACTION_TYPES.RESTORE_WINDOW,
+  ACTION_TYPES.SEND_WINDOW_TO_BACK,
+  'focus_desktop',
+  'set_clipboard_text',
+  'restore_clipboard_state'
+]);
+
+function isHermeticAutomationModeEnabled() {
+  const flag = String(process.env.LIKU_HERMETIC_AUTOMATION || '').trim().toLowerCase();
+  return flag === '1' || flag === 'true' || flag === 'yes' || flag === 'on';
+}
+
+function getHermeticAutomationBlockResult(action = {}, runtimeOptions = {}) {
+  if (!isHermeticAutomationModeEnabled()) return null;
+  if (runtimeOptions?.allowLiveAutomation === true || action?.allowLiveAutomation === true) {
+    return null;
+  }
+
+  const type = String(action?.type || '').trim().toLowerCase();
+  if (!type || !HERMETIC_AUTOMATION_BLOCKED_ACTION_TYPES.has(type)) {
+    return null;
+  }
+
+  return {
+    success: false,
+    error: `Hermetic automation test mode blocked live ${type} action.`,
+    errorCode: 'HERMETIC_AUTOMATION_BLOCKED',
+    blockedByHermeticAutomation: true,
+    message: `Blocked ${type} in hermetic automation test mode`
+  };
+}
+
+function throwIfHermeticAutomationBlocked(action = {}, runtimeOptions = {}) {
+  const blocked = getHermeticAutomationBlockResult(action, runtimeOptions);
+  if (!blocked) {
+    return null;
+  }
+
+  const error = new Error(blocked.error);
+  error.code = blocked.errorCode;
+  error.blockedByHermeticAutomation = true;
+  error.hermeticBlockedResult = blocked;
+  throw error;
 }
 
 /**
@@ -13069,6 +13373,14 @@ async function executeAction(action, runtimeOptions = {}) {
 
     effectiveAction = targetResolution.action || action;
     resolvedTarget = targetResolution.resolvedTarget || null;
+    const hermeticAutomationBlock = getHermeticAutomationBlockResult(effectiveAction, runtimeOptions);
+    if (hermeticAutomationBlock) {
+      const error = new Error(hermeticAutomationBlock.error);
+      error.code = hermeticAutomationBlock.errorCode;
+      error.resolvedTarget = resolvedTarget;
+      error.hermeticBlockedResult = hermeticAutomationBlock;
+      throw error;
+    }
 
     switch (effectiveAction.type) {
       case ACTION_TYPES.CLICK:
@@ -13839,13 +14151,20 @@ async function executeAction(action, runtimeOptions = {}) {
         throw new Error(`Unknown action type: ${effectiveAction.type}`);
     }
   } catch (error) {
-    result.success = false;
-    result.error = error.message;
-    result.errorCode = error.code || null;
+    if (error?.hermeticBlockedResult) {
+      result = {
+        ...result,
+        ...error.hermeticBlockedResult
+      };
+    } else {
+      result.success = false;
+      result.error = error.message;
+      result.errorCode = error.code || null;
+      console.error(`[AUTOMATION] Action failed:`, error);
+    }
     if (error.resolvedTarget) {
       resolvedTarget = error.resolvedTarget;
     }
-    console.error(`[AUTOMATION] Action failed:`, error);
   }
 
   if (resolvedTarget) {
@@ -14181,6 +14500,8 @@ module.exports = {
   getForegroundWindowInfo,
   getWindowInfoByHandle,
   getClipboardText,
+  saveClipboardState,
+  restoreClipboardState,
   setClipboardText,
   getRunningProcessesByNames,
   resolveWindowHandle,

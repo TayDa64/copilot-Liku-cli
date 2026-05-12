@@ -1036,6 +1036,47 @@ async function main() {
     });
   });
 
+  await test('getRunningProcessesByNames routes through automation host when enabled', async () => {
+    const calls = [];
+
+    await withAutomationHost({
+      getRunningProcessesByNames: async (processNames) => {
+        calls.push(Array.isArray(processNames) ? processNames.slice() : processNames);
+        return [
+          {
+            pid: 4242,
+            processName: 'TradingView',
+            mainWindowTitle: 'TradingView - Pine Editor',
+            startTime: '2026-05-10T12:30:00.000Z'
+          },
+          {
+            pid: 5252,
+            processName: 'msedge',
+            mainWindowTitle: 'YouTube - Microsoft Edge',
+            startTime: '2026-05-10T12:10:00.000Z'
+          }
+        ];
+      }
+    }, async () => {
+      const result = await systemAutomation.getRunningProcessesByNames(['TradingView', 'msedge', '']);
+      assert.deepStrictEqual(calls, [['tradingview', 'msedge']]);
+      assert.deepStrictEqual(result, [
+        {
+          pid: 4242,
+          processName: 'TradingView',
+          mainWindowTitle: 'TradingView - Pine Editor',
+          startTime: '2026-05-10T12:30:00.000Z'
+        },
+        {
+          pid: 5252,
+          processName: 'msedge',
+          mainWindowTitle: 'YouTube - Microsoft Edge',
+          startTime: '2026-05-10T12:10:00.000Z'
+        }
+      ]);
+    });
+  });
+
   await test('getFocusedElementInWindowWithHost preserves focused descendant metadata from automation host', async () => {
     const calls = [];
 
@@ -1357,6 +1398,44 @@ async function main() {
     });
   });
 
+  await test('discoverChromiumRemoteDebuggingTarget classifies fallback-only 9222 misses as port-not-configured instead of endpoint-unreachable', async () => {
+    const discovery = await chromiumCdp.discoverChromiumRemoteDebuggingTarget({
+      fallbackPorts: [9222],
+      fallbackPortLabel: 'tradingview-default',
+      processIds: [4242],
+      processNames: ['tradingview'],
+      WebSocketCtor: function MockWebSocket() {},
+      fetchImpl: async () => {
+        const error = new Error('connect ECONNREFUSED 127.0.0.1:9222');
+        error.code = 'ECONNREFUSED';
+        throw error;
+      },
+      processInspector: async () => ({
+        success: true,
+        processes: [{
+          pid: 4242,
+          name: 'TradingView.exe',
+          commandLine: 'TradingView.exe',
+          ports: []
+        }]
+      }),
+      listeningPortInspector: async () => ({
+        success: true,
+        listeners: []
+      })
+    });
+
+    assert.strictEqual(discovery?.available, false);
+    assert.strictEqual(discovery?.reason, 'remote-debugging-port-not-configured');
+    assert.strictEqual(discovery?.port, 9222);
+    assert.strictEqual(Array.isArray(discovery?.endpointAttempts), true);
+    assert.strictEqual(discovery.endpointAttempts[0]?.port, 9222);
+    assert.strictEqual(
+      discovery.endpointAttempts[0]?.source,
+      'fallback-port'
+    );
+  });
+
   await test('probeTradingViewPineEditorRendererWithCDP reports an explicit unavailable reason when TradingView is not exposing a remote debugging port', async () => {
     const rendererProbe = await systemAutomation.probeTradingViewPineEditorRendererWithCDP({
       windowInfo: buildWindowInfo({
@@ -1446,6 +1525,91 @@ async function main() {
     assert.strictEqual(recoveredProbe?.available, true);
     assert.strictEqual(recoveredProbe?.port, 9444);
     assert.strictEqual(recoveredProbe?.matchedBy, 'chromium-cdp-dom');
+  });
+
+  await test('probeTradingViewPineEditorRendererWithCDP can recover on a cold run from the TradingView fallback CDP port when process inspection is unavailable', async () => {
+    const recoveredProbe = await systemAutomation.probeTradingViewPineEditorRendererWithCDP({
+      windowInfo: buildWindowInfo({
+        hwnd: 460832,
+        pid: 5252,
+        processId: 5252,
+        processName: 'TradingView',
+        title: 'MN / Unnamed'
+      }),
+      resolveWindowState: false,
+      cdpDependencies: {
+        allowFallbackPortHint: true,
+        processInspector: async () => ({
+          success: false,
+          error: 'PowerShell script timed out after 1200ms',
+          processes: []
+        }),
+        fetchImpl: async (url) => {
+          if (/127\.0\.0\.1:9222\/json\/version$/i.test(String(url || ''))) {
+            return createJsonResponse({
+              Browser: 'TradingView/1.0',
+              'Protocol-Version': '1.3'
+            });
+          }
+          if (/127\.0\.0\.1:9222\/json\/list$/i.test(String(url || ''))) {
+            return createJsonResponse([{
+              id: 'tv-page-fallback',
+              type: 'page',
+              title: 'Live stock, index, futures, Forex and Bitcoin charts on TradingView',
+              url: 'https://www.tradingview.com/chart/abc123/',
+              webSocketDebuggerUrl: 'ws://127.0.0.1:9222/devtools/page/tv-page-fallback'
+            }]);
+          }
+          throw new Error(`Unexpected fetch URL: ${url}`);
+        },
+        WebSocketCtor: createMockWebSocket((message) => {
+          switch (String(message?.method || '')) {
+            case 'Accessibility.enable':
+              return {
+                id: message.id,
+                result: {}
+              };
+            case 'Runtime.evaluate':
+              return {
+                id: message.id,
+                result: {
+                  result: {
+                    type: 'object',
+                    value: {
+                      matched: true,
+                      anchorText: 'Add to chart',
+                      signals: [{
+                        text: 'Add to chart',
+                        observedText: 'Add to chart',
+                        source: 'dom-node'
+                      }],
+                      scannedNodes: 12,
+                      usedBodyInnerText: false
+                    }
+                  }
+                }
+              };
+            case 'Accessibility.getFullAXTree':
+              return {
+                id: message.id,
+                result: {
+                  nodes: []
+                }
+              };
+            default:
+              return {
+                id: message.id,
+                result: {}
+              };
+          }
+        })
+      }
+    });
+
+    assert.strictEqual(recoveredProbe?.available, true);
+    assert.strictEqual(recoveredProbe?.port, 9222);
+    assert.strictEqual(recoveredProbe?.matchedBy, 'chromium-cdp-dom');
+    assert.strictEqual(recoveredProbe?.discovery?.processInspection?.success, false);
   });
 
   await test('invokeTradingViewRendererButtonWithCDP uses AX-backed DOM resolution for exact TradingView confirmation buttons', async () => {
@@ -2194,6 +2358,140 @@ async function main() {
     assert(/timed out/i.test(String(invokeResult.cdpAttachAttempts[1]?.error || '')));
   });
 
+  await test('invokeTradingViewRendererButtonWithCDP can defer Pine Create new post-click proof to the follow-up readback', async () => {
+    const initialAxNodes = [
+      {
+        nodeId: '91800',
+        ignored: false,
+        role: { value: 'button' },
+        name: { value: 'Unnamed' },
+        backendDOMNodeId: 91800
+      },
+      {
+        nodeId: '91801',
+        ignored: false,
+        role: { value: 'button' },
+        name: { value: 'Add to chart' },
+        backendDOMNodeId: 91801
+      },
+      {
+        nodeId: '91802',
+        ignored: false,
+        role: { value: 'button' },
+        name: { value: 'Publish script' },
+        backendDOMNodeId: 91802
+      }
+    ];
+    const afterClickAxNodes = [
+      {
+        nodeId: '92000',
+        ignored: false,
+        role: { value: 'generic' },
+        name: { value: 'Pine Editor Untitled script Add to chart Publish script' }
+      }
+    ];
+    const menuAxNodes = [
+      ...initialAxNodes,
+      {
+        nodeId: '91900',
+        ignored: false,
+        role: { value: 'menuitem' },
+        name: { value: 'Create new' },
+        backendDOMNodeId: 91900
+      },
+      {
+        nodeId: '91901',
+        ignored: false,
+        role: { value: 'menuitem' },
+        name: { value: 'Indicator' },
+        backendDOMNodeId: 91901
+      }
+    ];
+    let axReadCount = 0;
+    let callFunctionOnCount = 0;
+
+    const invokeResult = await systemAutomation.invokeTradingViewRendererButtonWithCDP({
+      windowInfo: buildWindowInfo({
+        hwnd: 460837,
+        title: 'MN / Unnamed'
+      }),
+      resolveWindowState: false,
+      kind: 'pine-current-script-menu-item',
+      buttonText: 'Create new',
+      menuItemText: 'Create new',
+      submenuItemText: 'Indicator',
+      deferEffectProofToFollowUpAction: true,
+      requiredTexts: [
+        'Add to chart',
+        'Publish script'
+      ],
+      cdpDependencies: buildTradingViewCdpDependencies({
+        port: 9573,
+        axNodes: initialAxNodes,
+        domPayload: {
+          matched: true,
+          anchorText: 'Untitled script',
+          signals: [
+            {
+              text: 'Untitled script',
+              observedText: 'Untitled script',
+              source: 'dom-node',
+              category: 'save-title'
+            },
+            {
+              text: 'Add to chart',
+              observedText: 'Add to chart',
+              source: 'dom-node',
+              category: 'surface'
+            },
+            {
+              text: 'Publish script',
+              observedText: 'Publish script',
+              source: 'dom-node',
+              category: 'surface'
+            }
+          ],
+          scannedNodes: 24,
+          usedBodyInnerText: false
+        },
+        onGetFullAXTree: () => {
+          axReadCount += 1;
+          return null;
+        },
+        onCallFunctionOn: () => {
+          callFunctionOnCount += 1;
+          if (callFunctionOnCount === 1) {
+            return {
+              callFunctionOnValue: {
+                text: 'Add to chart',
+                title: 'Add to chart',
+                tagName: 'BUTTON',
+                rect: { x: 348, y: 62, width: 145, height: 34 }
+              }
+            };
+          }
+          return {
+            axNodes: callFunctionOnCount >= 3 ? afterClickAxNodes : menuAxNodes,
+            callFunctionOnValue: {
+              clicked: true,
+              text: callFunctionOnCount === 2 ? 'Unnamed' : 'Indicator',
+              tagName: 'DIV',
+              rect: { x: 102, y: 204, width: 160, height: 32 }
+            }
+          };
+        }
+      })
+    });
+
+    assert.strictEqual(invokeResult?.success, true);
+    assert.strictEqual(invokeResult?.effectProof?.deferredToFollowUpAction, true);
+    assert.strictEqual(invokeResult?.effectProof?.applicable, false);
+    assert.strictEqual(invokeResult?.effectProof?.kind, 'pine-current-script-menu-item');
+    assert.strictEqual(invokeResult?.effectProof?.postClickPineRendererProof?.active, true);
+    assert.strictEqual(invokeResult?.effectProof?.postClickPineRendererProof?.anchorText, 'Untitled script');
+    assert(axReadCount >= 2, 'AX tree should still be read to find the title button and menu path');
+  });
+
   await test('invokeTradingViewRendererButtonWithCDP verifies that the first-save Cancel path actually clears the dialog', async () => {
     let axReadCount = 0;
     const initialAxNodes = [
@@ -2603,6 +2901,131 @@ async function main() {
     assert.strictEqual(invokeResult?.dialogPrefill?.method, 'ChromiumCDPDialogSetValue');
     assert.deepStrictEqual(invokeResult?.dialogPrefill?.dialogInputValues, ['Liku Save Flow Probe']);
     assert.strictEqual(invokeResult?.clickResult?.clicked, true);
+  });
+
+  await test('invokeTradingViewRendererButtonWithCDP can defer first-save Save effect proof to the follow-up readback', async () => {
+    const initialAxNodes = [
+      {
+        nodeId: '34580',
+        ignored: false,
+        role: { value: 'generic' },
+        name: { value: 'Save script New script name Cancel Save' }
+      },
+      {
+        nodeId: '34581',
+        ignored: false,
+        role: { value: 'button' },
+        name: { value: 'Save' },
+        backendDOMNodeId: 34581
+      }
+    ];
+    const afterClickAxNodes = [
+      {
+        nodeId: '34600',
+        ignored: false,
+        role: { value: 'generic' },
+        name: { value: 'Pine Editor Liku Deferred Save Probe Add to chart Publish script' }
+      }
+    ];
+    let evaluateCount = 0;
+
+    const invokeResult = await systemAutomation.invokeTradingViewRendererButtonWithCDP({
+      windowInfo: buildWindowInfo({
+        hwnd: 460835,
+        title: 'MN / Untitled'
+      }),
+      resolveWindowState: false,
+      kind: 'pine-first-save-confirmation',
+      buttonText: 'Save',
+      pineExpectedScriptName: 'Liku Deferred Save Probe',
+      deferEffectProofToFollowUpAction: true,
+      requiredTexts: [
+        'Save script',
+        'New script name'
+      ],
+      cdpDependencies: buildTradingViewCdpDependencies({
+        port: 9564,
+        axNodes: initialAxNodes,
+        domPayload: {
+          matched: true,
+          anchorText: 'Liku Deferred Save Probe',
+          signals: [
+            {
+              text: 'Liku Deferred Save Probe',
+              observedText: 'Liku Deferred Save Probe',
+              source: 'dom-node',
+              category: 'save-title'
+            },
+            {
+              text: 'Add to chart',
+              observedText: 'Add to chart',
+              source: 'dom-node',
+              category: 'surface'
+            },
+            {
+              text: 'Publish script',
+              observedText: 'Publish script',
+              source: 'dom-node',
+              category: 'surface'
+            }
+          ],
+          scannedNodes: 24,
+          usedBodyInnerText: false
+        },
+        domResolveResult: {
+          object: {
+            objectId: 'mock-node-save-deferred'
+          }
+        },
+        onEvaluate: ({ message }) => {
+          const payload = extractRuntimeEvaluatePayload(message?.params?.expression || '');
+          if (String(payload?.operation || '').trim().toLowerCase() !== 'dialog-force-set') {
+            return null;
+          }
+          evaluateCount += 1;
+          return {
+            dialogInputValues: ['Liku Deferred Save Probe'],
+            value: {
+              found: true,
+              operation: 'dialog-force-set',
+              dialogFound: true,
+              dialogText: 'Save script\nNew script name\nCancel\nSave',
+              dialog: {
+                text: 'Save script\nNew script name\nCancel\nSave',
+                inputValues: ['Liku Deferred Save Probe'],
+                buttonTexts: ['Cancel', 'Save'],
+                source: 'dialog-surface',
+                visible: true,
+                score: 920
+              },
+              dialogInputApplied: true,
+              previousValueLength: 0,
+              appliedTextLength: 'Liku Deferred Save Probe'.length
+            }
+          };
+        },
+        onCallFunctionOn: ({ message }) => {
+          assert.strictEqual(String(message?.params?.objectId || ''), 'mock-node-save-deferred');
+          return {
+            axNodes: afterClickAxNodes,
+            callFunctionOnValue: {
+              clicked: true,
+              text: 'Save',
+              tagName: 'BUTTON'
+            }
+          };
+        }
+      })
+    });
+
+    assert.strictEqual(evaluateCount, 1);
+    assert.strictEqual(invokeResult?.success, true);
+    assert.strictEqual(invokeResult?.dialogPrefill?.success, true);
+    assert.strictEqual(invokeResult?.effectProof?.deferredToFollowUpAction, true);
+    assert.strictEqual(invokeResult?.effectProof?.applicable, false);
+    assert.strictEqual(invokeResult?.effectProof?.kind, 'pine-first-save-confirmation');
+    assert.strictEqual(invokeResult?.effectProof?.postClickPineRendererProof?.active, true);
+    assert.strictEqual(invokeResult?.effectProof?.postClickPineRendererProof?.anchorText, 'Liku Deferred Save Probe');
   });
 
   await test('invokeTradingViewRendererButtonWithCDP captures a post-click Pine surface proof after replace confirmation clears', async () => {
@@ -3477,6 +3900,98 @@ async function main() {
         });
 
         assert.strictEqual(result?.success, true);
+        assert.strictEqual(result?.pineStructuredSummary?.expectedScriptNameProofVisible, true);
+        assert.strictEqual(result?.pineStructuredSummary?.lifecycleState, 'saved-state-verified');
+      });
+    } finally {
+      uiAutomation.getElementText = originalGetElementText;
+      uiAutomation.findElement = originalFindElement;
+    }
+  });
+
+  await test('executeAction GET_TEXT save-status can use the bounded host header-title scan before the slow primary Pine readback', async () => {
+    const originalGetElementText = uiAutomation.getElementText;
+    const originalFindElement = uiAutomation.findElement;
+    let primaryReadbackCalls = 0;
+
+    uiAutomation.getElementText = async () => {
+      primaryReadbackCalls += 1;
+      return {
+        success: false,
+        error: 'Element not found'
+      };
+    };
+    uiAutomation.findElement = async () => ({
+      success: false,
+      error: 'Element not found'
+    });
+
+    try {
+      await withAutomationHost({
+        getForegroundWindowInfo: async () => buildWindowInfo({
+          hwnd: 460832,
+          title: 'MN / Unnamed',
+          bounds: { x: 911, y: 8, width: 1016, height: 956 }
+        }),
+        getWindowInfoByHandle: async (hwnd) => buildWindowInfo({
+          hwnd,
+          title: 'MN / Unnamed',
+          bounds: { x: 911, y: 8, width: 1016, height: 956 }
+        }),
+        findElementsByWindow: async (hwnd, options = {}) => {
+          if (String(options?.textMode || '') !== 'regex') {
+            return {
+              elements: [],
+              count: 0,
+              stats: { visited: 6, timedOut: false }
+            };
+          }
+          if (Number(options?.bounds?.height || 0) > 200) {
+            return {
+              elements: [],
+              count: 0,
+              stats: { visited: 8, timedOut: false }
+            };
+          }
+          return {
+            elements: [
+              {
+                Name: 'Liku Live Save Probe',
+                ControlType: 'ControlType.Button',
+                WindowHandle: hwnd,
+                Bounds: { X: 1004, Y: 102, Width: 252, Height: 34, CenterX: 1130, CenterY: 119 }
+              },
+              {
+                Name: 'Add to chart',
+                ControlType: 'ControlType.Button',
+                WindowHandle: hwnd,
+                Bounds: { X: 1298, Y: 102, Width: 146, Height: 34, CenterX: 1371, CenterY: 119 }
+              },
+              {
+                Name: 'Publish script',
+                ControlType: 'ControlType.Button',
+                WindowHandle: hwnd,
+                Bounds: { X: 1582, Y: 102, Width: 150, Height: 34, CenterX: 1657, CenterY: 119 }
+              }
+            ],
+            count: 3,
+            stats: { visited: 18, timedOut: false }
+          };
+        }
+      }, async () => {
+        const result = await systemAutomation.executeAction({
+          type: 'get_text',
+          text: 'Pine Editor',
+          pineEvidenceMode: 'save-status',
+          pineExpectedScriptName: 'Liku Live Save Probe',
+          criteria: {
+            text: 'Pine Editor'
+          }
+        });
+
+        assert.strictEqual(result?.success, true);
+        assert.strictEqual(primaryReadbackCalls, 0, 'header-title fallback should short-circuit the slow primary text readback');
+        assert(/header-title/i.test(String(result?.method || '')));
         assert.strictEqual(result?.pineStructuredSummary?.expectedScriptNameProofVisible, true);
         assert.strictEqual(result?.pineStructuredSummary?.lifecycleState, 'saved-state-verified');
       });

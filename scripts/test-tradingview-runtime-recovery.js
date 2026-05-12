@@ -13,6 +13,7 @@ const {
   createTradingViewRuntimeRecovery
 } = require(path.join(__dirname, '..', 'src', 'main', 'tradingview', 'runtime', 'recovery.js'));
 const TEST_TIMEOUT_MS = 30000;
+const TEST_FILTER = String(process.env.LIKU_TEST_FILTER || '').trim().toLowerCase();
 const forcedExitTimer = setTimeout(() => {
   console.error(`FAIL tradingview runtime recovery timed out after ${TEST_TIMEOUT_MS}ms`);
   process.exit(1);
@@ -22,6 +23,10 @@ if (typeof forcedExitTimer.unref === 'function') {
 }
 
 async function test(name, fn) {
+  if (TEST_FILTER && !String(name || '').toLowerCase().includes(TEST_FILTER)) {
+    console.log(`SKIP ${name}`);
+    return;
+  }
   try {
     await fn();
     console.log(`PASS ${name}`);
@@ -103,6 +108,20 @@ function buildSemanticIconPineRecoveryAction() {
   };
 }
 
+function buildNewPineIndicatorRecoveryAction() {
+  return {
+    type: 'key',
+    key: 'ctrl+i',
+    verify: {
+      target: 'pine-editor'
+    },
+    tradingViewShortcut: {
+      id: 'new-pine-indicator',
+      surface: 'pine-editor'
+    }
+  };
+}
+
 async function main() {
   await test('maybeRecoverTradingViewPineEditorOpen accepts a visible Pine surface without clicking again', async () => {
     const foreground = buildTradingViewForeground();
@@ -153,6 +172,291 @@ async function main() {
     assert.strictEqual(result?.checkpoint?.pineEditorSurfaceProbe?.text, 'Add to chart');
     assert.strictEqual(findCalls[0]?.options?.windowHandle, 777, 'surface probe should stay scoped to the foreground TradingView window');
     assert.strictEqual(findCalls[0]?.options?.foregroundOnly, true, 'surface probe should stay foreground-scoped');
+  });
+
+  await test('maybeRecoverTradingViewPineEditorOpen trusts fresh watcher Pine anchors without a host probe', async () => {
+    const foreground = buildTradingViewForeground();
+    let hostProbeCalls = 0;
+    let checkpointCalls = 0;
+
+    const recovery = createTradingViewRuntimeRecovery({
+      systemAutomation: {
+        getForegroundWindowInfo: async () => foreground,
+        probeTradingViewPineEditorSurface: async () => {
+          hostProbeCalls += 1;
+          return {
+            active: true,
+            anchorText: 'Add to chart',
+            foreground
+          };
+        },
+        click: async () => {
+          throw new Error('watcher-first Pine proof should not click again');
+        }
+      },
+      getUIWatcher: () => ({
+        cache: {
+          lastUpdate: Date.now(),
+          updateCount: 14,
+          activeWindow: foreground,
+          elements: [
+            {
+              name: 'Add to chart',
+              type: 'Button',
+              windowHandle: 777,
+              bounds: { x: 420, y: 640, width: 120, height: 32 }
+            }
+          ]
+        }
+      }),
+      sleepMs: async () => {},
+      verifyKeyObservationCheckpoint: async () => {
+        checkpointCalls += 1;
+        return { applicable: true, verified: false, foreground };
+      }
+    });
+
+    const result = await recovery.maybeRecoverTradingViewPineEditorOpen(
+      buildPineRecoveryAction(),
+      { applicable: true, classification: 'editor-active', requiresObservedChange: true },
+      foreground,
+      { classification: 'editor-active', verified: false, foreground },
+      { expectedWindowHandle: 777 }
+    );
+
+    assert(result?.recovered, 'fresh watcher Pine anchors should recover without host Pine proof');
+    assert.strictEqual(checkpointCalls, 0, 'watcher Pine proof should not need a relaxed checkpoint retry');
+    assert.strictEqual(hostProbeCalls, 0, 'watcher Pine proof should not call the host Pine surface probe');
+    assert.strictEqual(result?.pineEditorSurfaceProbe?.matchedBy, 'watcher-pine-surface-anchor');
+    assert.strictEqual(result?.checkpoint?.recoveredBy, 'surface-probe');
+  });
+
+  await test('maybeRecoverTradingViewPineEditorOpen fails closed for ctrl+i when the TradingView command surface remains open', async () => {
+    const foreground = {
+      ...buildTradingViewForeground(),
+      bounds: { x: 20, y: 40, width: 1000, height: 900 }
+    };
+    let pineProbeCalls = 0;
+
+    const recovery = createTradingViewRuntimeRecovery({
+      systemAutomation: {
+        getForegroundWindowInfo: async () => foreground,
+        getWindowInfoByHandle: async () => foreground,
+        probeTradingViewPineEditorSurface: async () => {
+          pineProbeCalls += 1;
+          return {
+            active: true,
+            anchorText: 'My Script',
+            visibleAnchors: ['My Script', 'All changes saved'],
+            matchedBy: 'chromium-cdp-dom',
+            foreground
+          };
+        },
+        findElementsByWindowWithHost: async (_searchText, options = {}) => {
+          const normalizedControlType = String(options?.controlType || '').trim().toLowerCase();
+          if (normalizedControlType === 'edit') {
+            return {
+              success: true,
+              count: 1,
+              element: {
+                Name: 'Search',
+                ControlType: 'ControlType.Edit',
+                WindowHandle: 777,
+                Bounds: { X: 330, Y: 138, Width: 365, Height: 34, CenterX: 512, CenterY: 155 }
+              },
+              elements: [
+                {
+                  Name: 'Search',
+                  ControlType: 'ControlType.Edit',
+                  WindowHandle: 777,
+                  Bounds: { X: 330, Y: 138, Width: 365, Height: 34, CenterX: 512, CenterY: 155 }
+                }
+              ],
+              stats: { visited: 4, timedOut: false }
+            };
+          }
+
+          return {
+            success: true,
+            count: 2,
+            element: {
+              Name: 'Search tool or function',
+              ControlType: 'ControlType.Text',
+              WindowHandle: 777,
+              Bounds: { X: 321, Y: 90, Width: 180, Height: 24, CenterX: 411, CenterY: 102 }
+            },
+            elements: [
+              {
+                Name: 'Search tool or function',
+                ControlType: 'ControlType.Text',
+                WindowHandle: 777,
+                Bounds: { X: 321, Y: 90, Width: 180, Height: 24, CenterX: 411, CenterY: 102 }
+              },
+              {
+                Name: 'Search',
+                ControlType: 'ControlType.Edit',
+                WindowHandle: 777,
+                Bounds: { X: 330, Y: 138, Width: 365, Height: 34, CenterX: 512, CenterY: 155 }
+              }
+            ],
+            stats: { visited: 4, timedOut: false }
+          };
+        }
+      },
+      sleepMs: async () => {},
+      verifyKeyObservationCheckpoint: async () => ({
+        applicable: true,
+        verified: false,
+        foreground,
+        matchReason: 'process'
+      })
+    });
+
+    const result = await recovery.maybeRecoverTradingViewPineEditorOpen(
+      buildNewPineIndicatorRecoveryAction(),
+      { applicable: true, classification: 'editor-active', requiresObservedChange: true },
+      foreground,
+      { classification: 'editor-active', verified: false, foreground },
+      { expectedWindowHandle: 777 }
+    );
+
+    assert.strictEqual(result?.recovered, false, 'Ctrl+I proof should fail closed while command search still covers the Pine surface');
+    assert.strictEqual(result?.recoveredBy, 'command-surface-open');
+    assert(/Ctrl\+I left the command quick-search surface open/i.test(String(result?.error || '')), 'Failure should explain that the command surface still owns input');
+    assert.strictEqual(result?.pineEditorSurfaceProbe?.matchedBy, 'chromium-cdp-dom', 'Underlying Pine DOM proof should still be captured for diagnosis');
+    assert.strictEqual(result?.pineEditorCommandSurfaceProbe?.matched, true, 'The lingering command surface should be preserved in recovery metadata');
+    assert.strictEqual(pineProbeCalls >= 1, true, 'Ctrl+I proof should still record the underlying Pine DOM state before failing closed');
+  });
+
+  await test('maybeRecoverTradingViewPineEditorOpen accepts ctrl+i once Pine is visible and the command surface is closed', async () => {
+    const foreground = {
+      ...buildTradingViewForeground(),
+      bounds: { x: 20, y: 40, width: 1000, height: 900 }
+    };
+    let checkpointCalls = 0;
+
+    const recovery = createTradingViewRuntimeRecovery({
+      systemAutomation: {
+        getForegroundWindowInfo: async () => foreground,
+        getWindowInfoByHandle: async () => foreground,
+        probeTradingViewPineEditorSurface: async () => ({
+          active: true,
+          anchorText: 'Untitled script',
+          visibleAnchors: ['Untitled script', 'Add to chart'],
+          matchedBy: 'chromium-cdp-dom',
+          foreground
+        }),
+        findElementsByWindowWithHost: async () => ({
+          success: true,
+          count: 0,
+          element: null,
+          elements: [],
+          stats: { visited: 3, timedOut: false }
+        })
+      },
+      sleepMs: async () => {},
+      verifyKeyObservationCheckpoint: async () => {
+        checkpointCalls += 1;
+        return {
+          applicable: true,
+          verified: false,
+          foreground,
+          matchReason: 'process'
+        };
+      }
+    });
+
+    const result = await recovery.maybeRecoverTradingViewPineEditorOpen(
+      buildNewPineIndicatorRecoveryAction(),
+      { applicable: true, classification: 'editor-active', requiresObservedChange: true },
+      foreground,
+      { classification: 'editor-active', verified: false, foreground },
+      { expectedWindowHandle: 777 }
+    );
+
+    assert.strictEqual(result?.recovered, true, 'Ctrl+I proof should accept a clean Pine surface once the command surface is absent');
+    assert.strictEqual(result?.recoveredBy, 'new-pine-indicator-proof');
+    assert.strictEqual(result?.checkpoint?.matchReason, 'new-pine-indicator-surface-probe');
+    assert.strictEqual(checkpointCalls, 0, 'Immediate Pine proof should avoid a redundant relaxed checkpoint');
+  });
+
+  await test('maybeRecoverTradingViewPineEditorOpen rejects stale save-confirmed Pine proof for ctrl+i fresh-script recovery', async () => {
+    const foreground = {
+      ...buildTradingViewForeground(),
+      bounds: { x: 20, y: 40, width: 1000, height: 900 }
+    };
+    let checkpointCalls = 0;
+
+    const recovery = createTradingViewRuntimeRecovery({
+      systemAutomation: {
+        getForegroundWindowInfo: async () => foreground,
+        getWindowInfoByHandle: async () => foreground,
+        probeTradingViewPineEditorSurface: async () => ({
+          active: true,
+          anchorText: 'All changes saved',
+          visibleAnchors: ['All changes saved'],
+          visibleAnchorEntries: [{
+            text: 'All changes saved',
+            observedText: 'All changes saved',
+            category: 'save-confirmed',
+            source: 'dom-node'
+          }],
+          matchedBy: 'chromium-cdp-dom',
+          foreground
+        }),
+        findElementsByWindowWithHost: async () => ({
+          success: true,
+          count: 0,
+          element: null,
+          elements: [],
+          stats: { visited: 3, timedOut: false }
+        })
+      },
+      sleepMs: async () => {},
+      verifyKeyObservationCheckpoint: async () => {
+        checkpointCalls += 1;
+        return {
+          applicable: true,
+          verified: false,
+          foreground,
+          pineSurfaceExpectation: 'fresh-script',
+          pineSurfaceExpectationMatched: false,
+          matchReason: 'process'
+        };
+      }
+    });
+
+    const result = await recovery.maybeRecoverTradingViewPineEditorOpen(
+      buildNewPineIndicatorRecoveryAction(),
+      {
+        applicable: true,
+        classification: 'editor-active',
+        requiresObservedChange: true,
+        pineSurfaceExpectation: 'fresh-script'
+      },
+      foreground,
+      {
+        classification: 'editor-active',
+        verified: false,
+        foreground,
+        pineSurfaceExpectation: 'fresh-script',
+        pineSurfaceExpectationMatched: false
+      },
+      { expectedWindowHandle: 777 }
+    );
+
+    assert.strictEqual(result?.recovered, false, 'Ctrl+I recovery should fail closed when only a saved-state Pine probe is visible');
+    assert.strictEqual(result?.recoveredBy, 'new-pine-indicator-proof');
+    assert(/trustworthy Pine Editor surface for safe authoring/i.test(String(result?.error || '')));
+    assert.strictEqual(result?.checkpoint?.verified, false);
+    assert.strictEqual(
+      result?.checkpoint?.pineEditorSurfaceProbe?.anchorText
+        || result?.checkpoint?.pineEditorSurfaceProbe?.text
+        || result?.pineEditorSurfaceProbe?.anchorText
+        || result?.pineEditorSurfaceProbe?.text,
+      'All changes saved'
+    );
+    assert.strictEqual(checkpointCalls >= 1, true, 'stale saved-state proof should force the relaxed checkpoint path instead of immediate recovery');
   });
 
   await test('maybeRecoverTradingViewPineEditorOpen does not click a generic Pine surface after Ctrl+K misses and instead retries the bounded direct route', async () => {
@@ -240,6 +544,140 @@ async function main() {
     assert.strictEqual(result?.checkpoint?.verified, true);
     assert.strictEqual(result?.checkpoint?.recoveredBy, 'chart-focus-ctrl-e');
     assert.strictEqual(result?.checkpoint?.pineEditorResultClick, undefined);
+  });
+
+  await test('maybeRecoverTradingViewPineEditorOpen trusts the host Pine surface proof and avoids legacy text probes during direct retry', async () => {
+    const foreground = {
+      ...buildTradingViewForeground(),
+      bounds: { x: 20, y: 40, width: 1000, height: 900 }
+    };
+    const findCalls = [];
+    const clicks = [];
+    const keyPresses = [];
+    let pineSurfaceVisible = false;
+
+    const recovery = createTradingViewRuntimeRecovery({
+      systemAutomation: {
+        getForegroundWindowInfo: async () => foreground,
+        getWindowInfoByHandle: async () => foreground,
+        probeTradingViewPineEditorSurface: async () => (
+          pineSurfaceVisible
+            ? {
+                active: true,
+                anchorText: 'Add to chart',
+                visibleAnchors: ['Add to chart'],
+                matchedBy: 'uia-host-pine-surface-header-scan',
+                foreground,
+                element: {
+                  Name: 'Add to chart',
+                  WindowHandle: 777,
+                  Bounds: { CenterX: 540, CenterY: 640 }
+                }
+              }
+            : {
+                active: false,
+                foreground,
+                reason: 'no-visible-pine-anchor'
+              }
+        ),
+        findElementByText: async (text, options = {}) => {
+          findCalls.push({ text, options });
+          return { success: true, element: null };
+        },
+        click: async (x, y, button) => {
+          clicks.push({ x, y, button });
+        },
+        pressKey: async (key) => {
+          keyPresses.push(key);
+          if (key === 'ctrl+e') {
+            pineSurfaceVisible = true;
+          }
+        }
+      },
+      sleepMs: async () => {},
+      verifyKeyObservationCheckpoint: async () => ({
+        applicable: true,
+        verified: false,
+        foreground,
+        matchReason: 'process'
+      })
+    });
+
+    const result = await recovery.maybeRecoverTradingViewPineEditorOpen(
+      buildDirectPineRecoveryAction(),
+      { applicable: true, classification: 'editor-active', requiresObservedChange: true },
+      foreground,
+      { classification: 'editor-active', verified: false, foreground },
+      { expectedWindowHandle: 777 }
+    );
+
+    assert(result?.recovered, 'host Pine surface proof should allow direct recovery to finish without legacy text scanning');
+    assert.deepStrictEqual(findCalls, [], 'host-backed Pine proof should replace the slow legacy foreground text probes');
+    assert.deepStrictEqual(clicks, [{ x: 520, y: 382, button: 'left' }], 'direct Pine retry should still use the bounded chart-focus click once');
+    assert.deepStrictEqual(keyPresses, ['ctrl+e'], 'direct Pine retry should still use the official shortcut once');
+    assert.strictEqual(result?.checkpoint?.pineEditorSurfaceProbe?.matchedBy, 'uia-host-pine-surface-header-scan');
+  });
+
+  await test('maybeRecoverTradingViewPineEditorOpen reuses a cached negative Pine probe when watcher state is unchanged', async () => {
+    const foreground = {
+      ...buildTradingViewForeground(),
+      bounds: { x: 20, y: 40, width: 1000, height: 900 }
+    };
+    const clicks = [];
+    const keyPresses = [];
+    let hostProbeCalls = 0;
+
+    const watcher = {
+      cache: {
+        lastUpdate: Date.now(),
+        updateCount: 41,
+        activeWindow: foreground,
+        elements: []
+      }
+    };
+
+    const recovery = createTradingViewRuntimeRecovery({
+      systemAutomation: {
+        getForegroundWindowInfo: async () => foreground,
+        getWindowInfoByHandle: async () => foreground,
+        probeTradingViewPineEditorSurface: async () => {
+          hostProbeCalls += 1;
+          return {
+            active: false,
+            foreground,
+            reason: 'no-visible-pine-anchor'
+          };
+        },
+        click: async (x, y, button) => {
+          clicks.push({ x, y, button });
+        },
+        pressKey: async (key) => {
+          keyPresses.push(key);
+        }
+      },
+      getUIWatcher: () => watcher,
+      sleepMs: async () => {},
+      verifyKeyObservationCheckpoint: async () => ({
+        applicable: true,
+        verified: false,
+        foreground,
+        matchReason: 'process'
+      })
+    });
+
+    const result = await recovery.maybeRecoverTradingViewPineEditorOpen(
+      buildPineRecoveryAction(),
+      { applicable: true, classification: 'editor-active', requiresObservedChange: true },
+      foreground,
+      { classification: 'editor-active', verified: false, foreground },
+      { expectedWindowHandle: 777 }
+    );
+
+    assert.strictEqual(result?.recovered, false, 'unchanged watcher state should keep the recovery fail-closed when Pine never appears');
+    assert.strictEqual(hostProbeCalls, 1, 'unchanged watcher state should not rerun the same host Pine probe twice');
+    assert.deepStrictEqual(clicks, [{ x: 520, y: 382, button: 'left' }], 'bounded chart-focus recovery should still run once');
+    assert.deepStrictEqual(keyPresses, ['escape', 'ctrl+e'], 'bounded direct recovery should still execute once');
+    assert.strictEqual(result?.pineEditorSurfaceProbe, null, 'cached negative probe should remain explicit on the failing recovery result');
   });
 
   await test('maybeRecoverTradingViewPineEditorOpen can fall back to a bounded chart-focus Ctrl+E recovery when quick-search selection is not interactable', async () => {
@@ -432,6 +870,59 @@ async function main() {
     assert.deepStrictEqual(result?.checkpoint?.pineEditorChartFocusClick?.coordinates, { x: 640, y: 410 });
   });
 
+  await test('maybeRecoverTradingViewPineEditorOpen fails closed for semantic Pine activation when renderer proof is unavailable', async () => {
+    const foreground = {
+      ...buildTradingViewForeground(),
+      bounds: { x: 20, y: 40, width: 1000, height: 900 }
+    };
+    const clicks = [];
+    const keyPresses = [];
+
+    const recovery = createTradingViewRuntimeRecovery({
+      systemAutomation: {
+        getForegroundWindowInfo: async () => foreground,
+        getWindowInfoByHandle: async () => foreground,
+        findElementByText: async () => ({ success: true, element: null }),
+        click: async (x, y, button) => {
+          clicks.push({ x, y, button });
+        },
+        pressKey: async (key) => {
+          keyPresses.push(key);
+        }
+      },
+      sleepMs: async () => {},
+      verifyKeyObservationCheckpoint: async () => ({
+        applicable: true,
+        verified: false,
+        foreground,
+        matchReason: 'process'
+      })
+    });
+
+    const result = await recovery.maybeRecoverTradingViewPineEditorOpen(
+      buildSemanticIconPineRecoveryAction(),
+      { applicable: true, classification: 'editor-active', requiresObservedChange: true },
+      foreground,
+      { classification: 'editor-active', verified: false, foreground },
+      {
+        expectedWindowHandle: 777,
+        activationProof: {
+          observedChange: true,
+          pineSurfaceObserved: false,
+          disposition: 'renderer-proof-unavailable',
+          likelyMeaning: 'TradingView was not launched with a remote debugging port, so Chromium renderer proof was unavailable.',
+          after: { foreground }
+        }
+      }
+    );
+
+    assert.strictEqual(result?.recovered, false, 'semantic icon recovery should fail closed when renderer proof is unavailable');
+    assert.strictEqual(result?.recoveredBy, 'renderer-proof-unavailable');
+    assert.deepStrictEqual(clicks, [], 'semantic icon recovery should not click the chart again without renderer proof');
+    assert.deepStrictEqual(keyPresses, [], 'semantic icon recovery should not send Ctrl+E or Ctrl+K when renderer proof is unavailable');
+    assert.strictEqual(result?.checkpoint?.matchReason, 'renderer-proof-unavailable');
+  });
+
   await test('maybeRecoverTradingViewPineEditorOpen can recover a semantic Pine icon opener with bounded chart-focus Ctrl+E retry', async () => {
     const foreground = {
       ...buildTradingViewForeground(),
@@ -493,6 +984,118 @@ async function main() {
     assert.deepStrictEqual(result?.checkpoint?.pineEditorChartFocusClick?.coordinates, { x: 520, y: 382 });
   });
 
+  await test('maybeRecoverTradingViewPineEditorOpen skips Ctrl+K fallback after semantic Pine activation already changed window state without exposing Pine', async () => {
+    const foreground = {
+      ...buildTradingViewForeground(),
+      bounds: { x: 20, y: 40, width: 1000, height: 900 }
+    };
+    const clicks = [];
+    const keyPresses = [];
+
+    const recovery = createTradingViewRuntimeRecovery({
+      systemAutomation: {
+        getForegroundWindowInfo: async () => foreground,
+        getWindowInfoByHandle: async () => foreground,
+        findElementByText: async () => ({ success: true, element: null }),
+        click: async (x, y, button) => {
+          clicks.push({ x, y, button });
+        },
+        pressKey: async (key) => {
+          keyPresses.push(key);
+        }
+      },
+      sleepMs: async () => {},
+      verifyKeyObservationCheckpoint: async () => ({
+        applicable: true,
+        verified: false,
+        foreground,
+        matchReason: 'process'
+      })
+    });
+
+    const result = await recovery.maybeRecoverTradingViewPineEditorOpen(
+      buildSemanticIconPineRecoveryAction(),
+      { applicable: true, classification: 'editor-active', requiresObservedChange: true },
+      foreground,
+      {
+        classification: 'editor-active',
+        verified: false,
+        foreground,
+        observedChange: true,
+        freshObservation: true,
+        hostSurfaceMatched: false,
+        watcherSurfaceMatched: false
+      },
+      { expectedWindowHandle: 777 }
+    );
+
+    assert.strictEqual(result?.recovered, false, 'semantic icon recovery should fail closed when Pine still is not visible after the bounded direct retry');
+    assert.strictEqual(result?.recoveredBy, 'chart-focus-ctrl-e-retry');
+    assert.deepStrictEqual(clicks, [{ x: 520, y: 382, button: 'left' }], 'semantic icon recovery should still try the bounded chart-focus click once');
+    assert.deepStrictEqual(keyPresses, ['ctrl+e'], 'semantic icon recovery should stop after the bounded direct shortcut retry instead of sending Ctrl+K');
+    assert(!keyPresses.includes('ctrl+k'), 'semantic icon recovery should not fall through into quick-search when the semantic path already changed TradingView state without exposing Pine');
+  });
+
+  await test('maybeRecoverTradingViewPineEditorOpen skips Ctrl+K fallback when semantic activation proof shows state change without a Pine surface even if the checkpoint lost observedChange', async () => {
+    const foreground = {
+      ...buildTradingViewForeground(),
+      bounds: { x: 20, y: 40, width: 1000, height: 900 }
+    };
+    const clicks = [];
+    const keyPresses = [];
+
+    const recovery = createTradingViewRuntimeRecovery({
+      systemAutomation: {
+        getForegroundWindowInfo: async () => foreground,
+        getWindowInfoByHandle: async () => foreground,
+        findElementByText: async () => ({ success: true, element: null }),
+        click: async (x, y, button) => {
+          clicks.push({ x, y, button });
+        },
+        pressKey: async (key) => {
+          keyPresses.push(key);
+        }
+      },
+      sleepMs: async () => {},
+      verifyKeyObservationCheckpoint: async () => ({
+        applicable: true,
+        verified: false,
+        foreground,
+        matchReason: 'process'
+      })
+    });
+
+    const result = await recovery.maybeRecoverTradingViewPineEditorOpen(
+      buildSemanticIconPineRecoveryAction(),
+      { applicable: true, classification: 'editor-active', requiresObservedChange: true },
+      foreground,
+      {
+        classification: 'editor-active',
+        verified: false,
+        foreground,
+        observedChange: false,
+        freshObservation: false,
+        hostSurfaceMatched: false,
+        watcherSurfaceMatched: false
+      },
+      {
+        expectedWindowHandle: 777,
+        activationProof: {
+          observedChange: true,
+          pineSurfaceObserved: false,
+          disposition: 'window-state-changed-without-pine-surface',
+          after: { foreground }
+        }
+      }
+    );
+
+    assert.strictEqual(result?.recovered, false, 'semantic icon recovery should still fail closed when Pine stays unproven');
+    assert.strictEqual(result?.recoveredBy, 'chart-focus-ctrl-e-retry');
+    assert.deepStrictEqual(clicks, [{ x: 520, y: 382, button: 'left' }], 'semantic icon recovery should still reuse the bounded chart-focus click once');
+    assert.deepStrictEqual(keyPresses, ['ctrl+e'], 'semantic icon recovery should not fall through into Ctrl+K when activation proof already proves the semantic path changed state without Pine');
+    assert(!keyPresses.includes('ctrl+k'));
+  });
+
   await test('maybeRecoverTradingViewPineEditorOpen can fall back from a failed direct Ctrl+E retry into a bounded quick-search recovery', async () => {
     const foreground = {
       ...buildTradingViewForeground(),
@@ -519,6 +1122,43 @@ async function main() {
         systemAutomation: {
           getForegroundWindowInfo: async () => foreground,
           getWindowInfoByHandle: async () => foreground,
+          findElementsByWindowWithHost: async (_searchText, options = {}) => {
+            if (!quickSearchOpen) {
+              return {
+                success: true,
+                count: 0,
+                elements: [],
+                stats: { visited: 0, timedOut: false }
+              };
+            }
+
+            return {
+              success: true,
+              count: 2,
+              elements: [
+                {
+                  Name: 'Search tool or function',
+                  ControlType: 'ControlType.Text',
+                  WindowHandle: 777,
+                  Patterns: ['Text'],
+                  Bounds: { X: 420, Y: 124, Width: 360, Height: 34, CenterX: 600, CenterY: 141 }
+                },
+                {
+                  Name: 'Search',
+                  ControlType: 'ControlType.Edit',
+                  WindowHandle: 777,
+                  Patterns: ['Value', 'Text'],
+                  IsEnabled: true,
+                  IsFocusable: true,
+                  Bounds: { X: 420, Y: 124, Width: 360, Height: 34, CenterX: 600, CenterY: 141 }
+                }
+              ],
+              stats: {
+                visited: 6,
+                timedOut: false
+              }
+            };
+          },
           findElementByText: async (text, options = {}) => {
             if (pineSurfaceVisible && text === 'Add to chart') {
               return {
@@ -766,7 +1406,98 @@ async function main() {
     assert(/symbol search/i.test(String(result?.error || '')), 'failure should explicitly describe symbol-search refusal');
     assert.strictEqual(result?.fallbackReason, 'command-surface-not-verified');
     assert.deepStrictEqual(keyPresses, ['escape'], 'preflight should dismiss the wrong search surface without selecting or clearing it');
-    assert(!findCalls.some((call) => call.text === 'Search'), 'Pine command preflight should not accept a generic Search edit as proof');
+    assert.strictEqual(findCalls.length, 0, 'Pine command preflight should fail closed before any legacy quick-search text probes');
+  });
+
+  await test('ensureTradingViewQuickSearchInputClearBeforeTyping can prove the command surface from the host focused element before typing', async () => {
+    const foreground = {
+      ...buildTradingViewForeground(),
+      bounds: { x: 20, y: 40, width: 1000, height: 900 }
+    };
+    const originalGetSharedUIAHost = uiAutomation.getSharedUIAHost;
+    const focusedCalls = [];
+    const hostScanCalls = [];
+    const findCalls = [];
+    const clicks = [];
+
+    uiAutomation.getSharedUIAHost = () => ({
+      getText: async () => ({ success: true, method: 'ValuePattern', text: '' }),
+      setValue: async (_x, _y, value) => ({ success: true, method: 'ValuePattern', value: String(value || '') })
+    });
+
+    try {
+      const recovery = createTradingViewRuntimeRecovery({
+        systemAutomation: {
+          getForegroundWindowInfo: async () => foreground,
+          getWindowInfoByHandle: async () => foreground,
+          getFocusedElementInWindowWithHost: async (windowHandle) => {
+            focusedCalls.push(windowHandle);
+            return {
+              success: true,
+              focused: true,
+              reason: 'focused-descendant',
+              element: {
+                Name: 'Search tool or function',
+                Value: '',
+                ControlType: 'ControlType.Edit',
+                WindowHandle: 777,
+                Patterns: ['Value', 'Text'],
+                HasKeyboardFocus: true,
+                IsEnabled: true,
+                IsFocusable: true,
+                Bounds: { X: 420, Y: 124, Width: 360, Height: 34, CenterX: 600, CenterY: 141 }
+              },
+              targetWindow: foreground,
+              focusedWindow: foreground,
+              stats: { depth: 2, elapsedMs: 8 }
+            };
+          },
+          findElementsByWindowWithHost: async (_searchText, options = {}) => {
+            hostScanCalls.push(options);
+            return {
+              success: true,
+              count: 0,
+              elements: [],
+              stats: { visited: 0, timedOut: false }
+            };
+          },
+          findElementByText: async (text, options = {}) => {
+            findCalls.push({ text, options });
+            return { success: true, element: null };
+          },
+          click: async (x, y, button) => {
+            clicks.push({ x, y, button });
+          },
+          getClipboardText: async () => ({ success: true, text: 'original clipboard payload', error: null }),
+          setClipboardText: async () => ({ success: true, error: null })
+        },
+        sleepMs: async () => {},
+        verifyKeyObservationCheckpoint: async () => ({ applicable: true, verified: false, foreground })
+      });
+
+      const result = await recovery.ensureTradingViewQuickSearchInputClearBeforeTyping({
+        type: 'type',
+        text: 'Pine Editor',
+        searchSurfaceContract: {
+          id: 'open-pine-editor',
+          route: 'quick-search',
+          surface: 'pine-editor',
+          requiresCommandSurface: true
+        }
+      }, 777);
+
+      assert.strictEqual(result?.applicable, true);
+      assert.strictEqual(result?.ready, true, 'focused host proof should allow Pine Editor typing to proceed');
+      assert.strictEqual(result?.inputFocus?.matchedBy, 'uia-host-focused-quick-search-input', 'input focus should come from the host focused-element proof');
+      assert.strictEqual(result?.inputFocus?.trustReason, 'uia-host-focused-quick-search-input');
+      assert.strictEqual(result?.clearedBy, 'already-empty');
+      assert.strictEqual(focusedCalls.length >= 2, true, 'command-surface verification and input focus should both query the host focused element');
+      assert.strictEqual(hostScanCalls.length, 0, 'focused host proof should not widen into a bounded host scan');
+      assert.strictEqual(clicks.length, 0, 'focused host proof should not click when the quick-search input is already focused');
+      assert.strictEqual(findCalls.length, 0, 'focused host proof should not fall back to legacy quick-search text probes');
+    } finally {
+      uiAutomation.getSharedUIAHost = originalGetSharedUIAHost;
+    }
   });
 
   await test('ensureTradingViewQuickSearchInputClearBeforeTyping can prove the command surface from the bounded host scan before typing', async () => {
@@ -843,12 +1574,12 @@ async function main() {
 
       assert.strictEqual(result?.applicable, true);
       assert.strictEqual(result?.ready, true, 'host-backed command-surface proof should allow Pine Editor typing to proceed');
-      assert.strictEqual(result?.inputFocus?.matchedBy, 'trusted-window-host-scan-candidate', 'input focus should come from the bounded host scan when text probes are unavailable');
-      assert.strictEqual(result?.inputFocus?.controlType, 'Edit');
+      assert.strictEqual(result?.inputFocus?.matchedBy, 'uia-host-quick-search-input-probe', 'input focus should come from the targeted host-backed quick-search probe');
+      assert(['Edit', 'Text'].includes(String(result?.inputFocus?.controlType || '')), 'host-backed command-surface proof should preserve a trusted quick-search input or placeholder surface');
       assert.strictEqual(result?.clearedBy, 'already-empty');
       assert.strictEqual(hostScanCalls.length > 0, true, 'command-surface discovery should use the host-backed bounded window scan');
       assert.strictEqual(clicks.length, 1, 'host-backed input recovery should only click the discovered quick-search input once');
-      assert(findCalls.length > 0, 'legacy text probes can still be attempted, but they must not be required for host-backed proof');
+      assert.strictEqual(findCalls.length, 0, 'host-backed command-surface proof should not fall back to legacy quick-search text probes');
     } finally {
       uiAutomation.getSharedUIAHost = originalGetSharedUIAHost;
     }
@@ -1124,20 +1855,20 @@ async function main() {
         systemAutomation: {
           getForegroundWindowInfo: async () => foreground,
           getWindowInfoByHandle: async () => foreground,
-          findElementByText: async (text, options = {}) => {
-            if (text === 'Search tool or function' && String(options?.controlType || '').trim().toLowerCase() === 'text') {
-              return {
-                success: true,
-                element: {
-                  Name: 'Search tool or function',
-                  ControlType: 'ControlType.Text',
-                  WindowHandle: 777,
-                  Bounds: { X: 330, Y: 138, Width: 365, Height: 34, CenterX: 512, CenterY: 155 }
-                }
-              };
-            }
-            return { success: true, element: null };
-          },
+          findElementsByWindowWithHost: async () => ({
+            success: true,
+            count: 1,
+            elements: [
+              {
+                Name: 'Search tool or function',
+                ControlType: 'ControlType.Text',
+                WindowHandle: 777,
+                Patterns: ['Text'],
+                Bounds: { X: 330, Y: 138, Width: 365, Height: 34, CenterX: 512, CenterY: 155 }
+              }
+            ],
+            stats: { visited: 5, timedOut: false }
+          }),
           click: async (x, y, button) => {
             clicks.push({ x, y, button });
           }

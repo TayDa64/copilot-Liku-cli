@@ -6,7 +6,10 @@
  *   stdin  → {"cmd":"elementFromPoint","x":500,"y":300}
  *   stdout ← {"ok":true,"cmd":"elementFromPoint","element":{…}}
  *
- * Supported commands: getTree, elementFromPoint, exit.
+ * Supported commands: getTree, findElementsByWindow, probeWindowAccessibility, getFocusedElementInWindow,
+ * getForegroundWindowInfo, getWindowInfoByHandle, getRunningProcessesByNames, getClipboardText,
+ * setClipboardText, saveClipboardState, restoreClipboardState,
+ * elementFromPoint, elementFromPointInWindow, exit.
  */
 
 const { spawn } = require('child_process');
@@ -25,7 +28,9 @@ class UIAHost extends EventEmitter {
     this._binaryPath = path.join(binDir, 'WindowsUIA.exe');
     this._proc = null;
     this._buffer = '';
-    this._pending = null; // { resolve, reject, timer }
+    this._pending = null; // { requestId, command, resolve, reject, timer }
+    this._queue = [];
+    this._nextRequestId = 1;
     this._alive = false;
   }
 
@@ -54,12 +59,12 @@ class UIAHost extends EventEmitter {
     });
     this._proc.on('exit', (code) => {
       this._alive = false;
-      this._rejectPending(new Error(`UIA host exited with code ${code}`));
+      this._rejectAllPending(new Error(`UIA host exited with code ${code}`));
       this.emit('exit', code);
     });
     this._proc.on('error', (err) => {
       this._alive = false;
-      this._rejectPending(err);
+      this._rejectAllPending(err);
       this.emit('error', err);
     });
   }
@@ -68,23 +73,19 @@ class UIAHost extends EventEmitter {
   async send(cmd) {
     await this.start();
 
-    if (this._pending) {
-      throw new Error('UIAHost: concurrent request not supported (previous call still pending)');
-    }
-
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this._pending = null;
-        reject(new Error(`UIAHost: command "${cmd.cmd}" timed out after ${REQUEST_TIMEOUT_MS}ms`));
-      }, REQUEST_TIMEOUT_MS);
-      if (typeof timer?.unref === 'function') {
-        timer.unref();
-      }
-
-      this._pending = { resolve, reject, timer };
-
-      const line = JSON.stringify(cmd) + '\n';
-      this._proc.stdin.write(line);
+      const requestId = this._normalizeRequestId(cmd?.requestId) || this._createRequestId();
+      this._queue.push({
+        requestId,
+        command: {
+          ...(cmd || {}),
+          requestId
+        },
+        resolve,
+        reject,
+        timer: null
+      });
+      this._dispatchNext();
     });
   }
 
@@ -95,11 +96,172 @@ class UIAHost extends EventEmitter {
     return resp.element;
   }
 
+  /** Bounded hit-test scoped to a specific top-level window. */
+  async elementFromPointInWindow(hwnd, x, y, options = {}) {
+    const resp = await this.send({
+      cmd: 'elementFromPointInWindow',
+      hwnd,
+      x,
+      y,
+      view: options.view || 'raw',
+      maxDepth: Number.isFinite(Number(options.maxDepth)) ? Number(options.maxDepth) : 18,
+      maxVisited: Number.isFinite(Number(options.maxVisited)) ? Number(options.maxVisited) : 1200,
+      timeoutMs: Number.isFinite(Number(options.timeoutMs ?? options.timeout))
+        ? Number(options.timeoutMs ?? options.timeout)
+        : 300,
+      includeOffscreen: options.includeOffscreen === true,
+      includeDisabled: options.includeDisabled !== false
+    });
+    if (!resp.ok) throw new Error(resp.error || 'elementFromPointInWindow failed');
+    return resp;
+  }
+
   /** Convenience: getTree() → foreground window tree */
   async getTree() {
     const resp = await this.send({ cmd: 'getTree' });
     if (!resp.ok) throw new Error(resp.error || 'getTree failed');
     return resp.tree;
+  }
+
+  /** Bounded UIA element search scoped to a specific top-level window. */
+  async findElementsByWindow(hwnd, options = {}) {
+    const resp = await this.send({
+      cmd: 'findElementsByWindow',
+      hwnd,
+      text: options.text || '',
+      textMode: options.textMode || (options.exact ? 'exact' : 'contains'),
+      controlType: options.controlType || '',
+      view: options.view || 'control',
+      bounds: options.bounds || null,
+      skipRootMatch: options.skipRootMatch === true,
+      maxResults: Number.isFinite(Number(options.maxResults)) ? Number(options.maxResults) : 50,
+      maxDepth: Number.isFinite(Number(options.maxDepth)) ? Number(options.maxDepth) : 12,
+      maxVisited: Number.isFinite(Number(options.maxVisited)) ? Number(options.maxVisited) : 750,
+      timeoutMs: Number.isFinite(Number(options.timeoutMs ?? options.timeout))
+        ? Number(options.timeoutMs ?? options.timeout)
+        : 2500,
+      includeOffscreen: options.includeOffscreen === true,
+      includeDisabled: options.includeDisabled !== false
+    });
+    if (!resp.ok) throw new Error(resp.error || 'findElementsByWindow failed');
+    return resp;
+  }
+
+  /** Bounded accessibility probe rooted under window-scoped document/content surfaces. */
+  async probeWindowAccessibility(hwnd, options = {}) {
+    const resp = await this.send({
+      cmd: 'probeWindowAccessibility',
+      hwnd,
+      bounds: options.bounds || null,
+      maxResults: Number.isFinite(Number(options.maxResults)) ? Number(options.maxResults) : 24,
+      maxRoots: Number.isFinite(Number(options.maxRoots)) ? Number(options.maxRoots) : 4,
+      maxDepth: Number.isFinite(Number(options.maxDepth)) ? Number(options.maxDepth) : 18,
+      maxVisited: Number.isFinite(Number(options.maxVisited)) ? Number(options.maxVisited) : 1400,
+      timeoutMs: Number.isFinite(Number(options.timeoutMs ?? options.timeout))
+        ? Number(options.timeoutMs ?? options.timeout)
+        : 900,
+      includeOffscreen: options.includeOffscreen === true,
+      includeDisabled: options.includeDisabled !== false,
+      rootControlType: options.rootControlType || 'Document',
+      rootClassName: options.rootClassName || 'Chrome_RenderWidgetHostHWND'
+    });
+    if (!resp.ok) throw new Error(resp.error || 'probeWindowAccessibility failed');
+    return resp;
+  }
+
+  /** Return the currently focused UIA element if it belongs to the given window. */
+  async getFocusedElementInWindow(hwnd) {
+    const resp = await this.send({
+      cmd: 'getFocusedElementInWindow',
+      hwnd
+    });
+    if (!resp.ok) throw new Error(resp.error || 'getFocusedElementInWindow failed');
+    return resp;
+  }
+
+  /** Invoke a semantic UIA element scoped to a specific top-level window. */
+  async invokeElementByWindow(hwnd, options = {}) {
+    const resp = await this.send({
+      cmd: 'invokeElementByWindow',
+      hwnd,
+      text: options.text || '',
+      textMode: options.textMode || (options.exact ? 'exact' : 'contains'),
+      controlType: options.controlType || '',
+      view: options.view || 'control',
+      bounds: options.bounds || null,
+      maxDepth: Number.isFinite(Number(options.maxDepth)) ? Number(options.maxDepth) : 16,
+      maxVisited: Number.isFinite(Number(options.maxVisited)) ? Number(options.maxVisited) : 1000,
+      timeoutMs: Number.isFinite(Number(options.timeoutMs ?? options.timeout))
+        ? Number(options.timeoutMs ?? options.timeout)
+        : 3000,
+      includeOffscreen: options.includeOffscreen === true,
+      includeDisabled: options.includeDisabled === true
+    });
+    if (!resp.ok) throw new Error(resp.error || 'invokeElementByWindow failed');
+    return resp;
+  }
+
+  /** Convenience: getForegroundWindowInfo() → structured foreground window info. */
+  async getForegroundWindowInfo() {
+    const resp = await this.send({ cmd: 'getForegroundWindowInfo' });
+    if (!resp.ok) throw new Error(resp.error || 'getForegroundWindowInfo failed');
+    return resp.window;
+  }
+
+  /** Convenience: getWindowInfoByHandle(hwnd) → structured window info. */
+  async getWindowInfoByHandle(hwnd) {
+    const resp = await this.send({ cmd: 'getWindowInfoByHandle', hwnd });
+    if (!resp.ok) throw new Error(resp.error || 'getWindowInfoByHandle failed');
+    return resp.window;
+  }
+
+  /** Convenience: findWindow(criteria) → best matching top-level window or null. */
+  async findWindow(criteria = {}) {
+    const resp = await this.send({
+      cmd: 'findWindow',
+      title: criteria?.title || '',
+      titleMode: criteria?.titleMode || 'contains',
+      processName: criteria?.processName || '',
+      className: criteria?.className || ''
+    });
+    if (!resp.ok) throw new Error(resp.error || 'findWindow failed');
+    return resp.window || null;
+  }
+
+  /** Convenience: getRunningProcessesByNames(processNames) → lightweight process awareness data. */
+  async getRunningProcessesByNames(processNames = []) {
+    const normalized = Array.from(
+      new Set(
+        (Array.isArray(processNames) ? processNames : [])
+          .map((value) => String(value || '').trim())
+          .filter(Boolean)
+      )
+    );
+
+    if (!normalized.length) {
+      return [];
+    }
+
+    const resp = await this.send({
+      cmd: 'getRunningProcessesByNames',
+      processNames: normalized
+    });
+    if (!resp.ok) throw new Error(resp.error || 'getRunningProcessesByNames failed');
+    return Array.isArray(resp.processes) ? resp.processes : [];
+  }
+
+  /** Convenience: focusWindow(hwnd) → structured foreground verification result. */
+  async focusWindow(hwnd) {
+    const resp = await this.send({ cmd: 'focusWindow', hwnd });
+    if (!resp.ok) throw new Error(resp.error || 'focusWindow failed');
+    return resp;
+  }
+
+  /** Convenience: restoreWindow(hwnd) → structured restore result. */
+  async restoreWindow(hwnd) {
+    const resp = await this.send({ cmd: 'restoreWindow', hwnd });
+    if (!resp.ok) throw new Error(resp.error || 'restoreWindow failed');
+    return resp;
   }
 
   /** Set value on element at (x,y) using ValuePattern. */
@@ -130,6 +292,34 @@ class UIAHost extends EventEmitter {
     return resp;
   }
 
+  /** Convenience: getClipboardText() → current clipboard text payload. */
+  async getClipboardText() {
+    const resp = await this.send({ cmd: 'getClipboardText' });
+    if (!resp.ok) throw new Error(resp.error || 'getClipboardText failed');
+    return resp;
+  }
+
+  /** Convenience: setClipboardText(text) → set current clipboard text payload. */
+  async setClipboardText(text = '') {
+    const resp = await this.send({ cmd: 'setClipboardText', text });
+    if (!resp.ok) throw new Error(resp.error || 'setClipboardText failed');
+    return resp;
+  }
+
+  /** Save the current clipboard state in the host and return a restoration token. */
+  async saveClipboardState() {
+    const resp = await this.send({ cmd: 'saveClipboardState' });
+    if (!resp.ok) throw new Error(resp.error || 'saveClipboardState failed');
+    return resp;
+  }
+
+  /** Restore a previously saved clipboard state from a host-issued token. */
+  async restoreClipboardState(token) {
+    const resp = await this.send({ cmd: 'restoreClipboardState', token: String(token || '') });
+    if (!resp.ok) throw new Error(resp.error || 'restoreClipboardState failed');
+    return resp;
+  }
+
   /** Subscribe to UIA events (focus, structure, property). Returns initial snapshot. */
   async subscribeEvents() {
     const resp = await this.send({ cmd: 'subscribeEvents' });
@@ -150,7 +340,7 @@ class UIAHost extends EventEmitter {
     const proc = this._proc;
 
     try {
-      if (!this._pending) {
+      if (!this._pending && this._queue.length === 0) {
         await Promise.race([
           this.send({ cmd: 'exit' }),
           new Promise((resolve) => {
@@ -164,7 +354,7 @@ class UIAHost extends EventEmitter {
     } catch { /* ignore */ }
 
     this._alive = false;
-    this._rejectPending(new Error('UIA host shutdown'));
+    this._rejectAllPending(new Error('UIA host shutdown'));
 
     try { proc.stdin?.end(); } catch {}
     try { proc.stdin?.destroy(); } catch {}
@@ -213,20 +403,93 @@ class UIAHost extends EventEmitter {
     }
   }
 
+  _createRequestId() {
+    const seq = this._nextRequestId++;
+    return `uia-${process.pid}-${Date.now()}-${seq}`;
+  }
+
+  _normalizeRequestId(value) {
+    if (value === undefined || value === null) return null;
+    const normalized = String(value).trim();
+    return normalized || null;
+  }
+
+  _dispatchNext() {
+    if (this._pending || !this._alive || !this._proc?.stdin || this._proc.stdin.destroyed) {
+      return;
+    }
+
+    const next = this._queue.shift();
+    if (!next) {
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      if (!this._pending || this._pending.requestId !== next.requestId) {
+        return;
+      }
+      this._rejectActiveRequest(
+        new Error(`UIAHost: command "${next.command.cmd}" timed out after ${REQUEST_TIMEOUT_MS}ms`)
+      );
+      this._dispatchNext();
+    }, REQUEST_TIMEOUT_MS);
+    if (typeof timer?.unref === 'function') {
+      timer.unref();
+    }
+
+    next.timer = timer;
+    this._pending = next;
+
+    const line = JSON.stringify(next.command) + '\n';
+    try {
+      this._proc.stdin.write(line, (err) => {
+        if (!err || !this._pending || this._pending.requestId !== next.requestId) {
+          return;
+        }
+        this._rejectActiveRequest(err);
+        this._dispatchNext();
+      });
+    } catch (error) {
+      this._rejectActiveRequest(error);
+      this._dispatchNext();
+    }
+  }
+
   _resolvePending(json) {
-    if (!this._pending) return;
+    if (!this._pending) {
+      this.emit('orphanResponse', json);
+      return;
+    }
+
+    const responseRequestId = this._normalizeRequestId(json?.requestId);
+    if (responseRequestId && responseRequestId !== this._pending.requestId) {
+      this.emit('orphanResponse', json);
+      return;
+    }
+
     const { resolve, timer } = this._pending;
     clearTimeout(timer);
     this._pending = null;
     resolve(json);
+    this._dispatchNext();
   }
 
-  _rejectPending(err) {
+  _rejectActiveRequest(err) {
     if (!this._pending) return;
     const { reject, timer } = this._pending;
     clearTimeout(timer);
     this._pending = null;
     reject(err);
+  }
+
+  _rejectAllPending(err) {
+    this._rejectActiveRequest(err);
+    while (this._queue.length > 0) {
+      const next = this._queue.shift();
+      try {
+        next?.reject?.(err);
+      } catch {}
+    }
   }
 }
 
@@ -261,6 +524,7 @@ async function shutdownSharedUIAHost() {
     await _shared.stop();
   } catch {}
   _shared = null;
+  _sharedCleanupRegistered = false;
 }
 
 module.exports = { UIAHost, getSharedUIAHost, shutdownSharedUIAHost };

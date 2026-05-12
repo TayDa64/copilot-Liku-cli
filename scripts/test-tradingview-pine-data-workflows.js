@@ -5,6 +5,9 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const aiService = require(path.join(__dirname, '..', 'src', 'main', 'ai-service.js'));
+const {
+  writeFailureArtifactBundleSync
+} = require(path.join(__dirname, 'lib', 'failure-artifacts.js'));
 
 const {
   buildTradingViewPineResumePrerequisites,
@@ -27,6 +30,23 @@ function test(name, fn) {
   } catch (error) {
     console.error(`FAIL ${name}`);
     console.error(error.stack || error.message);
+    try {
+      const artifact = writeFailureArtifactBundleSync({
+        suiteName: 'test-tradingview-pine-data-workflows',
+        failureName: name,
+        phase: 'test',
+        error,
+        aiService,
+        extra: {
+          testName: name
+        }
+      });
+      if (artifact?.filePath) {
+        console.error(`Artifact: ${artifact.filePath}`);
+      }
+    } catch (artifactError) {
+      console.error(`Artifact capture failed: ${artifactError.message}`);
+    }
     process.exitCode = 1;
   }
 }
@@ -74,6 +94,40 @@ function assertChartFocusBeforeCtrlE(actions = []) {
   assert(openIndex > chartFocusIndex, 'Ctrl+E should run only after the chart surface focus click');
 }
 
+function assertSemanticPineIconRoute(actions = []) {
+  const source = Array.isArray(actions) ? actions : [];
+  const iconIndex = source.findIndex((action) =>
+    action?.type === 'click_element'
+    && String(action?.verify?.target || '').toLowerCase() === 'pine-editor'
+    && String(action?.searchSurfaceContract?.route || action?.tradingViewShortcut?.route || '').toLowerCase() === 'semantic-icon'
+  );
+
+  assert(iconIndex >= 0, 'workflow should use the bounded semantic Pine icon route');
+  assert.strictEqual(
+    source.some((action) => action?.tradingViewChartFocusClick === true),
+    false,
+    'semantic Pine routing should not require a chart-focus Ctrl+E prelude'
+  );
+
+  return {
+    iconAction: source[iconIndex]
+  };
+}
+
+function assertPineCreateNewMenuRoute(actions = []) {
+  const source = Array.isArray(actions) ? actions : [];
+  const createNewIndex = source.findIndex((action) =>
+    action?.type === 'click_element'
+    && String(action?.text || '').trim() === 'Create new'
+    && String(action?.tradingViewRendererInvoke?.kind || '').trim().toLowerCase() === 'pine-current-script-menu-item'
+  );
+
+  assert(createNewIndex >= 0, 'existing-script branch should route through the Pine title-menu Create new action');
+  return {
+    createNewAction: source[createNewIndex]
+  };
+}
+
 function assertQuickSearchPineEditorRoute(actions = []) {
   const source = Array.isArray(actions) ? actions : [];
   const ctrlKIndex = source.findIndex((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'ctrl+k');
@@ -91,6 +145,214 @@ function assertQuickSearchPineEditorRoute(actions = []) {
   assert(backspaceIndex > ctrlAIndex, 'workflow should clear the selected quick-search text before typing Pine Editor');
   assert(typeIndex > backspaceIndex, 'workflow should type Pine Editor after clearing stale quick-search text');
   assert(enterIndex > typeIndex, 'workflow should confirm the Pine Editor quick-search result after typing it');
+}
+
+function assertBoundedConfirmationRecovery(actions = [], {
+  evidenceMode = 'safe-authoring-inspect',
+  expectedContinueOnPineEditorState = null,
+  expectedScriptName = null,
+  expectedPineEditorStates = []
+} = {}) {
+  assert(Array.isArray(actions) && actions.length > 0, `confirmation recovery for ${evidenceMode} should be present`);
+
+  const yesClick = actions.find((action) => action?.type === 'click_element' && String(action?.text || '') === 'Yes');
+  assert(yesClick, `confirmation recovery for ${evidenceMode} should click the exact Yes button`);
+  assert.strictEqual(yesClick.controlType, 'Button', `confirmation recovery for ${evidenceMode} should target a Button`);
+  assert.strictEqual(yesClick.exact, true, `confirmation recovery for ${evidenceMode} should require exact text matching`);
+  assert.strictEqual(yesClick.foregroundOnly, true, `confirmation recovery for ${evidenceMode} should stay scoped to the foreground TradingView window`);
+  assert.strictEqual(yesClick.allowCoordinateFallback, false, `confirmation recovery for ${evidenceMode} should not allow coordinate fallback`);
+  assert.strictEqual(yesClick?.tradingViewRendererInvoke?.buttonText, 'Yes', `confirmation recovery for ${evidenceMode} should carry the exact renderer button label`);
+  assert(Array.isArray(yesClick?.tradingViewRendererInvoke?.requiredTexts), `confirmation recovery for ${evidenceMode} should carry exact modal text anchors for renderer fallback`);
+  assert(yesClick.tradingViewRendererInvoke.requiredTexts.some((text) => /unsaved changes/i.test(String(text || ''))), `confirmation recovery for ${evidenceMode} should anchor on the unsaved-changes modal text`);
+
+  const reverifyAction = actions.find((action) => action?.type === 'get_text' && action?.pineEvidenceMode === evidenceMode);
+  assert(reverifyAction, `confirmation recovery for ${evidenceMode} should re-verify Pine state after clicking Yes`);
+
+  if (evidenceMode === 'safe-authoring-inspect') {
+    assert.strictEqual(reverifyAction.haltOnPineEditorStateMismatch, true, 'safe-authoring confirmation recovery should still fail closed on a second mismatch');
+    assert.strictEqual(
+      reverifyAction?.continueActionsByPineEditorState?.['confirmation-blocking'],
+      undefined,
+      'safe-authoring confirmation recovery should remain bounded and must not recursively retry the modal'
+    );
+    if (expectedContinueOnPineEditorState !== null) {
+      assert.strictEqual(
+        reverifyAction.continueOnPineEditorState,
+        expectedContinueOnPineEditorState,
+        'safe-authoring confirmation recovery should preserve the original continuation target state'
+      );
+    }
+    for (const stateKey of expectedPineEditorStates) {
+      assert(
+        Array.isArray(reverifyAction?.continueActionsByPineEditorState?.[stateKey]),
+        `safe-authoring confirmation recovery should preserve the ${stateKey} continuation branch`
+      );
+    }
+  }
+
+  if (evidenceMode === 'save-status') {
+    assert.strictEqual(reverifyAction.haltOnPineLifecycleStateMismatch, true, 'save confirmation recovery should still fail closed on a second mismatch');
+    assert.strictEqual(
+      reverifyAction?.continueActionsByPineLifecycleState?.['save-confirmation-blocking'],
+      undefined,
+      'save confirmation recovery should remain bounded and must not recursively retry the modal'
+    );
+    assert.strictEqual(
+      reverifyAction.continueOnPineLifecycleState,
+      'saved-state-verified',
+      'save confirmation recovery should still require verified saved state before continuing'
+    );
+    if (expectedScriptName !== null) {
+      assert.strictEqual(
+        reverifyAction.pineExpectedScriptName,
+        expectedScriptName,
+        'save confirmation recovery should preserve the expected saved Pine title'
+      );
+    }
+  }
+
+  return {
+    yesClick,
+    reverifyAction
+  };
+}
+
+function assertBoundedInspectBlockingDialogRecovery(actions = [], {
+  stateKey = '',
+  expectedButtonText = '',
+  expectedRendererKind = '',
+  expectedRequiredTexts = [],
+  expectedContinueOnPineEditorState = null,
+  expectedPineEditorStates = []
+} = {}) {
+  assert(Array.isArray(actions) && actions.length > 0, `safe-authoring ${stateKey} recovery should be present`);
+
+  const dismissClick = actions.find((action) =>
+    action?.type === 'click_element'
+    && String(action?.text || '').trim().toLowerCase() === String(expectedButtonText || '').trim().toLowerCase()
+  );
+  assert(dismissClick, `safe-authoring ${stateKey} recovery should click the exact ${expectedButtonText} button`);
+  assert.strictEqual(dismissClick.controlType, 'Button', `safe-authoring ${stateKey} recovery should target a Button`);
+  assert.strictEqual(dismissClick.exact, true, `safe-authoring ${stateKey} recovery should require exact text matching`);
+  assert.strictEqual(dismissClick.foregroundOnly, true, `safe-authoring ${stateKey} recovery should stay scoped to the foreground TradingView window`);
+  assert.strictEqual(dismissClick.allowCoordinateFallback, false, `safe-authoring ${stateKey} recovery should not allow coordinate fallback`);
+  assert.strictEqual(String(dismissClick?.tradingViewRendererInvoke?.buttonText || ''), expectedButtonText, `safe-authoring ${stateKey} recovery should carry the exact renderer button label`);
+  assert.strictEqual(String(dismissClick?.tradingViewRendererInvoke?.kind || ''), expectedRendererKind, `safe-authoring ${stateKey} recovery should carry the exact renderer modal kind`);
+  assert(Array.isArray(dismissClick?.tradingViewRendererInvoke?.requiredTexts), `safe-authoring ${stateKey} recovery should carry exact modal text anchors for renderer fallback`);
+  for (const requiredText of expectedRequiredTexts) {
+    assert(
+      dismissClick.tradingViewRendererInvoke.requiredTexts.some((text) => String(text || '').toLowerCase().includes(String(requiredText || '').toLowerCase())),
+      `safe-authoring ${stateKey} recovery should anchor on "${requiredText}"`
+    );
+  }
+
+  const reverifyAction = actions.find((action) => action?.type === 'get_text' && action?.pineEvidenceMode === 'safe-authoring-inspect');
+  assert(reverifyAction, `safe-authoring ${stateKey} recovery should re-verify Pine state after dismissing the stale modal`);
+  assert.strictEqual(reverifyAction.haltOnPineEditorStateMismatch, true, `safe-authoring ${stateKey} recovery should still fail closed if the same stale modal remains visible`);
+  assert.strictEqual(
+    reverifyAction?.continueActionsByPineEditorState?.[stateKey],
+    undefined,
+    `safe-authoring ${stateKey} recovery should remain bounded and must not recursively retry the same modal`
+  );
+  if (expectedContinueOnPineEditorState !== null) {
+    assert.strictEqual(
+      reverifyAction.continueOnPineEditorState,
+      expectedContinueOnPineEditorState,
+      `safe-authoring ${stateKey} recovery should preserve the original continuation target state`
+    );
+  }
+  for (const preservedState of expectedPineEditorStates) {
+    assert(
+      Array.isArray(reverifyAction?.continueActionsByPineEditorState?.[preservedState]),
+      `safe-authoring ${stateKey} recovery should preserve the ${preservedState} continuation branch`
+    );
+  }
+
+  return {
+    dismissClick,
+    reverifyAction
+  };
+}
+
+function assertBoundedInspectBlockingDialogRecoveries(inspectAction = null, {
+  expectedContinueOnPineEditorState = null,
+  expectedPineEditorStates = []
+} = {}) {
+  assert(inspectAction && typeof inspectAction === 'object', 'safe-authoring inspect action should be present');
+  return {
+    confirmation: assertBoundedInspectBlockingDialogRecovery(
+      inspectAction?.continueActionsByPineEditorState?.['confirmation-blocking'],
+      {
+        stateKey: 'confirmation-blocking',
+        expectedButtonText: 'No',
+        expectedRendererKind: 'unsaved-changes-confirmation',
+        expectedRequiredTexts: ['unsaved changes', 'save them'],
+        expectedContinueOnPineEditorState,
+        expectedPineEditorStates
+      }
+    ),
+    replace: assertBoundedInspectBlockingDialogRecovery(
+      inspectAction?.continueActionsByPineEditorState?.['replace-confirmation-blocking'],
+      {
+        stateKey: 'replace-confirmation-blocking',
+        expectedButtonText: 'No',
+        expectedRendererKind: 'replace-existing-script-confirmation',
+        expectedRequiredTexts: ['already exists', 'replace it'],
+        expectedContinueOnPineEditorState,
+        expectedPineEditorStates
+      }
+    ),
+    saveRequired: assertBoundedInspectBlockingDialogRecovery(
+      inspectAction?.continueActionsByPineEditorState?.['save-required-blocking'],
+      {
+        stateKey: 'save-required-blocking',
+        expectedButtonText: 'Cancel',
+        expectedRendererKind: 'pine-first-save-confirmation',
+        expectedRequiredTexts: ['Save script', 'New script name'],
+        expectedContinueOnPineEditorState,
+        expectedPineEditorStates
+      }
+    )
+  };
+}
+
+function assertBoundedFirstSaveRecovery(actions = [], {
+  expectedScriptName = null
+} = {}) {
+  assert(Array.isArray(actions) && actions.length > 0, 'first-save recovery should be present');
+
+  const staleNameTypeAction = actions.find((action) => action?.type === 'type' && (!expectedScriptName || String(action?.text || '') === expectedScriptName));
+  assert.strictEqual(staleNameTypeAction, undefined, 'first-save recovery should not emit a separate name typing action once the renderer Save invoke owns dialog prefill');
+
+  const staleEnterAction = actions.find((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'enter');
+  assert.strictEqual(staleEnterAction, undefined, 'first-save recovery should not rely on blind Enter confirmation');
+
+  const saveClick = actions.find((action) => action?.type === 'click_element' && String(action?.text || '') === 'Save');
+  assert(saveClick, 'first-save recovery should click the exact Save button');
+  assert.strictEqual(saveClick.controlType, 'Button', 'first-save recovery should target the Save button control type');
+  assert.strictEqual(saveClick.exact, true, 'first-save recovery should require exact Save button matching');
+  assert.strictEqual(saveClick.foregroundOnly, true, 'first-save recovery should remain scoped to the foreground TradingView window');
+  assert.strictEqual(saveClick.allowCoordinateFallback, false, 'first-save recovery should not allow coordinate fallback');
+  assert.strictEqual(saveClick?.tradingViewRendererInvoke?.buttonText, 'Save', 'first-save recovery should carry the exact renderer button label');
+  assert(Array.isArray(saveClick?.tradingViewRendererInvoke?.requiredTexts), 'first-save recovery should carry exact save-dialog text anchors for renderer fallback');
+  assert(saveClick.tradingViewRendererInvoke.requiredTexts.includes('Save script'), 'first-save recovery should anchor on the TradingView save dialog title');
+  assert(saveClick.tradingViewRendererInvoke.requiredTexts.includes('New script name'), 'first-save recovery should anchor on the TradingView save dialog field label');
+  assert.strictEqual(saveClick?.tradingViewRendererInvoke?.deferEffectProofToFollowUpAction, true, 'first-save recovery should let the follow-up save-status proof verify the final effect');
+  if (expectedScriptName !== null) {
+    assert.strictEqual(saveClick?.pineExpectedScriptName, expectedScriptName, 'first-save recovery should carry the expected Pine title on the Save action');
+    assert.strictEqual(saveClick?.tradingViewRendererInvoke?.pineExpectedScriptName, expectedScriptName, 'first-save recovery should carry the expected Pine title into the renderer Save invoke');
+  }
+
+  const reverifyAction = actions.find((action) => action?.type === 'get_text' && action?.pineEvidenceMode === 'save-status');
+  assert(reverifyAction, 'first-save recovery should re-verify the Pine save state after choosing Save');
+  if (expectedScriptName !== null) {
+    assert.strictEqual(reverifyAction.pineExpectedScriptName, expectedScriptName, 'first-save recovery reverify should preserve the expected Pine title');
+  }
+
+  return {
+    saveClick,
+    reverifyAction
+  };
 }
 
 test('pine workflow recognizes pine logs evidence-gathering requests', () => {
@@ -248,15 +510,15 @@ test('open pine editor and read visible status stays verification-first', () => 
   const readback = rewritten.find((action) => action?.type === 'get_text' && action?.text === 'Pine Editor');
 
   assert.strictEqual(rewritten[0].type, 'bring_window_to_front');
-  assertChartFocusBeforeCtrlE(rewritten);
-  assert.strictEqual(opener.type, 'key');
-  assert.strictEqual(opener.key, 'ctrl+e');
+  const { iconAction } = assertSemanticPineIconRoute(rewritten);
+  assert.strictEqual(opener.type, 'click_element');
+  assert.strictEqual(iconAction.text, 'Pine');
   assert.strictEqual(opener.verify.target, 'pine-editor');
   assert(readback, 'pine editor status workflow should gather Pine Editor text');
   assert.strictEqual(readback.pineEvidenceMode, 'generic-status');
 });
 
-test('pine editor opener falls back to quick search when chart Ctrl+E intent is not established', () => {
+test('pine editor opener canonicalizes unknown Pine surface actions onto the semantic icon route', () => {
   const rewritten = buildTradingViewPineWorkflowActions({
     appName: 'TradingView',
     surfaceTarget: 'pine-editor',
@@ -269,10 +531,10 @@ test('pine editor opener falls back to quick search when chart Ctrl+E intent is 
   ]);
 
   const opener = rewritten.find((action) => action?.verify?.target === 'pine-editor');
-  assert.strictEqual(rewritten[2].key, 'ctrl+k');
-  assert.strictEqual(opener.key, 'enter');
-  assert(rewritten.some((action) => String(action?.key || '').toLowerCase() === 'ctrl+a'), 'quick-search fallback should clear stale query text');
-  assert(rewritten.some((action) => String(action?.key || '').toLowerCase() === 'backspace'), 'quick-search fallback should erase stale query text before typing');
+  assertSemanticPineIconRoute(rewritten);
+  assert.strictEqual(opener?.type, 'click_element');
+  assert.strictEqual(String(opener?.text || ''), 'Pine');
+  assert.strictEqual(rewritten.some((action) => String(action?.key || '').toLowerCase() === 'ctrl+k'), false, 'canonical semantic Pine routing should not keep a quick-search opener');
 });
 
 test('pine editor activation verification stays anchored to pine-surface keywords instead of generic TradingView chrome', () => {
@@ -317,7 +579,7 @@ test('pine editor authoring workflow demands editor-active verification before t
   ]);
 
   const opener = rewritten.find((action) => action?.verify?.target === 'pine-editor');
-  assertChartFocusBeforeCtrlE(rewritten);
+  assertSemanticPineIconRoute(rewritten);
   assert.strictEqual(opener.verify.kind, 'editor-active');
   assert.strictEqual(opener.verify.target, 'pine-editor');
   assert.strictEqual(opener.verify.requiresObservedChange, true);
@@ -339,7 +601,8 @@ test('generic pine script creation prefers safe new-script workflow', () => {
   const postOpenActions = rewritten.slice(rewritten.indexOf(opener) + 1);
   assert(Array.isArray(rewritten), 'workflow should rewrite');
   assert.strictEqual(rewritten[0].type, 'bring_window_to_front');
-  assertQuickSearchPineEditorRoute(rewritten);
+  assertSemanticPineIconRoute(rewritten);
+  assert.strictEqual(String(opener?.type || '').toLowerCase(), 'click_element');
   assert.strictEqual(opener.verify.kind, 'editor-active');
   assert(rewritten.some((action) => action?.type === 'get_text' && action?.text === 'Pine Editor'), 'safe authoring should inspect visible Pine Editor state first');
   assert(!postOpenActions.some((action) => String(action?.key || '').toLowerCase() === 'ctrl+a'), 'safe authoring should avoid select-all inside Pine Editor by default');
@@ -390,25 +653,72 @@ test('clipboard-only pine authoring plan rewrites into guarded continuation afte
 
   const opener = rewritten.find((action) => action?.verify?.target === 'pine-editor');
   const inspectStep = rewritten.find((action) => action?.type === 'get_text' && action?.pineEvidenceMode === 'safe-authoring-inspect');
+  const directContinuation = inspectStep?.continueActions || [];
+  const saveInspect = directContinuation.find((action) => action?.type === 'get_text' && action?.pineEvidenceMode === 'save-status');
 
   assert(Array.isArray(rewritten), 'workflow should rewrite');
   assert.strictEqual(rewritten[0].type, 'bring_window_to_front');
-  assertQuickSearchPineEditorRoute(rewritten);
+  assertSemanticPineIconRoute(rewritten);
+  assert.strictEqual(String(opener?.type || '').toLowerCase(), 'click_element');
   assert.strictEqual(opener.verify.kind, 'editor-active');
   assert(inspectStep, 'safe authoring should inspect Pine Editor state first');
   assert.strictEqual(inspectStep.continueOnPineEditorState, 'empty-or-starter');
   assert(Array.isArray(inspectStep.continueActions) && inspectStep.continueActions.length > 0, 'safe authoring inspect step should carry continuation actions');
-  assert(inspectStep.continueActions.some((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'ctrl+i'), 'continuation should create a fresh Pine indicator through the official shortcut chord');
-  const freshInspect = inspectStep.continueActions.find((action) => action?.type === 'get_text' && action?.pineEvidenceMode === 'safe-authoring-inspect' && Array.isArray(action?.continueActions));
-  assert(freshInspect, 'continuation should verify a fresh Pine script surface after creating a new indicator');
-  assert(freshInspect.continueActions.some((action) => action?.type === 'run_command' && /set-clipboard/i.test(String(action?.command || ''))), 'fresh-script continuation should preserve clipboard preparation');
-  assert(freshInspect.continueActions.some((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'ctrl+v'), 'fresh-script continuation should paste the prepared script');
-  const saveInspect = freshInspect.continueActions.find((action) => action?.type === 'get_text' && action?.pineEvidenceMode === 'save-status');
-  assert(saveInspect, 'fresh-script continuation should verify visible save status before applying');
+  const dialogRecoveries = assertBoundedInspectBlockingDialogRecoveries(inspectStep, {
+    expectedContinueOnPineEditorState: 'empty-or-starter'
+  });
+  assert(Array.isArray(dialogRecoveries?.replace?.reverifyAction?.continueActionsByPineEditorState?.['save-required-blocking']), 'replace-modal recovery should still allow bounded save-dialog dismissal when the stale save-name dialog appears next');
+  assert(Array.isArray(dialogRecoveries?.replace?.reverifyAction?.continueActionsByPineEditorState?.['confirmation-blocking']), 'replace-modal recovery should still allow bounded unsaved-changes dismissal when that stale modal appears next');
+  assert(Array.isArray(dialogRecoveries?.saveRequired?.reverifyAction?.continueActionsByPineEditorState?.['replace-confirmation-blocking']), 'save-dialog recovery should still allow bounded replace-modal dismissal when the replace modal appears next');
+  assert(Array.isArray(dialogRecoveries?.saveRequired?.reverifyAction?.continueActionsByPineEditorState?.['confirmation-blocking']), 'save-dialog recovery should still allow bounded unsaved-changes dismissal when that stale modal appears next');
+  assert(!inspectStep.continueActions.some((action) => String(action?.tradingViewRendererInvoke?.kind || '').toLowerCase() === 'pine-current-script-menu-item'), 'empty/starter-safe continuation should not force the Pine Create new menu route');
+  assert(directContinuation.some((action) => action?.type === 'run_command' && /set-clipboard/i.test(String(action?.command || ''))), 'direct continuation should preserve clipboard preparation');
+  const starterSelectIndex = directContinuation.findIndex((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'ctrl+a');
+  const starterClearIndex = directContinuation.findIndex((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'backspace');
+  const clipboardIndex = directContinuation.findIndex((action) => action?.type === 'run_command' && /set-clipboard/i.test(String(action?.command || '')));
+  const pasteIndex = directContinuation.findIndex((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'ctrl+v');
+  const pasteAction = directContinuation.find((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'ctrl+v');
+  assert(pasteAction, 'direct continuation should paste the prepared script');
+  assert(starterSelectIndex >= 0, 'direct continuation should select the verified starter script before replacement');
+  assert(starterClearIndex > starterSelectIndex, 'direct continuation should clear the verified starter script before paste');
+  assert(clipboardIndex > starterClearIndex, 'clipboard preparation should occur after the starter script is cleared');
+  assert(pasteIndex > clipboardIndex, 'paste should occur after the prepared script is loaded into the clipboard');
+  assert.strictEqual(String(pasteAction?.inputSurfaceContract?.route || ''), 'pine-editor-authoring', 'paste should declare an explicit Pine authoring surface contract');
+  assert.strictEqual(pasteAction?.inputSurfaceContract?.requiresPineEditorSurface, true, 'paste should require a proven Pine surface');
+  assert.strictEqual(pasteAction?.inputSurfaceContract?.requiresCommandSurfaceClosed, true, 'paste should refuse to run while TradingView command search is open');
+  assert(/Momentum Confidence/.test(String(pasteAction?.pinePreparedScriptText || '')), 'paste should carry the prepared Pine source for bounded post-paste verification');
+  assert.strictEqual(String(pasteAction?.pinePreparedScriptName || ''), 'Momentum Confidence', 'paste should carry the expected Pine title for bounded post-paste verification');
+  const saveAction = directContinuation.find((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'ctrl+s');
+  assert(saveAction, 'direct continuation should save after insertion');
+  assert.strictEqual(String(saveAction?.inputSurfaceContract?.route || ''), 'pine-editor-authoring', 'save should stay on the Pine authoring surface contract');
+  assert(saveInspect, 'direct continuation should verify visible save status before applying');
+  assert.strictEqual(saveInspect.pineExpectedScriptName, 'Momentum Confidence', 'save verification should carry the expected Pine title');
   assert.strictEqual(saveInspect.continueOnPineLifecycleState, 'saved-state-verified');
   assert(Array.isArray(saveInspect?.continueActionsByPineLifecycleState?.['save-required-before-apply']), 'save verification should branch into a first-save recovery path when TradingView requires a script name');
-  assert(saveInspect.continueActionsByPineLifecycleState['save-required-before-apply'].some((action) => action?.type === 'type' && /Momentum Confidence/.test(String(action?.text || ''))), 'first-save recovery should derive a script name from the Pine payload');
-  assert(saveInspect.continueActions.some((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'ctrl+enter'), 'save-verified continuation should add the script to the chart');
+  const saveConfirmationRecovery = saveInspect?.continueActionsByPineLifecycleState?.['save-confirmation-blocking'];
+  const { reverifyAction: saveModalReverify } = assertBoundedConfirmationRecovery(saveConfirmationRecovery, {
+    evidenceMode: 'save-status',
+    expectedScriptName: 'Momentum Confidence'
+  });
+  assert(Array.isArray(saveModalReverify?.continueActionsByPineLifecycleState?.['save-required-before-apply']), 'save confirmation recovery should still allow the first-save naming path after the modal is cleared');
+  const saveReplaceRecovery = saveInspect?.continueActionsByPineLifecycleState?.['save-replace-confirmation-blocking'] || [];
+  const replaceConfirmAction = saveReplaceRecovery.find((action) => action?.type === 'click_element' && String(action?.text || '').toLowerCase() === 'yes');
+  const replaceReverify = saveReplaceRecovery.find((action) => action?.type === 'get_text' && action?.pineEvidenceMode === 'save-status');
+  assert(replaceConfirmAction, 'save verification should recover through the replace-existing-script confirmation modal');
+  assert(/already exists/i.test(String(replaceConfirmAction?.tradingViewRendererInvoke?.requiredTexts?.join(' ') || '')), 'replace confirmation should verify the exact replace-existing modal text');
+  assert.strictEqual(replaceReverify?.pineExpectedScriptName, 'Momentum Confidence', 'replace confirmation recovery should preserve the expected saved title');
+  const {
+    reverifyAction: saveReverify
+  } = assertBoundedFirstSaveRecovery(saveInspect.continueActionsByPineLifecycleState['save-required-before-apply'], {
+    expectedScriptName: 'Momentum Confidence'
+  });
+  assert.strictEqual(saveReverify?.continueActionsByPineLifecycleState?.['save-required-before-apply'], undefined, 'reverification after naming should fail closed if TradingView still shows the first-save dialog');
+  const postNameReplaceRecovery = saveReverify?.continueActionsByPineLifecycleState?.['save-replace-confirmation-blocking'] || [];
+  const postNameReplaceConfirmAction = postNameReplaceRecovery.find((action) => action?.type === 'click_element' && String(action?.text || '').toLowerCase() === 'yes');
+  assert(postNameReplaceConfirmAction, 'reverification after naming should still recover through the replace-existing confirmation modal');
+  const addToChartAction = saveInspect.continueActions.find((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'ctrl+enter');
+  assert(addToChartAction, 'save-verified continuation should add the script to the chart');
+  assert.strictEqual(String(addToChartAction?.inputSurfaceContract?.route || ''), 'pine-editor-authoring', 'apply-to-chart should stay on the Pine authoring surface contract');
   assert(saveInspect.continueActions.some((action) => action?.type === 'get_text' && action?.pineEvidenceMode === 'compile-result'), 'save-verified continuation should gather compile-result feedback after add-to-chart');
 });
 
@@ -425,13 +735,14 @@ test('save-only pine creation prompt suppresses auto add-to-chart continuation',
 
   const intent = inferTradingViewPineIntent(userMessage, sourceActions);
   const rewritten = buildTradingViewPineWorkflowActions(intent, sourceActions);
-
-  const freshInspect = intent?.safeAuthoringContinuationSteps?.find((action) => action?.type === 'get_text' && action?.pineEvidenceMode === 'safe-authoring-inspect' && Array.isArray(action?.continueActions));
-  const saveInspect = freshInspect?.continueActions?.find((action) => action?.type === 'get_text' && action?.pineEvidenceMode === 'save-status');
+  const inspectStep = rewritten.find((action) => action?.type === 'get_text' && action?.pineEvidenceMode === 'safe-authoring-inspect');
+  const starterContinuation = inspectStep?.continueActionsByPineEditorState?.['empty-or-starter'] || inspectStep?.continueActions || [];
+  const saveInspect = starterContinuation.find((action) => action?.type === 'get_text' && action?.pineEvidenceMode === 'save-status');
 
   assert(intent, 'save-only prompt should infer a TradingView Pine intent');
   assert(Array.isArray(rewritten) && rewritten.length > 0, 'save-only prompt should still build a rewritten workflow');
   assert(saveInspect, 'safe authoring flow should still verify save status');
+  assert.strictEqual(saveInspect.pineExpectedScriptName, 'Liku Live Save Probe', 'save-only flow should also carry the expected saved title');
   assert(!saveInspect.continueActions.some((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'ctrl+enter'), 'save-only prompt should not auto-add the script to the chart');
 });
 
@@ -465,40 +776,48 @@ plot(close)`,
     ], {
       userMessage: 'TradingView is already open on the LUNR chart. In Pine Editor, create a new interactive chart indicator for volume and momentum confidence, add it to the chart with Ctrl+Enter, and report the visible compile/apply result.'
     });
+    const flattened = collectWorkflowActions(rewritten);
+    const inspectStep = rewritten.find((action) => action?.type === 'get_text' && action?.pineEvidenceMode === 'safe-authoring-inspect');
+    const starterContinuation = inspectStep?.continueActionsByPineEditorState?.['empty-or-starter'] || [];
+    const existingScriptContinuation = inspectStep?.continueActionsByPineEditorState?.['existing-script-visible'] || [];
+    const freshInspect = existingScriptContinuation.find((action) => action?.type === 'get_text' && action?.pineEvidenceMode === 'safe-authoring-inspect' && Array.isArray(action?.continueActions));
+    const clearIndex = starterContinuation.findIndex((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'ctrl+a');
+    const backspaceIndex = starterContinuation.findIndex((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'backspace');
+    const clipboardIndex = starterContinuation.findIndex((action) => action?.type === 'run_command' && /get-content\s+-literalpath/i.test(String(action?.command || '')));
+    const pasteIndex = starterContinuation.findIndex((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'ctrl+v');
+    const clipboardStep = clipboardIndex >= 0 ? starterContinuation[clipboardIndex] : null;
+    const pasteStep = pasteIndex >= 0 ? starterContinuation[pasteIndex] : null;
 
-    const firstInspectIndex = rewritten.findIndex((action) => action?.type === 'get_text' && action?.pineEvidenceMode === 'safe-authoring-inspect');
-    const newIndicatorIndex = rewritten.findIndex((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'ctrl+i');
-    const freshInspect = rewritten.find((action) => action?.type === 'get_text' && action?.pineEvidenceMode === 'safe-authoring-inspect' && Array.isArray(action?.continueActions));
-    const clearIndex = freshInspect?.continueActions?.findIndex((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'ctrl+a');
-    const backspaceIndex = freshInspect?.continueActions?.findIndex((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'backspace');
-    const clipboardIndex = freshInspect?.continueActions?.findIndex((action) => action?.type === 'run_command' && /get-content\s+-literalpath/i.test(String(action?.command || '')));
-    const pasteIndex = freshInspect?.continueActions?.findIndex((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'ctrl+v');
-    const clipboardStep = clipboardIndex >= 0 ? freshInspect?.continueActions?.[clipboardIndex] : null;
-    const pasteStep = pasteIndex >= 0 ? freshInspect?.continueActions?.[pasteIndex] : null;
-
-    assert(freshInspect, 'canonical-state flow should still verify the fresh Pine surface');
-    assert(newIndicatorIndex >= 0, 'validated canonical-state flow should force the official new-indicator shortcut');
-    assert(firstInspectIndex > newIndicatorIndex, 'validated canonical-state flow should skip the ambiguous current-buffer inspect and inspect only after starting the fresh-indicator route');
-    assert.strictEqual(
-      rewritten.slice(0, Math.max(0, firstInspectIndex)).some((action) => action?.type === 'get_text' && action?.pineEvidenceMode === 'safe-authoring-inspect'),
-      false,
-      'validated canonical-state flow should not inspect the current Pine buffer before starting fresh-script creation'
-    );
-    assert(clearIndex >= 0, 'canonical-state flow should select the starter script before replacement');
-    assert(backspaceIndex > clearIndex, 'canonical-state flow should clear the starter script after select-all');
-    assert(clipboardIndex > backspaceIndex, 'canonical-state flow should reload the canonical script from disk after clearing');
-    assert(pasteIndex > clipboardIndex, 'canonical-state flow should paste after loading the canonical script');
+    assert(inspectStep, 'canonical-state flow should inspect the current Pine buffer before choosing a starter-safe or fresh-indicator route');
+    assertBoundedInspectBlockingDialogRecoveries(inspectStep, {
+      expectedPineEditorStates: ['empty-or-starter', 'existing-script-visible']
+    });
+    assert(Array.isArray(starterContinuation) && starterContinuation.length > 0, 'canonical-state flow should keep a direct starter-safe replacement branch');
+    assertPineCreateNewMenuRoute(existingScriptContinuation);
+    assert(freshInspect, 'Create new branch should still verify the new Pine surface');
+    assertBoundedInspectBlockingDialogRecoveries(freshInspect, {
+      expectedContinueOnPineEditorState: 'empty-or-starter'
+    });
+    assert.strictEqual(rewritten.some((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'ctrl+i'), false, 'validated canonical-state flow should not trigger the new-indicator shortcut before inspection');
+    assert(clearIndex >= 0, 'starter-safe canonical flow should select the starter script before replacement');
+    assert(backspaceIndex > clearIndex, 'starter-safe canonical flow should clear the starter script after select-all');
+    assert(clipboardIndex > backspaceIndex, 'starter-safe canonical flow should reload the canonical script from disk after clearing');
+    assert(pasteIndex > clipboardIndex, 'starter-safe canonical flow should paste after loading the canonical script');
     assert.strictEqual(clipboardStep?.pineCanonicalState?.sourcePath, persisted.sourcePath, 'canonical-state clipboard step should preserve the persisted source path');
     assert.strictEqual(clipboardStep?.pineCanonicalState?.validation?.valid, true, 'canonical-state clipboard step should preserve validation proof');
     assert.strictEqual(pasteStep?.pineCanonicalState?.sourceHash, pineState.sourceHash, 'canonical-state paste step should preserve canonical artifact identity');
+    assert(/Momentum Confidence/.test(String(pasteStep?.pinePreparedScriptText || '')), 'canonical-state paste should carry the persisted Pine source for bounded post-paste verification');
+    assert.strictEqual(String(pasteStep?.pinePreparedScriptName || ''), 'Momentum Confidence', 'canonical-state paste should carry the persisted Pine title for bounded post-paste verification');
     assert(/Get-Content -LiteralPath/i.test(String(clipboardStep?.command || '')), 'canonical-state clipboard step should source the script from the persisted .pine file');
     assert(String(clipboardStep?.command || '').includes(persisted.sourcePath), 'canonical-state clipboard step should reference the persisted .pine file path');
+    assert.strictEqual(flattened.some((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'ctrl+e'), false, 'already-active Pine Editor canonical-state flows should not reopen Pine Editor with Ctrl+E');
+    assert.strictEqual(flattened.some((action) => action?.type === 'type' && String(action?.text || '') === 'Pine Editor'), false, 'already-active Pine Editor canonical-state flows should not type Pine Editor into quick search');
   } finally {
     fs.rmSync(tempRoot, { recursive: true, force: true });
   }
 });
 
-test('explicit fresh-indicator prompts skip the ambiguous current-buffer inspect and go straight to the new-indicator flow', () => {
+test('explicit fresh-indicator prompts inspect first and branch into new-indicator flow only when an existing script is visible', () => {
   const rewritten = maybeRewriteTradingViewPineWorkflow([
     {
       type: 'run_command',
@@ -509,17 +828,18 @@ test('explicit fresh-indicator prompts skip the ambiguous current-buffer inspect
   ], {
     userMessage: 'TradingView is already open on the LUNR chart. In Pine Editor, create a new interactive chart indicator script for volume and momentum confidence. Use the new indicator flow so it does not reuse the current script, add it to the chart with Ctrl+Enter, and report the visible compile/apply result.'
   });
+  const flattened = collectWorkflowActions(rewritten);
 
-  const firstInspectIndex = rewritten.findIndex((action) => action?.type === 'get_text' && action?.pineEvidenceMode === 'safe-authoring-inspect');
-  const newIndicatorIndex = rewritten.findIndex((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'ctrl+i');
+  const inspectStep = rewritten.find((action) => action?.type === 'get_text' && action?.pineEvidenceMode === 'safe-authoring-inspect');
+  const starterContinuation = inspectStep?.continueActionsByPineEditorState?.['empty-or-starter'] || [];
+  const existingScriptContinuation = inspectStep?.continueActionsByPineEditorState?.['existing-script-visible'] || [];
 
-  assert(newIndicatorIndex >= 0, 'fresh-indicator prompts should still route through the official new-indicator shortcut');
-  assert(firstInspectIndex > newIndicatorIndex, 'fresh-indicator prompts should inspect only after starting the fresh-indicator flow');
-  assert.strictEqual(
-    rewritten.slice(0, Math.max(0, firstInspectIndex)).some((action) => action?.type === 'get_text' && action?.pineEvidenceMode === 'safe-authoring-inspect'),
-    false,
-    'fresh-indicator prompts should not gate on inspecting the current buffer before starting the new-indicator flow'
-  );
+  assert(inspectStep, 'fresh-indicator prompts should still inspect the current Pine buffer before choosing a bounded branch');
+  assert.strictEqual(rewritten.some((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'ctrl+i'), false, 'fresh-indicator prompts should not trigger the official new-indicator shortcut before inspection');
+  assert(!starterContinuation.some((action) => String(action?.tradingViewRendererInvoke?.kind || '').toLowerCase() === 'pine-current-script-menu-item'), 'starter-safe branch should continue directly without the Pine Create new route');
+  assertPineCreateNewMenuRoute(existingScriptContinuation);
+  assert.strictEqual(flattened.some((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'ctrl+e'), false, 'already-active Pine Editor fresh-indicator flows should not reopen Pine Editor with Ctrl+E');
+  assert.strictEqual(flattened.some((action) => action?.type === 'type' && String(action?.text || '') === 'Pine Editor'), false, 'already-active Pine Editor fresh-indicator flows should not type Pine Editor into quick search');
 });
 
 test('transcript-style Pine clipboard/edit/apply plans are normalized back onto the safe authoring contract', () => {
@@ -555,13 +875,19 @@ test('transcript-style Pine clipboard/edit/apply plans are normalized back onto 
     userMessage: 'TradingView is already open on the LUNR chart. Open Pine Editor, create a new Pine script that shows confidence in volume and momentum, apply it with Ctrl+Enter, and report the visible compile/apply result'
   });
 
-  const freshInspect = rewritten.find((action) => action?.type === 'get_text' && action?.pineEvidenceMode === 'safe-authoring-inspect' && Array.isArray(action?.continueActions));
+  const inspectStep = rewritten.find((action) => action?.type === 'get_text' && action?.pineEvidenceMode === 'safe-authoring-inspect');
+  const starterContinuation = inspectStep?.continueActionsByPineEditorState?.['empty-or-starter'] || [];
+  const existingScriptContinuation = inspectStep?.continueActionsByPineEditorState?.['existing-script-visible'] || [];
+  const freshInspect = existingScriptContinuation.find((action) => action?.type === 'get_text' && action?.pineEvidenceMode === 'safe-authoring-inspect' && Array.isArray(action?.continueActions));
   assert(Array.isArray(rewritten), 'workflow should rewrite the transcript-style Pine plan');
   assert.strictEqual(rewritten[0].type, 'bring_window_to_front');
-  assert.strictEqual(rewritten[2].key, 'ctrl+k', 'rewrite should route Pine Editor opening through the verified TradingView quick-search path');
-  assert(freshInspect, 'rewrite should restore the safe Pine inspection contract before any authoring edit resumes');
-  assert(rewritten.some((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'ctrl+i'), 'rewrite should force fresh-indicator creation instead of preserving raw clipboard overwrite steps');
-  assert(freshInspect.continueActions.some((action) => action?.type === 'run_command' && /set-clipboard/i.test(String(action?.command || ''))), 'rewrite should preserve bounded clipboard preparation only after the fresh Pine surface is verified');
+  assertSemanticPineIconRoute(rewritten);
+  const opener = rewritten.find((action) => action?.verify?.target === 'pine-editor');
+  assert.strictEqual(String(opener?.type || '').toLowerCase(), 'click_element', 'rewrite should route Pine Editor opening through the semantic icon path before safe authoring resumes');
+  assert(inspectStep, 'rewrite should restore the safe Pine inspection contract before any authoring edit resumes');
+  assert(starterContinuation.some((action) => action?.type === 'run_command' && /set-clipboard/i.test(String(action?.command || ''))), 'starter-safe branch should preserve bounded clipboard preparation immediately after inspection');
+  assertPineCreateNewMenuRoute(existingScriptContinuation);
+  assert(freshInspect && freshInspect.continueActions.some((action) => action?.type === 'run_command' && /set-clipboard/i.test(String(action?.command || ''))), 'Create new branch should preserve bounded clipboard preparation only after the fresh Pine surface is verified');
   assert(!rewritten.some((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'ctrl+c'), 'rewrite should not preserve raw clipboard inspection keystrokes outside the guarded continuation');
 });
 
@@ -869,8 +1195,7 @@ test('safe Pine continuation sanitizes contaminated Pine header text before past
     userMessage: 'TradingView is already open on the LUNR chart. Open Pine Editor, create a new Pine script that shows confidence in volume and momentum, apply it with Ctrl+Enter, and report the visible compile/apply result'
   });
 
-  const freshInspect = rewritten.find((action) => action?.type === 'get_text' && action?.pineEvidenceMode === 'safe-authoring-inspect' && Array.isArray(action?.continueActions));
-  const clipboardStep = freshInspect?.continueActions?.find((action) => action?.type === 'run_command' && /set-clipboard/i.test(String(action?.command || '')));
+  const clipboardStep = collectWorkflowActions(rewritten).find((action) => action?.type === 'run_command' && /set-clipboard/i.test(String(action?.command || '')));
 
   assert(clipboardStep, 'safe continuation should preserve a clipboard preparation step');
   assert(!/pine\s*editor\s*(?=\/\/\s*@version\b)/i.test(String(clipboardStep.command || '')), 'clipboard payload should strip Pine Editor contamination before the version header');
@@ -913,9 +1238,9 @@ test('pine resume prerequisites re-establish editor activation before destructiv
   const opener = prerequisites.find((action) => action?.verify?.target === 'pine-editor');
   assert(Array.isArray(prerequisites), 'resume prerequisites should be returned as an action array');
   assert.strictEqual(prerequisites[0].type, 'bring_window_to_front');
-  assert.strictEqual(prerequisites[2].key, 'ctrl+k');
-  assert.strictEqual(opener.type, 'key');
-  assert.strictEqual(opener.key, 'enter');
+  assert.strictEqual(prerequisites[2].type, 'click_element');
+  assert.strictEqual(String(prerequisites[2]?.text || ''), 'Pine');
+  assert.strictEqual(opener.type, 'click_element');
   assert.strictEqual(opener.verify.kind, 'editor-active');
   assert(prerequisites.some((action) => String(action?.key || '').toLowerCase() === 'ctrl+a'), 'resume prerequisites should re-select Pine Editor contents before destructive overwrite resumes');
 });
@@ -974,7 +1299,7 @@ test('open pine editor and check 500-line budget stays verification-first', () =
   const opener = rewritten.find((action) => action?.verify?.target === 'pine-editor');
   const readback = rewritten.find((action) => action?.type === 'get_text' && action?.text === 'Pine Editor');
   assert.strictEqual(rewritten[0].type, 'bring_window_to_front');
-  assertChartFocusBeforeCtrlE(rewritten);
+  assertSemanticPineIconRoute(rewritten);
   assert.strictEqual(opener.verify.target, 'pine-editor');
   assert(readback, 'line-budget workflow should gather Pine Editor text');
   assert(/line-budget hints/i.test(readback.reason), 'pine editor line-budget readback should mention line-budget hints');
@@ -1074,7 +1399,7 @@ test('pine editor evidence workflow preserves trailing get_text read step', () =
   const opener = rewritten.find((action) => action?.verify?.target === 'pine-editor');
   assert.strictEqual(readSteps.length, 1, 'explicit pine editor readback step should be preserved without duplication');
   assert.strictEqual(readSteps[0].text, 'Pine Editor');
-  assertChartFocusBeforeCtrlE(rewritten);
+  assertSemanticPineIconRoute(rewritten);
   assert.strictEqual(opener.verify.target, 'pine-editor');
 });
 

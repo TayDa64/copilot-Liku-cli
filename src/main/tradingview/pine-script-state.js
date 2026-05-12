@@ -1,6 +1,11 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const {
+  DEFAULT_PINE_SCRIPT_TITLE,
+  extractPineDeclarationTitle,
+  synthesizePineScriptTitleContract
+} = require('./pine-title-synthesis');
 
 function sanitizePineHeaderNoise(value = '') {
   let raw = String(value || '');
@@ -51,8 +56,10 @@ function normalizePineScriptSource(source = '', options = {}) {
 
 function inferPineScriptTitle(source = '') {
   const normalized = normalizePineScriptSource(source);
-  const titleMatch = normalized.match(/\b(?:indicator|strategy|library)\s*\(\s*["'`](.*?)["'`]/i);
-  return String(titleMatch?.[1] || 'Liku Pine Script').trim() || 'Liku Pine Script';
+  const titleContract = synthesizePineScriptTitleContract({
+    source: normalized
+  });
+  return titleContract?.title || extractPineDeclarationTitle(normalized) || DEFAULT_PINE_SCRIPT_TITLE;
 }
 
 function validatePineScriptStateSource(source = '') {

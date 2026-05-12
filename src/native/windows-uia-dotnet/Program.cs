@@ -6,11 +6,13 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Timers;
 using System.Windows;
 using System.Windows.Automation;
+using Accessibility;
 
 namespace UIAWrapper
 {
@@ -73,6 +75,16 @@ namespace UIAWrapper
         [DllImport("user32.dll")]
         static extern void SwitchToThisWindow(IntPtr hWnd, bool fAltTab);
 
+        [DllImport("oleacc.dll", CharSet = CharSet.Unicode)]
+        static extern int AccessibleObjectFromWindow(
+            IntPtr hwnd,
+            uint dwObjectID,
+            ref Guid riid,
+            [In, Out, MarshalAs(UnmanagedType.IUnknown)] ref object? ppvObject);
+
+        [DllImport("oleacc.dll", CharSet = CharSet.Unicode)]
+        static extern uint GetRoleText(uint dwRole, StringBuilder? lpszRole, uint cchRoleMax);
+
         delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
         [StructLayout(LayoutKind.Sequential)]
@@ -93,9 +105,17 @@ namespace UIAWrapper
         const uint SPI_GETFOREGROUNDLOCKTIMEOUT = 0x2000;
         const uint SPI_SETFOREGROUNDLOCKTIMEOUT = 0x2001;
         const uint SPIF_SENDCHANGE = 0x02;
+        const uint OBJID_CLIENT = 0xFFFFFFFC;
+        const int CHILDID_SELF = 0;
+        static readonly Guid IID_IAccessible = new("618736E0-3C3D-11CF-810C-00AA00389B71");
 
         // ── Thread-safe output (Phase 4) ─────────────────────────────────────
         static readonly object _writeLock = new object();
+        [ThreadStatic] static string? _activeRequestId;
+        static readonly object _clipboardSnapshotLock = new object();
+        static readonly Dictionary<string, ClipboardTextSnapshot> _clipboardSnapshots = new(StringComparer.Ordinal);
+        static readonly Queue<string> _clipboardSnapshotOrder = new();
+        const int MaxClipboardSnapshots = 32;
 
         // ── Event subscription state (Phase 4) ──────────────────────────────
         static bool _eventsSubscribed = false;
@@ -137,10 +157,14 @@ namespace UIAWrapper
             while ((line = Console.ReadLine()) != null)
             {
                 if (string.IsNullOrWhiteSpace(line)) continue;
+                string? previousRequestId = _activeRequestId;
+                string? requestId = null;
                 try
                 {
                     using var doc = JsonDocument.Parse(line);
                     var root = doc.RootElement;
+                    requestId = GetRequestId(root);
+                    _activeRequestId = requestId;
                     var cmd = root.GetProperty("cmd").GetString() ?? "";
 
                     switch (cmd)
@@ -157,6 +181,9 @@ namespace UIAWrapper
                         case "findWindow":
                             HandleFindWindow(root);
                             break;
+                        case "getRunningProcessesByNames":
+                            HandleGetRunningProcessesByNames(root);
+                            break;
                         case "focusWindow":
                             HandleFocusWindow(root);
                             break;
@@ -166,8 +193,17 @@ namespace UIAWrapper
                         case "elementFromPoint":
                             HandleElementFromPoint(root);
                             break;
+                        case "elementFromPointInWindow":
+                            HandleElementFromPointInWindow(root);
+                            break;
                         case "findElementsByWindow":
                             HandleFindElementsByWindow(root);
+                            break;
+                        case "probeWindowAccessibility":
+                            HandleProbeWindowAccessibility(root);
+                            break;
+                        case "getFocusedElementInWindow":
+                            HandleGetFocusedElementInWindow(root);
                             break;
                         case "invokeElementByWindow":
                             HandleInvokeElementByWindow(root);
@@ -190,6 +226,12 @@ namespace UIAWrapper
                         case "setClipboardText":
                             HandleSetClipboardText(root);
                             break;
+                        case "saveClipboardState":
+                            HandleSaveClipboardState();
+                            break;
+                        case "restoreClipboardState":
+                            HandleRestoreClipboardState(root);
+                            break;
                         case "subscribeEvents":
                             HandleSubscribeEvents();
                             break;
@@ -206,18 +248,57 @@ namespace UIAWrapper
                 }
                 catch (Exception ex)
                 {
+                    _activeRequestId = requestId;
                     Reply(new { ok = false, error = ex.Message });
+                }
+                finally
+                {
+                    _activeRequestId = previousRequestId;
                 }
             }
         }
 
         static void Reply(object obj)
         {
+            Reply(obj, _activeRequestId);
+        }
+
+        static void ReplyEvent(object obj)
+        {
+            Reply(obj, null);
+        }
+
+        static void Reply(object obj, string? requestId)
+        {
             lock (_writeLock)
             {
-                Console.WriteLine(JsonSerializer.Serialize(obj, JsonOpts));
+                Console.WriteLine(SerializeReply(obj, requestId));
                 Console.Out.Flush();
             }
+        }
+
+        static string SerializeReply(object obj, string? requestId)
+        {
+            if (string.IsNullOrWhiteSpace(requestId))
+            {
+                return JsonSerializer.Serialize(obj, JsonOpts);
+            }
+
+            JsonNode? node = JsonSerializer.SerializeToNode(obj, JsonOpts);
+            if (node is JsonObject jsonObject)
+            {
+                if (!jsonObject.ContainsKey("requestId"))
+                {
+                    jsonObject["requestId"] = requestId;
+                }
+                return jsonObject.ToJsonString(JsonOpts);
+            }
+
+            return JsonSerializer.Serialize(new
+            {
+                requestId,
+                payload = obj
+            }, JsonOpts);
         }
 
         // ── getTree ──────────────────────────────────────────────────────────
@@ -307,6 +388,124 @@ namespace UIAWrapper
             catch (Exception ex)
             {
                 Reply(new { ok = false, cmd = "findWindow", error = ex.Message });
+            }
+        }
+
+        static void HandleGetRunningProcessesByNames(JsonElement root)
+        {
+            try
+            {
+                var targets = GetStringArrayOption(root, "processNames")
+                    .Select((value) => (value ?? "").Trim().ToLowerInvariant())
+                    .Where((value) => !string.IsNullOrWhiteSpace(value))
+                    .Distinct(StringComparer.Ordinal)
+                    .ToArray();
+
+                if (targets.Length == 0)
+                {
+                    Reply(new
+                    {
+                        ok = true,
+                        cmd = "getRunningProcessesByNames",
+                        processes = Array.Empty<object>()
+                    });
+                    return;
+                }
+
+                var matches = new List<Dictionary<string, object?>>();
+                foreach (var process in Process.GetProcesses())
+                {
+                    try
+                    {
+                        string processName = "";
+                        try { processName = process.ProcessName ?? ""; } catch { processName = ""; }
+                        processName = processName.Trim();
+                        if (string.IsNullOrWhiteSpace(processName))
+                        {
+                            continue;
+                        }
+
+                        string normalizedName = processName.ToLowerInvariant();
+                        bool matched = false;
+                        foreach (var target in targets)
+                        {
+                            if (normalizedName == target || normalizedName.Contains(target, StringComparison.Ordinal))
+                            {
+                                matched = true;
+                                break;
+                            }
+                        }
+
+                        if (!matched)
+                        {
+                            continue;
+                        }
+
+                        string mainWindowTitle = "";
+                        try { mainWindowTitle = process.MainWindowTitle ?? ""; } catch { mainWindowTitle = ""; }
+
+                        DateTime? startTime = null;
+                        long sortTicks = 0;
+                        try
+                        {
+                            startTime = process.StartTime;
+                            sortTicks = startTime.Value.Ticks;
+                        }
+                        catch
+                        {
+                            startTime = null;
+                            sortTicks = 0;
+                        }
+
+                        matches.Add(new Dictionary<string, object?>
+                        {
+                            ["pid"] = process.Id,
+                            ["processName"] = processName,
+                            ["mainWindowTitle"] = mainWindowTitle,
+                            ["startTime"] = startTime?.ToString("o") ?? "",
+                            ["sortTicks"] = sortTicks
+                        });
+                    }
+                    catch { }
+                    finally
+                    {
+                        try { process.Dispose(); } catch { }
+                    }
+                }
+
+                var ordered = matches
+                    .OrderByDescending((entry) =>
+                    {
+                        if (entry.TryGetValue("sortTicks", out var value) && value is long longValue)
+                        {
+                            return longValue;
+                        }
+                        if (entry.TryGetValue("sortTicks", out value) && value != null && long.TryParse(value.ToString(), out long parsed))
+                        {
+                            return parsed;
+                        }
+                        return 0L;
+                    })
+                    .Take(15)
+                    .Select((entry) => new Dictionary<string, object?>
+                    {
+                        ["pid"] = entry.TryGetValue("pid", out var pidValue) ? pidValue : 0,
+                        ["processName"] = entry.TryGetValue("processName", out var processNameValue) ? processNameValue : "",
+                        ["mainWindowTitle"] = entry.TryGetValue("mainWindowTitle", out var mainWindowTitleValue) ? mainWindowTitleValue : "",
+                        ["startTime"] = entry.TryGetValue("startTime", out var startTimeValue) ? startTimeValue : ""
+                    })
+                    .ToList();
+
+                Reply(new
+                {
+                    ok = true,
+                    cmd = "getRunningProcessesByNames",
+                    processes = ordered
+                });
+            }
+            catch (Exception ex)
+            {
+                Reply(new { ok = false, cmd = "getRunningProcessesByNames", error = ex.Message });
             }
         }
 
@@ -417,6 +616,142 @@ namespace UIAWrapper
             Reply(new { ok = true, cmd = "elementFromPoint", element = payload });
         }
 
+        static void HandleElementFromPointInWindow(JsonElement root)
+        {
+            var started = Stopwatch.StartNew();
+            long rawHandle = root.TryGetProperty("hwnd", out var hwndProp)
+                ? hwndProp.GetInt64()
+                : 0;
+            double x = root.GetProperty("x").GetDouble();
+            double y = root.GetProperty("y").GetDouble();
+            string view = GetStringOption(root, "view", "raw");
+            int maxDepth = ClampInt(GetIntOption(root, "maxDepth", 18), 0, 64);
+            int maxVisited = ClampInt(GetIntOption(root, "maxVisited", 1200), 1, 5000);
+            int timeoutMs = ClampInt(GetIntOption(root, "timeoutMs", 300), 50, 4000);
+            bool includeOffscreen = GetBoolOption(root, "includeOffscreen", false);
+            bool includeDisabled = GetBoolOption(root, "includeDisabled", true);
+
+            IntPtr hwnd = new IntPtr(rawHandle);
+            if (hwnd == IntPtr.Zero || !IsWindow(hwnd))
+            {
+                Reply(new { ok = false, cmd = "elementFromPointInWindow", error = "Window handle not found" });
+                return;
+            }
+
+            AutomationElement window;
+            try
+            {
+                window = AutomationElement.FromHandle(hwnd);
+            }
+            catch (Exception ex)
+            {
+                Reply(new { ok = false, cmd = "elementFromPointInWindow", error = $"AutomationElement.FromHandle failed: {ex.Message}" });
+                return;
+            }
+
+            AutomationElement? directHit = null;
+            bool directHitWithinWindow = false;
+            try
+            {
+                directHit = AutomationElement.FromPoint(new Point(x, y));
+                directHitWithinWindow = directHit != null && IsSameOrDescendantOfWindow(directHit, window);
+            }
+            catch { }
+
+            int visited = 0;
+            int candidateCount = 0;
+            int matchedDepth = -1;
+            bool timedOut = false;
+            bool visitedLimitHit = false;
+            bool depthLimitHit = false;
+            string matchedBy = "direct-hit";
+            AutomationElement? matchedElement = null;
+
+            bool directHitIsMeaningful = false;
+            if (directHitWithinWindow && directHit != null && ElementPassesPointFilters(directHit, includeOffscreen, includeDisabled))
+            {
+                directHitIsMeaningful = IsMeaningfulPointElement(directHit);
+                matchedElement = directHit;
+                matchedDepth = 0;
+            }
+
+            if (matchedElement == null || !directHitIsMeaningful)
+            {
+                var boundedMatch = FindBestElementContainingPoint(
+                    window,
+                    x,
+                    y,
+                    includeOffscreen,
+                    includeDisabled,
+                    view,
+                    maxDepth,
+                    maxVisited,
+                    timeoutMs,
+                    started,
+                    out visited,
+                    out candidateCount,
+                    out timedOut,
+                    out visitedLimitHit,
+                    out depthLimitHit,
+                    out matchedDepth);
+
+                if (boundedMatch != null)
+                {
+                    matchedElement = boundedMatch;
+                    matchedBy = directHitWithinWindow ? "window-descendant-refine" : "window-descendant-hit";
+                }
+                else if (matchedElement != null)
+                {
+                    matchedBy = "direct-hit";
+                }
+            }
+
+            if (matchedElement == null)
+            {
+                Reply(new
+                {
+                    ok = false,
+                    cmd = "elementFromPointInWindow",
+                    error = "No matching element in target window at point",
+                    hwnd = hwnd.ToInt64(),
+                    queryPoint = new { x, y },
+                    directHitWithinWindow,
+                    stats = new
+                    {
+                        visited,
+                        candidateCount,
+                        elapsedMs = started.ElapsedMilliseconds,
+                        timedOut,
+                        visitedLimitHit,
+                        depthLimitHit
+                    }
+                });
+                return;
+            }
+
+            var payload = BuildFindElementPayload(matchedElement, hwnd, Math.Max(0, matchedDepth));
+            payload["queryPoint"] = new Dictionary<string, double> { ["x"] = x, ["y"] = y };
+            Reply(new
+            {
+                ok = true,
+                cmd = "elementFromPointInWindow",
+                hwnd = hwnd.ToInt64(),
+                queryPoint = new { x, y },
+                matchedBy,
+                directHitWithinWindow,
+                element = payload,
+                stats = new
+                {
+                    visited,
+                    candidateCount,
+                    elapsedMs = started.ElapsedMilliseconds,
+                    timedOut,
+                    visitedLimitHit,
+                    depthLimitHit
+                }
+            });
+        }
+
         // ── findElementsByWindow ─────────────────────────────────────────────
         static void HandleFindElementsByWindow(JsonElement root)
         {
@@ -442,6 +777,7 @@ namespace UIAWrapper
             int timeoutMs = ClampInt(GetIntOption(root, "timeoutMs", 2500), 100, 8000);
             bool includeOffscreen = GetBoolOption(root, "includeOffscreen", false);
             bool includeDisabled = GetBoolOption(root, "includeDisabled", true);
+            bool skipRootMatch = GetBoolOption(root, "skipRootMatch", false);
             var bounds = TryGetBoundsOption(root);
 
             Regex? regex = null;
@@ -500,15 +836,16 @@ namespace UIAWrapper
 
                     try
                     {
-                        if (ElementMatchesFindOptions(
-                            current.Element,
-                            text,
-                            textMode,
-                            regex,
-                            controlType,
-                            includeOffscreen,
-                            includeDisabled,
-                            bounds))
+                        bool shouldEvaluateCurrent = !(skipRootMatch && current.Depth == 0);
+                        if (shouldEvaluateCurrent && ElementMatchesFindOptions(
+                                current.Element,
+                                text,
+                                textMode,
+                                regex,
+                                controlType,
+                                includeOffscreen,
+                                includeDisabled,
+                                bounds))
                         {
                             results.Add(BuildFindElementPayload(current.Element, hwnd, current.Depth));
                             if (results.Count >= maxResults)
@@ -571,6 +908,7 @@ namespace UIAWrapper
                     maxDepth,
                     maxVisited,
                     timeoutMs,
+                    skipRootMatch,
                     includeOffscreen,
                     includeDisabled,
                     bounds
@@ -587,6 +925,280 @@ namespace UIAWrapper
                     resultLimitHit = results.Count >= maxResults
                 }
             });
+        }
+
+        static void HandleProbeWindowAccessibility(JsonElement root)
+        {
+            var started = Stopwatch.StartNew();
+            long rawHandle = root.TryGetProperty("hwnd", out var hwndProp)
+                ? hwndProp.GetInt64()
+                : 0;
+
+            IntPtr hwnd = new IntPtr(rawHandle);
+            if (hwnd == IntPtr.Zero || !IsWindow(hwnd))
+            {
+                Reply(new { ok = false, cmd = "probeWindowAccessibility", error = "Window handle not found" });
+                return;
+            }
+
+            int maxResults = ClampInt(GetIntOption(root, "maxResults", 24), 1, 128);
+            int maxRoots = ClampInt(GetIntOption(root, "maxRoots", 4), 1, 16);
+            int maxDepth = ClampInt(GetIntOption(root, "maxDepth", 18), 0, 64);
+            int maxVisited = ClampInt(GetIntOption(root, "maxVisited", 1400), 1, 8000);
+            int timeoutMs = ClampInt(GetIntOption(root, "timeoutMs", 900), 100, 8000);
+            bool includeOffscreen = GetBoolOption(root, "includeOffscreen", false);
+            bool includeDisabled = GetBoolOption(root, "includeDisabled", true);
+            string rootControlType = GetStringOption(root, "rootControlType", "Document");
+            string rootClassName = GetStringOption(root, "rootClassName", "Chrome_RenderWidgetHostHWND");
+            var bounds = TryGetBoundsOption(root);
+
+            AutomationElement window;
+            try
+            {
+                window = AutomationElement.FromHandle(hwnd);
+            }
+            catch (Exception ex)
+            {
+                Reply(new { ok = false, cmd = "probeWindowAccessibility", error = $"AutomationElement.FromHandle failed: {ex.Message}" });
+                return;
+            }
+
+            var roots = CollectAccessibilityProbeRootCandidates(
+                window,
+                rootControlType,
+                rootClassName,
+                bounds,
+                maxRoots,
+                maxDepth,
+                Math.Min(maxVisited, 1600),
+                timeoutMs,
+                started,
+                out int rootSearchVisited,
+                out bool rootSearchTimedOut,
+                out bool rootSearchVisitedLimitHit,
+                out bool rootSearchDepthLimitHit);
+
+            var rootPayloads = new List<Dictionary<string, object?>>();
+            foreach (var rootCandidate in roots)
+            {
+                try
+                {
+                    var payload = BuildFindElementPayload(rootCandidate.Element, hwnd, Math.Max(0, rootCandidate.Depth));
+                    payload["Source"] = "uia-document-root";
+                    rootPayloads.Add(payload);
+                }
+                catch { }
+            }
+
+            var collected = new List<(Dictionary<string, object?> Payload, int Score)>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            int rawVisited = 0;
+            int msaaVisited = 0;
+            bool timedOut = rootSearchTimedOut;
+            bool visitedLimitHit = rootSearchVisitedLimitHit;
+            bool depthLimitHit = rootSearchDepthLimitHit;
+            int uiaDescendantCount = 0;
+            int msaaDescendantCount = 0;
+
+            foreach (var rootCandidate in roots)
+            {
+                if (started.ElapsedMilliseconds >= timeoutMs)
+                {
+                    timedOut = true;
+                    break;
+                }
+
+                CollectAccessibilityProbeUiaDescendants(
+                    rootCandidate.Element,
+                    hwnd,
+                    bounds,
+                    includeOffscreen,
+                    includeDisabled,
+                    maxDepth,
+                    maxVisited,
+                    timeoutMs,
+                    started,
+                    collected,
+                    seen,
+                    ref rawVisited,
+                    ref timedOut,
+                    ref visitedLimitHit,
+                    ref depthLimitHit,
+                    ref uiaDescendantCount);
+
+                if (started.ElapsedMilliseconds >= timeoutMs)
+                {
+                    timedOut = true;
+                    break;
+                }
+
+                try
+                {
+                    IntPtr nativeRootHwnd = new IntPtr(rootCandidate.Element.Current.NativeWindowHandle);
+                    var fallbackBounds = TryBuildBoundsPayload(rootCandidate.Element);
+
+                    CollectAccessibilityProbeMsaaDescendants(
+                        nativeRootHwnd,
+                        hwnd,
+                        bounds,
+                        fallbackBounds,
+                        rootClassName,
+                        maxDepth,
+                        maxVisited,
+                        timeoutMs,
+                        started,
+                        collected,
+                        seen,
+                        ref msaaVisited,
+                        ref timedOut,
+                        ref visitedLimitHit,
+                        ref depthLimitHit,
+                        ref msaaDescendantCount);
+                }
+                catch { }
+            }
+
+            var elements = collected
+                .OrderByDescending(entry => entry.Score)
+                .ThenBy(entry => TryGetPayloadString(entry.Payload, "Name"))
+                .Take(maxResults)
+                .Select(entry => entry.Payload)
+                .ToList();
+
+            Reply(new
+            {
+                ok = true,
+                cmd = "probeWindowAccessibility",
+                hwnd = hwnd.ToInt64(),
+                query = new
+                {
+                    maxResults,
+                    maxRoots,
+                    maxDepth,
+                    maxVisited,
+                    timeoutMs,
+                    bounds,
+                    includeOffscreen,
+                    includeDisabled,
+                    rootControlType,
+                    rootClassName
+                },
+                roots = rootPayloads,
+                elements,
+                count = elements.Count,
+                stats = new
+                {
+                    elapsedMs = started.ElapsedMilliseconds,
+                    rootSearchVisited,
+                    rawVisited,
+                    msaaVisited,
+                    rootCount = rootPayloads.Count,
+                    uiaDescendantCount,
+                    msaaDescendantCount,
+                    timedOut,
+                    visitedLimitHit,
+                    depthLimitHit,
+                    resultLimitHit = collected.Count > maxResults,
+                    documentBarrierDetected = rootPayloads.Count > 0 && elements.Count == 0
+                }
+            });
+        }
+
+        static void HandleGetFocusedElementInWindow(JsonElement root)
+        {
+            var started = Stopwatch.StartNew();
+            long rawHandle = root.TryGetProperty("hwnd", out var hwndProp)
+                ? hwndProp.GetInt64()
+                : 0;
+
+            IntPtr hwnd = new IntPtr(rawHandle);
+            if (hwnd == IntPtr.Zero || !IsWindow(hwnd))
+            {
+                Reply(new { ok = false, cmd = "getFocusedElementInWindow", error = "Window handle not found" });
+                return;
+            }
+
+            AutomationElement targetWindow;
+            try
+            {
+                targetWindow = AutomationElement.FromHandle(hwnd);
+            }
+            catch (Exception ex)
+            {
+                Reply(new { ok = false, cmd = "getFocusedElementInWindow", error = $"AutomationElement.FromHandle failed: {ex.Message}" });
+                return;
+            }
+
+            AutomationElement? focused = null;
+            AutomationElement? focusedWindow = null;
+            int depth = -1;
+            string reason = "focused-element-unavailable";
+
+            try
+            {
+                focused = AutomationElement.FocusedElement;
+                if (focused == null)
+                {
+                    Reply(new
+                    {
+                        ok = true,
+                        cmd = "getFocusedElementInWindow",
+                        hwnd = hwnd.ToInt64(),
+                        focused = false,
+                        reason,
+                        element = (object?)null,
+                        targetWindow = BuildWindowInfo(hwnd, targetWindow),
+                        focusedWindow = (object?)null,
+                        stats = new { elapsedMs = started.ElapsedMilliseconds }
+                    });
+                    return;
+                }
+
+                focusedWindow = FindTopLevelWindow(focused);
+                long focusedWindowHandle = 0;
+                try { focusedWindowHandle = focusedWindow?.Current.NativeWindowHandle ?? 0; } catch { }
+
+                if (focusedWindowHandle != hwnd.ToInt64())
+                {
+                    reason = focusedWindow == null ? "focused-window-unresolved" : "focus-outside-window";
+                    Reply(new
+                    {
+                        ok = true,
+                        cmd = "getFocusedElementInWindow",
+                        hwnd = hwnd.ToInt64(),
+                        focused = false,
+                        reason,
+                        element = (object?)null,
+                        targetWindow = BuildWindowInfo(hwnd, targetWindow),
+                        focusedWindow = focusedWindow != null ? BuildWindowInfo(focusedWindow) : null,
+                        stats = new { elapsedMs = started.ElapsedMilliseconds }
+                    });
+                    return;
+                }
+
+                depth = GetElementDepthWithinAncestor(focused, focusedWindow);
+                reason = "focused-descendant";
+                Reply(new
+                {
+                    ok = true,
+                    cmd = "getFocusedElementInWindow",
+                    hwnd = hwnd.ToInt64(),
+                    focused = true,
+                    reason,
+                    element = BuildFindElementPayload(focused, hwnd, Math.Max(0, depth)),
+                    targetWindow = BuildWindowInfo(hwnd, targetWindow),
+                    focusedWindow = focusedWindow != null ? BuildWindowInfo(focusedWindow) : null,
+                    stats = new
+                    {
+                        depth = Math.Max(0, depth),
+                        elapsedMs = started.ElapsedMilliseconds
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                Reply(new { ok = false, cmd = "getFocusedElementInWindow", error = ex.Message });
+            }
         }
 
         static void HandleInvokeElementByWindow(JsonElement root)
@@ -940,6 +1552,63 @@ namespace UIAWrapper
             }
         }
 
+        static void HandleSaveClipboardState()
+        {
+            try
+            {
+                var snapshot = ReadClipboardSnapshotWithRetry();
+                string token = SaveClipboardSnapshot(snapshot);
+                Reply(new
+                {
+                    ok = true,
+                    cmd = "saveClipboardState",
+                    token,
+                    containsText = snapshot.ContainsText,
+                    textLength = snapshot.Text.Length
+                });
+            }
+            catch (Exception ex)
+            {
+                Reply(new { ok = false, cmd = "saveClipboardState", error = ex.Message });
+            }
+        }
+
+        static void HandleRestoreClipboardState(JsonElement root)
+        {
+            try
+            {
+                string token = GetStringOption(root, "token", "").Trim();
+                if (string.IsNullOrWhiteSpace(token))
+                {
+                    Reply(new { ok = false, cmd = "restoreClipboardState", error = "Clipboard state token was not provided" });
+                    return;
+                }
+
+                var snapshot = GetClipboardSnapshot(token);
+                if (snapshot == null)
+                {
+                    Reply(new { ok = false, cmd = "restoreClipboardState", error = "Clipboard state token was not found" });
+                    return;
+                }
+
+                WriteClipboardTextWithRetry(snapshot.ContainsText ? snapshot.Text : "");
+                RemoveClipboardSnapshot(token);
+                Reply(new
+                {
+                    ok = true,
+                    cmd = "restoreClipboardState",
+                    token,
+                    restored = true,
+                    containsText = snapshot.ContainsText,
+                    textLength = snapshot.Text.Length
+                });
+            }
+            catch (Exception ex)
+            {
+                Reply(new { ok = false, cmd = "restoreClipboardState", error = ex.Message });
+            }
+        }
+
         static string ReadClipboardTextWithRetry(int attempts = 5, int delayMs = 60)
         {
             Exception? lastError = null;
@@ -965,6 +1634,39 @@ namespace UIAWrapper
             }
 
             throw new InvalidOperationException($"Clipboard read failed after {attempts} attempts: {lastError?.Message}", lastError);
+        }
+
+        static ClipboardTextSnapshot ReadClipboardSnapshotWithRetry(int attempts = 5, int delayMs = 60)
+        {
+            Exception? lastError = null;
+            for (int attempt = 1; attempt <= attempts; attempt++)
+            {
+                try
+                {
+                    return RunInStaThread(() =>
+                    {
+                        bool containsUnicodeText = Clipboard.ContainsText(TextDataFormat.UnicodeText);
+                        bool containsText = containsUnicodeText || Clipboard.ContainsText();
+                        string text = containsUnicodeText
+                            ? (Clipboard.GetText(TextDataFormat.UnicodeText) ?? "")
+                            : (containsText ? (Clipboard.GetText() ?? "") : "");
+                        return new ClipboardTextSnapshot
+                        {
+                            ContainsText = containsText,
+                            Text = text,
+                            SavedAtUnixMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+                        };
+                    });
+                }
+                catch (Exception ex)
+                {
+                    lastError = ex;
+                    if (attempt < attempts)
+                        Thread.Sleep(delayMs);
+                }
+            }
+
+            throw new InvalidOperationException($"Clipboard snapshot failed after {attempts} attempts: {lastError?.Message}", lastError);
         }
 
         static void WriteClipboardTextWithRetry(string text, int attempts = 5, int delayMs = 60)
@@ -1019,6 +1721,45 @@ namespace UIAWrapper
                 throw error;
 
             return result;
+        }
+
+        static string SaveClipboardSnapshot(ClipboardTextSnapshot snapshot)
+        {
+            string token = Guid.NewGuid().ToString("N");
+            lock (_clipboardSnapshotLock)
+            {
+                _clipboardSnapshots[token] = snapshot;
+                _clipboardSnapshotOrder.Enqueue(token);
+                TrimClipboardSnapshotStoreUnsafe();
+            }
+            return token;
+        }
+
+        static ClipboardTextSnapshot? GetClipboardSnapshot(string token)
+        {
+            lock (_clipboardSnapshotLock)
+            {
+                return _clipboardSnapshots.TryGetValue(token, out var snapshot)
+                    ? snapshot
+                    : null;
+            }
+        }
+
+        static void RemoveClipboardSnapshot(string token)
+        {
+            lock (_clipboardSnapshotLock)
+            {
+                _clipboardSnapshots.Remove(token);
+            }
+        }
+
+        static void TrimClipboardSnapshotStoreUnsafe()
+        {
+            while (_clipboardSnapshots.Count > MaxClipboardSnapshots && _clipboardSnapshotOrder.Count > 0)
+            {
+                string oldestToken = _clipboardSnapshotOrder.Dequeue();
+                _clipboardSnapshots.Remove(oldestToken);
+            }
         }
 
         static IntPtr? FindBestWindow(string title, string titleMode, string processName, string className)
@@ -1319,7 +2060,7 @@ namespace UIAWrapper
 
                 // Emit focus changed event with active window info
                 var winInfo = BuildWindowInfo(topWindow);
-                Reply(new
+                ReplyEvent(new
                 {
                     type = "event",
                     @event = "focusChanged",
@@ -1402,7 +2143,7 @@ namespace UIAWrapper
             try
             {
                 var elements = WalkFocusedWindowElements();
-                Reply(new
+                ReplyEvent(new
                 {
                     type = "event",
                     @event = "structureChanged",
@@ -1413,7 +2154,7 @@ namespace UIAWrapper
             catch (Exception ex)
             {
                 // Window may have vanished
-                Reply(new
+                ReplyEvent(new
                 {
                     type = "event",
                     @event = "error",
@@ -1443,7 +2184,7 @@ namespace UIAWrapper
                 deduped[id] = el; // last wins
             }
 
-            Reply(new
+            ReplyEvent(new
             {
                 type = "event",
                 @event = "propertyChanged",
@@ -1500,9 +2241,14 @@ namespace UIAWrapper
 
         static AutomationElement? FindTopLevelWindow(AutomationElement element)
         {
+            return FindTopLevelWindow(element, TreeWalker.ControlViewWalker)
+                ?? FindTopLevelWindow(element, TreeWalker.RawViewWalker);
+        }
+
+        static AutomationElement? FindTopLevelWindow(AutomationElement element, TreeWalker walker)
+        {
             try
             {
-                var walker = TreeWalker.ControlViewWalker;
                 var current = element;
                 AutomationElement? lastWindow = null;
 
@@ -1521,6 +2267,40 @@ namespace UIAWrapper
                 return lastWindow;
             }
             catch { return null; }
+        }
+
+        static int GetElementDepthWithinAncestor(AutomationElement element, AutomationElement? ancestor, int maxDepth = 128)
+        {
+            if (ancestor == null) return -1;
+
+            try
+            {
+                var current = element;
+                var depth = 0;
+                var controlWalker = TreeWalker.ControlViewWalker;
+                var rawWalker = TreeWalker.RawViewWalker;
+
+                while (current != null && depth <= maxDepth)
+                {
+                    if (Automation.Compare(current, ancestor))
+                    {
+                        return depth;
+                    }
+
+                    AutomationElement? parent = null;
+                    try { parent = controlWalker.GetParent(current); } catch { parent = null; }
+                    if (parent == null)
+                    {
+                        try { parent = rawWalker.GetParent(current); } catch { parent = null; }
+                    }
+
+                    current = parent;
+                    depth++;
+                }
+            }
+            catch { }
+
+            return -1;
         }
 
         static Dictionary<string, object?> BuildWindowInfo(AutomationElement window)
@@ -1785,6 +2565,32 @@ namespace UIAWrapper
             catch { return fallback; }
         }
 
+        static string[] GetStringArrayOption(JsonElement root, string propertyName)
+        {
+            try
+            {
+                if (!root.TryGetProperty(propertyName, out var prop) || prop.ValueKind != JsonValueKind.Array)
+                {
+                    return Array.Empty<string>();
+                }
+
+                var values = new List<string>();
+                foreach (var item in prop.EnumerateArray())
+                {
+                    if (item.ValueKind == JsonValueKind.String)
+                    {
+                        string value = item.GetString() ?? "";
+                        if (!string.IsNullOrWhiteSpace(value))
+                        {
+                            values.Add(value);
+                        }
+                    }
+                }
+                return values.ToArray();
+            }
+            catch { return Array.Empty<string>(); }
+        }
+
         static int GetIntOption(JsonElement root, string propertyName, int fallback)
         {
             try
@@ -1808,6 +2614,20 @@ namespace UIAWrapper
                 return fallback;
             }
             catch { return fallback; }
+        }
+
+        static string? GetRequestId(JsonElement root)
+        {
+            try
+            {
+                if (!root.TryGetProperty("requestId", out var prop)) return null;
+                string requestId = prop.ValueKind == JsonValueKind.String
+                    ? prop.GetString() ?? ""
+                    : prop.ToString();
+                requestId = requestId.Trim();
+                return requestId.Length > 0 ? requestId : null;
+            }
+            catch { return null; }
         }
 
         static int ClampInt(int value, int min, int max)
@@ -1913,6 +2733,14 @@ namespace UIAWrapper
             return true;
         }
 
+        static bool RectContainsPoint(Rect rect, double x, double y)
+        {
+            return x >= rect.X
+                && x <= rect.X + rect.Width
+                && y >= rect.Y
+                && y <= rect.Y + rect.Height;
+        }
+
         static bool RectIntersects(Rect rect, Dictionary<string, double> bounds)
         {
             double bx = bounds["x"];
@@ -1936,6 +2764,308 @@ namespace UIAWrapper
                 "content" => TreeWalker.ContentViewWalker,
                 _ => TreeWalker.ControlViewWalker
             };
+        }
+
+        static bool ElementPassesPointFilters(AutomationElement el, bool includeOffscreen, bool includeDisabled)
+        {
+            try
+            {
+                var current = el.Current;
+                if (!includeOffscreen && current.IsOffscreen) return false;
+                if (!includeDisabled && !current.IsEnabled) return false;
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        static string TryGetElementValueText(AutomationElement el)
+        {
+            try
+            {
+                object value = el.GetCurrentPropertyValue(ValuePattern.ValueProperty);
+                if (value != AutomationElement.NotSupported)
+                    return value?.ToString() ?? "";
+            }
+            catch { }
+            return "";
+        }
+
+        static bool IsMeaningfulPointElement(AutomationElement el)
+        {
+            try
+            {
+                var current = el.Current;
+                string controlType = current.ControlType.ProgrammaticName.Replace("ControlType.", "");
+                bool hasTextSignals = !string.IsNullOrWhiteSpace(current.Name)
+                    || !string.IsNullOrWhiteSpace(current.AutomationId)
+                    || !string.IsNullOrWhiteSpace(TryGetElementValueText(el));
+                bool hasInteraction = current.IsKeyboardFocusable
+                    || (bool)el.GetCurrentPropertyValue(AutomationElement.IsInvokePatternAvailableProperty)
+                    || (bool)el.GetCurrentPropertyValue(AutomationElement.IsSelectionItemPatternAvailableProperty)
+                    || (bool)el.GetCurrentPropertyValue(AutomationElement.IsTogglePatternAvailableProperty)
+                    || (bool)el.GetCurrentPropertyValue(AutomationElement.IsExpandCollapsePatternAvailableProperty)
+                    || (bool)el.GetCurrentPropertyValue(AutomationElement.IsValuePatternAvailableProperty);
+                bool genericRole = controlType.Equals("Pane", StringComparison.OrdinalIgnoreCase)
+                    || controlType.Equals("Window", StringComparison.OrdinalIgnoreCase)
+                    || controlType.Equals("Custom", StringComparison.OrdinalIgnoreCase)
+                    || controlType.Equals("Document", StringComparison.OrdinalIgnoreCase);
+                return hasTextSignals || hasInteraction || !genericRole;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        static int[]? TryGetRuntimeId(AutomationElement? element)
+        {
+            if (element == null) return null;
+            try
+            {
+                return element.GetRuntimeId();
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        static bool ElementsReferToSameNode(AutomationElement? left, AutomationElement? right)
+        {
+            if (left == null || right == null) return false;
+
+            try
+            {
+                var leftRuntimeId = TryGetRuntimeId(left);
+                var rightRuntimeId = TryGetRuntimeId(right);
+                if (leftRuntimeId != null && rightRuntimeId != null
+                    && leftRuntimeId.Length > 0 && rightRuntimeId.Length > 0)
+                {
+                    return leftRuntimeId.SequenceEqual(rightRuntimeId);
+                }
+            }
+            catch { }
+
+            try
+            {
+                int leftHandle = left.Current.NativeWindowHandle;
+                int rightHandle = right.Current.NativeWindowHandle;
+                if (leftHandle > 0 && rightHandle > 0 && leftHandle == rightHandle)
+                {
+                    return string.Equals(left.Current.AutomationId ?? "", right.Current.AutomationId ?? "", StringComparison.OrdinalIgnoreCase)
+                        && string.Equals(left.Current.ClassName ?? "", right.Current.ClassName ?? "", StringComparison.OrdinalIgnoreCase)
+                        && string.Equals(left.Current.Name ?? "", right.Current.Name ?? "", StringComparison.OrdinalIgnoreCase);
+                }
+            }
+            catch { }
+
+            return false;
+        }
+
+        static bool IsSameOrDescendantOfWindow(AutomationElement element, AutomationElement window, int maxHops = 96)
+        {
+            AutomationElement? current = element;
+            int hops = 0;
+            while (current != null && hops < maxHops)
+            {
+                if (ElementsReferToSameNode(current, window))
+                    return true;
+
+                try
+                {
+                    current = TreeWalker.RawViewWalker.GetParent(current);
+                }
+                catch
+                {
+                    break;
+                }
+
+                hops++;
+            }
+
+            return false;
+        }
+
+        static int ScorePointElementCandidate(AutomationElement el, int depth)
+        {
+            int score = depth * 8;
+
+            try
+            {
+                var current = el.Current;
+                if (!string.IsNullOrWhiteSpace(current.Name)) score += 40;
+                if (!string.IsNullOrWhiteSpace(current.AutomationId)) score += 20;
+                if (!string.IsNullOrWhiteSpace(TryGetElementValueText(el))) score += 18;
+                if (current.IsKeyboardFocusable) score += 10;
+                if (current.IsEnabled) score += 4;
+                if (!current.IsOffscreen) score += 4;
+
+                string controlType = current.ControlType.ProgrammaticName.Replace("ControlType.", "");
+                if (controlType.Equals("Button", StringComparison.OrdinalIgnoreCase)) score += 16;
+                if (controlType.Equals("Edit", StringComparison.OrdinalIgnoreCase)) score += 16;
+                if (controlType.Equals("Text", StringComparison.OrdinalIgnoreCase)) score += 8;
+                if (controlType.Equals("Pane", StringComparison.OrdinalIgnoreCase)) score -= 12;
+                if (controlType.Equals("Window", StringComparison.OrdinalIgnoreCase)) score -= 20;
+                if (controlType.Equals("Custom", StringComparison.OrdinalIgnoreCase)) score -= 8;
+
+                if ((bool)el.GetCurrentPropertyValue(AutomationElement.IsInvokePatternAvailableProperty)) score += 16;
+                if ((bool)el.GetCurrentPropertyValue(AutomationElement.IsSelectionItemPatternAvailableProperty)) score += 12;
+                if ((bool)el.GetCurrentPropertyValue(AutomationElement.IsValuePatternAvailableProperty)) score += 10;
+                if ((bool)el.GetCurrentPropertyValue(AutomationElement.IsTextPatternAvailableProperty)) score += 8;
+                if ((bool)el.GetCurrentPropertyValue(AutomationElement.IsTogglePatternAvailableProperty)) score += 6;
+                if ((bool)el.GetCurrentPropertyValue(AutomationElement.IsExpandCollapsePatternAvailableProperty)) score += 6;
+            }
+            catch { }
+
+            return score;
+        }
+
+        static bool IsBetterPointElementCandidate(
+            AutomationElement candidate,
+            int candidateDepth,
+            double candidateArea,
+            int candidateScore,
+            AutomationElement? best,
+            int bestDepth,
+            double bestArea,
+            int bestScore)
+        {
+            if (best == null) return true;
+            if (candidateScore != bestScore) return candidateScore > bestScore;
+
+            double areaDelta = Math.Abs(candidateArea - bestArea);
+            if (areaDelta > 0.5) return candidateArea < bestArea;
+
+            if (candidateDepth != bestDepth) return candidateDepth > bestDepth;
+
+            return false;
+        }
+
+        static AutomationElement? FindBestElementContainingPoint(
+            AutomationElement window,
+            double x,
+            double y,
+            bool includeOffscreen,
+            bool includeDisabled,
+            string view,
+            int maxDepth,
+            int maxVisited,
+            int timeoutMs,
+            Stopwatch started,
+            out int visited,
+            out int candidateCount,
+            out bool timedOut,
+            out bool visitedLimitHit,
+            out bool depthLimitHit,
+            out int matchedDepth)
+        {
+            visited = 0;
+            candidateCount = 0;
+            timedOut = false;
+            visitedLimitHit = false;
+            depthLimitHit = false;
+            matchedDepth = -1;
+
+            AutomationElement? best = null;
+            double bestArea = double.PositiveInfinity;
+            int bestScore = int.MinValue;
+            int bestDepth = -1;
+
+            var walker = ResolveTreeWalker(view);
+            var stack = new Stack<(AutomationElement Element, int Depth)>();
+            stack.Push((window, 0));
+
+            while (stack.Count > 0)
+            {
+                if (started.ElapsedMilliseconds >= timeoutMs)
+                {
+                    timedOut = true;
+                    break;
+                }
+
+                if (visited >= maxVisited)
+                {
+                    visitedLimitHit = true;
+                    break;
+                }
+
+                var current = stack.Pop();
+                visited++;
+
+                Rect rect = Rect.Empty;
+                bool rectUsable = false;
+                bool containsPoint = false;
+
+                try
+                {
+                    rect = current.Element.Current.BoundingRectangle;
+                    rectUsable = IsUsableRect(rect);
+                    containsPoint = rectUsable && RectContainsPoint(rect, x, y);
+                }
+                catch (ElementNotAvailableException) { continue; }
+                catch { }
+
+                if (current.Depth == 0 && rectUsable && !containsPoint)
+                {
+                    break;
+                }
+
+                if (current.Depth > 0 && rectUsable && !containsPoint)
+                {
+                    continue;
+                }
+
+                if (containsPoint && ElementPassesPointFilters(current.Element, includeOffscreen, includeDisabled))
+                {
+                    candidateCount++;
+                    double area = Math.Max(1, rect.Width * rect.Height);
+                    int score = ScorePointElementCandidate(current.Element, current.Depth);
+                    if (IsBetterPointElementCandidate(current.Element, current.Depth, area, score, best, bestDepth, bestArea, bestScore))
+                    {
+                        best = current.Element;
+                        bestArea = area;
+                        bestScore = score;
+                        bestDepth = current.Depth;
+                    }
+                }
+
+                if (current.Depth >= maxDepth)
+                {
+                    depthLimitHit = true;
+                    continue;
+                }
+
+                var children = new List<AutomationElement>();
+                try
+                {
+                    var child = walker.GetFirstChild(current.Element);
+                    while (child != null)
+                    {
+                        children.Add(child);
+                        child = walker.GetNextSibling(child);
+                        if (started.ElapsedMilliseconds >= timeoutMs)
+                        {
+                            timedOut = true;
+                            break;
+                        }
+                    }
+                }
+                catch (ElementNotAvailableException) { }
+                catch { }
+
+                for (int i = children.Count - 1; i >= 0; i--)
+                {
+                    stack.Push((children[i], current.Depth + 1));
+                }
+
+                if (timedOut) break;
+            }
+
+            matchedDepth = bestDepth;
+            return best;
         }
 
         static AutomationElement? FindFirstMatchingElement(
@@ -2034,6 +3164,771 @@ namespace UIAWrapper
             }
 
             return null;
+        }
+
+        static List<(AutomationElement Element, int Depth, int Score)> CollectAccessibilityProbeRootCandidates(
+            AutomationElement window,
+            string rootControlType,
+            string rootClassName,
+            Dictionary<string, double>? bounds,
+            int maxRoots,
+            int maxDepth,
+            int maxVisited,
+            int timeoutMs,
+            Stopwatch started,
+            out int visited,
+            out bool timedOut,
+            out bool visitedLimitHit,
+            out bool depthLimitHit)
+        {
+            visited = 0;
+            timedOut = false;
+            visitedLimitHit = false;
+            depthLimitHit = false;
+
+            var results = new List<(AutomationElement Element, int Depth, int Score)>();
+            var walker = TreeWalker.RawViewWalker;
+            var stack = new Stack<(AutomationElement Element, int Depth)>();
+            stack.Push((window, 0));
+
+            while (stack.Count > 0)
+            {
+                if (started.ElapsedMilliseconds >= timeoutMs)
+                {
+                    timedOut = true;
+                    break;
+                }
+
+                if (visited >= maxVisited)
+                {
+                    visitedLimitHit = true;
+                    break;
+                }
+
+                var current = stack.Pop();
+                visited++;
+
+                if (current.Depth > maxDepth)
+                {
+                    depthLimitHit = true;
+                    continue;
+                }
+
+                try
+                {
+                    if (current.Depth > 0 && IsAccessibilityProbeRootCandidate(current.Element, rootControlType, rootClassName, bounds, out int score))
+                    {
+                        results.Add((current.Element, current.Depth, score));
+                    }
+                }
+                catch (ElementNotAvailableException) { continue; }
+                catch { }
+
+                var children = new List<AutomationElement>();
+                try
+                {
+                    var child = walker.GetFirstChild(current.Element);
+                    while (child != null)
+                    {
+                        children.Add(child);
+                        child = walker.GetNextSibling(child);
+                        if (started.ElapsedMilliseconds >= timeoutMs)
+                        {
+                            timedOut = true;
+                            break;
+                        }
+                    }
+                }
+                catch (ElementNotAvailableException) { }
+                catch { }
+
+                for (int i = children.Count - 1; i >= 0; i--)
+                {
+                    stack.Push((children[i], current.Depth + 1));
+                }
+
+                if (timedOut) break;
+            }
+
+            return results
+                .OrderByDescending(entry => entry.Score)
+                .ThenBy(entry => entry.Depth)
+                .Take(maxRoots)
+                .ToList();
+        }
+
+        static bool IsAccessibilityProbeRootCandidate(
+            AutomationElement element,
+            string rootControlType,
+            string rootClassName,
+            Dictionary<string, double>? bounds,
+            out int score)
+        {
+            score = 0;
+            var current = element.Current;
+            string className = current.ClassName ?? "";
+            string controlType = current.ControlType.ProgrammaticName.Replace("ControlType.", "");
+            bool classMatches = !string.IsNullOrWhiteSpace(rootClassName)
+                && string.Equals(className, rootClassName, StringComparison.OrdinalIgnoreCase);
+            bool controlMatches = !string.IsNullOrWhiteSpace(rootControlType)
+                && (string.Equals(controlType, rootControlType, StringComparison.OrdinalIgnoreCase)
+                    || current.ControlType.ProgrammaticName.EndsWith("." + rootControlType, StringComparison.OrdinalIgnoreCase));
+
+            if (!classMatches && !controlMatches) return false;
+
+            Rect rect = current.BoundingRectangle;
+            if (!IsUsableRect(rect)) return false;
+            if (bounds != null && !RectIntersects(rect, bounds)) return false;
+
+            if (classMatches) score += 80;
+            if (controlMatches) score += 44;
+            if (current.NativeWindowHandle > 0) score += 20;
+            if (!string.IsNullOrWhiteSpace(current.Name)) score += 8;
+            if (!current.IsOffscreen) score += 4;
+            return true;
+        }
+
+        static void CollectAccessibilityProbeUiaDescendants(
+            AutomationElement root,
+            IntPtr rootHwnd,
+            Dictionary<string, double>? bounds,
+            bool includeOffscreen,
+            bool includeDisabled,
+            int maxDepth,
+            int maxVisited,
+            int timeoutMs,
+            Stopwatch started,
+            List<(Dictionary<string, object?> Payload, int Score)> collected,
+            HashSet<string> seen,
+            ref int visited,
+            ref bool timedOut,
+            ref bool visitedLimitHit,
+            ref bool depthLimitHit,
+            ref int addedCount)
+        {
+            var walker = TreeWalker.RawViewWalker;
+            var stack = new Stack<(AutomationElement Element, int Depth)>();
+            stack.Push((root, 0));
+
+            while (stack.Count > 0)
+            {
+                if (started.ElapsedMilliseconds >= timeoutMs)
+                {
+                    timedOut = true;
+                    break;
+                }
+
+                if (visited >= maxVisited)
+                {
+                    visitedLimitHit = true;
+                    break;
+                }
+
+                var current = stack.Pop();
+                visited++;
+
+                if (current.Depth > maxDepth)
+                {
+                    depthLimitHit = true;
+                    continue;
+                }
+
+                try
+                {
+                    if (current.Depth > 0 && IsMeaningfulAccessibilityProbeElement(current.Element, includeOffscreen, includeDisabled, bounds))
+                    {
+                        var payload = BuildFindElementPayload(current.Element, rootHwnd, current.Depth);
+                        payload["Source"] = "uia-raw";
+                        if (AddAccessibilityProbeCandidate(collected, seen, payload))
+                        {
+                            addedCount++;
+                        }
+                    }
+                }
+                catch (ElementNotAvailableException) { continue; }
+                catch { }
+
+                var children = new List<AutomationElement>();
+                try
+                {
+                    var child = walker.GetFirstChild(current.Element);
+                    while (child != null)
+                    {
+                        children.Add(child);
+                        child = walker.GetNextSibling(child);
+                        if (started.ElapsedMilliseconds >= timeoutMs)
+                        {
+                            timedOut = true;
+                            break;
+                        }
+                    }
+                }
+                catch (ElementNotAvailableException) { }
+                catch { }
+
+                for (int i = children.Count - 1; i >= 0; i--)
+                {
+                    stack.Push((children[i], current.Depth + 1));
+                }
+
+                if (timedOut) break;
+            }
+        }
+
+        static void CollectAccessibilityProbeMsaaDescendants(
+            IntPtr nativeHwnd,
+            IntPtr rootHwnd,
+            Dictionary<string, double>? bounds,
+            Dictionary<string, double?>? fallbackBounds,
+            string rootClassName,
+            int maxDepth,
+            int maxVisited,
+            int timeoutMs,
+            Stopwatch started,
+            List<(Dictionary<string, object?> Payload, int Score)> collected,
+            HashSet<string> seen,
+            ref int visited,
+            ref bool timedOut,
+            ref bool visitedLimitHit,
+            ref bool depthLimitHit,
+            ref int addedCount)
+        {
+            if (nativeHwnd == IntPtr.Zero || !IsWindow(nativeHwnd)) return;
+            var accessible = TryGetAccessibleRootFromWindow(nativeHwnd);
+            if (accessible == null) return;
+            int visitedLocal = visited;
+            bool timedOutLocal = timedOut;
+            bool visitedLimitHitLocal = visitedLimitHit;
+            bool depthLimitHitLocal = depthLimitHit;
+            int addedCountLocal = addedCount;
+
+            try
+            {
+                VisitAccessibleNode(accessible, CHILDID_SELF, 0, false);
+            }
+            finally
+            {
+                SafeReleaseComObject(accessible);
+            }
+
+            visited = visitedLocal;
+            timedOut = timedOutLocal;
+            visitedLimitHit = visitedLimitHitLocal;
+            depthLimitHit = depthLimitHitLocal;
+            addedCount = addedCountLocal;
+
+            void VisitAccessibleNode(IAccessible accessibleNode, int childId, int depth, bool releaseAfter)
+            {
+                try
+                {
+                    if (started.ElapsedMilliseconds >= timeoutMs)
+                    {
+                        timedOutLocal = true;
+                        return;
+                    }
+
+                    if (visitedLocal >= maxVisited)
+                    {
+                        visitedLimitHitLocal = true;
+                        return;
+                    }
+
+                    visitedLocal++;
+
+                    if (depth > maxDepth)
+                    {
+                        depthLimitHitLocal = true;
+                        return;
+                    }
+
+                    var payload = BuildMsaaAccessibilityPayload(
+                        accessibleNode,
+                        childId,
+                        rootHwnd,
+                        nativeHwnd,
+                        rootClassName,
+                        fallbackBounds,
+                        depth);
+
+                    if (payload != null
+                        && BoundsPayloadIntersectsFilter(payload, bounds)
+                        && IsMeaningfulMsaaAccessibilityPayload(payload))
+                    {
+                        if (AddAccessibilityProbeCandidate(collected, seen, payload))
+                        {
+                            addedCountLocal++;
+                        }
+                    }
+
+                    if (childId != CHILDID_SELF || depth >= maxDepth) return;
+
+                    int childCount = 0;
+                    try { childCount = accessibleNode.accChildCount; } catch { childCount = 0; }
+                    for (int index = 1; index <= childCount; index++)
+                    {
+                        if (started.ElapsedMilliseconds >= timeoutMs)
+                        {
+                            timedOutLocal = true;
+                            break;
+                        }
+
+                        if (visitedLocal >= maxVisited)
+                        {
+                            visitedLimitHitLocal = true;
+                            break;
+                        }
+
+                        object? child = null;
+                        try { child = accessibleNode.get_accChild(index); } catch { child = null; }
+
+                        if (child is IAccessible childAccessible)
+                        {
+                            VisitAccessibleNode(childAccessible, CHILDID_SELF, depth + 1, true);
+                        }
+                        else
+                        {
+                            VisitAccessibleNode(accessibleNode, index, depth + 1, false);
+                        }
+
+                        if (timedOutLocal || visitedLimitHitLocal) break;
+                    }
+                }
+                finally
+                {
+                    if (releaseAfter)
+                    {
+                        SafeReleaseComObject(accessibleNode);
+                    }
+                }
+            }
+        }
+
+        static IAccessible? TryGetAccessibleRootFromWindow(IntPtr hwnd)
+        {
+            try
+            {
+                object? ppvObject = null;
+                Guid riid = IID_IAccessible;
+                int hr = AccessibleObjectFromWindow(hwnd, OBJID_CLIENT, ref riid, ref ppvObject);
+                if (hr < 0 || ppvObject is not IAccessible accessible)
+                {
+                    SafeReleaseComObject(ppvObject);
+                    return null;
+                }
+
+                return accessible;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        static void SafeReleaseComObject(object? instance)
+        {
+            if (instance == null) return;
+            try
+            {
+                if (Marshal.IsComObject(instance))
+                {
+                    Marshal.ReleaseComObject(instance);
+                }
+            }
+            catch { }
+        }
+
+        static Dictionary<string, object?>? BuildMsaaAccessibilityPayload(
+            IAccessible accessible,
+            int childId,
+            IntPtr rootHwnd,
+            IntPtr nativeHwnd,
+            string rootClassName,
+            Dictionary<string, double?>? fallbackBounds,
+            int depth)
+        {
+            object childVariant = childId;
+            string name = TryGetMsaaString(() => accessible.get_accName(childVariant));
+            string value = TryGetMsaaString(() => accessible.get_accValue(childVariant));
+            string description = TryGetMsaaString(() => accessible.get_accDescription(childVariant));
+            string defaultAction = TryGetMsaaString(() => accessible.get_accDefaultAction(childVariant));
+            string roleText = ResolveAccessibleRoleText(TryGetMsaaObject(() => accessible.get_accRole(childVariant)));
+            string controlType = MapAccessibleRoleToControlType(roleText);
+            var bounds = TryGetMsaaBoundsPayload(accessible, childVariant, fallbackBounds);
+
+            if (bounds == null) return null;
+
+            bool clickable = !string.IsNullOrWhiteSpace(defaultAction)
+                || controlType.Equals("Button", StringComparison.OrdinalIgnoreCase)
+                || controlType.Equals("Hyperlink", StringComparison.OrdinalIgnoreCase)
+                || controlType.Equals("TabItem", StringComparison.OrdinalIgnoreCase);
+            bool focusable = clickable
+                || controlType.Equals("Edit", StringComparison.OrdinalIgnoreCase)
+                || controlType.Equals("ComboBox", StringComparison.OrdinalIgnoreCase);
+
+            return new Dictionary<string, object?>
+            {
+                ["Name"] = name,
+                ["AutomationId"] = "",
+                ["ClassName"] = rootClassName,
+                ["ControlType"] = $"ControlType.{controlType}",
+                ["Value"] = value,
+                ["Description"] = description,
+                ["DefaultAction"] = defaultAction,
+                ["LegacyRole"] = roleText,
+                ["WindowHandle"] = rootHwnd.ToInt64(),
+                ["NativeWindowHandle"] = nativeHwnd.ToInt64(),
+                ["Patterns"] = new List<string> { "LegacyIAccessible" },
+                ["Bounds"] = CloneBoundsPayload(bounds),
+                ["depth"] = depth,
+                ["IsFocusable"] = focusable,
+                ["IsClickable"] = clickable,
+                ["Source"] = "msaa"
+            };
+        }
+
+        static Dictionary<string, double?>? TryBuildBoundsPayload(AutomationElement element)
+        {
+            try
+            {
+                return TryBuildBoundsPayload(element.Current.BoundingRectangle);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        static Dictionary<string, double?>? TryBuildBoundsPayload(Rect rect)
+        {
+            if (!IsUsableRect(rect)) return null;
+            return new Dictionary<string, double?>
+            {
+                ["X"] = SafeNumber(rect.X),
+                ["Y"] = SafeNumber(rect.Y),
+                ["Width"] = SafeNumber(rect.Width),
+                ["Height"] = SafeNumber(rect.Height),
+                ["CenterX"] = SafeNumber(rect.X + rect.Width / 2),
+                ["CenterY"] = SafeNumber(rect.Y + rect.Height / 2)
+            };
+        }
+
+        static Dictionary<string, double?>? CloneBoundsPayload(Dictionary<string, double?>? bounds)
+        {
+            if (bounds == null) return null;
+            return new Dictionary<string, double?>
+            {
+                ["X"] = bounds.TryGetValue("X", out var x) ? x : null,
+                ["Y"] = bounds.TryGetValue("Y", out var y) ? y : null,
+                ["Width"] = bounds.TryGetValue("Width", out var width) ? width : null,
+                ["Height"] = bounds.TryGetValue("Height", out var height) ? height : null,
+                ["CenterX"] = bounds.TryGetValue("CenterX", out var centerX) ? centerX : null,
+                ["CenterY"] = bounds.TryGetValue("CenterY", out var centerY) ? centerY : null
+            };
+        }
+
+        static object? TryGetMsaaObject(Func<object?> getter)
+        {
+            try { return getter(); }
+            catch { return null; }
+        }
+
+        static string TryGetMsaaString(Func<object?> getter)
+        {
+            try
+            {
+                return getter()?.ToString() ?? "";
+            }
+            catch
+            {
+                return "";
+            }
+        }
+
+        static Dictionary<string, double?>? TryGetMsaaBoundsPayload(
+            IAccessible accessible,
+            object childVariant,
+            Dictionary<string, double?>? fallbackBounds)
+        {
+            try
+            {
+                accessible.accLocation(out int left, out int top, out int width, out int height, childVariant);
+                if (width > 0 && height > 0)
+                {
+                    return new Dictionary<string, double?>
+                    {
+                        ["X"] = left,
+                        ["Y"] = top,
+                        ["Width"] = width,
+                        ["Height"] = height,
+                        ["CenterX"] = left + (width / 2.0),
+                        ["CenterY"] = top + (height / 2.0)
+                    };
+                }
+            }
+            catch { }
+
+            return CloneBoundsPayload(fallbackBounds);
+        }
+
+        static string ResolveAccessibleRoleText(object? role)
+        {
+            if (role == null) return "";
+
+            try
+            {
+                uint roleValue = Convert.ToUInt32(role);
+                uint required = GetRoleText(roleValue, null, 0);
+                if (required > 0)
+                {
+                    var buffer = new StringBuilder((int)required + 1);
+                    GetRoleText(roleValue, buffer, (uint)buffer.Capacity);
+                    return buffer.ToString();
+                }
+            }
+            catch { }
+
+            return role.ToString() ?? "";
+        }
+
+        static string MapAccessibleRoleToControlType(string roleText)
+        {
+            string normalized = (roleText ?? "").Trim().ToLowerInvariant();
+            if (normalized.Contains("push button") || normalized.Contains("button")) return "Button";
+            if (normalized.Contains("editable text")) return "Edit";
+            if (normalized.Contains("text")) return "Text";
+            if (normalized.Contains("graphic")) return "Image";
+            if (normalized.Contains("page tab")) return "TabItem";
+            if (normalized.Contains("link")) return "Hyperlink";
+            if (normalized.Contains("combo box")) return "ComboBox";
+            if (normalized.Contains("check button")) return "CheckBox";
+            if (normalized.Contains("radio button")) return "RadioButton";
+            if (normalized.Contains("menu item")) return "MenuItem";
+            if (normalized.Contains("list item") || normalized.Contains("outline item")) return "ListItem";
+            if (normalized.Contains("document")) return "Document";
+            if (normalized.Contains("client")) return "Pane";
+            return "Custom";
+        }
+
+        static bool BoundsPayloadIntersectsFilter(Dictionary<string, object?> payload, Dictionary<string, double>? bounds)
+        {
+            if (bounds == null) return true;
+            if (!payload.TryGetValue("Bounds", out var boundsObj) || boundsObj is not Dictionary<string, double?> payloadBounds)
+            {
+                return false;
+            }
+
+            double x = payloadBounds.TryGetValue("X", out var left) ? left ?? double.NaN : double.NaN;
+            double y = payloadBounds.TryGetValue("Y", out var top) ? top ?? double.NaN : double.NaN;
+            double width = payloadBounds.TryGetValue("Width", out var widthValue) ? widthValue ?? double.NaN : double.NaN;
+            double height = payloadBounds.TryGetValue("Height", out var heightValue) ? heightValue ?? double.NaN : double.NaN;
+            if (!double.IsFinite(x) || !double.IsFinite(y) || !double.IsFinite(width) || !double.IsFinite(height) || width <= 0 || height <= 0)
+            {
+                return false;
+            }
+
+            double bx = bounds["x"];
+            double by = bounds["y"];
+            double bw = bounds["width"];
+            double bh = bounds["height"];
+
+            return x < bx + bw
+                && x + width > bx
+                && y < by + bh
+                && y + height > by;
+        }
+
+        static bool IsMeaningfulAccessibilityProbeElement(
+            AutomationElement element,
+            bool includeOffscreen,
+            bool includeDisabled,
+            Dictionary<string, double>? bounds)
+        {
+            try
+            {
+                if (!ElementPassesPointFilters(element, includeOffscreen, includeDisabled)) return false;
+                Rect rect = element.Current.BoundingRectangle;
+                if (!IsUsableRect(rect)) return false;
+                if (bounds != null && !RectIntersects(rect, bounds)) return false;
+                return IsMeaningfulPointElement(element);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        static bool IsMeaningfulMsaaAccessibilityPayload(Dictionary<string, object?> payload)
+        {
+            string name = TryGetPayloadString(payload, "Name");
+            string value = TryGetPayloadString(payload, "Value");
+            string description = TryGetPayloadString(payload, "Description");
+            string defaultAction = TryGetPayloadString(payload, "DefaultAction");
+            string controlType = TryGetPayloadString(payload, "ControlType");
+            bool hasSignals = !string.IsNullOrWhiteSpace(name)
+                || !string.IsNullOrWhiteSpace(value)
+                || !string.IsNullOrWhiteSpace(description)
+                || !string.IsNullOrWhiteSpace(defaultAction);
+
+            if (hasSignals) return true;
+
+            return controlType.IndexOf("Button", StringComparison.OrdinalIgnoreCase) >= 0
+                || controlType.IndexOf("Edit", StringComparison.OrdinalIgnoreCase) >= 0
+                || controlType.IndexOf("TabItem", StringComparison.OrdinalIgnoreCase) >= 0
+                || controlType.IndexOf("Hyperlink", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        static bool AddAccessibilityProbeCandidate(
+            List<(Dictionary<string, object?> Payload, int Score)> collected,
+            HashSet<string> seen,
+            Dictionary<string, object?> payload)
+        {
+            string dedupeKey = BuildAccessibilityProbeCandidateKey(payload);
+            if (string.IsNullOrWhiteSpace(dedupeKey) || !seen.Add(dedupeKey))
+            {
+                return false;
+            }
+
+            collected.Add((payload, ScoreAccessibilityProbePayload(payload)));
+            return true;
+        }
+
+        static int ScoreAccessibilityProbePayload(Dictionary<string, object?> payload)
+        {
+            string name = TryGetPayloadString(payload, "Name");
+            string value = TryGetPayloadString(payload, "Value");
+            string automationId = TryGetPayloadString(payload, "AutomationId");
+            string className = TryGetPayloadString(payload, "ClassName");
+            string description = TryGetPayloadString(payload, "Description");
+            string defaultAction = TryGetPayloadString(payload, "DefaultAction");
+            string controlType = TryGetPayloadString(payload, "ControlType");
+            int depth = 0;
+            try
+            {
+                if (payload.TryGetValue("depth", out var depthObj) && depthObj != null)
+                {
+                    depth = Convert.ToInt32(depthObj);
+                }
+            }
+            catch { depth = 0; }
+
+            int score = 0;
+            if (!string.IsNullOrWhiteSpace(name)) score += 80;
+            if (!string.IsNullOrWhiteSpace(value)) score += 34;
+            if (!string.IsNullOrWhiteSpace(description)) score += 24;
+            if (!string.IsNullOrWhiteSpace(defaultAction)) score += 18;
+            if (!string.IsNullOrWhiteSpace(automationId)) score += 16;
+            if (!string.IsNullOrWhiteSpace(className)) score += 6;
+
+            if (controlType.IndexOf("Button", StringComparison.OrdinalIgnoreCase) >= 0) score += 24;
+            if (controlType.IndexOf("Edit", StringComparison.OrdinalIgnoreCase) >= 0) score += 22;
+            if (controlType.IndexOf("TabItem", StringComparison.OrdinalIgnoreCase) >= 0) score += 18;
+            if (controlType.IndexOf("ComboBox", StringComparison.OrdinalIgnoreCase) >= 0) score += 16;
+            if (controlType.IndexOf("Text", StringComparison.OrdinalIgnoreCase) >= 0) score += 8;
+            if (controlType.IndexOf("Document", StringComparison.OrdinalIgnoreCase) >= 0) score -= 24;
+            if (controlType.IndexOf("Pane", StringComparison.OrdinalIgnoreCase) >= 0) score -= 12;
+            if (controlType.IndexOf("Custom", StringComparison.OrdinalIgnoreCase) >= 0) score -= 8;
+
+            foreach (var pattern in TryGetPayloadPatternNames(payload))
+            {
+                if (pattern.Equals("Invoke", StringComparison.OrdinalIgnoreCase)) score += 16;
+                if (pattern.Equals("Value", StringComparison.OrdinalIgnoreCase)) score += 10;
+                if (pattern.Equals("Text", StringComparison.OrdinalIgnoreCase)) score += 8;
+                if (pattern.Equals("SelectionItem", StringComparison.OrdinalIgnoreCase)) score += 8;
+                if (pattern.Equals("LegacyIAccessible", StringComparison.OrdinalIgnoreCase)) score += 6;
+            }
+
+            if (payload.TryGetValue("IsFocusable", out var focusableObj) && focusableObj is bool focusable && focusable) score += 8;
+            if (payload.TryGetValue("isFocusable", out var focusableLowerObj) && focusableLowerObj is bool focusableLower && focusableLower) score += 8;
+            if (payload.TryGetValue("IsClickable", out var clickableObj) && clickableObj is bool clickable && clickable) score += 8;
+            if (payload.TryGetValue("isClickable", out var clickableLowerObj) && clickableLowerObj is bool clickableLower && clickableLower) score += 8;
+            score -= Math.Min(depth, 12) * 2;
+            return score;
+        }
+
+        static List<string> TryGetPayloadPatternNames(Dictionary<string, object?> payload)
+        {
+            if (payload.TryGetValue("Patterns", out var patternsObj) && patternsObj is IEnumerable<string> patternNames)
+            {
+                return patternNames.Where(pattern => !string.IsNullOrWhiteSpace(pattern)).ToList();
+            }
+
+            if (payload.TryGetValue("patterns", out var lowerPatternsObj) && lowerPatternsObj is IEnumerable<string> lowerPatternNames)
+            {
+                return lowerPatternNames.Where(pattern => !string.IsNullOrWhiteSpace(pattern)).ToList();
+            }
+
+            return new List<string>();
+        }
+
+        static string TryGetPayloadString(Dictionary<string, object?> payload, string key)
+        {
+            if (!payload.TryGetValue(key, out var value) || value == null)
+            {
+                return "";
+            }
+
+            return value.ToString() ?? "";
+        }
+
+        static string BuildAccessibilityProbeCandidateKey(Dictionary<string, object?> payload)
+        {
+            string name = NormalizeAccessibilityProbeText(TryGetPayloadString(payload, "Name"));
+            string automationId = NormalizeAccessibilityProbeText(TryGetPayloadString(payload, "AutomationId"));
+            string className = NormalizeAccessibilityProbeText(TryGetPayloadString(payload, "ClassName"));
+            string controlType = NormalizeAccessibilityProbeText(TryGetPayloadString(payload, "ControlType"));
+            long nativeWindowHandle = 0;
+            long windowHandle = 0;
+
+            try
+            {
+                if (payload.TryGetValue("NativeWindowHandle", out var nativeHwndObj) && nativeHwndObj != null)
+                {
+                    nativeWindowHandle = Convert.ToInt64(nativeHwndObj);
+                }
+            }
+            catch { nativeWindowHandle = 0; }
+
+            try
+            {
+                if (payload.TryGetValue("WindowHandle", out var hwndObj) && hwndObj != null)
+                {
+                    windowHandle = Convert.ToInt64(hwndObj);
+                }
+            }
+            catch { windowHandle = 0; }
+
+            double x = 0;
+            double y = 0;
+            double width = 0;
+            double height = 0;
+            if (payload.TryGetValue("Bounds", out var boundsObj) && boundsObj is Dictionary<string, double?> bounds)
+            {
+                x = bounds.TryGetValue("X", out var left) ? left ?? 0 : 0;
+                y = bounds.TryGetValue("Y", out var top) ? top ?? 0 : 0;
+                width = bounds.TryGetValue("Width", out var widthValue) ? widthValue ?? 0 : 0;
+                height = bounds.TryGetValue("Height", out var heightValue) ? heightValue ?? 0 : 0;
+            }
+
+            return string.Join("|", new[]
+            {
+                name,
+                automationId,
+                className,
+                controlType,
+                windowHandle.ToString(),
+                nativeWindowHandle.ToString(),
+                Math.Round(x).ToString(),
+                Math.Round(y).ToString(),
+                Math.Round(width).ToString(),
+                Math.Round(height).ToString()
+            });
+        }
+
+        static string NormalizeAccessibilityProbeText(string value)
+        {
+            return (value ?? "")
+                .Trim()
+                .ToLowerInvariant();
         }
 
         static string InvokeSemanticPattern(AutomationElement el)
@@ -2240,5 +4135,12 @@ namespace UIAWrapper
         public double? y { get; set; }
         public double? width { get; set; }
         public double? height { get; set; }
+    }
+
+    class ClipboardTextSnapshot
+    {
+        public bool ContainsText { get; set; }
+        public string Text { get; set; } = "";
+        public long SavedAtUnixMs { get; set; }
     }
 }

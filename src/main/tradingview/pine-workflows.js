@@ -368,25 +368,9 @@ const TRADINGVIEW_PINE_EDITOR_AUTHORING_SURFACE_CONTRACT = Object.freeze({
   requiresCommandSurfaceClosed: true
 });
 
-const TRADINGVIEW_PINE_SAVE_NAME_SURFACE_CONTRACT = Object.freeze({
-  appName: 'TradingView',
-  route: 'pine-save-name',
-  surface: 'pine-save-dialog',
-  requiresPineEditorSurface: true,
-  requiresCommandSurfaceClosed: true,
-  requiresSaveDialogSurface: true
-});
-
 function clonePineEditorAuthoringSurfaceContract(overrides = null) {
   return {
     ...TRADINGVIEW_PINE_EDITOR_AUTHORING_SURFACE_CONTRACT,
-    ...(overrides && typeof overrides === 'object' ? overrides : {})
-  };
-}
-
-function cloneTradingViewPineSaveNameSurfaceContract(overrides = null) {
-  return {
-    ...TRADINGVIEW_PINE_SAVE_NAME_SURFACE_CONTRACT,
     ...(overrides && typeof overrides === 'object' ? overrides : {})
   };
 }
@@ -608,6 +592,7 @@ function buildTradingViewFirstSaveDialogSaveAction(scriptName = '', reason = 'Co
     tradingViewRendererInvoke: {
       kind: 'pine-first-save-confirmation',
       buttonText: 'Save',
+      deferEffectProofToFollowUpAction: true,
       pineExpectedScriptName: normalizedScriptName || '',
       requiredTexts: [
         'Save script',
@@ -651,6 +636,7 @@ function buildTradingViewPineCreateNewAction(reason = 'Open the current Pine scr
       buttonText: 'Create new',
       menuItemText: 'Create new',
       submenuItemText: 'Indicator',
+      deferEffectProofToFollowUpAction: true,
       requiredTexts: [
         'Add to chart',
         'Publish script'
@@ -797,24 +783,24 @@ function buildPineSaveStatusVerificationAction({
       { type: 'wait', ms: 160 },
       buildTradingViewFirstSaveDialogSaveAction(
         derivedScriptName,
-        `Provide the Pine script name and confirm the exact TradingView first-save dialog: ${derivedScriptName}`
+        `Prefill the Pine script name and confirm the exact TradingView first-save dialog: ${derivedScriptName}`
       ),
       { type: 'wait', ms: 320 },
       buildPineSaveStatusVerificationAction({
         derivedScriptName,
         guardedApplyContinuationSteps,
-        reason: 'Re-verify visible Pine save-state evidence after naming and saving the script',
+        reason: 'Re-verify visible Pine save-state evidence after confirming the first-save dialog',
         includeSaveRequiredRecovery: false,
         includeConfirmationRecovery: false,
         includeReplaceConfirmationRecovery: true,
         pineLifecycleMismatchReasons: {
-          'save-replace-confirmation-blocking': 'TradingView is still asking whether to replace an existing Pine script after naming it; stop before applying it to the chart.',
-          'save-confirmation-blocking': 'TradingView is showing an unsaved-changes confirmation modal after the save attempt; resolve the modal before applying the script.',
-          'save-required-before-apply': 'TradingView still shows save-required state after naming the script; stop before applying it to the chart.',
-          'save-title-unverified': 'TradingView did not expose the expected saved Pine script title after naming the script; stop before applying it to the chart.',
-          'unknown-save-state': 'TradingView did not expose enough saved-state evidence after naming the script; stop before applying it to the chart.',
+          'save-replace-confirmation-blocking': 'TradingView is still asking whether to replace an existing Pine script after the first-save confirmation; stop before applying it to the chart.',
+          'save-confirmation-blocking': 'TradingView is showing an unsaved-changes confirmation modal after the first-save attempt; resolve the modal before applying the script.',
+          'save-required-before-apply': 'TradingView still shows save-required state after the first-save confirmation; stop before applying it to the chart.',
+          'save-title-unverified': 'TradingView did not expose the expected saved Pine script title after the first-save confirmation; stop before applying it to the chart.',
+          'unknown-save-state': 'TradingView did not expose enough saved-state evidence after the first-save confirmation; stop before applying it to the chart.',
           'editor-target-corrupt': 'Visible Pine output suggests editor-target corruption during save; stop before applying the script.',
-          '': 'The Pine save state could not be verified after naming the script; do not add it to the chart yet.'
+          '': 'The Pine save state could not be verified after the first-save confirmation; do not add it to the chart yet.'
         }
       })
     ];

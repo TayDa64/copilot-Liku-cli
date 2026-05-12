@@ -5,6 +5,7 @@ const path = require('path');
 
 const systemAutomation = require(path.join(__dirname, '..', 'src', 'main', 'system-automation.js'));
 const { shutdownSharedUIAHost } = require(path.join(__dirname, '..', 'src', 'main', 'ui-automation'));
+const originalExecuteAction = systemAutomation.executeAction.bind(systemAutomation);
 
 const forcedExitTimer = setTimeout(() => {
   console.error('FAIL test-pine-editor-structured-summary timed out');
@@ -13,6 +14,21 @@ const forcedExitTimer = setTimeout(() => {
 if (typeof forcedExitTimer.unref === 'function') {
   forcedExitTimer.unref();
 }
+
+function buildInertAutomationRuntimeOptions(runtimeOptions = {}) {
+  return {
+    click: async () => ({ success: true, message: 'inert-click' }),
+    doubleClick: async () => ({ success: true, message: 'inert-double-click' }),
+    moveMouse: async () => ({ success: true, message: 'inert-move-mouse' }),
+    typeText: async () => ({ success: true, message: 'inert-type' }),
+    pressKey: async () => ({ success: true, message: 'inert-key' }),
+    ...(runtimeOptions && typeof runtimeOptions === 'object' ? runtimeOptions : {})
+  };
+}
+
+systemAutomation.executeAction = function executeActionHermetic(action, runtimeOptions = {}) {
+  return originalExecuteAction(action, buildInertAutomationRuntimeOptions(runtimeOptions));
+};
 
 function test(name, fn) {
   try {
@@ -293,6 +309,7 @@ testAsync('KEY verifies Pine authoring paste with a single bounded retry before 
   ].join('\n');
   let editorBuffer = starterScript;
   let clipboardText = expectedScript;
+  let savedClipboardText = '';
   let selectionActive = false;
   let pasteAttempts = 0;
 
@@ -303,6 +320,14 @@ testAsync('KEY verifies Pine authoring paste with a single bounded retry before 
       title: 'LIKU LIVE SAVE PROBE ▲ 28.97 +20.16% / Unnamed',
       windowKind: 'main'
     }),
+    saveClipboardState: async () => {
+      savedClipboardText = clipboardText;
+      return { success: true, token: 'paste-proof-token', mode: 'host-token', source: 'uia-host' };
+    },
+    restoreClipboardState: async () => {
+      clipboardText = savedClipboardText;
+      return { success: true, token: 'paste-proof-token', source: 'uia-host' };
+    },
     getClipboardText: async () => ({ text: clipboardText }),
     setClipboardText: async (text) => {
       clipboardText = String(text || '');
@@ -351,6 +376,9 @@ testAsync('KEY verifies Pine authoring paste with a single bounded retry before 
   assert.strictEqual(pasteAttempts, 2, 'paste proof should perform at most one bounded repair retry');
   assert.strictEqual(result.pineAuthoringPasteProof?.retryAttempted, true, 'paste proof should record the bounded retry');
   assert.strictEqual(result.pineAuthoringPasteProof?.proof?.exactMatch, true, 'retry proof should confirm the prepared script exactly matches the editor buffer');
+  assert.strictEqual(result.pineAuthoringWriteTelemetry?.fallbackUsed, true);
+  assert.strictEqual(result.pineAuthoringWriteTelemetry?.fallbackRetryAttempted, true);
+  assert.strictEqual(result.pineAuthoringWriteTelemetry?.selectedMethod, 'ClipboardRoundTrip');
   assert.strictEqual(editorBuffer.replace(/\r/g, '').trim(), expectedScript.replace(/\r/g, '').trim(), 'bounded retry should leave the editor with only the prepared script');
   assert(/repaired the Pine buffer/i.test(String(result.message || '')), 'result message should explain that a single bounded repair retry was used');
 });
@@ -373,6 +401,7 @@ testAsync('KEY fails closed when Pine authoring paste proof still mismatches aft
   ].join('\n');
   let editorBuffer = starterScript;
   let clipboardText = expectedScript;
+  let savedClipboardText = '';
   let selectionActive = false;
   let pasteAttempts = 0;
 
@@ -383,6 +412,14 @@ testAsync('KEY fails closed when Pine authoring paste proof still mismatches aft
       title: 'LIKU LIVE SAVE PROBE ▲ 28.97 +20.16% / Unnamed',
       windowKind: 'main'
     }),
+    saveClipboardState: async () => {
+      savedClipboardText = clipboardText;
+      return { success: true, token: 'paste-proof-token', mode: 'host-token', source: 'uia-host' };
+    },
+    restoreClipboardState: async () => {
+      clipboardText = savedClipboardText;
+      return { success: true, token: 'paste-proof-token', source: 'uia-host' };
+    },
     getClipboardText: async () => ({ text: clipboardText }),
     setClipboardText: async (text) => {
       clipboardText = String(text || '');
@@ -468,10 +505,19 @@ testAsync('KEY allows Pine save only after the editor buffer matches the prepare
     'plot(close, title="Close")'
   ].join('\n');
   let clipboardText = 'previous clipboard';
+  let savedClipboardText = '';
   let selectionActive = false;
   const keyCalls = [];
 
   const result = await withMockAutomationHost({
+    saveClipboardState: async () => {
+      savedClipboardText = clipboardText;
+      return { success: true, token: 'pine-save-token', mode: 'host-token', source: 'uia-host' };
+    },
+    restoreClipboardState: async () => {
+      clipboardText = savedClipboardText;
+      return { success: true, token: 'pine-save-token', source: 'uia-host' };
+    },
     getClipboardText: async () => ({ success: true, text: clipboardText }),
     setClipboardText: async (text) => {
       clipboardText = String(text || '');
@@ -704,6 +750,34 @@ test('Pine safe-authoring summary treats probe-visible starter labels as empty-o
   assert(summary.visibleSignals.includes('starter-default-name'));
   assert(summary.visibleSignals.includes('editor-empty-hint'));
   assert.strictEqual(summary.surfaceMatchedBy, 'uia-host-pine-surface-header-scan');
+});
+
+test('Pine safe-authoring summary treats save-confirmed-only Pine surface evidence as insufficient', () => {
+  const summary = systemAutomation.buildPineEditorSafeAuthoringSummary(
+    'All changes saved',
+    {
+      pineEditorSurfaceProbe: {
+        active: true,
+        matchedBy: 'chromium-cdp-dom',
+        visibleAnchorEntries: [
+          {
+            text: 'All changes saved',
+            observedText: 'All changes saved',
+            category: 'save-confirmed',
+            source: 'dom-node',
+            ariaLabel: 'All changes saved',
+            priority: 182
+          }
+        ]
+      }
+    }
+  );
+
+  assert(summary, 'summary should be returned');
+  assert.strictEqual(summary.evidenceMode, 'safe-authoring-inspect');
+  assert.strictEqual(summary.editorVisibleState, 'unknown-visible-state');
+  assert.strictEqual(summary.lifecycleState, null);
+  assert.strictEqual(summary.surfaceMatchedBy, 'chromium-cdp-dom');
 });
 
 test('Pine safe-authoring summary blocks authoring when a save-name dialog is already visible on the Pine surface', () => {
@@ -1045,6 +1119,37 @@ test('Pine save-status summary can verify a saved title from bounded header proo
   assert.strictEqual(summary.expectedScriptNameEvidence, 'window-host-scan');
   assert.strictEqual(summary.lifecycleState, 'saved-state-verified');
   assert(summary.statusSignals.includes('save-title-visible'));
+});
+
+test('Pine save-status summary can verify a saved title from renderer title-button evidence when fallback text stays sparse', () => {
+  const summary = systemAutomation.buildPineEditorDiagnosticsStructuredSummary(
+    'All changes saved\nPublish script',
+    'save-status',
+    {
+      pineExpectedScriptName: 'Liku Live Save Probe',
+      pineEditorSurfaceProbe: {
+        matchedBy: 'chromium-cdp-dom',
+        rendererProof: {
+          matchedBy: 'chromium-cdp-dom',
+          titleButton: {
+            text: 'Liku Live Save Probe',
+            observedText: 'Liku Live Save Probe',
+            category: 'save-title',
+            source: 'renderer-title-button',
+            role: 'button',
+            surfaceKind: 'save-title'
+          }
+        }
+      }
+    }
+  );
+
+  assert(summary, 'summary should be returned');
+  assert.strictEqual(summary.expectedScriptNameVisible, false);
+  assert.strictEqual(summary.expectedScriptNameProofVisible, true);
+  assert.strictEqual(summary.expectedScriptNameEvidence, 'renderer-title-button');
+  assert.strictEqual(summary.observedTitleButtonText, 'Liku Live Save Probe');
+  assert.strictEqual(summary.lifecycleState, 'saved-state-verified');
 });
 
 test('Pine save-status summary rejects chart chrome as saved-title proof', () => {

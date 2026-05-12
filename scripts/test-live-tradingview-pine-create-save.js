@@ -77,6 +77,10 @@ test('pine-create-save save-required recovery uses a single verified save invoke
   const actions = scenario?.actionData?.actions || [];
   const inspectStep = actions.find((action) => action?.type === 'get_text' && action?.pineEvidenceMode === 'safe-authoring-inspect');
   const starterContinuation = inspectStep?.continueActionsByPineEditorState?.['empty-or-starter'] || [];
+  const existingScriptContinuation = inspectStep?.continueActionsByPineEditorState?.['existing-script-visible'] || [];
+  const createNewStep = existingScriptContinuation.find((action) =>
+    action?.type === 'click_element' && String(action?.text || '').trim() === 'Create new'
+  );
   const saveStatusStep = starterContinuation.find((action) =>
     action?.type === 'get_text' && action?.pineEvidenceMode === 'save-status'
   );
@@ -88,8 +92,11 @@ test('pine-create-save save-required recovery uses a single verified save invoke
 
   assert.strictEqual(typedNameStep, undefined);
   assert(saveDialogSaveStep, 'save-required recovery should invoke the first-save Save button');
+  assert(createNewStep, 'existing-script continuation should still use the semantic Create new route');
   assert.strictEqual(String(saveDialogSaveStep?.pineExpectedScriptName || ''), 'Liku Save Flow Probe');
   assert.strictEqual(String(saveDialogSaveStep?.tradingViewRendererInvoke?.pineExpectedScriptName || ''), 'Liku Save Flow Probe');
+  assert.strictEqual(saveDialogSaveStep?.tradingViewRendererInvoke?.deferEffectProofToFollowUpAction, true);
+  assert.strictEqual(createNewStep?.tradingViewRendererInvoke?.deferEffectProofToFollowUpAction, true);
 });
 
 console.log(`\nLive TradingView pine-create-save tests: ${passed} passed, ${failed} failed`);

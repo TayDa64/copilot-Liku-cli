@@ -115,6 +115,20 @@ function assertSemanticPineIconRoute(actions = []) {
   };
 }
 
+function assertPineCreateNewMenuRoute(actions = []) {
+  const source = Array.isArray(actions) ? actions : [];
+  const createNewIndex = source.findIndex((action) =>
+    action?.type === 'click_element'
+    && String(action?.text || '').trim() === 'Create new'
+    && String(action?.tradingViewRendererInvoke?.kind || '').trim().toLowerCase() === 'pine-current-script-menu-item'
+  );
+
+  assert(createNewIndex >= 0, 'existing-script branch should route through the Pine title-menu Create new action');
+  return {
+    createNewAction: source[createNewIndex]
+  };
+}
+
 function assertQuickSearchPineEditorRoute(actions = []) {
   const source = Array.isArray(actions) ? actions : [];
   const ctrlKIndex = source.findIndex((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'ctrl+k');
@@ -458,7 +472,11 @@ test('maybeRewriteTradingViewPineWorkflow skips redundant openers when the reque
   assert.strictEqual(rewritten.some((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'ctrl+k'), false, 'already-active Pine Editor prompts should not jump directly into a command-surface shortcut route before inspection');
   assert.strictEqual(rewritten.some((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'ctrl+i'), false, 'already-active Pine Editor prompts should not jump directly into fresh-indicator creation before inspection');
   assert(Array.isArray(starterContinuation) && starterContinuation.some((action) => action?.type === 'run_command' && /set-clipboard/i.test(String(action?.command || ''))), 'empty/starter Pine buffers should continue directly into validated payload preparation after inspection');
-  assert(Array.isArray(existingScriptContinuation) && existingScriptContinuation.some((action) => action?.type === 'key' && String(action?.key || '').toLowerCase() === 'ctrl+i'), 'existing visible Pine buffers should branch into the fresh-indicator route only after inspection');
+  assertPineCreateNewMenuRoute(existingScriptContinuation);
+  const freshInspect = Array.isArray(existingScriptContinuation)
+    ? existingScriptContinuation.find((action) => action?.type === 'get_text' && action?.pineEvidenceMode === 'safe-authoring-inspect')
+    : null;
+  assert.strictEqual(freshInspect?.acceptGenericSavedSurfaceAsStarter, true, 'the post-Create-new proof should narrowly tolerate generic saved Pine chrome after a verified Create new route');
   const guardedSaveAction = flattened.find((action) =>
     action?.type === 'key'
     && String(action?.key || '').toLowerCase() === 'ctrl+s'
