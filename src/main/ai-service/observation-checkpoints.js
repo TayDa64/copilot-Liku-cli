@@ -48,10 +48,19 @@ function createObservationCheckpointRuntime(deps = {}) {
   }
 
   const PINE_EDITOR_WATCHER_SURFACE_ANCHORS = Object.freeze([
+    'untitled script',
+    'my script',
+    'my strategy',
+    'my library',
     'add to chart',
     'publish script',
     'update on chart',
-    'script saved'
+    'script saved',
+    'all changes saved',
+    'save script',
+    'script name',
+    'save as',
+    'rename script'
   ]);
   const QUICK_SEARCH_WATCHER_SURFACE_ANCHORS = Object.freeze([
     'search tool or function',
@@ -102,6 +111,79 @@ function createObservationCheckpointRuntime(deps = {}) {
       || before.isMaximized !== after.isMaximized;
   }
 
+  function normalizeWatcherForeground(activeWindow = null, source = 'watcher-cache') {
+    if (!activeWindow || typeof activeWindow !== 'object') {
+      return null;
+    }
+
+    return {
+      success: true,
+      hwnd: Number(activeWindow.hwnd || 0) || 0,
+      pid: Number(activeWindow.pid || activeWindow.processId || 0) || 0,
+      processName: String(activeWindow.processName || ''),
+      title: String(activeWindow.title || ''),
+      ownerHwnd: Number(activeWindow.ownerHwnd || 0) || 0,
+      isTopmost: activeWindow.isTopmost === true,
+      isToolWindow: activeWindow.isToolWindow === true,
+      isMinimized: activeWindow.isMinimized === true,
+      isMaximized: activeWindow.isMaximized === true,
+      windowKind: String(activeWindow.windowKind || 'main'),
+      bounds: activeWindow.bounds || null,
+      source
+    };
+  }
+
+  function getWatcherForegroundState(watcher, expectedWindowHandle = 0) {
+    if (!watcher?.cache?.activeWindow) {
+      return {
+        available: false,
+        fresh: false,
+        ageMs: Number.POSITIVE_INFINITY,
+        lastUpdate: 0,
+        foreground: null,
+        matchesExpectedWindow: expectedWindowHandle <= 0
+      };
+    }
+
+    const lastUpdate = Number(watcher.cache.lastUpdate || 0) || 0;
+    const ageMs = lastUpdate > 0 ? Math.max(0, Date.now() - lastUpdate) : Number.POSITIVE_INFINITY;
+    const maxAgeMs = Math.max(600, Math.min(2200, Math.round((keyCheckpointTimeoutMs || 1400) * 0.75)));
+    const foreground = normalizeWatcherForeground(watcher.cache.activeWindow, 'watcher-cache');
+    const foregroundHwnd = Number(foreground?.hwnd || 0) || 0;
+
+    return {
+      available: true,
+      fresh: ageMs <= maxAgeMs,
+      ageMs,
+      lastUpdate,
+      foreground,
+      matchesExpectedWindow: expectedWindowHandle <= 0 || !foregroundHwnd || foregroundHwnd === expectedWindowHandle
+    };
+  }
+
+  async function waitForWatcherForegroundState(watcher, expectedWindowHandle = 0, sinceTs = 0, timeoutMs = 0) {
+    if (!watcher || typeof watcher.waitForFreshState !== 'function') {
+      return null;
+    }
+
+    const freshState = await watcher.waitForFreshState({
+      targetHwnd: expectedWindowHandle > 0 ? expectedWindowHandle : 0,
+      sinceTs: Number(sinceTs || 0) || 0,
+      timeoutMs: Math.max(120, Number(timeoutMs || keyCheckpointTimeoutMs || 1400) || 1400)
+    });
+
+    return {
+      fresh: freshState?.fresh === true,
+      timedOut: freshState?.timedOut === true,
+      immediate: freshState?.immediate === true,
+      lastUpdate: Number(freshState?.lastUpdate || 0) || 0,
+      foreground: normalizeWatcherForeground(
+        freshState?.activeWindow || watcher.cache?.activeWindow || null,
+        freshState?.fresh === true ? 'watcher-event' : 'watcher-timeout'
+      )
+    };
+  }
+
   function normalizeActionVerifyMetadata(verify) {
     if (!verify || typeof verify !== 'object') return null;
 
@@ -121,6 +203,7 @@ function createObservationCheckpointRuntime(deps = {}) {
       windowKinds: Array.isArray(verify.windowKinds)
         ? verify.windowKinds.map((value) => String(value || '').trim().toLowerCase()).filter(Boolean)
         : [],
+      pineSurfaceExpectation: String(verify.pineSurfaceExpectation || '').trim().toLowerCase() || null,
       requiresObservedChange: typeof verify.requiresObservedChange === 'boolean'
         ? verify.requiresObservedChange
         : null
@@ -214,6 +297,7 @@ function createObservationCheckpointRuntime(deps = {}) {
         ].filter(Boolean).join(' '),
         keywords: expectedKeywords
       }),
+      pineSurfaceExpectation: verify.pineSurfaceExpectation || null,
       requiresObservedChange: verify.requiresObservedChange === null
         ? (classification === 'dialog-open' || classification === 'input-surface-open' || classification === 'editor-active')
         : verify.requiresObservedChange,
@@ -292,6 +376,31 @@ function createObservationCheckpointRuntime(deps = {}) {
     };
   }
 
+  function hasExplicitPineCheckpointSignal(spec = {}) {
+    const signalText = normalizeTextForMatch([
+      spec?.verifyTarget,
+      spec?.verifyKind,
+      spec?.reason,
+      spec?.pineSurfaceExpectation
+    ].filter(Boolean).join(' '));
+    if (/\bpine\b/.test(signalText)) {
+      return true;
+    }
+
+    return /\b(add to chart|publish script|pine logs|profiler|version history|untitled script|my script|my strategy|my library)\b/.test(signalText);
+  }
+
+  function isPineEditorSurfaceCheckpoint(spec = {}) {
+    const verifyTarget = String(spec?.verifyTarget || '').trim().toLowerCase();
+    const verifyKind = String(spec?.verifyKind || '').trim().toLowerCase();
+    const classification = String(spec?.classification || '').trim().toLowerCase();
+    const targetsPineEditor = verifyTarget === 'pine-editor'
+      || hasExplicitPineCheckpointSignal(spec);
+    if (!targetsPineEditor) return false;
+    if (classification === 'editor-active') return true;
+    return verifyKind === 'status-visible' || verifyKind === 'status-ready';
+  }
+
   function getWatcherTextEvidenceMatch(watcher, spec, foreground) {
     if (!watcher || !watcher.cache || !Array.isArray(watcher.cache.elements)) {
       return { matched: false, anchor: null, element: null };
@@ -300,8 +409,7 @@ function createObservationCheckpointRuntime(deps = {}) {
     const expectedKeywords = Array.isArray(spec?.expectedKeywords)
       ? spec.expectedKeywords.map((value) => normalizeTextForMatch(value)).filter(Boolean)
       : [];
-    const pineEditorLike = spec?.classification === 'editor-active'
-      && expectedKeywords.some((value) => value.includes('pine'));
+    const pineEditorLike = isPineEditorSurfaceCheckpoint(spec);
     const quickSearchLike = spec?.classification === 'input-surface-open'
       && (
         /quick-search|symbol-search/.test(String(spec?.verifyTarget || '').trim().toLowerCase())
@@ -345,6 +453,200 @@ function createObservationCheckpointRuntime(deps = {}) {
     return { matched: false, anchor: null, element: null };
   }
 
+  function isPineEditorLikeCheckpoint(spec = {}) {
+    if (isPineEditorSurfaceCheckpoint(spec)) {
+      return true;
+    }
+    return String(spec?.classification || '').trim().toLowerCase() === 'panel-open'
+      && hasExplicitPineCheckpointSignal(spec);
+  }
+
+  function summarizePineSurfaceExpectationEvidence({ probe = null, anchor = null, element = null } = {}) {
+    const rawEntries = Array.isArray(probe?.visibleAnchorEntries) && probe.visibleAnchorEntries.length > 0
+      ? probe.visibleAnchorEntries
+      : (Array.isArray(probe?.rendererProof?.signals) && probe.rendererProof.signals.length > 0
+        ? probe.rendererProof.signals
+        : anchor
+          ? [{
+              text: anchor,
+              observedText: [
+                anchor,
+                element?.name,
+                element?.automationId,
+                element?.className,
+                element?.type
+              ].filter(Boolean).join(' '),
+              category: null
+            }]
+          : []);
+
+    const summary = {
+      starterVisible: false,
+      saveRequiredVisible: false,
+      renameSurfaceVisible: false,
+      saveConfirmedVisible: false,
+      actionableSurfaceVisible: false
+    };
+
+    for (const entry of rawEntries) {
+      const observedText = normalizeTextForMatch([
+        entry?.text || '',
+        entry?.observedText || '',
+        entry?.ariaLabel || ''
+      ].filter(Boolean).join(' '));
+      const category = normalizeTextForMatch(entry?.category || '');
+
+      if (
+        category === 'starter'
+        || /^(untitled script|untitled|my script|my strategy|my library)$/.test(observedText)
+        || /\b(untitled script|my script|my strategy|my library)\b/.test(observedText)
+      ) {
+        summary.starterVisible = true;
+      }
+
+      if (category === 'rename surface' || category === 'rename-surface') {
+        summary.renameSurfaceVisible = true;
+        summary.saveRequiredVisible = true;
+      }
+
+      if (
+        category === 'save required'
+        || category === 'save-required'
+        || /\b(save script|new script name|script name|save as|rename script|unsaved)\b/.test(observedText)
+      ) {
+        summary.saveRequiredVisible = true;
+      }
+
+      if (
+        category === 'save confirmed'
+        || category === 'save-confirmed'
+        || /\b(all changes saved|saved successfully|save complete)\b/.test(observedText)
+      ) {
+        summary.saveConfirmedVisible = true;
+      }
+
+      if (
+        category === 'surface'
+        && /\b(add to chart|update on chart|publish script|pine logs|strategy tester)\b/.test(observedText)
+      ) {
+        summary.actionableSurfaceVisible = true;
+      }
+    }
+
+    return {
+      ...summary,
+      freshScriptVisible: summary.starterVisible || summary.saveRequiredVisible || summary.renameSurfaceVisible,
+      genericSavedSurfaceOnly: summary.saveConfirmedVisible
+        && !summary.starterVisible
+        && !summary.saveRequiredVisible
+        && !summary.renameSurfaceVisible
+    };
+  }
+
+  function matchesPineSurfaceExpectation(spec = {}, evidence = {}) {
+    const expectation = String(spec?.pineSurfaceExpectation || '').trim().toLowerCase();
+    if (!expectation) return true;
+    if (expectation === 'fresh-script') {
+      return evidence.freshScriptVisible === true;
+    }
+    return true;
+  }
+
+  function shouldAttemptPineEditorHostSurfaceProbe(spec, foreground, watcherState, watcherFreshness, watcherSurfaceMatched, observedChange) {
+    if (!isPineEditorLikeCheckpoint(spec)) {
+      return { attempt: false, reason: 'not-pine-editor-checkpoint' };
+    }
+
+    const freshScriptExpectation = String(spec?.pineSurfaceExpectation || '').trim().toLowerCase() === 'fresh-script';
+
+    if (watcherSurfaceMatched && !freshScriptExpectation) {
+      return { attempt: false, reason: 'watcher-surface-matched' };
+    }
+
+    if (!foreground?.success) {
+      return { attempt: true, reason: 'foreground-unavailable' };
+    }
+
+    const processName = normalizeTextForMatch(foreground?.processName || '');
+    if (!processName.includes('tradingview')) {
+      return { attempt: false, reason: 'foreground-not-tradingview' };
+    }
+
+    if (!watcherState?.available) {
+      return { attempt: true, reason: 'watcher-unavailable' };
+    }
+
+    if (watcherFreshness?.timedOut === true) {
+      return { attempt: true, reason: 'watcher-timeout' };
+    }
+
+    if (watcherState?.matchesExpectedWindow === false) {
+      return { attempt: true, reason: 'watcher-window-mismatch' };
+    }
+
+    if (watcherFreshness?.fresh === true) {
+      return { attempt: true, reason: 'watcher-delta' };
+    }
+
+    if (observedChange) {
+      return { attempt: true, reason: 'foreground-change' };
+    }
+
+    if (watcherState?.fresh !== true) {
+      return { attempt: true, reason: 'watcher-stale' };
+    }
+
+    if (freshScriptExpectation) {
+      return { attempt: true, reason: 'fresh-script-required' };
+    }
+
+    return { attempt: false, reason: 'watcher-stable-no-delta' };
+  }
+
+  async function getPineEditorHostSurfaceEvidence(spec, foreground, expectedWindowHandle, options = {}) {
+    if (!isPineEditorLikeCheckpoint(spec)) {
+      return { matched: false, anchor: null, probe: null };
+    }
+    if (!foreground?.success) {
+      return { matched: false, anchor: null, probe: null };
+    }
+    if (typeof systemAutomation?.probeTradingViewPineEditorSurface !== 'function') {
+      return { matched: false, anchor: null, probe: null };
+    }
+
+    const processName = normalizeTextForMatch(foreground?.processName || '');
+    if (!processName.includes('tradingview')) {
+      return { matched: false, anchor: null, probe: null };
+    }
+
+    try {
+      const timeoutMs = Math.max(
+        250,
+        Math.min(900, Math.round((Number(spec?.timeoutMs || keyCheckpointTimeoutMs) || keyCheckpointTimeoutMs) * 0.45))
+      );
+      const preferredWindowHandle = spec?.allowWindowHandleChange
+        ? Number(foreground?.hwnd || expectedWindowHandle || 0) || 0
+        : Number(expectedWindowHandle || foreground?.hwnd || 0) || 0;
+      const probe = await systemAutomation.probeTradingViewPineEditorSurface({
+        windowHandle: preferredWindowHandle,
+        timeout: timeoutMs,
+        foreground,
+        windowInfo: options?.windowInfo || foreground,
+        resolveWindowState: false
+      });
+      const anchorSource = probe?.anchorText
+        || (Array.isArray(probe?.visibleAnchors) ? probe.visibleAnchors[0] : null);
+      const anchor = anchorSource ? String(anchorSource).trim() || null : null;
+      return {
+        matched: probe?.active === true,
+        anchor,
+        probe: probe || null
+      };
+    } catch {
+      return { matched: false, anchor: null, probe: null };
+    }
+  }
+
   async function verifyKeyObservationCheckpoint(spec, beforeForeground, options = {}) {
     if (!spec?.applicable) {
       return { applicable: false, verified: true, classification: null };
@@ -363,21 +665,47 @@ function createObservationCheckpointRuntime(deps = {}) {
     let watcherSurfaceMatched = false;
     let watcherSurfaceAnchor = null;
     let watcherSurfaceElement = null;
+    let hostSurfaceMatched = false;
+    let hostSurfaceAnchor = null;
+    let pineEditorSurfaceProbe = null;
+    let pineSurfaceExpectationEvidence = summarizePineSurfaceExpectationEvidence();
+    let pineSurfaceExpectationMatched = false;
+    let hostSurfaceProbeDecision = { attempt: false, reason: 'not-evaluated' };
     let tradingMode = spec.tradingModeHint || { mode: 'unknown', confidence: 'low', evidence: [] };
+    let cachedHostSurfaceProbeKey = null;
+    let cachedHostSurfaceEvidence = { matched: false, anchor: null, probe: null };
 
     for (let attempt = 1; attempt <= keyCheckpointMaxPolls; attempt++) {
       const sinceTs = Number(watcher?.cache?.lastUpdate || 0);
       await sleepMs(keyCheckpointSettleMs + ((attempt - 1) * 120));
 
-      if (watcher && watcher.isPolling && typeof watcher.waitForFreshState === 'function') {
-        watcherFreshness = await watcher.waitForFreshState({
-          targetHwnd: waitTargetHwnd,
+      if (watcher && watcher.isPolling) {
+        watcherFreshness = await waitForWatcherForegroundState(
+          watcher,
+          waitTargetHwnd,
           sinceTs,
-          timeoutMs: spec.timeoutMs || keyCheckpointTimeoutMs
-        });
+          spec.timeoutMs || keyCheckpointTimeoutMs
+        );
       }
 
-      foreground = await systemAutomation.getForegroundWindowInfo();
+      const watcherState = getWatcherForegroundState(watcher, waitTargetHwnd);
+      const watcherForeground = watcherFreshness?.foreground?.success
+        ? watcherFreshness.foreground
+        : watcherState?.foreground;
+      const shouldUseWatcherForeground = !!(
+        watcherForeground?.success
+        && watcherState?.matchesExpectedWindow !== false
+        && (
+          watcherFreshness?.fresh === true
+          || watcherState?.fresh === true
+        )
+      );
+
+      if (shouldUseWatcherForeground) {
+        foreground = watcherForeground;
+      } else {
+        foreground = await systemAutomation.getForegroundWindowInfo();
+      }
       evalResult = evaluateForegroundAgainstTarget(foreground, spec.verifyTargetHint || {});
       observedChange = didForegroundObservationChange(beforeForeground, foreground);
 
@@ -396,6 +724,41 @@ function createObservationCheckpointRuntime(deps = {}) {
       watcherSurfaceMatched = !!watcherEvidence.matched;
       watcherSurfaceAnchor = watcherEvidence.anchor || null;
       watcherSurfaceElement = watcherEvidence.element || null;
+      hostSurfaceProbeDecision = shouldAttemptPineEditorHostSurfaceProbe(
+        spec,
+        foreground,
+        watcherState,
+        watcherFreshness,
+        watcherSurfaceMatched,
+        observedChange
+      );
+      if (hostSurfaceProbeDecision.attempt) {
+        const hostSurfaceProbeKey = [
+          Number(expectedWindowHandle || foreground?.hwnd || 0) || 0,
+          Number(watcherFreshness?.lastUpdate || watcherState?.lastUpdate || 0) || 0,
+          Number(foreground?.hwnd || 0) || 0,
+          normalizeTextForMatch(foreground?.title || ''),
+          hostSurfaceProbeDecision.reason
+        ].join('|');
+        if (hostSurfaceProbeKey !== cachedHostSurfaceProbeKey) {
+          cachedHostSurfaceEvidence = await getPineEditorHostSurfaceEvidence(spec, foreground, expectedWindowHandle, {
+            windowInfo: foreground,
+            reason: hostSurfaceProbeDecision.reason
+          });
+          cachedHostSurfaceProbeKey = hostSurfaceProbeKey;
+        }
+      } else {
+        cachedHostSurfaceEvidence = { matched: false, anchor: null, probe: null };
+      }
+      hostSurfaceMatched = !!cachedHostSurfaceEvidence.matched;
+      hostSurfaceAnchor = cachedHostSurfaceEvidence.anchor || null;
+      pineEditorSurfaceProbe = cachedHostSurfaceEvidence.probe || null;
+      pineSurfaceExpectationEvidence = summarizePineSurfaceExpectationEvidence({
+        probe: pineEditorSurfaceProbe,
+        anchor: watcherSurfaceAnchor,
+        element: watcherSurfaceElement
+      });
+      pineSurfaceExpectationMatched = matchesPineSurfaceExpectation(spec, pineSurfaceExpectationEvidence);
       tradingMode = inferTradingViewTradingMode({
         title: foreground?.title,
         textSignals: [
@@ -411,7 +774,11 @@ function createObservationCheckpointRuntime(deps = {}) {
       });
 
       const freshObservation = !!watcherFreshness?.fresh;
-      const surfaceChangeObserved = observedChange || keywordMatched || titleHintMatched || watcherSurfaceMatched;
+      const surfaceEvidenceMatched = keywordMatched || titleHintMatched || watcherSurfaceMatched || hostSurfaceMatched;
+      const surfaceChangeObserved = observedChange || surfaceEvidenceMatched;
+      const strongForegroundMatch = ['hwnd-exact', 'title', 'title-regex'].includes(
+        String(evalResult.matchReason || '').trim().toLowerCase()
+      );
       const strictChartStateMatched = spec.classification === 'chart-state'
         && ['symbol-updated', 'timeframe-updated', 'watchlist-updated'].includes(String(spec.verifyKind || '').trim().toLowerCase())
         ? !!(
@@ -422,26 +789,39 @@ function createObservationCheckpointRuntime(deps = {}) {
           && (observedChange || watcherSurfaceMatched)
         )
         : false;
-      const editorActiveMatched = spec.classification === 'editor-active'
+      const strictFreshPineSurfaceMatched = spec.classification === 'editor-active'
+        && String(spec.pineSurfaceExpectation || '').trim().toLowerCase() === 'fresh-script'
         ? !!(
           foreground?.success
           && windowKindMatched
-          && (
-            watcherSurfaceMatched
-            || (
-              evalResult.matched
-              && surfaceChangeObserved
-              && (keywordMatched || titleHintMatched || freshObservation)
-            )
-          )
+          && pineSurfaceExpectationMatched
         )
+        : false;
+      const editorActiveMatched = spec.classification === 'editor-active'
+        ? (String(spec.pineSurfaceExpectation || '').trim().toLowerCase() === 'fresh-script'
+          ? strictFreshPineSurfaceMatched
+          : !!(
+            foreground?.success
+            && windowKindMatched
+            && (
+              hostSurfaceMatched
+              || watcherSurfaceMatched
+              || (
+                evalResult.matched
+                && surfaceChangeObserved
+                && (keywordMatched || titleHintMatched || (freshObservation && strongForegroundMatch))
+              )
+            )
+          ))
         : false;
       const verified = spec.requiresObservedChange
         ? (spec.classification === 'editor-active'
           ? editorActiveMatched
           : (strictChartStateMatched
             || !!(foreground?.success && evalResult.matched && windowKindMatched && surfaceChangeObserved)))
-        : !!(foreground?.success && evalResult.matched && windowKindMatched && (surfaceChangeObserved || freshObservation || !spec.requiresObservedChange));
+        : (spec.classification === 'chart-state'
+          ? !!(foreground?.success && evalResult.matched && windowKindMatched)
+          : !!(foreground?.success && evalResult.matched && windowKindMatched && surfaceEvidenceMatched));
 
       if (verified) {
         return {
@@ -451,6 +831,7 @@ function createObservationCheckpointRuntime(deps = {}) {
           appName: spec.appName || null,
           verifyKind: spec.verifyKind || null,
           verifyTarget: spec.verifyTarget || null,
+          pineSurfaceExpectation: spec.pineSurfaceExpectation || null,
           domainProofEligible: spec.domainProofEligible === true,
           attempts: attempt,
           observedChange,
@@ -459,15 +840,21 @@ function createObservationCheckpointRuntime(deps = {}) {
           titleHintMatched,
           windowKindMatched,
           editorActiveMatched,
+          hostSurfaceMatched,
+          hostSurfaceAnchor,
           watcherSurfaceMatched,
           watcherSurfaceAnchor,
           watcherSurfaceElement,
+          pineSurfaceExpectationMatched,
+          pineSurfaceExpectationEvidence,
+          pineEditorSurfaceProbe,
+          hostSurfaceProbeDecision,
           tradingMode,
           beforeForeground: beforeForeground || null,
           foreground,
           expectedWindowHandle,
           waitTargetHwnd,
-          matchReason: evalResult.matchReason,
+          matchReason: hostSurfaceMatched ? 'pine-editor-surface-probe' : evalResult.matchReason,
           popupHint: evalResult.popupHint || null,
           reason: spec.reason || ''
         };
@@ -481,6 +868,7 @@ function createObservationCheckpointRuntime(deps = {}) {
       appName: spec.appName || null,
       verifyKind: spec.verifyKind || null,
       verifyTarget: spec.verifyTarget || null,
+      pineSurfaceExpectation: spec.pineSurfaceExpectation || null,
       domainProofEligible: spec.domainProofEligible === true,
       attempts: keyCheckpointMaxPolls,
       observedChange,
@@ -489,9 +877,15 @@ function createObservationCheckpointRuntime(deps = {}) {
       titleHintMatched,
       windowKindMatched,
       editorActiveMatched: false,
+      hostSurfaceMatched,
+      hostSurfaceAnchor,
       watcherSurfaceMatched,
       watcherSurfaceAnchor,
       watcherSurfaceElement,
+      pineSurfaceExpectationMatched,
+      pineSurfaceExpectationEvidence,
+      pineEditorSurfaceProbe,
+      hostSurfaceProbeDecision,
       tradingMode,
       beforeForeground: beforeForeground || null,
       foreground,
@@ -502,9 +896,11 @@ function createObservationCheckpointRuntime(deps = {}) {
       reason: spec.reason || '',
       error: spec.requiresObservedChange
         ? (spec.classification === 'editor-active'
-          ? 'Post-key observation checkpoint could not confirm an active Pine Editor surface before continuing'
+          ? (String(spec.pineSurfaceExpectation || '').trim().toLowerCase() === 'fresh-script'
+            ? 'Post-key observation checkpoint could not confirm a fresh Pine starter surface before continuing'
+            : 'Post-key observation checkpoint could not confirm an active Pine Editor surface before continuing')
           : 'Post-key observation checkpoint could not confirm a TradingView surface change before continuing')
-        : 'Post-key observation checkpoint could not confirm fresh TradingView state'
+        : 'Post-key observation checkpoint could not confirm the expected TradingView surface before continuing'
     };
   }
 

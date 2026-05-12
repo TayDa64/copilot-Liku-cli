@@ -212,6 +212,184 @@ function createTradingViewObservationProvider() {
   };
 }
 
+function normalizeTradingViewDecisionSurface(surface = '') {
+  const normalized = String(surface || '').trim().toLowerCase();
+  if (!normalized) return null;
+
+  switch (normalized) {
+    case 'pine-editor':
+    case 'editor-active':
+    case 'editor-ready':
+      return 'tradingview/pine-editor';
+    case 'quick-search':
+    case 'input-surface-open':
+      return 'tradingview/quick-search';
+    case 'symbol-search':
+      return 'tradingview/symbol-search';
+    case 'chart':
+    case 'chart-state':
+      return 'tradingview/chart';
+    default:
+      return normalized.startsWith('tradingview/')
+        ? normalized
+        : `tradingview/${normalized}`;
+  }
+}
+
+function summarizeTradingViewShortcut(shortcut = {}) {
+  if (!shortcut || typeof shortcut !== 'object') return null;
+  const id = String(shortcut.id || '').trim().toLowerCase();
+  const surface = String(shortcut.surface || '').trim().toLowerCase();
+  const appName = String(shortcut.appName || '').trim();
+  if (!id && !surface && !appName) return null;
+  return {
+    id: id || null,
+    surface: surface || null,
+    appName: appName || null
+  };
+}
+
+function summarizeTradingViewSearchSurfaceContract(contract = {}) {
+  if (!contract || typeof contract !== 'object') return null;
+  const id = String(contract.id || '').trim().toLowerCase();
+  const route = String(contract.route || '').trim().toLowerCase();
+  const surface = String(contract.surface || contract.target || '').trim().toLowerCase();
+  const appName = String(contract.appName || '').trim();
+  if (!id && !route && !surface && !appName) return null;
+  return {
+    id: id || null,
+    route: route || null,
+    surface: surface || null,
+    appName: appName || null,
+    requiresCommandSurface: contract.requiresCommandSurface === true
+  };
+}
+
+function summarizeTradingViewDecisionObservation(observationCheckpoint = {}) {
+  if (!observationCheckpoint || typeof observationCheckpoint !== 'object') return null;
+  const verifyTarget = String(
+    observationCheckpoint.verifyTarget?.target
+    || observationCheckpoint.verifyTarget?.surface
+    || observationCheckpoint.verifyTarget
+    || ''
+  ).trim().toLowerCase();
+  const summary = {
+    classification: String(observationCheckpoint.classification || '').trim().toLowerCase() || null,
+    verifyKind: String(observationCheckpoint.verifyKind || '').trim().toLowerCase() || null,
+    verifyTarget: verifyTarget || null,
+    verified: observationCheckpoint.verified === true,
+    matchReason: String(observationCheckpoint.matchReason || '').trim() || null,
+    hostSurfaceMatched: observationCheckpoint.hostSurfaceMatched === true,
+    hostSurfaceAnchor: String(observationCheckpoint.hostSurfaceAnchor || '').trim() || null,
+    watcherSurfaceMatched: observationCheckpoint.watcherSurfaceMatched === true,
+    watcherSurfaceAnchor: String(observationCheckpoint.watcherSurfaceAnchor || '').trim() || null,
+    editorActiveMatched: observationCheckpoint.editorActiveMatched === true,
+    recoveredBy: String(observationCheckpoint.recoveredBy || '').trim() || null
+  };
+
+  return Object.values(summary).some((value) => value !== null && value !== false)
+    ? summary
+    : null;
+}
+
+function inferTradingViewDecisionSurface(context = {}) {
+  const action = context.action || {};
+  const observationCheckpoint = context.observationCheckpoint || context.result?.observationCheckpoint || null;
+  const shortcutId = String(action?.tradingViewShortcut?.id || '').trim().toLowerCase();
+  const shortcutSurface = String(action?.tradingViewShortcut?.surface || '').trim().toLowerCase();
+  const route = String(action?.searchSurfaceContract?.route || '').trim().toLowerCase();
+  const contractId = String(action?.searchSurfaceContract?.id || '').trim().toLowerCase();
+  const verifyTarget = String(
+    action?.verify?.target
+    || context.checkpointSpec?.verifyTarget
+    || observationCheckpoint?.verifyTarget?.target
+    || observationCheckpoint?.verifyTarget?.surface
+    || observationCheckpoint?.verifyTarget
+    || ''
+  ).trim().toLowerCase();
+  const classification = String(
+    context.checkpointSpec?.classification
+    || observationCheckpoint?.classification
+    || ''
+  ).trim().toLowerCase();
+
+  if (verifyTarget === 'pine-editor' || classification === 'editor-active') {
+    return 'tradingview/pine-editor';
+  }
+  if (shortcutId === 'symbol-search' || shortcutSurface === 'symbol-search') {
+    return 'tradingview/symbol-search';
+  }
+  if (route === 'quick-search') {
+    return contractId === 'open-pine-editor'
+      ? 'tradingview/command-quick-search'
+      : 'tradingview/quick-search';
+  }
+  if (String(action?.reason || '').trim() && /chart/i.test(String(action.reason))) {
+    return 'tradingview/chart';
+  }
+  if (verifyTarget) {
+    return normalizeTradingViewDecisionSurface(verifyTarget);
+  }
+  if (classification) {
+    return normalizeTradingViewDecisionSurface(classification);
+  }
+  return 'tradingview/main-window';
+}
+
+function createTradingViewDecisionTraceContributor() {
+  return {
+    toolName: TRADINGVIEW_TOOL_NAME,
+    matchesContext(context = {}) {
+      const haystack = [
+        context.userMessage,
+        context.actionData?.thought,
+        context.actionData?.verification,
+        context.action?.reason,
+        context.action?.verify?.target,
+        context.action?.searchSurfaceContract?.appName,
+        context.action?.tradingViewShortcut?.appName,
+        context.focusRecoveryTarget?.title,
+        context.focusRecoveryTarget?.processName,
+        context.observationCheckpoint?.appName,
+        context.observationCheckpoint?.verifyTarget?.target,
+        context.observationCheckpoint?.verifyTarget?.surface,
+        context.observationCheckpoint?.verifyTarget
+      ].map((value) => String(value || '')).join(' ');
+
+      return /tradingview|trading\s+view/i.test(haystack)
+        || isTradingViewTargetHint(context.verifyTarget || context.inferredTarget || null);
+    },
+    enrich({ context = {} } = {}) {
+      const action = context.action || {};
+      const observationCheckpoint = context.observationCheckpoint || context.result?.observationCheckpoint || null;
+      const shortcut = summarizeTradingViewShortcut(action.tradingViewShortcut);
+      const searchSurfaceContract = summarizeTradingViewSearchSurfaceContract(action.searchSurfaceContract);
+      const observation = summarizeTradingViewDecisionObservation(observationCheckpoint);
+      const quickSearchRecovery = context.quickSearchRecovery || context.result?.quickSearchRecovery || null;
+      const pineEditorRecovery = context.pineEditorRecovery || context.result?.pineEditorRecovery || null;
+      const domainData = {};
+
+      if (shortcut) domainData.shortcut = shortcut;
+      if (searchSurfaceContract) domainData.searchSurfaceContract = searchSurfaceContract;
+      if (observation) domainData.observation = observation;
+      if (quickSearchRecovery) domainData.quickSearchRecovery = quickSearchRecovery;
+      if (pineEditorRecovery) domainData.pineEditorRecovery = pineEditorRecovery;
+
+      return {
+        domain: 'tradingview',
+        expectedSurface: inferTradingViewDecisionSurface(context),
+        domainData: Object.keys(domainData).length
+          ? { tradingview: domainData }
+          : null,
+        tags: [
+          'tradingview',
+          inferTradingViewDecisionSurface(context)
+        ]
+      };
+    }
+  };
+}
+
 function registerTradingViewObservationProvider(deps = {}) {
   const {
     registerObservationProvider
@@ -228,6 +406,25 @@ function registerTradingViewObservationProvider(deps = {}) {
     toolName: TRADINGVIEW_TOOL_NAME,
     priority: TRADINGVIEW_TOOL_PRIORITY,
     observationProviderEntry
+  };
+}
+
+function registerTradingViewDecisionTraceContributor(deps = {}) {
+  const {
+    registerDecisionTraceContributor
+  } = deps;
+
+  if (typeof registerDecisionTraceContributor !== 'function') {
+    throw new Error('registerTradingViewDecisionTraceContributor requires registerDecisionTraceContributor');
+  }
+
+  const contributor = createTradingViewDecisionTraceContributor();
+  const decisionTraceContributorEntry = registerDecisionTraceContributor(TRADINGVIEW_TOOL_NAME, contributor, TRADINGVIEW_TOOL_PRIORITY);
+
+  return {
+    toolName: TRADINGVIEW_TOOL_NAME,
+    priority: TRADINGVIEW_TOOL_PRIORITY,
+    decisionTraceContributorEntry
   };
 }
 
@@ -261,6 +458,8 @@ module.exports = {
   registerTradingViewSystemContracts,
   createTradingViewObservationProvider,
   registerTradingViewObservationProvider,
+  createTradingViewDecisionTraceContributor,
+  registerTradingViewDecisionTraceContributor,
   registerTradingViewPineLifecycleHooks,
   applyTradingViewReliabilityRewrites,
   assessTradingViewRisk,
