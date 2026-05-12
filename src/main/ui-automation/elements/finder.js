@@ -20,6 +20,7 @@ const { debug, log } = require('../core/helpers');
  * @property {boolean} [isEnabled] - Filter by enabled state
  * @property {string} [windowTitle] - Limit search to specific window
  * @property {number} [index] - Select Nth matching element (0-based)
+ * @property {number} [timeoutMs] - Optional PowerShell execution timeout override
  */
 
 /**
@@ -51,6 +52,7 @@ async function findElements(options = {}) {
     isEnabled,
     windowTitle = '',
     index,
+    timeoutMs = 30000,
   } = options;
 
   const searchText = exactText || text;
@@ -184,7 +186,7 @@ $results = Find-UIElements \`
 $results | ConvertTo-Json -Depth 5 -Compress
 `;
 
-  const result = await executePowerShellScript(psScript, 30000);
+  const result = await executePowerShellScript(psScript, timeoutMs);
   
   debug('PowerShell stdout:', result.stdout?.substring(0, 500));
   debug('PowerShell stderr:', result.stderr);

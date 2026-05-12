@@ -43,6 +43,7 @@ const MIN_TRADINGVIEW_QUICK_SEARCH_DISCOVERY_TIMEOUT_MS = 250;
 const DEFAULT_TRADINGVIEW_PINE_QUICK_SEARCH_RECOVERY_TIMEOUT_MS = 7000;
 const MIN_TRADINGVIEW_PINE_QUICK_SEARCH_RECOVERY_TIMEOUT_MS = 500;
 const TRADINGVIEW_PINE_EDITOR_QUICK_SEARCH_QUERY = 'Pine Editor';
+const WATCHER_FOREGROUND_FRESH_MS = 1500;
 
 const TRADINGVIEW_QUICK_SEARCH_EMPTY_TEXT_PATTERNS = Object.freeze([
   /^$/,
@@ -50,9 +51,21 @@ const TRADINGVIEW_QUICK_SEARCH_EMPTY_TEXT_PATTERNS = Object.freeze([
   /^search\s+tool\s+or\s+function$/i
 ]);
 
+const PINE_EDITOR_WATCHER_SURFACE_ANCHORS = Object.freeze([
+  'Add to chart',
+  'Publish script',
+  'Update on chart',
+  'Script saved',
+  'Untitled script',
+  'Save script',
+  'Save as',
+  'Rename script'
+]);
+
 function createTradingViewRuntimeRecovery(deps = {}) {
   const {
     systemAutomation,
+    getUIWatcher,
     sleepMs,
     verifyKeyObservationCheckpoint
   } = deps;
@@ -66,6 +79,308 @@ function createTradingViewRuntimeRecovery(deps = {}) {
 
   function normalizeQuickSearchWindowProcessName(value = '') {
     return String(value || '').trim().toLowerCase();
+  }
+
+  function normalizeWatcherForeground(activeWindow = null, source = 'watcher-cache') {
+    if (!activeWindow || typeof activeWindow !== 'object') {
+      return null;
+    }
+
+    return {
+      success: true,
+      hwnd: Number(activeWindow.hwnd || 0) || 0,
+      pid: Number(activeWindow.pid || activeWindow.processId || 0) || 0,
+      processName: String(activeWindow.processName || ''),
+      title: String(activeWindow.title || ''),
+      ownerHwnd: Number(activeWindow.ownerHwnd || 0) || 0,
+      isTopmost: activeWindow.isTopmost === true,
+      isToolWindow: activeWindow.isToolWindow === true,
+      isMinimized: activeWindow.isMinimized === true,
+      isMaximized: activeWindow.isMaximized === true,
+      windowKind: String(activeWindow.windowKind || 'main'),
+      bounds: activeWindow.bounds || null,
+      source
+    };
+  }
+
+  function getFreshWatcherForeground(expectedWindowHandle = 0, maxAgeMs = WATCHER_FOREGROUND_FRESH_MS) {
+    const watcher = typeof getUIWatcher === 'function'
+      ? getUIWatcher()
+      : null;
+    if (!watcher?.cache?.activeWindow) {
+      return {
+        watcher: null,
+        available: false,
+        fresh: false,
+        ageMs: Number.POSITIVE_INFINITY,
+        lastUpdate: 0,
+        updateCount: 0,
+        foreground: null,
+        matchesExpectedWindow: expectedWindowHandle <= 0
+      };
+    }
+
+    const lastUpdate = Number(watcher.cache.lastUpdate || 0) || 0;
+    const ageMs = lastUpdate > 0 ? Math.max(0, Date.now() - lastUpdate) : Number.POSITIVE_INFINITY;
+    const foreground = normalizeWatcherForeground(watcher.cache.activeWindow, 'watcher-cache');
+    const foregroundHwnd = Number(foreground?.hwnd || 0) || 0;
+
+    return {
+      watcher,
+      available: true,
+      fresh: ageMs <= (Math.max(0, Number(maxAgeMs || 0)) || WATCHER_FOREGROUND_FRESH_MS),
+      ageMs,
+      lastUpdate,
+      updateCount: Number(watcher.cache.updateCount || 0) || 0,
+      foreground,
+      matchesExpectedWindow: expectedWindowHandle <= 0 || !foregroundHwnd || foregroundHwnd === expectedWindowHandle
+    };
+  }
+
+  function cacheTrustedTradingViewForeground(runtimeOptions = null, foreground = null) {
+    if (!runtimeOptions || typeof runtimeOptions !== 'object' || !foreground?.success) {
+      return foreground;
+    }
+
+    if (normalizeQuickSearchWindowProcessName(foreground?.processName || '') === 'tradingview') {
+      runtimeOptions.cachedQuickSearchForeground = foreground;
+    }
+
+    return foreground;
+  }
+
+  function getCachedTrustedTradingViewForeground(expectedWindowHandle = 0, runtimeOptions = null) {
+    const cachedForeground = runtimeOptions?.cachedQuickSearchForeground;
+    const cachedForegroundHandle = Number(cachedForeground?.hwnd || 0) || 0;
+    if (
+      cachedForeground?.success
+      && normalizeQuickSearchWindowProcessName(cachedForeground?.processName || '') === 'tradingview'
+      && (!expectedWindowHandle || !cachedForegroundHandle || expectedWindowHandle === cachedForegroundHandle)
+    ) {
+      return cachedForeground;
+    }
+
+    return null;
+  }
+
+  async function getPreferredForegroundInfo(preferredWindowHandle = 0, runtimeOptions = null, options = {}) {
+    const expectedWindowHandle = Number(
+      preferredWindowHandle
+      || runtimeOptions?.expectedWindowHandle
+      || runtimeOptions?.windowHandle
+      || 0
+    ) || 0;
+    const requireTradingView = options.requireTradingView === true;
+
+    if (requireTradingView) {
+      const cachedForeground = getCachedTrustedTradingViewForeground(expectedWindowHandle, runtimeOptions);
+      if (cachedForeground) {
+        return {
+          foreground: cachedForeground,
+          source: 'cache',
+          watcher: null
+        };
+      }
+    }
+
+    const watcherState = getFreshWatcherForeground(
+      expectedWindowHandle,
+      Math.max(0, Number(options.maxWatcherAgeMs || 0)) || WATCHER_FOREGROUND_FRESH_MS
+    );
+    if (
+      watcherState.fresh
+      && watcherState.foreground?.success
+      && watcherState.matchesExpectedWindow !== false
+      && (
+        !requireTradingView
+        || normalizeQuickSearchWindowProcessName(watcherState.foreground?.processName || '') === 'tradingview'
+      )
+    ) {
+      cacheTrustedTradingViewForeground(runtimeOptions, watcherState.foreground);
+      return {
+        foreground: watcherState.foreground,
+        source: 'watcher',
+        watcher: watcherState
+      };
+    }
+
+    let foreground = null;
+    try {
+      foreground = await systemAutomation.getForegroundWindowInfo();
+    } catch {
+      foreground = null;
+    }
+
+    if (
+      foreground?.success
+      && normalizeQuickSearchWindowProcessName(foreground?.processName || '') === 'tradingview'
+    ) {
+      cacheTrustedTradingViewForeground(runtimeOptions, foreground);
+    }
+
+    if (
+      requireTradingView
+      && normalizeQuickSearchWindowProcessName(foreground?.processName || '') !== 'tradingview'
+    ) {
+      return {
+        foreground: null,
+        source: 'system-automation-non-tradingview',
+        watcher: watcherState,
+        systemForeground: foreground
+      };
+    }
+
+    return {
+      foreground: foreground?.success ? foreground : null,
+      source: 'system-automation',
+      watcher: watcherState,
+      systemForeground: foreground
+    };
+  }
+
+  function buildForegroundStateKey(foreground = null) {
+    if (!foreground || typeof foreground !== 'object') {
+      return '';
+    }
+
+    return [
+      Number(foreground?.hwnd || 0) || 0,
+      normalizeTradingViewQuickSearchDiscoveryText(foreground?.processName || ''),
+      normalizeTradingViewQuickSearchDiscoveryText(foreground?.title || ''),
+      normalizeTradingViewQuickSearchDiscoveryText(foreground?.windowKind || '')
+    ].join('|');
+  }
+
+  function normalizeWatcherProbeBounds(bounds = null) {
+    const geometry = getNormalizedBoundsGeometry(bounds);
+    if (!geometry) {
+      return null;
+    }
+
+    return {
+      X: geometry.x,
+      Y: geometry.y,
+      Width: geometry.width,
+      Height: geometry.height,
+      CenterX: Math.round(geometry.x + (geometry.width / 2)),
+      CenterY: Math.round(geometry.y + (geometry.height / 2))
+    };
+  }
+
+  function normalizeWatcherProbeElement(element = null) {
+    if (!element || typeof element !== 'object') {
+      return null;
+    }
+
+    const controlTypeRaw = String(
+      element?.ControlType
+      || element?.controlType
+      || element?.type
+      || ''
+    ).trim();
+    const controlType = controlTypeRaw
+      ? (controlTypeRaw.startsWith('ControlType.') ? controlTypeRaw : `ControlType.${controlTypeRaw}`)
+      : '';
+
+    return {
+      Name: String(element?.Name || element?.name || ''),
+      Value: String(element?.Value || element?.value || ''),
+      ControlType: controlType,
+      AutomationId: String(element?.AutomationId || element?.automationId || ''),
+      ClassName: String(element?.ClassName || element?.className || ''),
+      WindowHandle: Number(element?.WindowHandle || element?.windowHandle || 0) || 0,
+      Bounds: normalizeWatcherProbeBounds(element?.Bounds || element?.bounds)
+    };
+  }
+
+  function getWatcherTextEvidenceMatch(watcher = null, anchors = [], foreground = null) {
+    if (!watcher?.cache || !Array.isArray(watcher.cache.elements)) {
+      return { matched: false, anchor: null, element: null };
+    }
+
+    const normalizedAnchors = (Array.isArray(anchors) ? anchors : [])
+      .map((anchor) => ({
+        raw: String(anchor || '').trim(),
+        normalized: normalizeTradingViewQuickSearchDiscoveryText(anchor)
+      }))
+      .filter((entry) => entry.raw && entry.normalized);
+    if (!normalizedAnchors.length) {
+      return { matched: false, anchor: null, element: null };
+    }
+
+    const activeHwnd = Number(foreground?.hwnd || watcher.cache.activeWindow?.hwnd || 0) || 0;
+    const scopedElements = activeHwnd > 0
+      ? watcher.cache.elements.filter((element) => Number(element?.windowHandle || element?.WindowHandle || 0) === activeHwnd)
+      : watcher.cache.elements.slice();
+
+    for (const element of scopedElements) {
+      const haystack = normalizeTradingViewQuickSearchDiscoveryText([
+        element?.name,
+        element?.Name,
+        element?.value,
+        element?.Value,
+        element?.automationId,
+        element?.AutomationId,
+        element?.className,
+        element?.ClassName,
+        element?.type,
+        element?.ControlType
+      ].filter(Boolean).join(' '));
+      if (!haystack) {
+        continue;
+      }
+
+      for (const anchor of normalizedAnchors) {
+        if (haystack.includes(anchor.normalized)) {
+          return {
+            matched: true,
+            anchor: anchor.raw,
+            element: normalizeWatcherProbeElement(element)
+          };
+        }
+      }
+    }
+
+    return { matched: false, anchor: null, element: null };
+  }
+
+  function buildPineSurfaceProbeStateKey(expectedWindowHandle = 0, watcherState = null, foreground = null) {
+    const effectiveForeground = foreground?.success
+      ? foreground
+      : watcherState?.foreground;
+
+    return [
+      Number(expectedWindowHandle || 0) || 0,
+      Number(watcherState?.lastUpdate || 0) || 0,
+      Number(watcherState?.updateCount || 0) || 0,
+      watcherState?.matchesExpectedWindow === false ? 'window-mismatch' : 'window-match',
+      buildForegroundStateKey(effectiveForeground)
+    ].join('|');
+  }
+
+  function getCachedSurfaceProbeResult(runtimeOptions = null, cacheName = '', stateKey = '') {
+    if (!runtimeOptions || typeof runtimeOptions !== 'object' || !cacheName || !stateKey) {
+      return undefined;
+    }
+
+    const cache = runtimeOptions[cacheName];
+    if (!cache || cache.key !== stateKey || !Object.prototype.hasOwnProperty.call(cache, 'result')) {
+      return undefined;
+    }
+
+    return cache.result;
+  }
+
+  function cacheSurfaceProbeResult(runtimeOptions = null, cacheName = '', stateKey = '', result = null) {
+    if (!runtimeOptions || typeof runtimeOptions !== 'object' || !cacheName || !stateKey) {
+      return result;
+    }
+
+    runtimeOptions[cacheName] = {
+      key: stateKey,
+      result
+    };
+    return result;
   }
 
   function getTradingViewQuickSearchDiscoveryTimeoutMs() {
@@ -84,6 +399,22 @@ function createTradingViewRuntimeRecovery(deps = {}) {
     }
 
     return DEFAULT_TRADINGVIEW_PINE_QUICK_SEARCH_RECOVERY_TIMEOUT_MS;
+  }
+
+  function shouldAllowLegacyPineSurfaceTextProbe(runtimeOptions = null) {
+    if (runtimeOptions?.allowLegacyPineSurfaceTextProbe === true) {
+      return true;
+    }
+
+    return /^(1|true|yes)$/i.test(String(process.env.LIKU_ENABLE_LEGACY_PINE_SURFACE_TEXT_PROBE || '').trim());
+  }
+
+  function shouldAllowLegacyQuickSearchTextProbe(runtimeOptions = null) {
+    if (runtimeOptions?.allowLegacyQuickSearchTextProbe === true) {
+      return true;
+    }
+
+    return /^(1|true|yes)$/i.test(String(process.env.LIKU_ENABLE_LEGACY_QUICK_SEARCH_TEXT_PROBE || '').trim());
   }
 
   function getQuickSearchOperationTimeRemainingMs(runtimeOptions = null, fallbackMs = 0) {
@@ -169,6 +500,27 @@ function createTradingViewRuntimeRecovery(deps = {}) {
     const route = String(contract?.route || '').trim().toLowerCase();
     if (route !== 'quick-search') return false;
     return contract?.requiresCommandSurface === true;
+  }
+
+  function hasAuthoritativeTradingViewQuickSearchSurfaceProof(probe = null, expectedWindowHandle = 0) {
+    if (!probe || probe.trusted !== true) {
+      return false;
+    }
+
+    const expectedHwnd = Number(expectedWindowHandle || 0) || 0;
+    const elementWindowHandle = Number(probe?.element?.WindowHandle || probe?.element?.windowHandle || 0) || 0;
+    const trustReason = String(probe?.trustReason || '').trim().toLowerCase();
+    const matchedBy = String(probe?.matchedBy || '').trim().toLowerCase();
+
+    if (expectedHwnd > 0 && elementWindowHandle > 0 && elementWindowHandle === expectedHwnd) {
+      return true;
+    }
+
+    if (trustReason === 'expected-window' || trustReason === 'foreground-window') {
+      return true;
+    }
+
+    return /^uia-host-focused-/.test(matchedBy);
   }
 
   function buildTradingViewPineQuickSearchTypeAction(expectedText = TRADINGVIEW_PINE_EDITOR_QUICK_SEARCH_QUERY) {
@@ -295,7 +647,8 @@ function createTradingViewRuntimeRecovery(deps = {}) {
       pineEditorDirectShortcut: summarizeRecoveryStep(recovery.pineEditorDirectShortcut),
       pineEditorChartFocusClick: summarizeRecoveryStep(recovery.pineEditorChartFocusClick),
       pineEditorResultClick: recovery.pineEditorResultClick || null,
-      pineEditorSurfaceProbe: recovery.pineEditorSurfaceProbe || null
+      pineEditorSurfaceProbe: recovery.pineEditorSurfaceProbe || null,
+      pineEditorCommandSurfaceProbe: recovery.pineEditorCommandSurfaceProbe || null
     };
   }
 
@@ -315,6 +668,56 @@ function createTradingViewRuntimeRecovery(deps = {}) {
       recovered: recovery.recovered === true,
       error: recovery.error || metadata.error || null
     };
+  }
+
+  function shouldSkipQuickSearchFallbackAfterSemanticActivation(observationCheckpoint = null, directShortcutRecovery = null, semanticActivationProof = null) {
+    if (!directShortcutRecovery || typeof directShortcutRecovery !== 'object' || directShortcutRecovery.recovered === true) {
+      return false;
+    }
+
+    const proofIndicatesRendererProofUnavailable = semanticActivationProof
+      && typeof semanticActivationProof === 'object'
+      && String(semanticActivationProof.disposition || '').trim().toLowerCase() === 'renderer-proof-unavailable';
+    const proofIndicatesStateChangeWithoutSurface = semanticActivationProof
+      && typeof semanticActivationProof === 'object'
+      && semanticActivationProof.observedChange === true
+      && semanticActivationProof.pineSurfaceObserved !== true
+      && String(semanticActivationProof.disposition || '').trim().toLowerCase() === 'window-state-changed-without-pine-surface';
+    const checkpointIndicatesStateChangeWithoutSurface = observationCheckpoint
+      && typeof observationCheckpoint === 'object'
+      && observationCheckpoint.verified !== true
+      && observationCheckpoint.observedChange === true
+      && observationCheckpoint.hostSurfaceMatched !== true
+      && observationCheckpoint.watcherSurfaceMatched !== true;
+
+    if (
+      !proofIndicatesRendererProofUnavailable
+      && !proofIndicatesStateChangeWithoutSurface
+      && !checkpointIndicatesStateChangeWithoutSurface
+    ) {
+      return false;
+    }
+
+    const recoverySurfaceObserved = directShortcutRecovery?.checkpoint?.verified === true
+      || directShortcutRecovery?.pineEditorSurfaceProbe?.matched === true
+      || directShortcutRecovery?.pineEditorSurfaceProbe?.active === true;
+    if (recoverySurfaceObserved) {
+      return false;
+    }
+
+    const processName = normalizeQuickSearchWindowProcessName(
+      observationCheckpoint?.foreground?.processName
+      || semanticActivationProof?.foreground?.processName
+      || semanticActivationProof?.after?.foreground?.processName
+      || semanticActivationProof?.before?.foreground?.processName
+      || observationCheckpoint?.beforeForeground?.processName
+      || ''
+    );
+    if (processName && processName !== 'tradingview') {
+      return false;
+    }
+
+    return true;
   }
 
   function buildTradingViewQuickSearchSyntheticFocus(foreground = null, inputSurface = null) {
@@ -422,6 +825,49 @@ try {
     }
   }
 
+  async function saveCurrentClipboardState() {
+    if (typeof systemAutomation.saveClipboardState === 'function') {
+      try {
+        const result = await systemAutomation.saveClipboardState();
+        if (result && typeof result === 'object' && Object.prototype.hasOwnProperty.call(result, 'success')) {
+          return {
+            success: result.success === true,
+            token: String(result.token || ''),
+            text: String(result.text || ''),
+            mode: String(result.mode || (result.token ? 'host-token' : 'text') || ''),
+            error: result.error || null,
+            source: result.source || null,
+            containsText: result.containsText === true,
+            textLength: Number(result.textLength || 0) || 0
+          };
+        }
+      } catch (error) {
+        return {
+          success: false,
+          token: '',
+          text: '',
+          mode: '',
+          error: error?.message || String(error || 'Clipboard state save failed'),
+          source: null,
+          containsText: false,
+          textLength: 0
+        };
+      }
+    }
+
+    const fallbackRead = await readClipboardText();
+    return {
+      success: fallbackRead.success === true,
+      token: '',
+      text: String(fallbackRead.text || ''),
+      mode: 'text',
+      error: fallbackRead.error || null,
+      source: fallbackRead.source || null,
+      containsText: fallbackRead.success === true,
+      textLength: String(fallbackRead.text || '').length
+    };
+  }
+
   async function writeClipboardText(text = '') {
     const normalizedText = String(text ?? '');
 
@@ -459,38 +905,58 @@ Set-Clipboard -Value $value
     }
   }
 
+  async function restoreSavedClipboardState(savedState = null) {
+    if (typeof systemAutomation.restoreClipboardState === 'function') {
+      try {
+        const result = await systemAutomation.restoreClipboardState(savedState);
+        if (result && typeof result === 'object' && Object.prototype.hasOwnProperty.call(result, 'success')) {
+          return {
+            success: result.success === true,
+            error: result.error || null,
+            source: result.source || null,
+            token: String(result.token || '')
+          };
+        }
+        return { success: true, error: null, source: null, token: '' };
+      } catch (error) {
+        return {
+          success: false,
+          error: error?.message || String(error || 'Clipboard restore failed'),
+          source: null,
+          token: ''
+        };
+      }
+    }
+
+    if (!savedState || savedState.success !== true) {
+      return {
+        success: false,
+        error: savedState?.error || 'Original clipboard could not be restored because it could not be read',
+        source: savedState?.source || null,
+        token: String(savedState?.token || '')
+      };
+    }
+
+    return writeClipboardText(savedState.text || '');
+  }
+
   async function getTrustedTradingViewQuickSearchForeground(preferredWindowHandle = 0, runtimeOptions = null) {
     const expectedWindowHandle = Number(preferredWindowHandle || 0) || 0;
-    const cachedForeground = runtimeOptions?.cachedQuickSearchForeground;
-    const cachedForegroundHandle = Number(cachedForeground?.hwnd || 0) || 0;
-    if (
-      cachedForeground?.success
-      && normalizeQuickSearchWindowProcessName(cachedForeground?.processName || '') === 'tradingview'
-      && (!expectedWindowHandle || !cachedForegroundHandle || expectedWindowHandle === cachedForegroundHandle)
-    ) {
-      return cachedForeground;
-    }
-
-    let foreground = null;
-    try {
-      foreground = await systemAutomation.getForegroundWindowInfo();
-    } catch {
-      foreground = null;
-    }
-
+    const preferredForeground = await getPreferredForegroundInfo(
+      expectedWindowHandle,
+      runtimeOptions,
+      {
+        requireTradingView: true
+      }
+    );
+    const foreground = preferredForeground?.foreground;
     if (!foreground?.success) {
-      return null;
-    }
-
-    if (normalizeQuickSearchWindowProcessName(foreground?.processName || '') !== 'tradingview') {
       return null;
     }
 
     const foregroundHandle = Number(foreground?.hwnd || 0) || 0;
     if (!expectedWindowHandle || !foregroundHandle || expectedWindowHandle === foregroundHandle) {
-      if (runtimeOptions && typeof runtimeOptions === 'object') {
-        runtimeOptions.cachedQuickSearchForeground = foreground;
-      }
+      cacheTrustedTradingViewForeground(runtimeOptions, foreground);
       return foreground;
     }
 
@@ -507,9 +973,7 @@ Set-Clipboard -Value $value
       return null;
     }
 
-    if (runtimeOptions && typeof runtimeOptions === 'object') {
-      runtimeOptions.cachedQuickSearchForeground = foreground;
-    }
+    cacheTrustedTradingViewForeground(runtimeOptions, foreground);
     return foreground;
   }
 
@@ -556,11 +1020,10 @@ Set-Clipboard -Value $value
       return selectionReset;
     }
 
-    try {
-      selectionReset.foreground = await systemAutomation.getForegroundWindowInfo();
-    } catch {
-      selectionReset.foreground = null;
-    }
+    const foregroundContext = await getPreferredForegroundInfo(0, runtimeOptions, {
+      requireTradingView: false
+    });
+    selectionReset.foreground = foregroundContext?.foreground || null;
 
     return selectionReset;
   }
@@ -603,7 +1066,7 @@ Set-Clipboard -Value $value
     }
 
     throwIfQuickSearchOperationTimedOut(runtimeOptions);
-    const originalClipboard = await readClipboardText();
+    const originalClipboard = await saveCurrentClipboardState();
     const sentinel = `__LIKU_QS_${Date.now()}_${Math.random().toString(36).slice(2, 8)}__`;
     throwIfQuickSearchOperationTimedOut(runtimeOptions);
     const sentinelWrite = await writeClipboardText(sentinel);
@@ -645,7 +1108,7 @@ Set-Clipboard -Value $value
     } finally {
       selectionReset = await collapseTradingViewQuickSearchSelection(action, 'right', runtimeOptions);
       restoreClipboard = originalClipboard.success
-        ? await writeClipboardText(originalClipboard.text)
+        ? await restoreSavedClipboardState(originalClipboard)
         : { success: false, error: originalClipboard.error || 'Original clipboard could not be restored because it could not be read' };
     }
 
@@ -847,6 +1310,88 @@ Set-Clipboard -Value $value
     };
   }
 
+  function shouldAllowTradingViewPineQuickSearchClipboardContinuation(action = {}) {
+    return String(action?.searchSurfaceContract?.route || '').trim().toLowerCase() === 'quick-search'
+      && String(action?.searchSurfaceContract?.surface || '').trim().toLowerCase() === 'pine-editor';
+  }
+
+  function normalizeTradingViewQuickSearchClipboardProofError(
+    error = '',
+    fallback = 'TradingView quick-search typing could not be verified before continuing'
+  ) {
+    const raw = String(error || '').trim();
+    if (!raw) {
+      return fallback;
+    }
+
+    if (/hermetic automation test mode blocked live .*clipboard/i.test(raw)) {
+      return fallback;
+    }
+
+    return raw;
+  }
+
+  async function maybePrepareTradingViewPineQuickSearchClipboardContinuation(
+    action,
+    preferredWindowHandle = 0,
+    runtimeOptions = null,
+    context = {}
+  ) {
+    if (!shouldAllowTradingViewPineQuickSearchClipboardContinuation(action)) {
+      return null;
+    }
+
+    const clipboardFallbackRuntimeOptions = runtimeOptions && typeof runtimeOptions === 'object'
+      ? {
+          ...runtimeOptions,
+          allowPostClearAssumedReady: true
+        }
+      : { allowPostClearAssumedReady: true };
+    const clipboardFallback = await maybeAssumeTradingViewQuickSearchFocusedFromClipboard(
+      action,
+      preferredWindowHandle,
+      clipboardFallbackRuntimeOptions
+    );
+    if (!clipboardFallback?.ready) {
+      if (!clipboardFallback?.applicable) {
+        return null;
+      }
+
+      return {
+        applicable: true,
+        ready: true,
+        emptyConfirmed: false,
+        queryAlreadyPresent: false,
+        fallbackAssumedFocused: true,
+        fallbackReason: normalizeTradingViewQuickSearchClipboardProofError(
+          clipboardFallback?.error || clipboardFallback?.fallbackReason || '',
+          'TradingView quick-search clipboard selection could not prove the field state; continue in bounded Pine mode and require post-type verification before Enter'
+        ),
+        clearedBy: context.keyboardFallback?.success === true
+          ? 'keyboard-fallback-assumed-empty'
+          : (clipboardFallback?.clearedBy || 'clipboard-selection-miss-assumed-empty'),
+        expectedText: context.expectedText || clipboardFallback?.expectedText || getExpectedTradingViewQuickSearchText(action),
+        inputFocus: clipboardFallback.inputFocus || context.inputFocus || null,
+        focusRecovery: context.focusRecovery || clipboardFallback.focusRecovery || clipboardFallback.inputFocus || context.inputFocus || null,
+        initialRead: context.initialRead || clipboardFallback.initialRead || null,
+        clearAttempt: context.clearAttempt || clipboardFallback.clearAttempt || null,
+        keyboardFallback: context.keyboardFallback || clipboardFallback.keyboardFallback || null,
+        finalRead: clipboardFallback.finalRead || context.finalRead || null,
+        error: null
+      };
+    }
+
+    return {
+      ...clipboardFallback,
+      initialRead: context.initialRead || clipboardFallback.initialRead || null,
+      clearAttempt: context.clearAttempt || clipboardFallback.clearAttempt || null,
+      keyboardFallback: context.keyboardFallback || clipboardFallback.keyboardFallback || null,
+      inputFocus: clipboardFallback.inputFocus || context.inputFocus || null,
+      focusRecovery: context.focusRecovery || clipboardFallback.focusRecovery || null,
+      finalRead: clipboardFallback.finalRead || context.finalRead || null
+    };
+  }
+
   function getTradingViewQuickSearchReadbackTargetCandidates(action = {}) {
     return [
       action?.quickSearchPreflight?.inputFocus,
@@ -908,20 +1453,44 @@ Set-Clipboard -Value $value
   async function getQuickSearchTrustedWindowInfo(windowHandle, fallbackForeground = null) {
     const numericHandle = Number(windowHandle || 0) || 0;
     if (!numericHandle) return null;
-    if (Number(fallbackForeground?.hwnd || 0) === numericHandle) {
-      return fallbackForeground && typeof fallbackForeground === 'object'
-        ? fallbackForeground
-        : null;
+    const fallbackMatchesHandle = Number(fallbackForeground?.hwnd || 0) === numericHandle;
+    const fallbackWindow = fallbackForeground && typeof fallbackForeground === 'object'
+      ? fallbackForeground
+      : null;
+
+    let windowInfo = null;
+    if (typeof systemAutomation.getWindowInfoByHandle === 'function') {
+      try {
+        const info = await systemAutomation.getWindowInfoByHandle(numericHandle);
+        if (info?.success) {
+          windowInfo = info;
+        }
+      } catch {
+        windowInfo = null;
+      }
     }
-    if (typeof systemAutomation.getWindowInfoByHandle !== 'function') {
-      return null;
+
+    if (fallbackMatchesHandle && fallbackWindow) {
+      if (!windowInfo) {
+        return fallbackWindow;
+      }
+
+      const mergedWindow = {
+        ...windowInfo,
+        ...fallbackWindow
+      };
+      if (!getUsableTradingViewWindowBounds(fallbackWindow) && getUsableTradingViewWindowBounds(windowInfo)) {
+        if (windowInfo?.bounds && typeof windowInfo.bounds === 'object') {
+          mergedWindow.bounds = windowInfo.bounds;
+        }
+        if (windowInfo?.Bounds && typeof windowInfo.Bounds === 'object') {
+          mergedWindow.Bounds = windowInfo.Bounds;
+        }
+      }
+      return mergedWindow;
     }
-    try {
-      const info = await systemAutomation.getWindowInfoByHandle(numericHandle);
-      return info?.success ? info : null;
-    } catch {
-      return null;
-    }
+
+    return windowInfo;
   }
 
   async function isTrustedTradingViewQuickSearchMatch(matched, options = {}) {
@@ -933,7 +1502,9 @@ Set-Clipboard -Value $value
     const expectedWindowHandle = Number(options.expectedWindowHandle || 0) || 0;
     const foreground = options.foreground && typeof options.foreground === 'object'
       ? options.foreground
-      : await systemAutomation.getForegroundWindowInfo();
+      : (await getPreferredForegroundInfo(expectedWindowHandle, options.runtimeOptions || null, {
+          requireTradingView: false
+        }))?.foreground;
     const foregroundHandle = Number(foreground?.hwnd || 0) || 0;
 
     if (elementWindowHandle && expectedWindowHandle && elementWindowHandle === expectedWindowHandle) {
@@ -987,7 +1558,9 @@ Set-Clipboard -Value $value
       ? (Number(options.windowHandle || 0) || 0)
       : 0;
 
-    const foreground = await systemAutomation.getForegroundWindowInfo();
+    const foreground = (await getPreferredForegroundInfo(explicitWindowHandle, runtimeOptions, {
+      requireTradingView: false
+    }))?.foreground;
     const foregroundHwnd = Number(foreground?.hwnd || 0) || 0;
     const attempts = [];
     if (explicitWindowHandle > 0) {
@@ -1203,6 +1776,96 @@ Set-Clipboard -Value $value
     };
   }
 
+  function buildTradingViewQuickSearchHostProbeBoundsCandidates(windowInfo = {}, options = {}) {
+    const candidates = [];
+    const seen = new Set();
+
+    const appendCandidate = (id, bounds) => {
+      const hostBounds = convertTradingViewQuickSearchBoundsToHostRect(bounds);
+      if (!hostBounds) {
+        return;
+      }
+
+      const dedupeKey = JSON.stringify(hostBounds);
+      if (seen.has(dedupeKey)) {
+        return;
+      }
+      seen.add(dedupeKey);
+
+      candidates.push({
+        id,
+        bounds: hostBounds,
+        hostBounds
+      });
+    };
+
+    appendCandidate('quick-search-lane', options.searchBounds || buildTradingViewQuickSearchEditBounds(windowInfo));
+
+    if (options.includeWindowBoundsFallback !== false) {
+      appendCandidate('window', getUsableTradingViewWindowBounds(windowInfo));
+    }
+
+    return candidates;
+  }
+
+  async function resolveTradingViewQuickSearchHostContext(preferredWindowHandle = 0, options = {}) {
+    const foreground = (await getPreferredForegroundInfo(
+      preferredWindowHandle,
+      options.runtimeOptions || null,
+      {
+        requireTradingView: false
+      }
+    ))?.foreground;
+
+    const trustedWindowHandle = Number(preferredWindowHandle || 0)
+      || Number(foreground?.hwnd || 0)
+      || 0;
+
+    let trustedWindow = null;
+    if (trustedWindowHandle > 0) {
+      trustedWindow = await getQuickSearchTrustedWindowInfo(trustedWindowHandle, foreground);
+    }
+    if (!trustedWindow && foreground?.success) {
+      trustedWindow = foreground;
+    }
+
+    if (normalizeQuickSearchWindowProcessName(trustedWindow?.processName || '') !== 'tradingview') {
+      return {
+        valid: false,
+        foreground,
+        trustedWindowHandle,
+        trustedWindow,
+        searchBounds: null,
+        hostBounds: null,
+        boundsCandidates: []
+      };
+    }
+
+    const searchBounds = options.searchBounds || buildTradingViewQuickSearchEditBounds(trustedWindow);
+    const boundsCandidates = buildTradingViewQuickSearchHostProbeBoundsCandidates(trustedWindow, {
+      searchBounds,
+      includeWindowBoundsFallback: options.includeWindowBoundsFallback
+    });
+    if (!boundsCandidates.length && trustedWindowHandle > 0) {
+      boundsCandidates.push({
+        id: 'window-unbounded',
+        bounds: null,
+        hostBounds: null,
+        unbounded: true
+      });
+    }
+
+    return {
+      valid: true,
+      foreground,
+      trustedWindowHandle,
+      trustedWindow,
+      searchBounds,
+      hostBounds: boundsCandidates[0]?.hostBounds || null,
+      boundsCandidates
+    };
+  }
+
   function buildTradingViewQuickSearchHostScanElementKey(element = null) {
     const metadata = getTradingViewQuickSearchCandidateMetadata(element);
     const bounds = metadata.bounds || {};
@@ -1225,41 +1888,22 @@ Set-Clipboard -Value $value
       return null;
     }
 
-    let foreground = null;
-    try {
-      foreground = await systemAutomation.getForegroundWindowInfo();
-    } catch {
-      foreground = null;
-    }
-
-    const trustedWindowHandle = Number(preferredWindowHandle || 0)
-      || Number(foreground?.hwnd || 0)
-      || 0;
-
-    let trustedWindow = null;
-    if (trustedWindowHandle > 0) {
-      trustedWindow = await getQuickSearchTrustedWindowInfo(trustedWindowHandle, foreground);
-    }
-    if (!trustedWindow && foreground?.success) {
-      trustedWindow = foreground;
-    }
-
-    if (normalizeQuickSearchWindowProcessName(trustedWindow?.processName || '') !== 'tradingview') {
+    const hostContext = await resolveTradingViewQuickSearchHostContext(preferredWindowHandle, {
+      runtimeOptions,
+      searchBounds: options.searchBounds || null,
+      includeWindowBoundsFallback: false
+    });
+    if (!hostContext.valid) {
       return null;
     }
 
-    const searchBounds = options.searchBounds || buildTradingViewQuickSearchEditBounds(trustedWindow);
-    const hostBounds = convertTradingViewQuickSearchBoundsToHostRect(searchBounds);
-    if (!hostBounds) {
-      return {
-        foreground,
-        trustedWindow,
-        searchBounds,
-        hostBounds: null,
-        elements: [],
-        scanAttempts: []
-      };
-    }
+    const {
+      foreground,
+      trustedWindowHandle,
+      trustedWindow,
+      searchBounds,
+      hostBounds
+    } = hostContext;
 
     const views = Array.isArray(options.views) && options.views.length > 0
       ? options.views
@@ -1532,8 +2176,408 @@ Set-Clipboard -Value $value
     return null;
   }
 
+  function doTradingViewQuickSearchBoundsIntersect(left = null, right = null) {
+    const normalizedLeft = getNormalizedBoundsGeometry(left);
+    const normalizedRight = getNormalizedBoundsGeometry(right);
+    if (!normalizedLeft || !normalizedRight) {
+      return false;
+    }
+
+    return normalizedLeft.x < normalizedRight.x + normalizedRight.width
+      && normalizedLeft.x + normalizedLeft.width > normalizedRight.x
+      && normalizedLeft.y < normalizedRight.y + normalizedRight.height
+      && normalizedLeft.y + normalizedLeft.height > normalizedRight.y;
+  }
+
+  async function findTradingViewQuickSearchFocusedHostSurface(preferredWindowHandle = 0, runtimeOptions = null, options = {}) {
+    throwIfQuickSearchOperationTimedOut(runtimeOptions);
+    if (typeof systemAutomation.getFocusedElementInWindowWithHost !== 'function') {
+      return null;
+    }
+
+    const hostContext = await resolveTradingViewQuickSearchHostContext(preferredWindowHandle, {
+      runtimeOptions,
+      searchBounds: options.searchBounds || null,
+      includeWindowBoundsFallback: false
+    });
+    if (!hostContext.valid) {
+      return null;
+    }
+
+    let focusedProbe = null;
+    try {
+      focusedProbe = await systemAutomation.getFocusedElementInWindowWithHost(hostContext.trustedWindowHandle);
+      throwIfQuickSearchOperationTimedOut(runtimeOptions);
+    } catch {
+      focusedProbe = null;
+    }
+
+    const fallbackResult = {
+      matched: false,
+      text: null,
+      exact: false,
+      controlType: null,
+      matchedBy: String(options.matchedBy || 'uia-host-focused-element-probe'),
+      element: null,
+      foreground: hostContext.foreground,
+      trusted: false,
+      trustReason: 'focused-element-unavailable',
+      trustedWindow: hostContext.trustedWindow || null,
+      candidateScore: null,
+      hostFocusedProbe: {
+        reason: focusedProbe?.reason || null,
+        searchBounds: hostContext.searchBounds || null,
+        stats: focusedProbe?.stats || null
+      }
+    };
+
+    if (focusedProbe?.success !== true || focusedProbe?.focused !== true || !focusedProbe?.element) {
+      return fallbackResult;
+    }
+
+    const metadata = getTradingViewQuickSearchCandidateMetadata(focusedProbe.element);
+    const candidateScore = scoreTradingViewQuickSearchCandidate(focusedProbe.element, hostContext.trustedWindow || {});
+    const likelyQuickSearchInput = Number.isFinite(candidateScore)
+      && candidateScore >= TRADINGVIEW_QUICK_SEARCH_EDIT_SCORE_MIN
+      && /(edit|combobox|document|text)/.test(metadata.controlType)
+      && doTradingViewQuickSearchBoundsIntersect(metadata.bounds, hostContext.searchBounds || null);
+    const genericSearchMatched = /\bsearch\b/.test(metadata.haystack);
+    const commandMarkerMatched = /search\s+tool\s+or\s+function|nothing\s+matches\s+your\s+criteria/.test(metadata.haystack);
+    const matched = commandMarkerMatched || genericSearchMatched || likelyQuickSearchInput;
+    const trusted = options.requireCommandSurface === true
+      ? commandMarkerMatched
+      : matched;
+    const trustReason = trusted
+      ? String(options.trustReason || options.matchedBy || 'uia-host-focused-element-probe')
+      : (
+        options.requireCommandSurface === true
+          ? (genericSearchMatched || likelyQuickSearchInput ? 'generic-search-only' : 'focused-element-not-command-surface')
+          : 'focused-element-not-quick-search'
+      );
+
+    return {
+      matched,
+      text: String(
+        focusedProbe.element?.Name
+        || focusedProbe.element?.Value
+        || focusedProbe.element?.name
+        || focusedProbe.element?.value
+        || ''
+      ).trim(),
+      exact: commandMarkerMatched,
+      controlType: String(
+        focusedProbe.element?.ControlType
+        || focusedProbe.element?.controlType
+        || ''
+      ).replace(/^ControlType\./i, '').trim() || null,
+      matchedBy: String(options.matchedBy || 'uia-host-focused-element-probe'),
+      element: focusedProbe.element,
+      foreground: hostContext.foreground,
+      trusted,
+      trustReason,
+      trustedWindow: hostContext.trustedWindow || null,
+      candidateScore: Number.isFinite(candidateScore) ? candidateScore : null,
+      hostFocusedProbe: {
+        reason: focusedProbe?.reason || null,
+        searchBounds: hostContext.searchBounds || null,
+        stats: focusedProbe?.stats || null,
+        genericSearchMatched,
+        commandMarkerMatched,
+        likelyQuickSearchInput
+      }
+    };
+  }
+
+  function augmentTradingViewQuickSearchSurfaceProbeWithFocusedElement(probe = null, focusedProbe = null) {
+    if (!probe || typeof probe !== 'object' || !focusedProbe || typeof focusedProbe !== 'object') {
+      return probe;
+    }
+
+    const focusedElementProbe = {
+      matched: focusedProbe.matched === true,
+      trusted: focusedProbe.trusted === true,
+      trustReason: focusedProbe.trustReason || null,
+      text: focusedProbe.text || null,
+      controlType: focusedProbe.controlType || null,
+      candidateScore: Number.isFinite(Number(focusedProbe.candidateScore))
+        ? Number(focusedProbe.candidateScore)
+        : null,
+      hostFocusedProbe: focusedProbe.hostFocusedProbe || null,
+      element: focusedProbe.element || null
+    };
+
+    return {
+      ...probe,
+      focusedElementProbe,
+      commandSurfaceProbe: probe.commandSurfaceProbe && typeof probe.commandSurfaceProbe === 'object'
+        ? {
+            ...probe.commandSurfaceProbe,
+            focusedElementProbe
+          }
+        : probe.commandSurfaceProbe
+    };
+  }
+
+  function formatTradingViewQuickSearchProbeFailureReason(probe = null) {
+    if (!probe || typeof probe !== 'object') {
+      return null;
+    }
+
+    const focusedProbe = probe.focusedElementProbe && typeof probe.focusedElementProbe === 'object'
+      ? probe.focusedElementProbe
+      : (probe.hostFocusedProbe ? probe : null);
+    if (focusedProbe) {
+      const controlType = String(focusedProbe.controlType || focusedProbe?.element?.ControlType || '')
+        .replace(/^ControlType\./i, '')
+        .trim();
+      const rawText = String(
+        focusedProbe.text
+        || focusedProbe?.element?.Name
+        || focusedProbe?.element?.Value
+        || ''
+      ).replace(/\s+/g, ' ').trim();
+      const displayText = rawText ? `"${rawText.slice(0, 80)}"` : null;
+      const trustReason = String(focusedProbe.trustReason || '').trim();
+      const focusReason = String(focusedProbe?.hostFocusedProbe?.reason || '').trim();
+
+      if (controlType || displayText || trustReason || focusReason) {
+        return [
+          'focused element remained',
+          [controlType || 'unknown', displayText].filter(Boolean).join(' '),
+          [trustReason, focusReason].filter(Boolean).join(', ')
+        ].filter(Boolean).join(' ');
+      }
+    }
+
+    const trustReason = String(probe.trustReason || '').trim();
+    return trustReason || null;
+  }
+
+  async function findTradingViewQuickSearchHostTextSurface(preferredWindowHandle = 0, candidates = [], runtimeOptions = null, options = {}) {
+    throwIfQuickSearchOperationTimedOut(runtimeOptions);
+    if (typeof systemAutomation.findElementsByWindowWithHost !== 'function') {
+      return null;
+    }
+
+    const hostContext = await resolveTradingViewQuickSearchHostContext(preferredWindowHandle, {
+      runtimeOptions,
+      searchBounds: options.searchBounds || null,
+      includeWindowBoundsFallback: options.includeWindowBoundsFallback
+    });
+    if (!hostContext.valid || !hostContext.boundsCandidates.length) {
+      return null;
+    }
+
+    const normalizedCandidates = Array.isArray(candidates)
+      ? candidates.filter((candidate) => String(candidate?.text || '').trim())
+      : [];
+    if (!normalizedCandidates.length) {
+      return null;
+    }
+
+    const views = Array.isArray(options.views) && options.views.length > 0
+      ? options.views
+      : ['control', 'content', 'raw'];
+    const maxResults = Number.isFinite(Number(options.maxResults)) && Number(options.maxResults) > 0
+      ? Math.min(40, Math.round(Number(options.maxResults)))
+      : 4;
+    const maxDepth = Number.isFinite(Number(options.maxDepth)) && Number(options.maxDepth) >= 0
+      ? Math.min(20, Math.round(Number(options.maxDepth)))
+      : 12;
+    const maxVisited = Number.isFinite(Number(options.maxVisited)) && Number(options.maxVisited) > 0
+      ? Math.min(1800, Math.round(Number(options.maxVisited)))
+      : 900;
+    const discoveryBudgetMs = getQuickSearchOperationTimeRemainingMs(
+      runtimeOptions,
+      Number.isFinite(Number(options.timeoutMs)) && Number(options.timeoutMs) > 0
+        ? Math.round(Number(options.timeoutMs))
+        : Math.min(1500, getTradingViewQuickSearchDiscoveryTimeoutMs())
+    );
+
+    if (discoveryBudgetMs < MIN_TRADINGVIEW_QUICK_SEARCH_DISCOVERY_TIMEOUT_MS) {
+      throwIfQuickSearchOperationTimedOut(runtimeOptions);
+      return null;
+    }
+
+    const scanAttempts = [];
+    let rejectedProbe = null;
+    const discoveryStartedAt = Date.now();
+    const totalAttemptCount = Math.max(1, normalizedCandidates.length * hostContext.boundsCandidates.length * views.length);
+    const perAttemptTimeoutFloorMs = Math.max(
+      MIN_TRADINGVIEW_QUICK_SEARCH_DISCOVERY_TIMEOUT_MS,
+      Math.floor(discoveryBudgetMs / totalAttemptCount)
+    );
+
+    for (const candidate of normalizedCandidates) {
+      for (const boundsCandidate of hostContext.boundsCandidates) {
+        for (const view of views) {
+          throwIfQuickSearchOperationTimedOut(runtimeOptions);
+          const elapsedMs = Date.now() - discoveryStartedAt;
+          const remainingBudgetMs = getQuickSearchOperationTimeRemainingMs(runtimeOptions, discoveryBudgetMs - elapsedMs);
+          if (remainingBudgetMs < MIN_TRADINGVIEW_QUICK_SEARCH_DISCOVERY_TIMEOUT_MS) {
+            break;
+          }
+
+          const perAttemptTimeoutMs = Math.max(
+            MIN_TRADINGVIEW_QUICK_SEARCH_DISCOVERY_TIMEOUT_MS,
+            Math.min(remainingBudgetMs, perAttemptTimeoutFloorMs)
+          );
+
+          let scanResult = null;
+          try {
+            scanResult = await systemAutomation.findElementsByWindowWithHost(candidate.text, {
+              windowHandle: hostContext.trustedWindowHandle,
+              controlType: candidate.controlType || '',
+              exact: candidate.exact === true,
+              textMode: candidate.textMode || '',
+              bounds: boundsCandidate.hostBounds,
+              view,
+              maxResults,
+              maxDepth,
+              maxVisited,
+              includeOffscreen: false,
+              includeDisabled: true,
+              timeout: perAttemptTimeoutMs
+            });
+            throwIfQuickSearchOperationTimedOut(runtimeOptions);
+          } catch (error) {
+            scanAttempts.push({
+              text: candidate.text,
+              controlType: candidate.controlType || null,
+              exact: candidate.exact === true,
+              view,
+              boundsId: boundsCandidate.id,
+              bounds: boundsCandidate.bounds,
+              success: false,
+              count: 0,
+              stats: null,
+              error: error?.message || String(error || 'TradingView quick-search host text probe failed')
+            });
+            continue;
+          }
+
+          const elements = Array.isArray(scanResult?.elements) ? scanResult.elements : [];
+          scanAttempts.push({
+            text: candidate.text,
+            controlType: candidate.controlType || null,
+            exact: candidate.exact === true,
+            view,
+            boundsId: boundsCandidate.id,
+            bounds: boundsCandidate.bounds,
+            success: scanResult?.success === true,
+            count: elements.length,
+            stats: scanResult?.stats || null,
+            error: scanResult?.success === false ? (scanResult?.error || 'TradingView quick-search host text probe failed') : null
+          });
+
+          if (!elements.length) {
+            continue;
+          }
+
+          const selection = selectBestTradingViewQuickSearchCandidate(elements, hostContext.trustedWindow || {});
+          const bestElement = selection?.bestCandidate?.element || elements[0];
+          const rawControlType = String(
+            bestElement?.ControlType
+            || bestElement?.controlType
+            || candidate.controlType
+            || ''
+          ).trim();
+          const normalizedControlType = rawControlType.replace(/^ControlType\./i, '') || 'Text';
+          const bestElementWindowHandle = Number(bestElement?.WindowHandle || bestElement?.windowHandle || 0) || 0;
+          if (
+            options.preferPlaceholderText === true
+            && /edit/.test(String(candidate?.controlType || normalizedControlType).trim().toLowerCase())
+            && bestElementWindowHandle > 0
+            && Number(hostContext?.trustedWindowHandle || 0) > 0
+            && bestElementWindowHandle !== Number(hostContext.trustedWindowHandle || 0)
+          ) {
+            continue;
+          }
+
+          const matchedProbe = {
+            matched: true,
+            text: candidate.text,
+            exact: candidate.exact === true,
+            controlType: normalizedControlType,
+            matchedBy: String(options.matchedBy || 'uia-host-window-text-probe'),
+            element: bestElement,
+            foreground: hostContext.foreground,
+            candidateScore: Number.isFinite(Number(selection?.bestCandidate?.score))
+              ? Number(selection.bestCandidate.score)
+              : null,
+            hostTextProbe: {
+              text: candidate.text,
+              controlType: candidate.controlType || null,
+              view,
+              boundsId: boundsCandidate.id,
+              searchBounds: boundsCandidate.bounds,
+              hostBounds: boundsCandidate.hostBounds,
+              scanAttempts
+            }
+          };
+          const trust = await isTrustedTradingViewQuickSearchMatch(matchedProbe, {
+            expectedWindowHandle: hostContext.trustedWindowHandle,
+            expectedProcessName: hostContext.foreground?.processName || hostContext.trustedWindow?.processName || '',
+            foreground: hostContext.foreground,
+            runtimeOptions
+          });
+          if (trust?.trusted !== true) {
+            rejectedProbe = {
+              ...matchedProbe,
+              trusted: false,
+              trustReason: trust?.reason || 'window-family-mismatch',
+              trustedWindow: trust?.trustedWindow || null
+            };
+            continue;
+          }
+
+          return {
+            ...matchedProbe,
+            trusted: true,
+            trustReason: trust?.reason || String(options.trustReason || options.matchedBy || 'uia-host-window-text-probe'),
+            trustedWindow: trust?.trustedWindow || hostContext.trustedWindow || null
+          };
+        }
+      }
+    }
+
+    return rejectedProbe || {
+      matched: false,
+      text: null,
+      exact: false,
+      controlType: null,
+      matchedBy: String(options.matchedBy || 'uia-host-window-text-probe'),
+      element: null,
+      foreground: hostContext.foreground,
+      trusted: false,
+      trustReason: 'no-host-text-match',
+      trustedWindow: hostContext.trustedWindow || null,
+      hostTextProbe: {
+        text: null,
+        controlType: null,
+        view: null,
+        boundsId: null,
+        searchBounds: hostContext.searchBounds || null,
+        hostBounds: hostContext.hostBounds || null,
+        scanAttempts
+      }
+    };
+  }
+
   async function findTrustedTradingViewQuickSearchSurfaceCandidate(preferredWindowHandle = 0, runtimeOptions = null) {
     throwIfQuickSearchOperationTimedOut(runtimeOptions);
+    const focusedHostProbe = await findTradingViewQuickSearchFocusedHostSurface(
+      preferredWindowHandle,
+      runtimeOptions,
+      {
+        matchedBy: 'uia-host-focused-quick-search-surface-candidate',
+        trustReason: 'uia-host-focused-quick-search-surface-candidate'
+      }
+    );
+    if (focusedHostProbe?.trusted === true && (focusedHostProbe?.element?.Bounds || focusedHostProbe?.element?.bounds)) {
+      return focusedHostProbe;
+    }
+
     const probedSurface = await probeTradingViewQuickSearchSurface(preferredWindowHandle, runtimeOptions);
     if (probedSurface?.trusted === true && (probedSurface?.element?.Bounds || probedSurface?.element?.bounds)) {
       return probedSurface;
@@ -1549,36 +2593,27 @@ Set-Clipboard -Value $value
 
   async function findTrustedTradingViewQuickSearchEdit(preferredWindowHandle = 0, runtimeOptions = null) {
     throwIfQuickSearchOperationTimedOut(runtimeOptions);
-    let foreground = null;
-    try {
-      foreground = await systemAutomation.getForegroundWindowInfo();
-    } catch {
-      foreground = null;
-    }
-
-    const trustedWindowHandle = Number(preferredWindowHandle || 0)
-      || Number(foreground?.hwnd || 0)
-      || 0;
-
-    let trustedWindow = null;
-    if (trustedWindowHandle > 0) {
-      trustedWindow = await getQuickSearchTrustedWindowInfo(trustedWindowHandle, foreground);
-    }
-    if (!trustedWindow && foreground?.success) {
-      trustedWindow = foreground;
-    }
-
-    if (normalizeQuickSearchWindowProcessName(trustedWindow?.processName || '') !== 'tradingview') {
+    const hostContext = await resolveTradingViewQuickSearchHostContext(preferredWindowHandle, {
+      runtimeOptions,
+      includeWindowBoundsFallback: false
+    });
+    if (!hostContext.valid) {
       return null;
     }
 
-    const searchBounds = buildTradingViewQuickSearchEditBounds(trustedWindow);
-    if (!searchBounds) {
+    const {
+      foreground,
+      trustedWindowHandle,
+      trustedWindow,
+      searchBounds
+    } = hostContext;
+    const usableSearchBounds = searchBounds || buildTradingViewQuickSearchEditBounds(trustedWindow);
+    if (!usableSearchBounds) {
       return null;
     }
 
     const hostScan = await collectTradingViewQuickSearchHostScanElements(trustedWindowHandle, runtimeOptions, {
-      searchBounds,
+      searchBounds: usableSearchBounds,
       maxResults: 120,
       maxDepth: 14,
       maxVisited: 1200
@@ -1599,7 +2634,7 @@ Set-Clipboard -Value $value
         || ''
       ).trim();
       const normalizedControlType = rawControlType.replace(/^ControlType\./i, '') || 'Edit';
-      return {
+      const matchedProbe = {
         matched: true,
         text: String(
           hostSelection.bestCandidate.element?.Name
@@ -1613,13 +2648,24 @@ Set-Clipboard -Value $value
         matchedBy: 'trusted-window-host-scan-candidate',
         element: hostSelection.bestCandidate.element,
         foreground: hostScan?.foreground || foreground,
-        trusted: true,
-        trustReason: 'trusted-window-host-scan-candidate',
-        trustedWindow: hostScan?.trustedWindow || trustedWindow,
-        searchBounds,
+        searchBounds: usableSearchBounds,
         candidateScore: hostSelection.bestCandidate.score,
         hostScanAttempts: hostScan?.scanAttempts || []
       };
+      const trust = await isTrustedTradingViewQuickSearchMatch(matchedProbe, {
+        expectedWindowHandle: trustedWindowHandle,
+        expectedProcessName: foreground?.processName || trustedWindow?.processName || '',
+        foreground: hostScan?.foreground || foreground,
+        runtimeOptions
+      });
+      if (trust?.trusted === true) {
+        return {
+          ...matchedProbe,
+          trusted: true,
+          trustReason: trust.reason || 'trusted-window-host-scan-candidate',
+          trustedWindow: trust.trustedWindow || hostScan?.trustedWindow || trustedWindow
+        };
+      }
     }
 
     let uia = null;
@@ -1666,7 +2712,7 @@ Set-Clipboard -Value $value
         matches = await uia.findElements({
           controlType,
           isEnabled: controlType === 'Text' ? undefined : true,
-          bounds: searchBounds,
+          bounds: usableSearchBounds,
           timeoutMs: perAttemptTimeoutMs
         });
         throwIfQuickSearchOperationTimedOut(runtimeOptions);
@@ -1717,7 +2763,7 @@ Set-Clipboard -Value $value
     const bestCandidate = scoredCandidates[0];
     const rawControlType = String(bestCandidate.element?.ControlType || bestCandidate.element?.controlType || '').trim();
     const normalizedControlType = rawControlType.replace(/^ControlType\./i, '') || 'Edit';
-    return {
+    const matchedProbe = {
       matched: true,
       text: String(bestCandidate.element?.Name || bestCandidate.element?.name || '').trim(),
       exact: false,
@@ -1725,34 +2771,132 @@ Set-Clipboard -Value $value
       matchedBy: 'trusted-window-bounds-search-candidate',
       element: bestCandidate.element,
       foreground,
-      trusted: true,
-      trustReason: 'trusted-window-bounds-search-candidate',
-      trustedWindow,
-      searchBounds,
+      searchBounds: usableSearchBounds,
       candidateScore: bestCandidate.score
+    };
+    const trust = await isTrustedTradingViewQuickSearchMatch(matchedProbe, {
+      expectedWindowHandle: trustedWindowHandle,
+      expectedProcessName: foreground?.processName || trustedWindow?.processName || '',
+      foreground,
+      runtimeOptions
+    });
+    if (trust?.trusted !== true) {
+      return null;
+    }
+    return {
+      ...matchedProbe,
+      trusted: true,
+      trustReason: trust.reason || 'trusted-window-bounds-search-candidate',
+      trustedWindow: trust.trustedWindow || trustedWindow
     };
   }
 
   async function probeTradingViewPineEditorSurface(runtimeOptions = null) {
+    const watcherState = getFreshWatcherForeground(
+      Number(runtimeOptions?.expectedWindowHandle || runtimeOptions?.windowHandle || 0) || 0,
+      WATCHER_FOREGROUND_FRESH_MS
+    );
+    const watcherSurface = getWatcherTextEvidenceMatch(
+      watcherState.watcher,
+      PINE_EDITOR_WATCHER_SURFACE_ANCHORS,
+      watcherState.foreground
+    );
+
+    if (
+      watcherState.fresh
+      && watcherState.matchesExpectedWindow !== false
+      && normalizeQuickSearchWindowProcessName(watcherState?.foreground?.processName || '') === 'tradingview'
+      && watcherSurface.matched
+    ) {
+      const watcherResult = {
+        matched: true,
+        text: watcherSurface.anchor || 'Pine Editor',
+        exact: false,
+        element: watcherSurface.element || null,
+        foreground: watcherState.foreground,
+        matchedBy: 'watcher-pine-surface-anchor',
+        visibleAnchors: watcherSurface.anchor ? [watcherSurface.anchor] : [],
+        trustReason: 'watcher-pine-surface-anchor'
+      };
+      if (watcherState.available === true) {
+        cacheSurfaceProbeResult(
+          runtimeOptions,
+          'cachedPineSurfaceProbe',
+          buildPineSurfaceProbeStateKey(
+            Number(runtimeOptions?.expectedWindowHandle || runtimeOptions?.windowHandle || watcherState?.foreground?.hwnd || 0) || 0,
+            watcherState,
+            watcherState.foreground
+          ),
+          watcherResult
+        );
+      }
+      return watcherResult;
+    }
+
+    const foregroundContext = await getPreferredForegroundInfo(
+      Number(runtimeOptions?.expectedWindowHandle || runtimeOptions?.windowHandle || 0) || 0,
+      runtimeOptions,
+      {
+        requireTradingView: false
+      }
+    );
+    const foreground = foregroundContext?.foreground || watcherState?.foreground || null;
+    const expectedWindowHandle = Number(
+      runtimeOptions?.expectedWindowHandle
+      || runtimeOptions?.windowHandle
+      || foreground?.hwnd
+      || watcherState?.foreground?.hwnd
+      || 0
+    ) || 0;
+    const probeStateKey = watcherState.available === true
+      ? buildPineSurfaceProbeStateKey(
+          expectedWindowHandle,
+          watcherState,
+          foreground
+        )
+      : '';
+    const cachedProbe = getCachedSurfaceProbeResult(
+      runtimeOptions,
+      'cachedPineSurfaceProbe',
+      probeStateKey
+    );
+    if (cachedProbe !== undefined) {
+      return cachedProbe;
+    }
+
     if (typeof systemAutomation.probeTradingViewPineEditorSurface === 'function') {
       try {
         throwIfQuickSearchOperationTimedOut(runtimeOptions);
+        const trustedWindow = expectedWindowHandle > 0
+          ? await getQuickSearchTrustedWindowInfo(expectedWindowHandle, foreground)
+          : null;
         const hostProbe = await systemAutomation.probeTradingViewPineEditorSurface({
-          timeout: getQuickSearchOperationTimeRemainingMs(runtimeOptions, 1500) || 1500
+          windowHandle: Number(trustedWindow?.hwnd || expectedWindowHandle || foreground?.hwnd || 0) || 0,
+          timeout: getQuickSearchOperationTimeRemainingMs(runtimeOptions, 1500) || 1500,
+          foreground,
+          windowInfo: trustedWindow || foreground || null,
+          resolveWindowState: false
         });
         if (hostProbe?.active) {
-          return {
+          return cacheSurfaceProbeResult(runtimeOptions, 'cachedPineSurfaceProbe', probeStateKey, {
             matched: true,
             text: hostProbe.anchorText || (Array.isArray(hostProbe.visibleAnchors) ? hostProbe.visibleAnchors[0] : 'Pine Editor'),
             exact: false,
             element: hostProbe.element || null,
             foreground: hostProbe.foreground || hostProbe.windowInfo || null,
-            matchedBy: hostProbe.matchedBy || 'uia-host-lower-panel-scan',
+            matchedBy: hostProbe.matchedBy || 'uia-host-pine-surface-scan',
             visibleAnchors: Array.isArray(hostProbe.visibleAnchors) ? hostProbe.visibleAnchors.slice(0, 8) : []
-          };
+          });
+        }
+        cacheSurfaceProbeResult(runtimeOptions, 'cachedPineSurfaceProbe', probeStateKey, null);
+        if (!shouldAllowLegacyPineSurfaceTextProbe(runtimeOptions)) {
+          return null;
         }
       } catch {
-        // Fall through to the lighter foreground text probe path.
+        cacheSurfaceProbeResult(runtimeOptions, 'cachedPineSurfaceProbe', probeStateKey, null);
+        if (!shouldAllowLegacyPineSurfaceTextProbe(runtimeOptions)) {
+          return null;
+        }
       }
     }
 
@@ -1762,23 +2906,60 @@ Set-Clipboard -Value $value
         runtimeOptions
       });
       if (matched) {
-        return {
+        return cacheSurfaceProbeResult(runtimeOptions, 'cachedPineSurfaceProbe', probeStateKey, {
           matched: true,
           text: candidate.text,
           exact: candidate.exact,
           element: matched.element,
           foreground: matched.foreground
-        };
+        });
       }
     }
 
-    return null;
+    return cacheSurfaceProbeResult(runtimeOptions, 'cachedPineSurfaceProbe', probeStateKey, null);
   }
 
   async function probeTradingViewQuickSearchSurface(preferredWindowHandle = 0, runtimeOptions = null) {
     throwIfQuickSearchOperationTimedOut(runtimeOptions);
-    const foreground = await systemAutomation.getForegroundWindowInfo();
+    const foreground = (await getPreferredForegroundInfo(preferredWindowHandle, runtimeOptions, {
+      requireTradingView: false
+    }))?.foreground;
     const expectedWindowHandle = Number(preferredWindowHandle || 0) || Number(foreground?.hwnd || 0) || 0;
+
+    const focusedHostProbe = await findTradingViewQuickSearchFocusedHostSurface(
+      expectedWindowHandle,
+      runtimeOptions,
+      {
+        matchedBy: 'uia-host-quick-search-focused-element-probe',
+        trustReason: 'uia-host-quick-search-focused-element-probe'
+      }
+    );
+    if (focusedHostProbe?.trusted === true) {
+      return focusedHostProbe;
+    }
+
+    const hostTextProbe = await findTradingViewQuickSearchHostTextSurface(
+      expectedWindowHandle,
+      TRADINGVIEW_QUICK_SEARCH_SURFACE_PROBE_CANDIDATES,
+      runtimeOptions,
+      {
+        matchedBy: 'uia-host-quick-search-text-probe',
+        trustReason: 'uia-host-quick-search-text-probe'
+      }
+    );
+    if (hostTextProbe?.trusted === true) {
+      return hostTextProbe;
+    }
+
+    const unnamedEditMatch = await findTrustedTradingViewQuickSearchEdit(expectedWindowHandle, runtimeOptions);
+    if (unnamedEditMatch) {
+      return unnamedEditMatch;
+    }
+
+    if (!shouldAllowLegacyQuickSearchTextProbe(runtimeOptions)) {
+      return hostTextProbe || focusedHostProbe || null;
+    }
+
     const expectedProcessName = foreground?.processName || '';
 
     for (const candidate of TRADINGVIEW_QUICK_SEARCH_SURFACE_PROBE_CANDIDATES) {
@@ -1793,7 +2974,8 @@ Set-Clipboard -Value $value
         const trust = await isTrustedTradingViewQuickSearchMatch(matched, {
           expectedWindowHandle,
           expectedProcessName,
-          foreground
+          foreground,
+          runtimeOptions
         });
         return {
           matched: true,
@@ -1810,30 +2992,113 @@ Set-Clipboard -Value $value
       }
     }
 
-    const unnamedEditMatch = await findTrustedTradingViewQuickSearchEdit(expectedWindowHandle, runtimeOptions);
-    if (unnamedEditMatch) {
-      return unnamedEditMatch;
+    return hostTextProbe || focusedHostProbe || null;
+  }
+
+  async function probeTradingViewQuickSearchHostSurfaceOnly(preferredWindowHandle = 0, runtimeOptions = null) {
+    throwIfQuickSearchOperationTimedOut(runtimeOptions);
+    const foreground = (await getPreferredForegroundInfo(preferredWindowHandle, runtimeOptions, {
+      requireTradingView: false
+    }))?.foreground;
+    const expectedWindowHandle = Number(preferredWindowHandle || 0) || Number(foreground?.hwnd || 0) || 0;
+
+    const focusedHostProbe = await findTradingViewQuickSearchFocusedHostSurface(
+      expectedWindowHandle,
+      runtimeOptions,
+      {
+        matchedBy: 'uia-host-quick-search-focused-element-probe',
+        trustReason: 'uia-host-quick-search-focused-element-probe'
+      }
+    );
+    if (focusedHostProbe?.trusted === true) {
+      return focusedHostProbe;
     }
 
-    return null;
+    const hostTextProbe = await findTradingViewQuickSearchHostTextSurface(
+      expectedWindowHandle,
+      TRADINGVIEW_QUICK_SEARCH_SURFACE_PROBE_CANDIDATES,
+      runtimeOptions,
+      {
+        matchedBy: 'uia-host-quick-search-text-probe',
+        trustReason: 'uia-host-quick-search-text-probe'
+      }
+    );
+    if (hostTextProbe?.trusted === true) {
+      return hostTextProbe;
+    }
+
+    return hostTextProbe || focusedHostProbe || null;
   }
 
   async function probeTradingViewCommandQuickSearchSurface(preferredWindowHandle = 0, runtimeOptions = null) {
     throwIfQuickSearchOperationTimedOut(runtimeOptions);
-    const foreground = await systemAutomation.getForegroundWindowInfo();
+    const foreground = (await getPreferredForegroundInfo(preferredWindowHandle, runtimeOptions, {
+      requireTradingView: false
+    }))?.foreground;
     const expectedWindowHandle = Number(preferredWindowHandle || 0) || Number(foreground?.hwnd || 0) || 0;
-    const expectedProcessName = foreground?.processName || '';
-    const hostProbe = selectTradingViewCommandQuickSearchHostSurface(
+
+    const focusedHostProbe = await findTradingViewQuickSearchFocusedHostSurface(
+      expectedWindowHandle,
+      runtimeOptions,
+      {
+        requireCommandSurface: true,
+        matchedBy: 'uia-host-command-focused-element-probe',
+        trustReason: 'uia-host-command-focused-element-probe'
+      }
+    );
+    if (focusedHostProbe?.trusted === true) {
+      return {
+        ...focusedHostProbe,
+        commandSurfaceProbe: {
+          markerElement: focusedHostProbe.element,
+          inputElement: focusedHostProbe.element,
+          scanAttempts: [],
+          hostBounds: focusedHostProbe?.hostFocusedProbe?.searchBounds || null,
+          boundsId: 'focused-element'
+        }
+      };
+    }
+
+    const hostTextProbe = await findTradingViewQuickSearchHostTextSurface(
+      expectedWindowHandle,
+      TRADINGVIEW_COMMAND_QUICK_SEARCH_SURFACE_PROBE_CANDIDATES,
+      runtimeOptions,
+      {
+        matchedBy: 'uia-host-command-quick-search-text-probe',
+        trustReason: 'uia-host-command-quick-search-text-probe'
+      }
+    );
+    if (hostTextProbe?.trusted === true) {
+      return augmentTradingViewQuickSearchSurfaceProbeWithFocusedElement({
+        ...hostTextProbe,
+        commandSurfaceProbe: {
+          markerElement: hostTextProbe.element,
+          inputElement: null,
+          scanAttempts: hostTextProbe?.hostTextProbe?.scanAttempts || [],
+          hostBounds: hostTextProbe?.hostTextProbe?.hostBounds || null,
+          boundsId: hostTextProbe?.hostTextProbe?.boundsId || null
+        }
+      }, focusedHostProbe);
+    }
+    const commandHostTextProbe = augmentTradingViewQuickSearchSurfaceProbeWithFocusedElement(hostTextProbe, focusedHostProbe);
+
+    const hostProbe = augmentTradingViewQuickSearchSurfaceProbeWithFocusedElement(selectTradingViewCommandQuickSearchHostSurface(
       await collectTradingViewQuickSearchHostScanElements(expectedWindowHandle, runtimeOptions, {
         maxResults: 120,
         maxDepth: 14,
         maxVisited: 1200
       })
-    );
+    ), focusedHostProbe);
 
     if (hostProbe?.trusted === true) {
       return hostProbe;
     }
+
+    if (!shouldAllowLegacyQuickSearchTextProbe(runtimeOptions)) {
+      return hostProbe || commandHostTextProbe || focusedHostProbe || null;
+    }
+
+    const expectedProcessName = foreground?.processName || '';
 
     for (const candidate of TRADINGVIEW_COMMAND_QUICK_SEARCH_SURFACE_PROBE_CANDIDATES) {
       const matched = await findForegroundElementByText(candidate.text, {
@@ -1850,7 +3115,8 @@ Set-Clipboard -Value $value
       const trust = await isTrustedTradingViewQuickSearchMatch(matched, {
         expectedWindowHandle,
         expectedProcessName,
-        foreground
+        foreground,
+        runtimeOptions
       });
 
       return {
@@ -1867,7 +3133,7 @@ Set-Clipboard -Value $value
       };
     }
 
-    return hostProbe || null;
+    return hostProbe || commandHostTextProbe || focusedHostProbe || null;
   }
 
   function normalizeTradingViewQuickSearchInputText(value = '') {
@@ -1974,12 +3240,9 @@ Set-Clipboard -Value $value
       return null;
     }
 
-    let foreground = null;
-    try {
-      foreground = await systemAutomation.getForegroundWindowInfo();
-    } catch {
-      foreground = null;
-    }
+    const foreground = (await getPreferredForegroundInfo(preferredWindowHandle, runtimeOptions, {
+      requireTradingView: false
+    }))?.foreground;
 
     const trustedWindowHandle = Number(preferredWindowHandle || 0)
       || Number(foreground?.hwnd || 0)
@@ -2070,74 +3333,75 @@ Set-Clipboard -Value $value
       }
     }
 
-    const foreground = await systemAutomation.getForegroundWindowInfo();
+    const foreground = (await getPreferredForegroundInfo(preferredWindowHandle, runtimeOptions, {
+      requireTradingView: false
+    }))?.foreground;
     const expectedWindowHandle = Number(preferredWindowHandle || 0) || Number(foreground?.hwnd || 0) || 0;
-    const expectedProcessName = foreground?.processName || '';
 
-    for (const candidate of TRADINGVIEW_QUICK_SEARCH_INPUT_FOCUS_CANDIDATES) {
-      const matched = await findForegroundElementByText(candidate.text, {
-        exact: candidate.exact,
-        controlType: candidate.controlType,
-        windowHandle: preferredWindowHandle,
-        allowGlobalFallback: true,
-        runtimeOptions
-      });
-      if (!matched?.element?.Bounds) {
-        continue;
+    const focusedHostProbe = await findTradingViewQuickSearchFocusedHostSurface(
+      expectedWindowHandle,
+      runtimeOptions,
+      {
+        matchedBy: 'uia-host-focused-quick-search-input',
+        trustReason: 'uia-host-focused-quick-search-input'
       }
-
-      const trust = await isTrustedTradingViewQuickSearchMatch(matched, {
-        expectedWindowHandle,
-        expectedProcessName,
-        foreground
-      });
-      if (!trust.trusted) {
-        continue;
-      }
-
-      const clickResult = await clickTradingViewQuickSearchMatch(matched, runtimeOptions);
-      if (!clickResult.success) {
-        continue;
-      }
-
+    );
+    if (focusedHostProbe?.trusted === true && (focusedHostProbe?.element?.Bounds || focusedHostProbe?.element?.bounds)) {
       return {
         focused: true,
-        text: candidate.text,
-        exact: candidate.exact,
-        controlType: candidate.controlType,
-        matchedBy: matched.matchedBy || 'foreground-window',
-        element: matched.element,
-        foreground: matched.foreground,
+        text: focusedHostProbe.text || '',
+        exact: focusedHostProbe.exact,
+        controlType: focusedHostProbe.controlType,
+        matchedBy: focusedHostProbe.matchedBy || 'uia-host-focused-quick-search-input',
+        element: focusedHostProbe.element,
+        foreground: focusedHostProbe.foreground || foreground,
         trusted: true,
-        trustReason: trust.reason || null,
-        trustedWindow: trust.trustedWindow || null,
-        clickResult
+        trustReason: focusedHostProbe.trustReason || null,
+        trustedWindow: focusedHostProbe.trustedWindow || null,
+        candidateScore: focusedHostProbe.candidateScore || null,
+        searchBounds: focusedHostProbe?.hostFocusedProbe?.searchBounds || null,
+        surfaceProbe: focusedHostProbe
       };
     }
 
-    const unnamedEditMatch = await findTrustedTradingViewQuickSearchEdit(expectedWindowHandle, runtimeOptions);
-    if (unnamedEditMatch?.element?.Bounds) {
-      const clickResult = await clickTradingViewQuickSearchMatch(unnamedEditMatch, runtimeOptions);
-      if (clickResult.success) {
-        return {
-          focused: true,
-          text: unnamedEditMatch.text || '',
-          exact: unnamedEditMatch.exact,
-          controlType: unnamedEditMatch.controlType,
-          matchedBy: unnamedEditMatch.matchedBy || 'trusted-window-bounds-edit',
-          element: unnamedEditMatch.element,
-          foreground: unnamedEditMatch.foreground,
-          trusted: true,
-          trustReason: unnamedEditMatch.trustReason || null,
-          trustedWindow: unnamedEditMatch.trustedWindow || null,
-          clickResult,
-          candidateScore: unnamedEditMatch.candidateScore || null,
-          searchBounds: unnamedEditMatch.searchBounds || null
-        };
+    const inputHostProbe = await findTradingViewQuickSearchHostTextSurface(
+      expectedWindowHandle,
+      TRADINGVIEW_QUICK_SEARCH_INPUT_FOCUS_CANDIDATES,
+      runtimeOptions,
+      {
+        matchedBy: 'uia-host-quick-search-input-probe',
+        trustReason: 'uia-host-quick-search-input-probe',
+        preferPlaceholderText: true
       }
+    );
+    const trustedSurface = inputHostProbe?.trusted === true
+      ? inputHostProbe
+      : await probeTradingViewQuickSearchSurface(expectedWindowHandle, runtimeOptions);
+    if (!trustedSurface?.trusted || !trustedSurface?.element?.Bounds) {
+      return null;
     }
 
-    return null;
+    const clickResult = await clickTradingViewQuickSearchMatch(trustedSurface, runtimeOptions);
+    if (!clickResult.success) {
+      return null;
+    }
+
+    return {
+      focused: true,
+      text: trustedSurface.text || '',
+      exact: trustedSurface.exact,
+      controlType: trustedSurface.controlType,
+      matchedBy: trustedSurface.matchedBy || 'trusted-surface-probe',
+      element: trustedSurface.element,
+      foreground: trustedSurface.foreground || foreground,
+      trusted: true,
+      trustReason: trustedSurface.trustReason || null,
+      trustedWindow: trustedSurface.trustedWindow || null,
+      clickResult,
+      candidateScore: trustedSurface.candidateScore || null,
+      searchBounds: trustedSurface.searchBounds || trustedSurface?.hostTextProbe?.searchBounds || null,
+      surfaceProbe: trustedSurface
+    };
   }
 
   async function recoverTradingViewQuickSearchInputFocus(preferredWindowHandle = 0, runtimeOptions = null) {
@@ -2231,6 +3495,7 @@ Set-Clipboard -Value $value
         runtimeOptions
       );
       if (commandQuickSearchSurface?.trusted !== true) {
+        const commandSurfaceFailureReason = formatTradingViewQuickSearchProbeFailureReason(commandQuickSearchSurface);
         const dismissal = {
           attempted: false,
           success: false,
@@ -2250,7 +3515,9 @@ Set-Clipboard -Value $value
         return {
           applicable: true,
           ready: false,
-          error: 'TradingView command quick-search surface was not verified before typing; refusing to type into symbol search',
+          error: commandSurfaceFailureReason
+            ? `TradingView command quick-search surface was not verified before typing; refusing to type into symbol search because ${commandSurfaceFailureReason}`
+            : 'TradingView command quick-search surface was not verified before typing; refusing to type into symbol search',
           inputFocus: null,
           focusRecovery: null,
           fallbackAssumedFocused: false,
@@ -2259,6 +3526,26 @@ Set-Clipboard -Value $value
           commandSurfaceProbe: commandQuickSearchSurface || null,
           dismissal
         };
+      }
+    }
+
+    if (runtimeOptions?.preferWindowGuessFirst !== true) {
+      const earlySurfaceProbe = await probeTradingViewQuickSearchHostSurfaceOnly(
+        preferredWindowHandle,
+        runtimeOptions
+      );
+      if (
+        earlySurfaceProbe?.trusted === true
+        && !hasAuthoritativeTradingViewQuickSearchSurfaceProof(earlySurfaceProbe, preferredWindowHandle)
+      ) {
+        const earlyClipboardContinuation = await maybePrepareTradingViewPineQuickSearchClipboardContinuation(
+          action,
+          preferredWindowHandle,
+          runtimeOptions
+        );
+        if (earlyClipboardContinuation?.ready) {
+          return earlyClipboardContinuation;
+        }
       }
     }
 
@@ -2440,6 +3727,23 @@ Set-Clipboard -Value $value
       };
     }
 
+    const clipboardContinuation = await maybePrepareTradingViewPineQuickSearchClipboardContinuation(
+      action,
+      preferredWindowHandle,
+      runtimeOptions,
+      {
+        initialRead,
+        clearAttempt: valueClearAttempt,
+        keyboardFallback,
+        inputFocus,
+        focusRecovery,
+        finalRead: afterKeyboardClearRead.success ? afterKeyboardClearRead : afterValueClearRead
+      }
+    );
+    if (clipboardContinuation?.ready) {
+      return clipboardContinuation;
+    }
+
     return {
       applicable: true,
       ready: false,
@@ -2561,7 +3865,10 @@ Set-Clipboard -Value $value
       readback: clipboardRead,
       error: clipboardRead.success
         ? `TradingView quick-search typed readback captured "${clipboardActualText}" instead of "${expectedText}"`
-        : (clipboardRead.error || 'TradingView quick-search typing could not be verified before continuing')
+        : normalizeTradingViewQuickSearchClipboardProofError(
+            clipboardRead.error,
+            'TradingView quick-search typing could not be verified before continuing'
+          )
     };
   }
 
@@ -2619,6 +3926,23 @@ Set-Clipboard -Value $value
           ? `TradingView quick-search semantic write read back "${normalizedReadback}" instead of "${normalizedIntended}"`
           : (readbackResponse.error || 'TradingView quick-search semantic write could not be verified')
       };
+    }
+
+    const clipboardContinuation = await maybePrepareTradingViewPineQuickSearchClipboardContinuation(
+      action,
+      preferredWindowHandle,
+      runtimeOptions,
+      {
+        initialRead,
+        clearAttempt: valueClearAttempt,
+        keyboardFallback,
+        inputFocus,
+        focusRecovery,
+        finalRead: afterKeyboardClearRead
+      }
+    );
+    if (clipboardContinuation?.ready) {
+      return clipboardContinuation;
     }
 
     return {
@@ -2694,6 +4018,9 @@ Set-Clipboard -Value $value
     const key = String(action?.key || '').trim().toLowerCase();
     const shortcutId = String(action?.tradingViewShortcut?.id || '').trim().toLowerCase();
     const searchRoute = String(action?.searchSurfaceContract?.route || '').trim().toLowerCase();
+    const runtimeOptions = options?.runtimeOptions && typeof options.runtimeOptions === 'object'
+      ? options.runtimeOptions
+      : {};
 
     if (verifyTarget !== 'quick-search' || key !== 'ctrl+k') {
       return null;
@@ -2703,7 +4030,14 @@ Set-Clipboard -Value $value
       return null;
     }
 
-    const probeMatched = await probeTradingViewQuickSearchSurface(options.expectedWindowHandle || 0);
+    if (!runtimeOptions.expectedWindowHandle && Number(options.expectedWindowHandle || 0) > 0) {
+      runtimeOptions.expectedWindowHandle = Number(options.expectedWindowHandle || 0) || 0;
+    }
+    if (observationCheckpoint?.foreground?.success) {
+      cacheTrustedTradingViewForeground(runtimeOptions, observationCheckpoint.foreground);
+    }
+
+    const probeMatched = await probeTradingViewQuickSearchSurface(options.expectedWindowHandle || 0, runtimeOptions);
     if (!probeMatched) {
       return null;
     }
@@ -2716,7 +4050,7 @@ Set-Clipboard -Value $value
       || Number(probeMatched?.element?.WindowHandle || 0)
       || Number(probeMatched?.foreground?.hwnd || 0)
       || 0;
-    const focusedInput = await focusTradingViewQuickSearchInput(preferredWindowHandle);
+    const focusedInput = await focusTradingViewQuickSearchInput(preferredWindowHandle, runtimeOptions);
     if (!focusedInput?.focused) {
       return null;
     }
@@ -2729,7 +4063,9 @@ Set-Clipboard -Value $value
 
     const foreground = relaxedCheckpoint?.foreground?.success
       ? relaxedCheckpoint.foreground
-      : await systemAutomation.getForegroundWindowInfo();
+      : (await getPreferredForegroundInfo(preferredWindowHandle, runtimeOptions, {
+          requireTradingView: false
+        }))?.foreground;
 
     return {
       recovered: true,
@@ -2754,19 +4090,249 @@ Set-Clipboard -Value $value
     const shortcutId = String(action?.tradingViewShortcut?.id || '').trim().toLowerCase();
     const verifyTarget = String(action?.verify?.target || '').trim().toLowerCase();
     const key = String(action?.key || '').trim().toLowerCase();
-    const runtimeOptions = options?.runtimeOptions || null;
+    const runtimeOptions = options?.runtimeOptions && typeof options.runtimeOptions === 'object'
+      ? options.runtimeOptions
+      : {};
     const quickSearchActivation = routeId === 'open-pine-editor' && key === 'enter';
     const directShortcutActivation = shortcutId === 'open-pine-editor' && key === 'ctrl+e';
+    const newIndicatorActivation = shortcutId === 'new-pine-indicator' && key === 'ctrl+i';
     const semanticIconActivation = actionType === 'click_element'
       && routeId === 'open-pine-editor'
       && route === 'semantic-icon';
-    if (verifyTarget !== 'pine-editor' || (!quickSearchActivation && !directShortcutActivation && !semanticIconActivation)) {
+    if (
+      verifyTarget !== 'pine-editor'
+      || (!quickSearchActivation && !directShortcutActivation && !newIndicatorActivation && !semanticIconActivation)
+    ) {
       return null;
+    }
+
+    if (!runtimeOptions.expectedWindowHandle && Number(options.expectedWindowHandle || 0) > 0) {
+      runtimeOptions.expectedWindowHandle = Number(options.expectedWindowHandle || 0) || 0;
+    }
+    if (observationCheckpoint?.foreground?.success) {
+      cacheTrustedTradingViewForeground(runtimeOptions, observationCheckpoint.foreground);
+    } else if (checkpointBeforeForeground?.success) {
+      cacheTrustedTradingViewForeground(runtimeOptions, checkpointBeforeForeground);
+    }
+
+    const preferredWindowHandle = Number(options.expectedWindowHandle || 0)
+      || Number(observationCheckpoint?.foreground?.hwnd || 0)
+      || Number(checkpointBeforeForeground?.hwnd || 0)
+      || 0;
+    const resolveRecoveryForeground = async () => (await getPreferredForegroundInfo(
+      options.expectedWindowHandle || preferredWindowHandle || 0,
+      runtimeOptions,
+      {
+        requireTradingView: false
+      }
+    ))?.foreground;
+
+    const buildNewIndicatorCommandSurfaceConflict = async (pineSurfaceProbe = null) => {
+      if (!newIndicatorActivation) {
+        return null;
+      }
+
+      const commandQuickSearchSurface = await probeTradingViewCommandQuickSearchSurface(
+        preferredWindowHandle,
+        runtimeOptions
+      ).catch(() => null);
+      if (commandQuickSearchSurface?.matched !== true) {
+        return null;
+      }
+
+      const commandSurfaceFailureReason = formatTradingViewQuickSearchProbeFailureReason(commandQuickSearchSurface);
+      const error = commandSurfaceFailureReason
+        ? `TradingView Ctrl+I left the command quick-search surface open; refusing to trust underlying Pine DOM because ${commandSurfaceFailureReason}`
+        : 'TradingView Ctrl+I left the command quick-search surface open; refusing to trust underlying Pine DOM.';
+      const foreground = await resolveRecoveryForeground();
+
+      return {
+        attempted: true,
+        recovered: false,
+        recoveredBy: 'command-surface-open',
+        error,
+        pineEditorSurfaceProbe: pineSurfaceProbe || null,
+        pineEditorCommandSurfaceProbe: commandQuickSearchSurface,
+        checkpoint: {
+          ...observationCheckpoint,
+          verified: false,
+          error,
+          editorActiveMatched: false,
+          foreground,
+          matchReason: 'command-surface-open',
+          recoveredBy: 'command-surface-open',
+          pineEditorSurfaceProbe: pineSurfaceProbe || null,
+          pineEditorCommandSurfaceProbe: commandQuickSearchSurface
+        }
+      };
+    };
+
+    const summarizePineSurfaceExpectationEvidence = (probe = null) => {
+      const rawEntries = Array.isArray(probe?.visibleAnchorEntries) && probe.visibleAnchorEntries.length > 0
+        ? probe.visibleAnchorEntries
+        : (Array.isArray(probe?.rendererProof?.signals) && probe.rendererProof.signals.length > 0
+          ? probe.rendererProof.signals
+          : (Array.isArray(probe?.visibleAnchors) ? probe.visibleAnchors.map((text) => ({
+              text,
+              observedText: text,
+              category: null
+            })) : []));
+      const summary = {
+        starterVisible: false,
+        saveRequiredVisible: false,
+        renameSurfaceVisible: false,
+        saveConfirmedVisible: false
+      };
+
+      for (const entry of rawEntries) {
+        const text = String(entry?.observedText || entry?.text || entry?.ariaLabel || '').trim().toLowerCase();
+        const category = String(entry?.category || '').trim().toLowerCase();
+
+        if (
+          category === 'starter'
+          || /\b(untitled script|my script|my strategy|my library)\b/.test(text)
+        ) {
+          summary.starterVisible = true;
+        }
+
+        if (category === 'rename-surface' || category === 'rename surface') {
+          summary.renameSurfaceVisible = true;
+          summary.saveRequiredVisible = true;
+        }
+
+        if (
+          category === 'save-required'
+          || category === 'save required'
+          || /\b(save script|new script name|script name|save as|rename script|unsaved)\b/.test(text)
+        ) {
+          summary.saveRequiredVisible = true;
+        }
+
+        if (
+          category === 'save-confirmed'
+          || category === 'save confirmed'
+          || /\b(all changes saved|saved successfully|save complete)\b/.test(text)
+        ) {
+          summary.saveConfirmedVisible = true;
+        }
+      }
+
+      return {
+        ...summary,
+        freshScriptVisible: summary.starterVisible || summary.saveRequiredVisible || summary.renameSurfaceVisible
+      };
+    };
+
+    const pineSurfaceProbeMatchesCheckpointExpectation = (probe = null, checkpoint = null) => {
+      const expectation = String(
+        checkpoint?.pineSurfaceExpectation
+        || checkpointSpec?.pineSurfaceExpectation
+        || ''
+      ).trim().toLowerCase();
+      if (!probe) {
+        return false;
+      }
+      if (!expectation) {
+        return true;
+      }
+      if (expectation === 'fresh-script') {
+        return summarizePineSurfaceExpectationEvidence(probe).freshScriptVisible === true;
+      }
+      return true;
+    };
+
+    if (newIndicatorActivation) {
+      const probeMatchedAfterNewIndicator = await probeTradingViewPineEditorSurface(runtimeOptions);
+      const commandSurfaceConflict = await buildNewIndicatorCommandSurfaceConflict(probeMatchedAfterNewIndicator || null);
+      if (commandSurfaceConflict) {
+        return commandSurfaceConflict;
+      }
+
+      if (pineSurfaceProbeMatchesCheckpointExpectation(probeMatchedAfterNewIndicator, observationCheckpoint)) {
+        const foreground = await resolveRecoveryForeground();
+        return {
+          attempted: true,
+          recovered: true,
+          recoveredBy: 'new-pine-indicator-proof',
+          error: null,
+          pineEditorSurfaceProbe: probeMatchedAfterNewIndicator,
+          checkpoint: {
+            ...observationCheckpoint,
+            verified: true,
+            error: null,
+            editorActiveMatched: true,
+            foreground,
+            matchReason: 'new-pine-indicator-surface-probe',
+            recoveredBy: 'new-pine-indicator-proof',
+            pineEditorSurfaceProbe: probeMatchedAfterNewIndicator
+          }
+        };
+      }
+
+      const relaxedCheckpoint = await verifyKeyObservationCheckpoint({
+        ...checkpointSpec,
+        requiresObservedChange: false
+      }, checkpointBeforeForeground, {
+        expectedWindowHandle: options.expectedWindowHandle
+      });
+      const probeMatchedAfterCheckpoint = await probeTradingViewPineEditorSurface(runtimeOptions);
+      const postCheckpointCommandSurfaceConflict = await buildNewIndicatorCommandSurfaceConflict(probeMatchedAfterCheckpoint || null);
+      if (postCheckpointCommandSurfaceConflict) {
+        return postCheckpointCommandSurfaceConflict;
+      }
+      if (
+        (relaxedCheckpoint?.verified && (relaxedCheckpoint?.pineSurfaceExpectationMatched !== false))
+        || pineSurfaceProbeMatchesCheckpointExpectation(probeMatchedAfterCheckpoint, relaxedCheckpoint || observationCheckpoint)
+      ) {
+        const foreground = relaxedCheckpoint?.foreground?.success
+          ? relaxedCheckpoint.foreground
+          : (await resolveRecoveryForeground());
+        return {
+          attempted: true,
+          recovered: true,
+          recoveredBy: 'new-pine-indicator-proof',
+          error: null,
+          pineEditorSurfaceProbe: probeMatchedAfterCheckpoint || null,
+          checkpoint: {
+            ...observationCheckpoint,
+            ...(relaxedCheckpoint || {}),
+            verified: true,
+            error: null,
+            editorActiveMatched: true,
+            foreground,
+            matchReason: relaxedCheckpoint?.matchReason || 'new-pine-indicator-proof',
+            recoveredBy: 'new-pine-indicator-proof',
+            pineEditorSurfaceProbe: probeMatchedAfterCheckpoint || null
+          }
+        };
+      }
+
+      const foreground = relaxedCheckpoint?.foreground?.success
+        ? relaxedCheckpoint.foreground
+        : (await resolveRecoveryForeground());
+      return {
+        attempted: true,
+        recovered: false,
+        recoveredBy: 'new-pine-indicator-proof',
+        error: 'TradingView Ctrl+I did not expose a trustworthy Pine Editor surface for safe authoring.',
+        pineEditorSurfaceProbe: probeMatchedAfterCheckpoint || null,
+        checkpoint: {
+          ...observationCheckpoint,
+          ...(relaxedCheckpoint || {}),
+          verified: false,
+          error: 'TradingView Ctrl+I did not expose a trustworthy Pine Editor surface for safe authoring.',
+          editorActiveMatched: false,
+          foreground,
+          matchReason: relaxedCheckpoint?.matchReason || 'new-pine-indicator-proof-failed',
+          recoveredBy: 'new-pine-indicator-proof',
+          pineEditorSurfaceProbe: probeMatchedAfterCheckpoint || null
+        }
+      };
     }
 
     const probeMatchedBeforeClick = await probeTradingViewPineEditorSurface(runtimeOptions);
     if (probeMatchedBeforeClick) {
-      const foreground = await systemAutomation.getForegroundWindowInfo();
+      const foreground = await resolveRecoveryForeground();
       return {
         attempted: true,
         recovered: true,
@@ -2940,7 +4506,9 @@ Set-Clipboard -Value $value
 
       const foreground = relaxedCheckpoint?.foreground?.success
         ? relaxedCheckpoint.foreground
-        : await systemAutomation.getForegroundWindowInfo();
+        : (await getPreferredForegroundInfo(options.expectedWindowHandle || trustedWindowHandle || 0, runtimeOptions, {
+            requireTradingView: false
+          }))?.foreground;
 
       return {
         attempted: true,
@@ -2969,10 +4537,12 @@ Set-Clipboard -Value $value
     };
 
     const tryQuickSearchFallbackRecovery = async (initialDirectShortcutRecovery = null) => {
-      const quickSearchRuntimeOptions = runtimeOptions || createQuickSearchRuntimeOptions(
-        getTradingViewPineQuickSearchRecoveryTimeoutMs(),
-        'TradingView Pine quick-search fallback'
-      );
+      const quickSearchRuntimeOptions = options?.runtimeOptions && typeof options.runtimeOptions === 'object'
+        ? options.runtimeOptions
+        : createQuickSearchRuntimeOptions(
+            getTradingViewPineQuickSearchRecoveryTimeoutMs(),
+            'TradingView Pine quick-search fallback'
+          );
       if (quickSearchRuntimeOptions && typeof quickSearchRuntimeOptions === 'object') {
         quickSearchRuntimeOptions.preferWindowGuessFirst = true;
         quickSearchRuntimeOptions.skipClipboardSurfaceDiscovery = true;
@@ -2986,11 +4556,10 @@ Set-Clipboard -Value $value
         if (cachedQuickSearchForeground?.success) {
           quickSearchRuntimeOptions.cachedQuickSearchForeground = cachedQuickSearchForeground;
         }
+        if (!quickSearchRuntimeOptions.expectedWindowHandle && Number(options.expectedWindowHandle || 0) > 0) {
+          quickSearchRuntimeOptions.expectedWindowHandle = Number(options.expectedWindowHandle || 0) || 0;
+        }
       }
-      const preferredWindowHandle = Number(options.expectedWindowHandle || 0)
-        || Number(observationCheckpoint?.foreground?.hwnd || 0)
-        || Number(checkpointBeforeForeground?.hwnd || 0)
-        || 0;
       const routeMetadata = buildTradingViewPineQuickSearchRouteMetadata();
       const typeAction = buildTradingViewPineQuickSearchTypeAction();
       const enterAction = buildTradingViewPineQuickSearchEnterAction();
@@ -3043,6 +4612,7 @@ Set-Clipboard -Value $value
           quickSearchRuntimeOptions
         );
         if (commandQuickSearchSurface?.trusted !== true) {
+          const commandSurfaceFailureReason = formatTradingViewQuickSearchProbeFailureReason(commandQuickSearchSurface);
           try {
             await systemAutomation.pressKey('escape', {
               searchSurfaceContract: routeMetadata,
@@ -3052,7 +4622,9 @@ Set-Clipboard -Value $value
           return mergePineRecoveryMetadata(null, {
             ...baseMetadata,
             recoveredBy: 'quick-search-fallback',
-            error: 'TradingView Ctrl+K did not expose the command quick-search surface for Pine Editor recovery; refusing to type Pine Editor into symbol search',
+            error: commandSurfaceFailureReason
+              ? `TradingView Ctrl+K did not expose the command quick-search surface for Pine Editor recovery; refusing to type Pine Editor into symbol search because ${commandSurfaceFailureReason}`
+              : 'TradingView Ctrl+K did not expose the command quick-search surface for Pine Editor recovery; refusing to type Pine Editor into symbol search',
             pineEditorQuickSearchOpen: summarizeRecoveryStep({
               ...quickSearchOpen,
               success: false,
@@ -3159,7 +4731,9 @@ Set-Clipboard -Value $value
         if (relaxedCheckpoint?.verified || probeMatchedAfterEnter) {
           const foreground = relaxedCheckpoint?.foreground?.success
             ? relaxedCheckpoint.foreground
-            : await systemAutomation.getForegroundWindowInfo();
+            : (await getPreferredForegroundInfo(options.expectedWindowHandle || preferredWindowHandle || 0, quickSearchRuntimeOptions, {
+                requireTradingView: false
+              }))?.foreground;
           return mergePineRecoveryMetadata({
             attempted: true,
             recovered: true,
@@ -3226,7 +4800,44 @@ Set-Clipboard -Value $value
     }
 
     if (semanticIconActivation) {
-      return tryChartFocusDirectShortcutRecovery(false);
+      const activationProofDisposition = String(options?.activationProof?.disposition || '').trim().toLowerCase();
+      if (activationProofDisposition === 'renderer-proof-unavailable') {
+        const foreground = observationCheckpoint?.foreground?.success
+          ? observationCheckpoint.foreground
+          : (checkpointBeforeForeground?.success ? checkpointBeforeForeground : null);
+        const rendererFailureReason = options?.activationProof?.likelyMeaning
+          || 'Semantic Pine activation could not obtain Chromium renderer proof, so repeated Ctrl+E recovery was intentionally skipped.';
+        return {
+          attempted: true,
+          recovered: false,
+          recoveredBy: 'renderer-proof-unavailable',
+          error: rendererFailureReason,
+          checkpoint: {
+            ...observationCheckpoint,
+            verified: false,
+            error: rendererFailureReason,
+            foreground,
+            matchReason: 'renderer-proof-unavailable',
+            recoveredBy: 'renderer-proof-unavailable'
+          }
+        };
+      }
+
+      const directShortcutRecovery = await tryChartFocusDirectShortcutRecovery(false);
+      if (directShortcutRecovery?.recovered) {
+        return directShortcutRecovery;
+      }
+
+      if (shouldSkipQuickSearchFallbackAfterSemanticActivation(
+        observationCheckpoint,
+        directShortcutRecovery,
+        options?.activationProof || null
+      )) {
+        return directShortcutRecovery || null;
+      }
+
+      const quickSearchFallbackRecovery = await tryQuickSearchFallbackRecovery(directShortcutRecovery);
+      return quickSearchFallbackRecovery || directShortcutRecovery || null;
     }
 
     return tryChartFocusDirectShortcutRecovery(true);
@@ -3236,6 +4847,9 @@ Set-Clipboard -Value $value
     ensureTradingViewQuickSearchInputClearBeforeTyping,
     executeTradingViewQuickSearchTypeAction,
     verifyTradingViewQuickSearchTypedValue,
+    probeTradingViewQuickSearchSurface,
+    probeTradingViewCommandQuickSearchSurface,
+    probeTradingViewPineEditorSurface,
     maybeRecoverTradingViewQuickSearchOpen,
     maybeRecoverTradingViewPineEditorOpen
   };

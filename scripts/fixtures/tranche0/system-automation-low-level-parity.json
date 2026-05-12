@@ -235,6 +235,57 @@
       "normalizeAs": "windowInfo"
     },
     {
+      "id": "getRunningProcessesByNames.host",
+      "helper": "getRunningProcessesByNames",
+      "mode": "host",
+      "mockId": "getRunningProcessesByNames.host",
+      "args": [["tradingview", "msedge"]],
+      "expectedResult": [
+        {
+          "pid": 4242,
+          "processName": "TradingView",
+          "mainWindowTitle": "TradingView - Pine Editor",
+          "startTime": "2026-05-10T12:30:00.000Z"
+        },
+        {
+          "pid": 3131,
+          "processName": "msedge",
+          "mainWindowTitle": "YouTube - Microsoft Edge",
+          "startTime": "2026-05-10T12:10:00.000Z"
+        }
+      ],
+      "expectedExecCallCount": 0,
+      "parityGroup": "processes.byName",
+      "normalizeAs": "processList"
+    },
+    {
+      "id": "getRunningProcessesByNames.powershell",
+      "helper": "getRunningProcessesByNames",
+      "mode": "powershell",
+      "mockId": "getRunningProcessesByNames.powershell",
+      "args": [["tradingview", "msedge"]],
+      "expectedResult": [
+        {
+          "pid": 4242,
+          "processName": "TradingView",
+          "mainWindowTitle": "TradingView - Pine Editor",
+          "startTime": "2026-05-10T12:30:00.000Z"
+        },
+        {
+          "pid": 3131,
+          "processName": "msedge",
+          "mainWindowTitle": "YouTube - Microsoft Edge",
+          "startTime": "2026-05-10T12:10:00.000Z"
+        }
+      ],
+      "expectedExecCallCount": 1,
+      "expectedScriptMarkers": [
+        ["ConvertFrom-Json", "Select-Object -First 15 -Property pid, processName, mainWindowTitle, startTime", "[\"tradingview\",\"msedge\"]"]
+      ],
+      "parityGroup": "processes.byName",
+      "normalizeAs": "processList"
+    },
+    {
       "id": "getClipboardText.host",
       "helper": "getClipboardText",
       "mode": "host",
@@ -303,6 +354,22 @@
       "normalizeAs": "clipboardWrite"
     },
     {
+      "id": "setClipboardText.hermetic-blocked",
+      "helper": "setClipboardText",
+      "mode": "direct",
+      "env": {
+        "LIKU_HERMETIC_AUTOMATION": "1"
+      },
+      "args": ["Pine Editor"],
+      "expectedResult": {
+        "success": false,
+        "errorCode": "HERMETIC_AUTOMATION_BLOCKED",
+        "blockedByHermeticAutomation": true,
+        "message": "Blocked set_clipboard_text in hermetic automation test mode"
+      },
+      "expectedExecCallCount": 0
+    },
+    {
       "id": "typeText.escaped-sendkeys",
       "helper": "typeText",
       "mode": "powershell",
@@ -311,6 +378,22 @@
       "expectedScriptMarkers": [
         ["SendWait(\"Pine{+}RSI{^}{[}{]}{(}{)}{%}{~}\")"]
       ]
+    },
+    {
+      "id": "typeText.hermetic-blocked",
+      "helper": "typeText",
+      "mode": "direct",
+      "env": {
+        "LIKU_HERMETIC_AUTOMATION": "1"
+      },
+      "args": ["Pine Editor"],
+      "expectedResult": {
+        "success": false,
+        "errorCode": "HERMETIC_AUTOMATION_BLOCKED",
+        "blockedByHermeticAutomation": true,
+        "message": "Blocked type in hermetic automation test mode"
+      },
+      "expectedExecCallCount": 0
     },
     {
       "id": "pressKey.sendkeys.ctrl-shift-p",
@@ -371,6 +454,22 @@
       ]
     },
     {
+      "id": "pressKey.hermetic-blocked",
+      "helper": "pressKey",
+      "mode": "direct",
+      "env": {
+        "LIKU_HERMETIC_AUTOMATION": "1"
+      },
+      "args": ["ctrl+v"],
+      "expectedResult": {
+        "success": false,
+        "errorCode": "HERMETIC_AUTOMATION_BLOCKED",
+        "blockedByHermeticAutomation": true,
+        "message": "Blocked key in hermetic automation test mode"
+      },
+      "expectedExecCallCount": 0
+    },
+    {
       "id": "pressKey.sendinput.win-r",
       "helper": "pressKey",
       "mode": "powershell",
@@ -379,6 +478,22 @@
       "expectedScriptMarkers": [
         ["public class WinKeyPress", "VK_LWIN", "KeyDown(82)", "KeyUp(82)"]
       ]
+    },
+    {
+      "id": "focusWindow.hermetic-blocked",
+      "helper": "focusWindow",
+      "mode": "direct",
+      "env": {
+        "LIKU_HERMETIC_AUTOMATION": "1"
+      },
+      "args": [777],
+      "expectedResult": {
+        "success": false,
+        "errorCode": "HERMETIC_AUTOMATION_BLOCKED",
+        "blockedByHermeticAutomation": true,
+        "message": "Blocked focus_window in hermetic automation test mode"
+      },
+      "expectedExecCallCount": 0
     },
     {
       "id": "click.left",
@@ -390,6 +505,22 @@
         ["Cursor]::Position = New-Object System.Drawing.Point(120, 240)"],
         ["public class ClickThrough", "ClickAt(120, 240, $false)"]
       ]
+    },
+    {
+      "id": "click.hermetic-blocked",
+      "helper": "click",
+      "mode": "direct",
+      "env": {
+        "LIKU_HERMETIC_AUTOMATION": "1"
+      },
+      "args": [120, 240, "left"],
+      "expectedResult": {
+        "success": false,
+        "errorCode": "HERMETIC_AUTOMATION_BLOCKED",
+        "blockedByHermeticAutomation": true,
+        "message": "Blocked click in hermetic automation test mode"
+      },
+      "expectedExecCallCount": 0
     },
     {
       "id": "doubleClick.left",

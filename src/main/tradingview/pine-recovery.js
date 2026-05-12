@@ -41,7 +41,7 @@ function createTradingViewPineRecoveryHelpers(deps = {}) {
     throw new Error('createTradingViewPineRecoveryHelpers requires providerOrchestrator.callProvider');
   }
 
-  async function requestTradingViewPineCodeOnly(promptText = '', effectiveModel = '') {
+  async function requestTradingViewPineCodeOnly(promptText = '', effectiveModel = '', titleIntent = '') {
     if (!promptText) return '';
 
     pineRecoveryDebugLog('[AI][PINE-RECOVERY] Requesting Pine code with prompt:', promptText);
@@ -62,7 +62,10 @@ function createTradingViewPineRecoveryHelpers(deps = {}) {
     pineRecoveryDebugLog('[AI][PINE-RECOVERY] Raw Pine code response:', String(codeContent || ''));
 
     const extracted = extractPineScriptFromModelResponse(codeContent);
-    const normalized = normalizeGeneratedPineScript(extracted);
+    const normalized = normalizeGeneratedPineScript({
+      pineScript: extracted,
+      userMessage: titleIntent || promptText
+    });
     pineRecoveryDebugLog('[AI][PINE-RECOVERY] Extracted Pine snippet:', extracted);
     pineRecoveryDebugLog('[AI][PINE-RECOVERY] Normalized Pine snippet:', normalized);
     pineRecoveryDebugLog('[AI][PINE-RECOVERY] Contains Pine payload:', containsPineScriptPayloadText(normalized));
@@ -110,7 +113,7 @@ function createTradingViewPineRecoveryHelpers(deps = {}) {
         || buildTradingViewPineCodeValidationRetryPrompt(enhancedMessage, pineState?.validation);
       if (!promptText) break;
 
-      pineScript = await requestTradingViewPineCodeOnly(promptText, effectiveModel);
+      pineScript = await requestTradingViewPineCodeOnly(promptText, effectiveModel, enhancedMessage);
       pineState = buildPineScriptState({
         source: pineScript,
         intent: enhancedMessage,

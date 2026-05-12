@@ -336,6 +336,30 @@ function createScenarioForFixture(fixture) {
           }))
         }]
       };
+    case 'getRunningProcessesByNames.host':
+      return {
+        host: {
+          async getRunningProcessesByNames(processNames) {
+            assert.deepStrictEqual(
+              processNames,
+              (Array.isArray(fixture.args?.[0]) ? fixture.args[0] : []).map((value) => String(value || '').trim().toLowerCase()).filter(Boolean),
+              `${fixture.id} should pass normalized process names to the host`
+            );
+            return cloneSerializable(fixture.expectedResult);
+          }
+        }
+      };
+    case 'getRunningProcessesByNames.powershell':
+      return {
+        responders: [{
+          includesAll: [
+            'ConvertFrom-Json',
+            'Select-Object -First 15 -Property pid, processName, mainWindowTitle, startTime',
+            JSON.stringify((Array.isArray(fixture.args?.[0]) ? fixture.args[0] : []).map((value) => String(value || '').trim().toLowerCase()).filter(Boolean))
+          ],
+          stdout: JSON.stringify(fixture.expectedResult)
+        }]
+      };
     case 'getClipboardText.host':
       return {
         host: {
@@ -442,6 +466,19 @@ function normalizeClipboardWriteResult(result) {
   };
 }
 
+function normalizeRunningProcessesResult(result) {
+  if (!Array.isArray(result)) {
+    return result;
+  }
+
+  return result.map((entry) => ({
+    pid: Number(entry?.pid || 0) || 0,
+    processName: String(entry?.processName || ''),
+    mainWindowTitle: String(entry?.mainWindowTitle || ''),
+    startTime: String(entry?.startTime || '')
+  }));
+}
+
 function normalizeForParity(normalizeAs, result) {
   switch (String(normalizeAs || '').trim()) {
     case 'focusWindow':
@@ -452,6 +489,8 @@ function normalizeForParity(normalizeAs, result) {
       return normalizeClipboardReadResult(result);
     case 'clipboardWrite':
       return normalizeClipboardWriteResult(result);
+    case 'processList':
+      return normalizeRunningProcessesResult(result);
     default:
       return cloneSerializable(result);
   }
@@ -514,6 +553,34 @@ async function withAutomationHostDisabled(fn) {
   }
 }
 
+async function withTemporaryEnv(envOverrides, fn) {
+  const entries = envOverrides && typeof envOverrides === 'object'
+    ? Object.entries(envOverrides)
+    : [];
+  const originals = new Map();
+
+  for (const [key, value] of entries) {
+    originals.set(key, process.env[key]);
+    if (value === null || value === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = String(value);
+    }
+  }
+
+  try {
+    return await fn();
+  } finally {
+    for (const [key, value] of originals.entries()) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
+}
+
 async function runFixtureCase(fixture) {
   const scenario = createScenarioForFixture(fixture);
   const controller = {
@@ -532,9 +599,18 @@ async function runFixtureCase(fixture) {
     assert.strictEqual(typeof helper, 'function', `${fixture.id} references an exported helper`);
 
     const invoke = () => helper(...(Array.isArray(fixture.args) ? fixture.args : []));
-    actualResult = fixture.mode === 'host'
-      ? await withAutomationHost(scenario.host || {}, invoke)
-      : await withAutomationHostDisabled(invoke);
+    const invokeWithMode = () => (fixture.mode === 'host'
+      ? withAutomationHost(scenario.host || {}, invoke)
+      : withAutomationHostDisabled(invoke));
+    try {
+      actualResult = await withTemporaryEnv(fixture.env, invokeWithMode);
+    } catch (error) {
+      if (error?.hermeticBlockedResult) {
+        actualResult = error.hermeticBlockedResult;
+      } else {
+        throw error;
+      }
+    }
   } finally {
     mockState.activeCase = null;
   }

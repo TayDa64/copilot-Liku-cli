@@ -867,6 +867,7 @@ $results | ConvertTo-Json -Depth 4 -Compress
         this.cache = {
           elements,
           activeWindow,
+          windowTopology: this.cache.windowTopology || {},
           lastUpdate: Date.now(),
           updateCount: this.cache.updateCount + 1
         };
@@ -931,9 +932,27 @@ $results | ConvertTo-Json -Depth 4 -Compress
 
     switch (evt.event) {
       case 'focusChanged': {
-        // New window — update active window, await structureChanged for elements
+        // New window — update active window immediately so focus-sensitive waits
+        // can observe the fresh foreground even before structureChanged arrives.
         if (evt.data?.activeWindow) {
-          this.cache.activeWindow = evt.data.activeWindow;
+          const nextActiveWindow = evt.data.activeWindow;
+          const previous = this.cache.activeWindow || null;
+          const hasChanges = Number(previous?.hwnd || 0) !== Number(nextActiveWindow?.hwnd || 0)
+            || String(previous?.title || '') !== String(nextActiveWindow?.title || '')
+            || String(previous?.processName || '') !== String(nextActiveWindow?.processName || '');
+
+          this.cache.activeWindow = nextActiveWindow;
+          this.cache.windowTopology = this.cache.windowTopology || {};
+          this.cache.lastUpdate = Date.now();
+          this.cache.updateCount = Number(this.cache.updateCount || 0) + 1;
+
+          this.emit('poll-complete', {
+            elements: this.cache.elements || [],
+            activeWindow: this.cache.activeWindow,
+            pollTime: 0,
+            hasChanges,
+            source: 'event-focus'
+          });
         }
         break;
       }
@@ -944,6 +963,7 @@ $results | ConvertTo-Json -Depth 4 -Compress
         this.cache = {
           elements,
           activeWindow: this.cache.activeWindow,
+          windowTopology: this.cache.windowTopology || {},
           lastUpdate: Date.now(),
           updateCount: this.cache.updateCount + 1
         };
@@ -989,7 +1009,9 @@ $results | ConvertTo-Json -Depth 4 -Compress
         if (patchCount > 0) {
           const elements = Array.from(map.values());
           this.cache.elements = elements;
+          this.cache.windowTopology = this.cache.windowTopology || {};
           this.cache.lastUpdate = Date.now();
+          this.cache.updateCount = Number(this.cache.updateCount || 0) + 1;
 
           this.emit('poll-complete', {
             elements,

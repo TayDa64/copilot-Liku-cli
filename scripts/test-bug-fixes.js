@@ -471,7 +471,9 @@ test('system prompt includes Pine diagnostics guidance', () => {
   assert(systemPromptContent.includes('realtime rollback'), 'System prompt should mention Pine execution-model caveats');
   assert(systemPromptContent.includes('TradingView drawing capability rule'), 'System prompt should include TradingView drawing honesty guidance');
   assert(systemPromptContent.includes('TradingView shortcut profile rule'), 'System prompt should include TradingView shortcut-profile guidance');
-  assert(systemPromptContent.includes('do not assume') && systemPromptContent.includes('stable native TradingView shortcut for Pine Editor'), 'System prompt should explicitly reject ctrl+e as a stable native Pine Editor shortcut');
+  assert(systemPromptContent.includes('TradingView Pine opener rule'), 'System prompt should include explicit Pine opener policy guidance');
+  assert(systemPromptContent.includes('chart-focused official Pine opener first'), 'System prompt should prefer the direct Pine opener when chart focus is established');
+  assert(systemPromptContent.includes('verified TradingView command quick-search'), 'System prompt should retain the quick-search fallback when direct Pine focus is not proven');
 });
 
 test('reflection trigger builds provider-compatible chat messages', () => {
@@ -703,10 +705,10 @@ test('ai-service gates TradingView follow-up typing on post-key observation chec
   assert(systemAutomationContent.includes('buildPineEditorSafeAuthoringSummary'), 'system-automation should structure Pine Editor safe-authoring inspection summaries');
   assert(systemAutomationContent.includes('buildPineEditorDiagnosticsStructuredSummary'), 'system-automation should structure Pine Editor diagnostics summaries');
   assert(systemAutomationContent.includes("pineEvidenceMode === 'safe-authoring-inspect'"), 'system-automation should attach structured Pine summaries for safe-authoring-inspect readbacks');
-  assert(systemAutomationContent.includes("effectiveAction?.pineEvidenceMode === 'compile-result'"), 'system-automation should structure compile-result Pine Editor reads');
-  assert(systemAutomationContent.includes("effectiveAction?.pineEvidenceMode === 'diagnostics'"), 'system-automation should structure diagnostics Pine Editor reads');
-  assert(systemAutomationContent.includes("effectiveAction?.pineEvidenceMode === 'line-budget'"), 'system-automation should structure line-budget Pine Editor reads');
-  assert(systemAutomationContent.includes("effectiveAction?.pineEvidenceMode === 'generic-status'"), 'system-automation should structure generic-status Pine Editor reads');
+  assert(systemAutomationContent.includes("getTextAction?.pineEvidenceMode === 'compile-result'"), 'system-automation should structure compile-result Pine Editor reads');
+  assert(systemAutomationContent.includes("getTextAction?.pineEvidenceMode === 'diagnostics'"), 'system-automation should structure diagnostics Pine Editor reads');
+  assert(systemAutomationContent.includes("getTextAction?.pineEvidenceMode === 'line-budget'"), 'system-automation should structure line-budget Pine Editor reads');
+  assert(systemAutomationContent.includes("getTextAction?.pineEvidenceMode === 'generic-status'"), 'system-automation should structure generic-status Pine Editor reads');
   assert(sessionIntentStateContent.includes('pineAuthoringState'), 'session intent continuity context should expose Pine authoring state');
   assert(sessionIntentStateContent.includes('pineCompileStatus'), 'session intent continuity context should expose Pine compile status');
   assert(sessionIntentStateContent.includes('Visible Pine compiler errors are present'), 'session intent continuity should recommend fixing visible compiler errors first');
@@ -814,6 +816,14 @@ test('system-automation uses SendInput for TradingView Alt/Enter and shortcut-ro
     }),
     true,
     'TradingView quick-search route clear steps should use SendInput'
+  );
+  assertEqual(
+    systemAutomation.shouldUseSendInputForKeyCombo('ctrl+e', {
+      tradingViewShortcut: { id: 'open-pine-editor', surface: 'pine-editor' },
+      verifyTarget: { appName: 'TradingView', processNames: ['tradingview'] }
+    }),
+    false,
+    'TradingView Pine Editor direct opener should stay on SendKeys when SendInput is proven inert'
   );
   assertEqual(
     systemAutomation.shouldUseSendInputForKeyCombo('ctrl+l', { verifyTarget: { appName: 'TradingView', processNames: ['tradingview'] } }),

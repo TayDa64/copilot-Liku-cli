@@ -11,7 +11,7 @@ const { log, sleep } = require('../core/helpers');
 /**
  * Get the active (foreground) window info
  * 
- * @returns {Promise<{hwnd: number, title: string, processName: string, className: string, bounds: Object} | null>}
+ * @returns {Promise<{hwnd: number, pid: number, processId: number, title: string, processName: string, className: string, bounds: Object} | null>}
  */
 async function getActiveWindow() {
   const psScript = `
@@ -71,6 +71,8 @@ $windowKind = if ($ownerHwnd -ne 0 -and $isToolWindow) { 'palette' } elseif ($ow
 
 @{
     hwnd = $hwnd.ToInt64()
+    pid = [int]$procId
+    processId = [int]$procId
     title = $titleSB.ToString()
     className = $classSB.ToString()
     processName = if ($proc) { $proc.ProcessName } else { "" }
@@ -103,10 +105,11 @@ $windowKind = if ($ownerHwnd -ne 0 -and $isToolWindow) { 'palette' } elseif ($ow
  * @param {string} [criteria.title] - Window title contains
  * @param {string} [criteria.processName] - Process name equals
  * @param {string} [criteria.className] - Window class contains
- * @returns {Promise<Array<{hwnd: number, title: string, processName: string, className: string, bounds: Object}>>}
+ * @param {number} [criteria.pid] - Process id equals
+ * @returns {Promise<Array<{hwnd: number, pid: number, processId: number, title: string, processName: string, className: string, bounds: Object}>>}
  */
 async function findWindows(criteria = {}) {
-  const { title, processName, className, includeUntitled = false } = criteria;
+  const { title, processName, className, pid, includeUntitled = false } = criteria;
   
   const psScript = `
 Add-Type @'
@@ -168,6 +171,7 @@ foreach ($hwnd in [WindowFinder]::windows) {
     
     $procId = 0
     [void][WindowFinder]::GetWindowThreadProcessId($hwnd, [ref]$procId)
+    ${Number.isFinite(Number(pid)) && Number(pid) > 0 ? `if ([int]$procId -ne ${Math.round(Number(pid))}) { continue }` : ''}
     $proc = Get-Process -Id $procId -ErrorAction SilentlyContinue
     $pn = if ($proc) { $proc.ProcessName } else { "" }
     
@@ -186,6 +190,8 @@ foreach ($hwnd in [WindowFinder]::windows) {
     
     $results += @{
         hwnd = $hwnd.ToInt64()
+        pid = [int]$procId
+        processId = [int]$procId
         title = $t
         className = $c
         processName = $pn
