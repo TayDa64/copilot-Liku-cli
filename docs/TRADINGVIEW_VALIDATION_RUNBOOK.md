@@ -34,9 +34,16 @@ Use the narrowest deterministic test first, then broaden only when the touched b
 | --- | --- | --- |
 | Focused Node tests | Module contracts, rewrite parity, safety rules | `node scripts\test-ai-service-contract.js`, `node scripts\test-tradingview-paper-workflows.js` |
 | AI/runtime bundle | Cross-module AI-service behavior | `npm run test:ai-focused` |
+| Harness/reporting bundle | Failure artifacts and clean shutdown coverage for the live TradingView smoke harness | `npm run test:automation-harness` |
 | Windows observation flow | Focus lock, watcher/checkpoint semantics, bounded TradingView workflows | `npm run test:windows-observation-flow` |
 | Live `liku chat` | Real foreground/input routing and final app state | Manual command through `npm run liku -- chat` |
 | Browser/Playwright proof | Browser-visible TradingView state after Liku actions | Optional, artifact-oriented, not a direct DOM trading executor |
+
+When a change only touches failure artifacts or shutdown/exit hygiene around the live TradingView smoke harness, run:
+
+```powershell
+npm run test:automation-harness
+```
 
 ## TradingView live checks
 
