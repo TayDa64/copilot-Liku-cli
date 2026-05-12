@@ -2,6 +2,8 @@
 
 This runbook keeps delegated TradingView work grounded in the current codebase instead of stale branch state or blueprint assumptions.
 
+For the repo-specific automation-driver modernization backlog grounded in the current `main`-branch seams, see [TRADINGVIEW_AUTOMATION_MODERNIZATION_BACKLOG.md](./TRADINGVIEW_AUTOMATION_MODERNIZATION_BACKLOG.md).
+
 ## Current source of truth
 
 The TradingView modularization slices represented by planning issues #10-#16 are complete and merged through implementation PRs #19-#25. Those issues are closed; future changes should use implementation PRs directly unless a separate planning issue is explicitly needed.
@@ -32,17 +34,19 @@ Use the narrowest deterministic test first, then broaden only when the touched b
 
 | Layer | Use for | Examples |
 | --- | --- | --- |
-| Focused Node tests | Module contracts, rewrite parity, safety rules | `node scripts\test-ai-service-contract.js`, `node scripts\test-tradingview-paper-workflows.js` |
+| Focused Node tests | Module contracts, rewrite parity, safety rules | `node scripts\test-ai-service-contract.js`, `node scripts\test-system-automation-parity.js`, `node scripts\test-tradingview-paper-workflows.js` |
 | AI/runtime bundle | Cross-module AI-service behavior | `npm run test:ai-focused` |
-| Harness/reporting bundle | Failure artifacts and clean shutdown coverage for the live TradingView smoke harness | `npm run test:automation-harness` |
+| Automation-host bundle | Host bridge, clipboard/save guards, watcher shutdown, decision trace, bounded quick-search | `npm run test:automation-host` |
+| TradingView runtime bundle | Pine surface summaries, Pine workflows, runtime recovery, create/save, smoke window selection | `npm run test:tradingview-runtime` |
+| TradingView launch bundle | Launch profile, capability, contract, and relaunch executor seams | `npm run test:tradingview-launch` |
 | Windows observation flow | Focus lock, watcher/checkpoint semantics, bounded TradingView workflows | `npm run test:windows-observation-flow` |
 | Live `liku chat` | Real foreground/input routing and final app state | Manual command through `npm run liku -- chat` |
 | Browser/Playwright proof | Browser-visible TradingView state after Liku actions | Optional, artifact-oriented, not a direct DOM trading executor |
 
-When a change only touches failure artifacts or shutdown/exit hygiene around the live TradingView smoke harness, run:
+For a broader deterministic TradingView modernization regression pass before live smoke, use:
 
 ```powershell
-npm run test:automation-harness
+npm run test:tradingview-modernization
 ```
 
 ## TradingView live checks
@@ -67,6 +71,96 @@ When a PR changes TradingView runtime behavior, include evidence for:
 5. Runtime trace or summary artifacts are attached if behavior diverges from deterministic tests.
 
 Unexpected VS Code Accessibility View popups are evidence that keyboard input may have routed to VS Code instead of TradingView. Treat any result after that as suspicious until reproduced with correct focus.
+
+## Automation-ready launcher contract
+
+For Pine/CDP scenarios, use an explicit automation-ready launcher/wrapper contract instead of relying on generic Start-menu launch behavior.
+
+Current source of truth on Windows:
+- the official TradingView MSIX install is usable for automation when relaunched through the packaged AppUserModelId route
+- the wrapper can now launch that install with `--remote-debugging-port=<port>` and `--force-renderer-accessibility`
+- the preferred official-install path is packaged AppID activation, not unpacking the MSIX and launching `TradingView.exe` directly
+
+Supported contract entry points:
+
+- `LIKU_TRADINGVIEW_AUTOMATION_LAUNCH_CONTRACT`
+  Inline JSON object describing the wrapper command.
+- `LIKU_TRADINGVIEW_AUTOMATION_LAUNCH_CONTRACT_FILE`
+  Path to a JSON file describing the wrapper command.
+- `LIKU_TRADINGVIEW_AUTOMATION_LAUNCH_COMMAND`
+  Minimal env-field form for the wrapper command.
+
+Minimal contract shape:
+
+```json
+{
+  "kind": "command",
+  "displayName": "TradingView automation wrapper",
+  "command": "C:\\tools\\launch-tradingview-automation.cmd",
+  "args": ["--remote-debugging-port=9222", "--force-renderer-accessibility"],
+  "workdir": "C:\\tools",
+  "expected": {
+    "cdpPort": 9222,
+    "rendererAccessibility": true,
+    "processNames": ["TradingView", "TradingView.exe"]
+  }
+}
+```
+
+Use `node scripts\inspect-tradingview-launch-capability.js` to inspect the current launch profile, install capability, launch contract, and Pine precondition message together.
+
+To generate a local wrapper-contract file under ignored artifacts, use:
+
+```powershell
+npm run tradingview:write-launch-contract
+```
+
+Useful writer options:
+
+- `--app-user-model-id <id>`
+  Preferred for the official Windows MSIX install. Pins the packaged TradingView AppUserModelId that the wrapper should activate.
+- `--executable-path <path>`
+  Target an explicit TradingView build/profile instead of the default packaged launch target.
+- `--allow-force-kill`
+  Let the wrapper escalate from graceful close to `Stop-Process -Force` if TradingView does not exit within the configured timeout.
+- `--close-timeout-ms <ms>`
+  Bound the graceful close window before the wrapper either fails closed or force-kills.
+- `--launch-settle-ms <ms>`
+  Add a short bounded settle delay after `Start-Process`.
+
+Preferred official-MSIX example:
+
+```powershell
+$appId = 'TradingView.Desktop_n534cwy3pjxzj!TradingView.Desktop'
+npm run tradingview:write-launch-contract -- --app-user-model-id $appId --cdp-port 9333
+$env:LIKU_TRADINGVIEW_CDP_PORT = '9333'
+$env:LIKU_TRADINGVIEW_AUTOMATION_LAUNCH_CONTRACT_FILE = (Resolve-Path .\artifacts\tmp\tradingview-automation-launch-contract.local.json).Path
+node scripts\inspect-tradingview-launch-capability.js
+```
+
+Explicit binary example:
+
+```powershell
+npm run tradingview:write-launch-contract -- --executable-path "C:\Tools\TradingView\TradingView.exe" --allow-force-kill
+$env:LIKU_TRADINGVIEW_AUTOMATION_LAUNCH_CONTRACT_FILE = (Resolve-Path .\artifacts\tmp\tradingview-automation-launch-contract.local.json).Path
+node scripts\inspect-tradingview-launch-capability.js
+```
+
+The live smoke harness will not relaunch TradingView automatically just because a contract is configured. Opt in explicitly when you want the harness to consume the contract:
+
+```powershell
+$env:LIKU_TRADINGVIEW_AUTOMATION_RELAUNCH = '1'
+node scripts\live-tradingview-smoke.js --scenarios pine-editor --relaunch-tradingview-via-contract
+```
+
+Optional relaunch controls:
+
+- `LIKU_TRADINGVIEW_AUTOMATION_RELAUNCH_TIMEOUT_MS`
+  Bound the total wrapper-wait budget.
+- `LIKU_TRADINGVIEW_AUTOMATION_RELAUNCH_POLL_INTERVAL_MS`
+  Control how often the harness rechecks the TradingView launch profile.
+
+The harness does not force-kill the current TradingView session on its own. The wrapper always attempts graceful close first. Force-kill is opt-in and should be enabled only in the generated wrapper contract when that restart policy is acceptable.
 
 ## Browser/Playwright proof
 

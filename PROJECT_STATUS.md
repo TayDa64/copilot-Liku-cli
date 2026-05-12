@@ -73,6 +73,12 @@
 
 ## Delivered in This Session
 
+### TradingView Automation Driver Hardening
+- Added an automation-ready TradingView launcher contract flow for live Pine/CDP validation, including packaged AppUserModelId activation support for the official Windows MSIX install.
+- Added launch capability, launch contract, launch executor, and launch profile validation coverage plus an opt-in relaunch path for the live smoke harness.
+- Updated TradingView validation docs to reflect the packaged-launch route, wrapper contract usage, and current Tranche 0 status.
+- Closed Tranche 0 with deterministic low-level helper parity fixtures and a parity artifact lane; also corrected `typeText` SendKeys escaping so the fixture captures the intended helper contract instead of a broken special-character path.
+
 ### TradingView Validation Documentation Hardening
 - Documented that `test-windows-observation-flow.js` is characterization coverage, not a full real-world proof of `liku chat` behavior.
 - Added guidance for investigating unexpected VS Code Accessibility View popups during live chat-path testing.
