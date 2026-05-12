@@ -29,7 +29,7 @@ const { CONFIG, CONTROL_TYPES } = require('./config');
 // Core utilities
 const { sleep, debug, log, executePowerShellScript } = require('./core');
 const { UIProvider } = require('./core/ui-provider');
-const { UIAHost, getSharedUIAHost } = require('./core/uia-host');
+const { UIAHost, getSharedUIAHost, shutdownSharedUIAHost } = require('./core/uia-host');
 
 // Element operations
 const { 
@@ -123,6 +123,7 @@ module.exports = {
   UIProvider,
   UIAHost,
   getSharedUIAHost,
+  shutdownSharedUIAHost,
   
   // Element operations
   findElements,

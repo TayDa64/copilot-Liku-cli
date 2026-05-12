@@ -151,6 +151,197 @@ async function getForegroundSnapshot(systemAutomation = null) {
   }
 }
 
+function normalizeWindowHandle(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) {
+    return null;
+  }
+  return Math.trunc(numeric);
+}
+
+function normalizeBoundsRect(bounds = null) {
+  if (!bounds || typeof bounds !== 'object') {
+    return null;
+  }
+
+  const rawX = bounds.x ?? bounds.X ?? bounds.left ?? bounds.Left;
+  const rawY = bounds.y ?? bounds.Y ?? bounds.top ?? bounds.Top;
+  const rawWidth = bounds.width ?? bounds.Width;
+  const rawHeight = bounds.height ?? bounds.Height;
+  const rawRight = bounds.right ?? bounds.Right;
+  const rawBottom = bounds.bottom ?? bounds.Bottom;
+
+  const x = Number(rawX);
+  const y = Number(rawY);
+
+  let width = Number(rawWidth);
+  let height = Number(rawHeight);
+
+  if ((!Number.isFinite(width) || width <= 0) && Number.isFinite(Number(rawRight)) && Number.isFinite(x)) {
+    width = Number(rawRight) - x;
+  }
+  if ((!Number.isFinite(height) || height <= 0) && Number.isFinite(Number(rawBottom)) && Number.isFinite(y)) {
+    height = Number(rawBottom) - y;
+  }
+
+  if (![x, y, width, height].every(Number.isFinite) || width <= 0 || height <= 0) {
+    return null;
+  }
+
+  return {
+    x: Math.trunc(x),
+    y: Math.trunc(y),
+    width: Math.max(1, Math.trunc(width)),
+    height: Math.max(1, Math.trunc(height))
+  };
+}
+
+function getScreenshotFn(explicitScreenshotFn = null) {
+  if (typeof explicitScreenshotFn === 'function') {
+    return explicitScreenshotFn;
+  }
+
+  try {
+    const screenshotModule = require(path.join(__dirname, '..', '..', 'src', 'main', 'ui-automation', 'screenshot.js'));
+    return typeof screenshotModule?.screenshot === 'function' ? screenshotModule.screenshot : null;
+  } catch {
+    return null;
+  }
+}
+
+async function getWindowBoundsSnapshot(systemAutomation = null, windowHandle = null) {
+  const requestedWindowHandle = normalizeWindowHandle(windowHandle);
+  if (!requestedWindowHandle || typeof systemAutomation?.getWindowInfoByHandle !== 'function') {
+    return null;
+  }
+
+  try {
+    const windowInfo = await systemAutomation.getWindowInfoByHandle(requestedWindowHandle);
+    return normalizeBoundsRect(windowInfo?.bounds || windowInfo?.Bounds || null);
+  } catch {
+    return null;
+  }
+}
+
+async function captureWindowArtifact(options = {}) {
+  const artifactDir = path.resolve(process.cwd(), options.artifactDir || DEFAULT_FAILURE_ARTIFACT_DIR);
+  const baseName = String(options.baseName || '').trim();
+  const label = String(options.label || 'window').trim() || 'window';
+  const requestedWindowHandle = normalizeWindowHandle(options.windowHandle);
+
+  if (!requestedWindowHandle || !baseName) {
+    return null;
+  }
+
+  const screenshotFn = getScreenshotFn(options.screenshotFn);
+  if (typeof screenshotFn !== 'function') {
+    return {
+      label,
+      requestedWindowHandle,
+      captured: false,
+      error: 'Screenshot module unavailable'
+    };
+  }
+
+  ensureDir(artifactDir);
+  const filePath = path.join(artifactDir, `${baseName}.${sanitizeFileSegment(label, 'window')}.png`);
+
+  try {
+    let result = await screenshotFn({
+      path: filePath,
+      windowHwnd: requestedWindowHandle,
+      base64: false,
+      format: 'png'
+    });
+
+    let fallbackUsed = false;
+    let fallbackBounds = null;
+
+    if (result?.success !== true) {
+      fallbackBounds = await getWindowBoundsSnapshot(options.systemAutomation, requestedWindowHandle);
+      if (fallbackBounds) {
+        result = await screenshotFn({
+          path: filePath,
+          region: fallbackBounds,
+          base64: false,
+          format: 'png'
+        });
+        fallbackUsed = result?.success === true;
+      }
+    }
+
+    if (result?.success !== true) {
+      return {
+        label,
+        requestedWindowHandle,
+        captured: false,
+        path: result?.path || filePath,
+        captureMode: result?.captureMode || null,
+        fallback: fallbackBounds ? 'region-by-window-bounds' : null,
+        bounds: fallbackBounds,
+        error: 'Window-scoped screenshot capture returned no data'
+      };
+    }
+
+    return {
+      label,
+      requestedWindowHandle,
+      captured: true,
+      path: result.path || filePath,
+      captureMode: result.captureMode || null,
+      fallback: fallbackUsed ? 'region-by-window-bounds' : null,
+      bounds: fallbackUsed ? fallbackBounds : null
+    };
+  } catch (error) {
+    return {
+      label,
+      requestedWindowHandle,
+      captured: false,
+      path: filePath,
+      error: String(error?.message || error || 'Window-scoped screenshot capture failed')
+    };
+  }
+}
+
+async function captureFailureWindowArtifacts(options = {}) {
+  const targetWindowHandle = normalizeWindowHandle(
+    options.captureTargetWindowHandle
+    ?? options.targetWindowHandle
+    ?? options.extra?.boundWindow?.hwnd
+  );
+  const foregroundWindowHandle = normalizeWindowHandle(options.foreground?.hwnd);
+  const captureForegroundWindow = options.captureForegroundWindow === true;
+  const screenshots = {};
+
+  if (targetWindowHandle) {
+    screenshots.targetWindow = await captureWindowArtifact({
+      artifactDir: options.artifactDir,
+      baseName: options.baseName,
+      label: 'target-window',
+      windowHandle: targetWindowHandle,
+      systemAutomation: options.systemAutomation,
+      screenshotFn: options.screenshotFn
+    });
+  }
+
+  if (
+    captureForegroundWindow
+    && foregroundWindowHandle
+    && foregroundWindowHandle !== targetWindowHandle
+  ) {
+    screenshots.foregroundWindow = await captureWindowArtifact({
+      artifactDir: options.artifactDir,
+      baseName: options.baseName,
+      label: 'foreground-window',
+      windowHandle: foregroundWindowHandle,
+      systemAutomation: options.systemAutomation,
+      screenshotFn: options.screenshotFn
+    });
+  }
+
+  return Object.keys(screenshots).length ? screenshots : null;
+}
+
 function buildBaseBundle(options = {}) {
   const {
     suiteName = 'failure',
@@ -232,6 +423,17 @@ async function writeFailureArtifactBundle(options = {}) {
   bundle.foreground = await getForegroundSnapshot(systemAutomation);
   bundle.watcherSnapshot = getWatcherSnapshot(watcher);
   bundle.tradingViewContext = tradingViewContext;
+  bundle.windowCaptures = await captureFailureWindowArtifacts({
+    artifactDir,
+    baseName,
+    foreground: bundle.foreground,
+    captureTargetWindowHandle: options.captureTargetWindowHandle,
+    targetWindowHandle: options.targetWindowHandle,
+    captureForegroundWindow: options.captureForegroundWindow,
+    systemAutomation,
+    screenshotFn: options.screenshotFn,
+    extra: options.extra
+  });
 
   const filePath = writeBundleToDisk(artifactDir, baseName, bundle);
   return {

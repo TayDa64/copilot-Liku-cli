@@ -108,6 +108,9 @@ class UIWatcher extends EventEmitter {
         this.poll();
       }
     }, this.options.pollInterval);
+    if (typeof this.pollTimer?.unref === 'function') {
+      this.pollTimer.unref();
+    }
     
     this.emit('started');
   }
@@ -116,7 +119,13 @@ class UIWatcher extends EventEmitter {
    * Stop monitoring
    */
   stop() {
-    if (!this.isPolling) return;
+    const hadActiveResources = this.isPolling
+      || !!this.pollTimer
+      || !!this._healthCheckTimer
+      || !!this._fallbackRetryTimer
+      || this._mode !== MODE.POLLING
+      || !!this.psProcess;
+    if (!hadActiveResources) return;
     
     if (!this.options.quiet) {
       console.log('[UI-WATCHER] Stopping monitoring');
@@ -128,6 +137,14 @@ class UIWatcher extends EventEmitter {
       clearInterval(this.pollTimer);
       this.pollTimer = null;
     }
+
+    this._stopHealthCheck();
+    if (this._fallbackRetryTimer) {
+      clearTimeout(this._fallbackRetryTimer);
+      this._fallbackRetryTimer = null;
+    }
+
+    this._mode = MODE.POLLING;
     
     this.killPsProcess();
     this.emit('stopped');
@@ -783,10 +800,31 @@ $results | ConvertTo-Json -Depth 4 -Compress
   /**
    * Destroy watcher
    */
+  async shutdown() {
+    try {
+      if (this._mode !== MODE.POLLING || this._uiaEventHandler) {
+        await this.stopEventMode().catch(() => {});
+      }
+    } finally {
+      this.stop();
+    }
+  }
+
   destroy() {
-    this.stopEventMode();
-    this.stop();
-    this.removeAllListeners();
+    return this.shutdown().finally(() => {
+      this.removeAllListeners();
+    });
+  }
+
+  resetSingleton() {
+    if (instance === this) {
+      instance = null;
+    }
+  }
+
+  async dispose() {
+    await this.destroy();
+    this.resetSingleton();
   }
 
   // ── Phase 4: Event-driven mode ──────────────────────────────────────
@@ -980,6 +1018,9 @@ $results | ConvertTo-Json -Depth 4 -Compress
         this._fallbackToPolling();
       }
     }, 5000);
+    if (typeof this._healthCheckTimer?.unref === 'function') {
+      this._healthCheckTimer.unref();
+    }
   }
 
   _stopHealthCheck() {
@@ -1004,6 +1045,9 @@ $results | ConvertTo-Json -Depth 4 -Compress
         await this.startEventMode();
       }
     }, 30000);
+    if (typeof this._fallbackRetryTimer?.unref === 'function') {
+      this._fallbackRetryTimer.unref();
+    }
   }
 
   _restartPolling() {
@@ -1016,6 +1060,9 @@ $results | ConvertTo-Json -Depth 4 -Compress
     this.pollTimer = setInterval(() => {
       if (!this.pollInProgress) this.poll();
     }, this.options.pollInterval);
+    if (typeof this.pollTimer?.unref === 'function') {
+      this.pollTimer.unref();
+    }
   }
 
   _detachEventHandler() {

@@ -16,6 +16,7 @@ const { EventEmitter } = require('events');
 
 const STARTUP_TIMEOUT_MS = 5000;
 const REQUEST_TIMEOUT_MS = 8000;
+const STOP_TIMEOUT_MS = 1200;
 
 class UIAHost extends EventEmitter {
   constructor() {
@@ -76,6 +77,9 @@ class UIAHost extends EventEmitter {
         this._pending = null;
         reject(new Error(`UIAHost: command "${cmd.cmd}" timed out after ${REQUEST_TIMEOUT_MS}ms`));
       }, REQUEST_TIMEOUT_MS);
+      if (typeof timer?.unref === 'function') {
+        timer.unref();
+      }
 
       this._pending = { resolve, reject, timer };
 
@@ -143,14 +147,43 @@ class UIAHost extends EventEmitter {
   /** Gracefully shut down the host process. */
   async stop() {
     if (!this._alive || !this._proc) return;
+    const proc = this._proc;
+
     try {
-      await this.send({ cmd: 'exit' });
+      if (!this._pending) {
+        await Promise.race([
+          this.send({ cmd: 'exit' }),
+          new Promise((resolve) => {
+            const timer = setTimeout(resolve, STOP_TIMEOUT_MS);
+            if (typeof timer?.unref === 'function') {
+              timer.unref();
+            }
+          })
+        ]);
+      }
     } catch { /* ignore */ }
+
     this._alive = false;
-    if (this._proc && !this._proc.killed) {
-      this._proc.kill();
+    this._rejectPending(new Error('UIA host shutdown'));
+
+    try { proc.stdin?.end(); } catch {}
+    try { proc.stdin?.destroy(); } catch {}
+    try { proc.stdout?.destroy(); } catch {}
+    try { proc.stderr?.destroy(); } catch {}
+
+    if (proc && !proc.killed) {
+      try { proc.kill(); } catch {}
     }
-    this._proc = null;
+    try {
+      if (typeof proc?.unref === 'function') {
+        proc.unref();
+      }
+    } catch {}
+
+    if (this._proc === proc) {
+      this._proc = null;
+    }
+    this._buffer = '';
   }
 
   get isAlive() {
@@ -199,6 +232,7 @@ class UIAHost extends EventEmitter {
 
 // Singleton for shared use
 let _shared = null;
+let _sharedCleanupRegistered = false;
 
 /**
  * Get or create the shared UIAHost instance.
@@ -208,7 +242,25 @@ function getSharedUIAHost() {
   if (!_shared) {
     _shared = new UIAHost();
   }
+  if (!_sharedCleanupRegistered) {
+    _sharedCleanupRegistered = true;
+    process.once('exit', () => {
+      try {
+        if (_shared?._proc && !_shared._proc.killed) {
+          _shared._proc.kill();
+        }
+      } catch {}
+    });
+  }
   return _shared;
 }
 
-module.exports = { UIAHost, getSharedUIAHost };
+async function shutdownSharedUIAHost() {
+  if (!_shared) return;
+  try {
+    await _shared.stop();
+  } catch {}
+  _shared = null;
+}
+
+module.exports = { UIAHost, getSharedUIAHost, shutdownSharedUIAHost };
