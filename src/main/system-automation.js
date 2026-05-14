@@ -5,7 +5,7 @@
  * Uses native platform APIs via child_process for zero dependencies
  */
 
-const { exec } = require('child_process');
+const { exec, execFile } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -15,6 +15,16 @@ const {
   discoverChromiumRemoteDebuggingTarget,
   withChromiumCdpSession
 } = require('./ui-automation/core/chromium-cdp');
+
+const POWERSHELL_EXECUTABLE = (() => {
+  const candidates = [
+    'C:\\Program Files\\PowerShell\\7\\pwsh.exe',
+    'C:\\Program Files\\PowerShell\\6\\pwsh.exe'
+  ];
+  return candidates.find((candidate) => {
+    try { return fs.existsSync(candidate); } catch { return false; }
+  }) || 'powershell';
+})();
 
 // Action types the AI can request
 const ACTION_TYPES = {
@@ -11500,9 +11510,15 @@ function executePowerShellScript(scriptContent, timeoutMs = 10000) {
     }
     
     const scriptFile = path.join(tempDir, `script-${Date.now()}.ps1`);
-    fs.writeFileSync(scriptFile, scriptContent, 'utf8');
+    fs.writeFileSync(scriptFile, `\uFEFF${scriptContent}`, 'utf8');
     
-    exec(`powershell -NoProfile -ExecutionPolicy Bypass -File "${scriptFile}"`, {
+    execFile(POWERSHELL_EXECUTABLE, [
+      '-NoProfile',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-File',
+      scriptFile
+    ], {
       encoding: 'utf8',
       timeout: timeoutMs,
       maxBuffer: 10 * 1024 * 1024

@@ -33,6 +33,31 @@ const FEATURE_PATTERNS = Object.freeze([
   { label: 'Momentum', pattern: /\bmomentum\b/i }
 ]);
 
+const SHORT_TITLE_ABBREVIATIONS = Object.freeze({
+  ATR: 'A',
+  VWAP: 'V',
+  MACD: 'M',
+  RSI: 'R',
+  EMA: 'E',
+  SMA: 'S',
+  ADX: 'D',
+  OBV: 'O',
+  MFI: 'F',
+  ROC: 'C',
+  BB: 'B',
+  'Stoch RSI': 'SR',
+  Supertrend: 'ST',
+  Ichimoku: 'I',
+  Volume: 'Vol',
+  Momentum: 'Mom',
+  Confidence: 'Conf',
+  Trend: 'Trend',
+  Volatility: 'Vol',
+  Breakout: 'Brk',
+  Reversal: 'Rev',
+  Range: 'Range'
+});
+
 const SEMANTIC_PATTERNS = Object.freeze([
   { label: 'Confidence', pattern: /\bconfidence\b|confidence building/i },
   { label: 'Momentum', pattern: /\bmomentum\b/i },
@@ -50,6 +75,33 @@ function sanitizePineScriptName(value = '') {
     .replace(/[<>:"/\\|?*\u0000-\u001f]+/g, ' ')
     .trim()
     .slice(0, 120);
+}
+
+function buildCompactLabelToken(label = '') {
+  const sanitized = sanitizePineScriptName(label);
+  if (!sanitized) return '';
+  if (SHORT_TITLE_ABBREVIATIONS[sanitized]) {
+    return SHORT_TITLE_ABBREVIATIONS[sanitized];
+  }
+  const initials = sanitized
+    .split(/\s+/)
+    .map((word) => word.replace(/[^a-z0-9]/ig, '').slice(0, 1).toUpperCase())
+    .join('');
+  return initials || sanitized.slice(0, 4);
+}
+
+function buildShortUniqueSuffix(date = new Date()) {
+  const normalized = date instanceof Date && Number.isFinite(date.getTime()) ? date : new Date();
+  const pad = (value) => String(value).padStart(2, '0');
+  return `${String(normalized.getFullYear()).slice(-2)}${pad(normalized.getMonth() + 1)}${pad(normalized.getDate())}${pad(normalized.getHours())}${pad(normalized.getMinutes())}${pad(normalized.getSeconds())}`;
+}
+
+function buildFallbackTitleAcronym(title = '') {
+  return sanitizePineScriptName(title)
+    .split(/\s+/)
+    .map((word) => word.replace(/[^a-z0-9]/ig, '').slice(0, 1).toUpperCase())
+    .join('')
+    .slice(0, 6);
 }
 
 function normalizeTitleForMatch(value = '') {
@@ -224,6 +276,34 @@ function synthesizePineScriptTitleContract(options = {}) {
   };
 }
 
+function synthesizeShortUniquePineScriptName(titleContract = {}, options = {}) {
+  const maxLength = Math.max(16, Math.min(Number(options.maxLength || 32) || 32, 80));
+  const suffix = sanitizePineScriptName(options.uniqueSuffix || buildShortUniqueSuffix(options.date));
+  const featureLabels = Array.isArray(titleContract?.featureLabels) ? titleContract.featureLabels : [];
+  const semanticLabels = Array.isArray(titleContract?.semanticLabels) ? titleContract.semanticLabels : [];
+  const featureToken = featureLabels
+    .slice(0, 4)
+    .map(buildCompactLabelToken)
+    .filter(Boolean)
+    .join('')
+    || buildFallbackTitleAcronym(titleContract?.title || DEFAULT_PINE_SCRIPT_TITLE)
+    || 'LPS';
+  const semanticToken = semanticLabels.includes('Confidence')
+    ? 'Conf'
+    : (semanticLabels.map(buildCompactLabelToken).find(Boolean) || '');
+  const pieces = [featureToken, semanticToken, suffix].filter(Boolean);
+  let title = sanitizePineScriptName(pieces.join(' '));
+
+  if (title.length > maxLength && suffix) {
+    const reserved = suffix.length + 1;
+    const stemBudget = Math.max(3, maxLength - reserved);
+    const stem = sanitizePineScriptName([featureToken, semanticToken].filter(Boolean).join(' ')).slice(0, stemBudget).trim();
+    title = sanitizePineScriptName(`${stem || featureToken.slice(0, stemBudget)} ${suffix}`);
+  }
+
+  return title.slice(0, maxLength).trim() || DEFAULT_PINE_SCRIPT_TITLE;
+}
+
 function applyPineScriptTitleContract(source = '', titleContract = null) {
   const normalizedSource = String(source || '');
   const expectedTitle = sanitizePineScriptName(titleContract?.title || '');
@@ -244,5 +324,6 @@ module.exports = {
   extractPineDeclarationTitle,
   extractExplicitUserRequestedPineTitle,
   synthesizePineScriptTitleContract,
+  synthesizeShortUniquePineScriptName,
   applyPineScriptTitleContract
 };

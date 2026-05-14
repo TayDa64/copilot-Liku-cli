@@ -13,7 +13,8 @@ const {
   inferTradingViewPineIntent
 } = require(path.join(__dirname, '..', 'src', 'main', 'tradingview', 'pine-workflows.js'));
 const {
-  synthesizePineScriptTitleContract
+  synthesizePineScriptTitleContract,
+  synthesizeShortUniquePineScriptName
 } = require(path.join(__dirname, '..', 'src', 'main', 'tradingview', 'pine-title-synthesis.js'));
 const {
   buildTradingViewSymbolWorkflowActions,
@@ -1336,10 +1337,13 @@ function buildDefaultPineCreateSavePrompt(scriptName = DEFAULT_PINE_CREATE_SAVE_
   return `TradingView is already open. Create a new Pine script called "${safeName}", save the script, and report the visible save status. Do not add it to the chart.`;
 }
 
-function buildPineCreateSaveScenario(prompt, scriptName) {
-  const synthesizedTitle = synthesizePineScriptTitleContract({
+function buildPineCreateSaveScenario(prompt, scriptName, options = {}) {
+  const titleContract = synthesizePineScriptTitleContract({
     userMessage: prompt || ''
-  }).title;
+  });
+  const synthesizedTitle = options?.shortUniqueName === true
+    ? synthesizeShortUniquePineScriptName(titleContract)
+    : titleContract.title;
   const effectiveScriptName = String(scriptName || synthesizedTitle || DEFAULT_PINE_CREATE_SAVE_NAME).trim() || DEFAULT_PINE_CREATE_SAVE_NAME;
   const effectivePrompt = String(prompt || buildDefaultPineCreateSavePrompt(effectiveScriptName)).trim()
     || buildDefaultPineCreateSavePrompt(effectiveScriptName);
@@ -1418,7 +1422,9 @@ function buildScenarioPlan(options = {}) {
       continue;
     }
     if (id === 'pine-create-save' || id === 'pine-save') {
-      scenarios.push(buildPineCreateSaveScenario(options.pinePrompt, options.pineScriptName));
+      scenarios.push(buildPineCreateSaveScenario(options.pinePrompt, options.pineScriptName, {
+        shortUniqueName: options.pineShortUniqueName === true
+      }));
       continue;
     }
     if (id === 'symbol') {
@@ -1466,6 +1472,7 @@ Options:
   --timeframe <value>          Timeframe for the timeframe scenario
   --pine-prompt <text>         User prompt for the pine-create-save scenario
   --pine-script-name <name>    Script title for the pine-create-save scenario
+  --pine-short-unique-name     Synthesize a compact timestamped script name when no explicit name is provided
   --allow-symbol-change        Explicitly allow symbol mutation
   --allow-timeframe-change     Explicitly allow timeframe mutation
   --artifact-dir <path>        Output directory (default: artifacts/live-validation)
@@ -1848,6 +1855,7 @@ async function main() {
     timeframe: getArgValue('--timeframe') || getEnvValue('LIKU_LIVE_TV_TIMEFRAME') || '',
     pinePrompt: getArgValue('--pine-prompt') || getEnvValue('LIKU_LIVE_TV_PINE_PROMPT') || '',
     pineScriptName: getArgValue('--pine-script-name') || getEnvValue('LIKU_LIVE_TV_PINE_SCRIPT_NAME') || '',
+    pineShortUniqueName: hasFlag('--pine-short-unique-name') || hasTruthyValue(getEnvValue('LIKU_LIVE_TV_PINE_SHORT_UNIQUE_NAME')),
     allowSymbolChange: hasFlag('--allow-symbol-change'),
     allowTimeframeChange: hasFlag('--allow-timeframe-change')
   };

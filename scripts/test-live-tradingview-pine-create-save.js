@@ -72,6 +72,26 @@ test('pine-create-save scenario preserves an explicit smoke script name over syn
   assert(/indicator\("Liku Monaco Steady State Probe 20260509-1445"/.test(String(pasteStep?.pinePreparedScriptText || '')));
 });
 
+test('pine-create-save scenario can synthesize a shorter unique save name', () => {
+  const prompt = 'generate a pine script that builds confidence using ATR, VWAP, MACD, RSI; that is visually pleasing';
+  const scenario = buildPineCreateSaveScenario(prompt, '', { shortUniqueName: true });
+  const actions = scenario?.actionData?.actions || [];
+  const inspectStep = actions.find((action) => action?.type === 'get_text' && action?.pineEvidenceMode === 'safe-authoring-inspect');
+  const starterContinuation = inspectStep?.continueActionsByPineEditorState?.['empty-or-starter'] || [];
+  const pasteStep = starterContinuation.find((action) =>
+    action?.type === 'key' && String(action?.key || '').toLowerCase() === 'ctrl+v'
+  );
+  const saveStatusStep = starterContinuation.find((action) =>
+    action?.type === 'get_text' && action?.pineEvidenceMode === 'save-status'
+  );
+  const generatedName = String(pasteStep?.pinePreparedScriptName || '');
+
+  assert(/^AVMR Conf \d{12}$/.test(generatedName), `expected compact AVMR confidence name, got ${generatedName}`);
+  assert(generatedName.length < 'ATR VWAP MACD RSI Confidence'.length);
+  assert.strictEqual(String(saveStatusStep?.pineExpectedScriptName || ''), generatedName);
+  assert(new RegExp(`indicator\\("${generatedName}"`).test(String(pasteStep?.pinePreparedScriptText || '')));
+});
+
 test('pine-create-save save-required recovery uses a single verified save invoke instead of separate dialog typing', () => {
   const scenario = buildPineCreateSaveScenario('TradingView is already open. Create a new Pine script called "Liku Save Flow Probe", save the script, and report the visible save status. Do not add it to the chart.');
   const actions = scenario?.actionData?.actions || [];
