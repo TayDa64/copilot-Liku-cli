@@ -93,11 +93,11 @@ These names are proposed to match existing repo conventions and should default t
 
 | Tranche | Outcome | Primary targets | Exit gate |
 | --- | --- | --- | --- |
-| 0 | Baseline parity inventory and latency proof | `src/main/system-automation.js`, `src/main/ui-watcher.js`, `scripts/live-tradingview-smoke.js` | We can measure current costs and compare new paths without guessing |
-| 1 | Existing host becomes the real execution substrate for low-level ops | `src/native/windows-uia-dotnet/Program.cs`, `src/main/ui-automation/core/uia-host.js`, `src/main/system-automation.js` | Host can perform window/focus/clipboard ops with legacy-parity fallbacks |
-| 2 | Watcher/focus parity becomes event-first and foreground-safe | `src/main/ui-watcher.js`, `src/main/ai-service.js`, `src/main/ai-service/observation-checkpoints.js` | Focus steals are detected quickly and watcher shape remains compatible |
-| 3 | TradingView quick-search and Pine flows become semantic-first and bounded | `src/main/tradingview/runtime/recovery.js`, `src/main/tradingview/pine-workflows.js`, `src/main/system-automation.js` | Live TradingView flows stop depending on fragile polling/clipboard loops |
-| 4 | Same-surface batching reduces round trips without hiding proof | host wrapper plus new sequencer seam | Microflows become faster while preserving per-step proof metadata |
+| 0 | Baseline parity inventory and latency proof | `src/main/system-automation.js`, `src/main/ui-watcher.js`, `scripts/live-tradingview-smoke.js` | **Closed**: current costs, process pressure, and helper parity are measurable |
+| 1 | Existing host becomes the real execution substrate for low-level ops | `src/native/windows-uia-dotnet/Program.cs`, `src/main/ui-automation/core/uia-host.js`, `src/main/system-automation.js` | **Closed**: host-backed window/focus/clipboard ops are flag-gated with legacy fallbacks |
+| 2 | Watcher/focus parity becomes event-first and foreground-safe | `src/main/ui-watcher.js`, `src/main/ai-service.js`, `src/main/ai-service/observation-checkpoints.js` | **Closed**: watcher shape remains compatible and focus steals fail/refocus boundedly |
+| 3 | TradingView quick-search and Pine flows become semantic-first and bounded | `src/main/tradingview/runtime/recovery.js`, `src/main/tradingview/pine-workflows.js`, `src/main/system-automation.js` | **Closed**: quick-search/Pine paths prefer semantic proof and bounded fallback |
+| 4 | Same-surface sequencing reduces fragile round trips without hiding proof | `src/main/ai-service.js`, `src/main/system-automation.js`, host wrapper | **Closed**: conservative same-surface microflows preserve per-step proof metadata |
 | 5 | Gradual rollout and cleanup | docs, flags, telemetry, fallback tracking | Host-backed path runs stably before any legacy removal |
 
 ---
@@ -152,6 +152,12 @@ Completed:
 - structured failure bundles
 - baseline documentation
 
+Closure evidence:
+- `scripts/test-system-automation-parity.js`
+- `scripts/profile-tradingview-latency.js`
+- `scripts/live-tradingview-smoke.js`
+- `docs/TRANCHE0_POWERSHELL_PROCESS_PRESSURE_BASELINE.md`
+
 ### Why first
 This prevents speculative optimization and gives us a safe way to prove that host migration preserves behavior.
 
@@ -169,20 +175,32 @@ Use the existing `WindowsUIA.exe` seam as the single long-lived automation drive
 - `src/main/system-automation.js`
 
 ### Tasks
-- [ ] Extend the host with **window operations**:
+- [x] Extend the host with **window operations**:
   - foreground window info
   - window enumeration / resolve helpers
   - reliable focus/bring-to-front behavior
-- [ ] Extend the host with **clipboard operations**:
+- [x] Extend the host with **clipboard operations**:
   - `getText`
   - `setText`
   - `save`
   - `restore`
   - optional monitor/wait support
-- [ ] Introduce request correlation IDs and queued request handling in `uia-host.js`.
-- [ ] Remove the single-call bottleneck in the Node wrapper without weakening error reporting.
-- [ ] Route selected `system-automation.js` calls through the host under `LIKU_USE_AUTOMATION_HOST=1`.
-- [ ] Preserve current legacy PowerShell paths in explicit fallback helpers.
+- [x] Introduce request correlation IDs and queued request handling in `uia-host.js`.
+- [x] Replace fragile single pending-request behavior with correlated queued dispatch in the Node wrapper without weakening error reporting.
+- [x] Route selected `system-automation.js` calls through the host under `LIKU_USE_AUTOMATION_HOST=1`.
+- [x] Preserve current legacy PowerShell paths in explicit fallback helpers.
+
+### Current status
+
+Tranche 1 is implemented and closed. The source-of-truth host seam now supports foreground/window inspection, focus/restore, process lookup, clipboard text/state operations, request IDs, queued dispatch, and event messages. `src/main/system-automation.js` routes selected calls through the host only when `LIKU_USE_AUTOMATION_HOST=1`, and retains legacy PowerShell fallbacks when the flag is disabled or the host path cannot satisfy the call.
+
+Closure evidence:
+- `src/native/windows-uia-dotnet/Program.cs`
+- `src/main/ui-automation/core/uia-host.js`
+- `src/main/system-automation.js`
+- `scripts/test-system-automation-host-bridge.js`
+- `scripts/test-uia-host-request-queue.js`
+- `scripts/test-host-native-clipboard-state.js`
 
 ### Important repo-specific notes
 - Keep `src/main/system-automation.js` as the public facade.
@@ -222,8 +240,8 @@ Make the watcher and focus verification event-first, faster, and safer against f
 - `src/native/windows-uia-dotnet/Program.cs`
 
 ### Tasks
-- [ ] Expand host event payloads so they can support current watcher consumers more faithfully.
-- [ ] Preserve active-window fields used by AI context and verification:
+- [x] Expand host event payloads so they can support current watcher consumers more faithfully.
+- [x] Preserve active-window fields used by AI context and verification:
   - `processName`
   - `ownerHwnd`
   - `isTopmost`
@@ -231,13 +249,25 @@ Make the watcher and focus verification event-first, faster, and safer against f
   - `isMinimized`
   - `isMaximized`
   - `windowKind`
-- [ ] Shift watcher behavior to **event-first + heartbeat fallback** instead of heavy poll-first logic.
-- [ ] Add explicit classification for foreground steals caused by:
+- [x] Shift watcher behavior to **event-first + heartbeat fallback** instead of heavy poll-first logic.
+- [x] Add explicit classification for foreground steals caused by:
   - VS Code terminal notifications
   - stale background terminal exits
   - non-TradingView popups
-- [ ] Tighten focus-lock rules so untrusted foregrounds block TradingView input/readback instead of encouraging loops.
-- [ ] Introduce an adapter layer only if in-place watcher parity becomes too invasive.
+- [x] Tighten focus-lock rules so untrusted foregrounds block TradingView input/readback instead of encouraging loops.
+- [x] Keep the watcher in place; no adapter layer was needed for the current parity surface.
+
+### Current status
+
+Tranche 2 is implemented and closed. `src/main/ui-watcher.js` keeps the existing consumer shape while exposing richer active-window topology, event freshness, and heartbeat fallback behavior. `src/main/ai-service.js` and `src/main/ai-service/observation-checkpoints.js` now use watcher freshness and foreground proof to refocus or fail closed before keyboard input/readback can route to VS Code, stale terminals, or non-TradingView foregrounds.
+
+Closure evidence:
+- `src/main/ui-watcher.js`
+- `src/main/ai-service.js`
+- `src/main/ai-service/observation-checkpoints.js`
+- `scripts/test-windows-observation-flow.js`
+- `scripts/test-observation-checkpoint-host-proof.js`
+- `scripts/test-live-tradingview-smoke-window-selection.js`
 
 ### Acceptance criteria
 - Watcher consumers continue to receive the same shape they expect.
@@ -265,21 +295,35 @@ Fix the current user-visible pain points in TradingView without weakening existi
 - optional new: `src/main/tradingview/element-map.js`
 
 ### Tasks
-- [ ] Convert quick-search handling to a semantic-first path:
+- [x] Convert quick-search handling to a semantic-first path:
   - semantic focus/input if available
   - bounded clipboard fallback only when semantic input is unavailable
-- [ ] Make Pine readback **TextPattern-first** and clipboard fallback second.
-- [ ] Make Pine write/update paths explicit and bounded:
+- [x] Make Pine readback **TextPattern-first** and clipboard fallback second.
+- [x] Make Pine write/update paths explicit and bounded:
   - semantic set/focus when available
   - clipboard save/restore-backed paste fallback when necessary
   - immediate bounded readback/verification after write
-- [ ] Add a small TradingView element registry for high-value surfaces:
+- [x] Capture high-value TradingView surfaces in the existing TradingView registries/contracts:
   - quick-search input
   - Pine editor anchors
   - Pine logs/profiler/version history anchors
   - symbol/timeframe surfaces
-- [ ] Reduce “wait then sample again” loops where semantic event-backed confirmation is possible.
-- [ ] Prevent stale terminal notifications from being mistaken for valid readback surfaces.
+- [x] Reduce “wait then sample again” loops where semantic event-backed confirmation is possible.
+- [x] Prevent stale terminal notifications from being mistaken for valid readback surfaces.
+
+### Current status
+
+Tranche 3 is implemented and closed. Quick-search text replacement now prefers host/UIA `ValuePattern` write plus readback before falling back to keyboard typing. Pine Editor readback and authoring paths are bounded by foreground/surface proof, TextPattern/ValuePattern reads, clipboard save/restore fallbacks, and immediate lifecycle/readback verification. The high-value TradingView surfaces are represented through the existing tool facade, shortcut profile, verification, system contract, and observation-provider registries instead of a new competing element-map file.
+
+Closure evidence:
+- `src/main/system-automation.js`
+- `src/main/tradingview/runtime/recovery.js`
+- `src/main/tradingview/pine-workflows.js`
+- `src/main/tools/tradingview-tool.js`
+- `scripts/test-system-automation-quick-search.js`
+- `scripts/test-tradingview-pine-workflows.js`
+- `scripts/test-tradingview-pine-data-workflows.js`
+- `scripts/test-tradingview-runtime-recovery.js`
 
 ### Pain points this tranche must directly address
 - text not landing reliably in the TradingView quick-search input
@@ -306,7 +350,7 @@ Fix the current user-visible pain points in TradingView without weakening existi
 ## Tranche 4 — Narrow action batching and sequencer support
 
 ### Objective
-Reduce round trips only after correctness and state trust improve.
+Reduce fragile round trips only after correctness and state trust improve. The landed scope is intentionally conservative: keep sequencing inside the existing action executor and host wrapper, collapse only same-surface microflows where semantic proof is available, and preserve per-step metadata instead of introducing a broad batch daemon.
 
 ### File-level targets
 - `src/main/ui-automation/core/uia-host.js`
@@ -316,28 +360,35 @@ Reduce round trips only after correctness and state trust improve.
 - `src/main/tradingview/runtime/recovery.js`
 
 ### Tasks
-- [ ] Add support for narrowly scoped compound operations such as:
-  - `focusAndReady(...)`
-  - `replaceQuickSearchText(...)`
-  - `pineReadback(...)`
-  - `semanticClickAndVerify(...)`
-- [ ] Preserve per-step proof metadata even when a compound call is used.
-- [ ] Restrict batching to same-surface microflows.
-- [ ] Do **not** batch across:
+- [x] Add support for narrowly scoped same-surface microflows:
+  - focus/readiness preflight through focus-lock and active-input guards
+  - quick-search replacement through semantic `setValue` plus `getText` readback
+  - Pine readback preparation through bounded TextPattern/ValuePattern and fallback lanes
+  - semantic Pine click proof through post-invoke surface verification
+- [x] Preserve per-step proof metadata even when a microflow uses a collapsed semantic host path.
+- [x] Restrict collapsed behavior to same-surface microflows.
+- [x] Do **not** batch across:
   - focus boundary changes
   - confirmation boundaries
   - high-risk actions
   - uncertain foreground states
-- [ ] Keep legacy and non-batched paths available as fallback.
+- [x] Keep legacy and non-batched paths available as fallback.
+
+### Current status
+
+Tranche 4 is implemented and closed for the safe current scope. The repo does **not** add a second automation sequencer daemon or a broad host-side action batcher. Instead, `src/main/ai-service.js` preserves intelligible action/checkpoint proof, `src/main/system-automation.js` collapses trusted same-surface semantic operations where safe, and risky/focus-changing/high-uncertainty paths remain explicit non-batched steps with fallback behavior.
 
 ### Acceptance criteria
-- Microflows require fewer process/IPC round trips.
+- Same-surface microflows require fewer fragile keyboard/process round trips where semantic host proof exists.
 - Error reporting still identifies which sub-step failed.
 - Existing AI-service proof and checkpoint metadata remain intelligible.
 
 ### Validation proof
-- targeted microflow tests to be added alongside existing TradingView recovery tests
-- live smoke timing comparisons before/after batching on focus + Pine scenarios
+- `scripts/test-system-automation-quick-search.js`
+- `scripts/test-windows-observation-flow.js`
+- `scripts/test-observation-checkpoint-host-proof.js`
+- `scripts/test-decision-trace.js`
+- live smoke timing comparisons from `scripts/live-tradingview-smoke.js` manifests
 
 ---
 
@@ -367,7 +418,7 @@ Enable the modernized path gradually and remove legacy only after stable proof.
 
 ## Suggested first three implementation slices
 
-These are the first concrete slices to land after this backlog document.
+These implementation slices have landed as part of Tranches 1-3; Tranche 5 owns controlled rollout and cleanup.
 
 ### Slice A — Host-backed clipboard safety and foreground APIs
 **Files:**
@@ -408,6 +459,8 @@ Before enabling any tranche by default, re-verify:
 - [ ] stale terminals and VS Code notifications are rejected as trusted TradingView foregrounds
 - [ ] runtime trace artifacts still explain why a workflow passed, recovered, or failed
 - [ ] live smoke artifacts under `artifacts/live-validation/` still tell the story of the scenario clearly
+
+Current closure note: Tranches 0-4 are complete, but they remain intentionally guarded. Tranche 5 is where fallback-trigger trending, default-on rollout decisions, and any legacy pruning should happen.
 
 ## Suggested validation cadence per slice
 

@@ -263,6 +263,23 @@ What they cover:
 - policy and preference-parser helpers
 - browser/session/history/UI-context seams
 
+### TradingView Modernization Closure Tests
+
+Use this bundle before treating Tranches 0-4 in `docs/TRADINGVIEW_AUTOMATION_MODERNIZATION_BACKLOG.md` as a clean baseline for future planning:
+
+```bash
+npm run test:tradingview-modernization
+```
+
+The bundle combines:
+
+- `npm run test:ai-focused`
+- `npm run test:automation-host`
+- `npm run test:tradingview-runtime`
+- `npm run test:tradingview-launch`
+
+It is deterministic and does not replace live `liku chat` validation for foreground/input routing, but it is the repo-level regression gate for the closed host, watcher, semantic TradingView, and conservative sequencer/proof surfaces.
+
 Focused suite quick map:
 
 | Test | Primary purpose |

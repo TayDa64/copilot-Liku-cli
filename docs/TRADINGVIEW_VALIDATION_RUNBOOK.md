@@ -8,6 +8,8 @@ For the repo-specific automation-driver modernization backlog grounded in the cu
 
 The TradingView modularization slices represented by planning issues #10-#16 are complete and merged through implementation PRs #19-#25. Those issues are closed; future changes should use implementation PRs directly unless a separate planning issue is explicitly needed.
 
+The automation-driver modernization backlog is closed through Tranche 4 on `main`: Tranche 0 parity/profiling, Tranche 1 host-backed window/focus/clipboard operations, Tranche 2 watcher/focus-lock hardening, Tranche 3 semantic quick-search/Pine paths, and Tranche 4 conservative same-surface sequencing/proof support. Tranche 5 remains open for controlled rollout, fallback trending, and legacy cleanup only after stable proof.
+
 The canonical TradingView facade is `src\main\tools\tradingview-tool.js`. It owns registration for:
 
 - rewrite handlers through `src\main\ai-service\rewrite-registry.js`
@@ -39,6 +41,7 @@ Use the narrowest deterministic test first, then broaden only when the touched b
 | Automation-host bundle | Host bridge, clipboard/save guards, watcher shutdown, decision trace, bounded quick-search | `npm run test:automation-host` |
 | TradingView runtime bundle | Pine surface summaries, Pine workflows, runtime recovery, create/save, smoke window selection | `npm run test:tradingview-runtime` |
 | TradingView launch bundle | Launch profile, capability, contract, and relaunch executor seams | `npm run test:tradingview-launch` |
+| TradingView modernization bundle | Tranche 0-4 deterministic closure check before live proof | `npm run test:tradingview-modernization` |
 | Windows observation flow | Focus lock, watcher/checkpoint semantics, bounded TradingView workflows | `npm run test:windows-observation-flow` |
 | Live `liku chat` | Real foreground/input routing and final app state | Manual command through `npm run liku -- chat` |
 | Browser/Playwright proof | Browser-visible TradingView state after Liku actions | Optional, artifact-oriented, not a direct DOM trading executor |

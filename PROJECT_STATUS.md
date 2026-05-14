@@ -78,6 +78,8 @@
 - Added launch capability, launch contract, launch executor, and launch profile validation coverage plus an opt-in relaunch path for the live smoke harness.
 - Updated TradingView validation docs to reflect the packaged-launch route, wrapper contract usage, and current Tranche 0 status.
 - Closed Tranche 0 with deterministic low-level helper parity fixtures and a parity artifact lane; also corrected `typeText` SendKeys escaping so the fixture captures the intended helper contract instead of a broken special-character path.
+- Closed Tranches 1-4 against the current source seams: host-backed window/focus/clipboard routing, watcher/focus-lock hardening, semantic quick-search/Pine readback/write paths, and conservative same-surface sequencing/proof support.
+- Kept Tranche 5 as the remaining rollout lane for fallback-trigger trending, default-on decisions, and legacy cleanup after stable evidence.
 
 ### TradingView Validation Documentation Hardening
 - Documented that `test-windows-observation-flow.js` is characterization coverage, not a full real-world proof of `liku chat` behavior.
@@ -96,6 +98,7 @@
 ### Verification Coverage
 - Added targeted characterization tests for contract stability, command handling, provider orchestration, registry state, policy enforcement, preference parsing, and runtime state seams.
 - Confirmed fresh local passes for provider orchestration, contract, feature, and bug-fix suites.
+- Added/identified deterministic tranche-closure lanes: `test:automation-host`, `test:tradingview-runtime`, `test:tradingview-launch`, and `test:tradingview-modernization`.
 
 ## Recently Stabilized
 
@@ -110,6 +113,7 @@
 ## Operational Health
 - No static diagnostics errors on modified implementation files after updates.
 - Fresh provider-seam verification completed with successful contract and regression checks.
+- TradingView modernization docs now treat Tranches 0-4 as the closed baseline and reserve future planning for Tranche 5 rollout/cleanup or new feature slices.
 
 ## Core Runtime Areas
 - `src/main/ai-service.js`: compatibility facade, orchestration, cognitive feedback loop (AWM + RLVR).
