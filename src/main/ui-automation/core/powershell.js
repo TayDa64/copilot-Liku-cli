@@ -10,6 +10,15 @@ const fs = require('fs');
 const path = require('path');
 const { CONFIG } = require('../config');
 
+// Prefer PS 7 (pwsh) for faster startup; fall back to Windows PS 5.x (powershell).
+const PS_EXECUTABLE = (() => {
+  const candidates = [
+    'C:\\Program Files\\PowerShell\\7\\pwsh.exe',
+    'C:\\Program Files\\PowerShell\\6\\pwsh.exe',
+  ];
+  return candidates.some((p) => { try { return fs.existsSync(p); } catch { return false; } }) ? 'pwsh' : 'powershell';
+})();
+
 /**
  * Execute a PowerShell script from a temp file
  * More reliable than inline commands for complex scripts
@@ -28,7 +37,7 @@ async function executePowerShellScript(script, timeout = CONFIG.DEFAULT_TIMEOUT)
     fs.writeFileSync(scriptPath, script, 'utf8');
 
     return new Promise((resolve) => {
-      const child = spawn('powershell', [
+      const child = spawn(PS_EXECUTABLE, [
         '-NoProfile',
         '-ExecutionPolicy',
         'Bypass',

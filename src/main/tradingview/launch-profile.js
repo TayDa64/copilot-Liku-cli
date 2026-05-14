@@ -1,4 +1,5 @@
 const fs = require('fs');
+const net = require('net');
 const path = require('path');
 
 const { executePowerShellScript } = require('../ui-automation/core/powershell');
@@ -88,6 +89,28 @@ function summarizeListenerEntry(entry = {}) {
     port: normalizePort(entry?.port || entry?.LocalPort),
     address: String(entry?.address || entry?.LocalAddress || '').trim()
   };
+}
+
+async function probeTcpPortsReachable(ports = [], timeoutMs = 400) {
+  const reachable = [];
+  await Promise.all(
+    ports.map((port) =>
+      new Promise((resolve) => {
+        const socket = net.createConnection({ host: '127.0.0.1', port }, () => {
+          socket.destroy();
+          reachable.push(port);
+          resolve();
+        });
+        socket.setTimeout(Math.max(100, timeoutMs));
+        socket.on('error', resolve);
+        socket.on('timeout', () => {
+          socket.destroy();
+          resolve();
+        });
+      })
+    )
+  );
+  return reachable;
 }
 
 function buildDefaultDevToolsActivePortPaths() {
@@ -344,10 +367,11 @@ $result | ConvertTo-Json -Compress -Depth 5
     ));
 
     let listeners = [];
+    const devToolsActivePort = readTradingViewDevToolsActivePort(options?.devToolsActivePortPaths || buildDefaultDevToolsActivePortPaths());
     if (processIds.length > 0 || configuredPorts.length > 0 || expectedCdpPort > 0) {
       const processIdLiteral = processIds.join(', ');
       const candidatePorts = Array.from(new Set(
-        [expectedCdpPort, ...configuredPorts]
+        [expectedCdpPort, ...configuredPorts, normalizePort(devToolsActivePort?.port)]
           .map((value) => normalizePort(value))
           .filter((value) => value > 0)
       ));
@@ -384,19 +408,31 @@ foreach ($connection in @($rawConnections | Group-Object OwningProcess, LocalPor
 
 $output | ConvertTo-Json -Compress -Depth 4
 `;
+      let psListenerFailed = false;
       const listenerPayload = await runPowerShellJson(listenerScript, timeoutMs, {
         executePowerShellScript: options.executePowerShellScript
-      }).catch(() => null);
+      }).catch(() => { psListenerFailed = true; return null; });
       listeners = Array.isArray(listenerPayload)
         ? listenerPayload
         : (listenerPayload ? [listenerPayload] : []);
+
+      // If the PS listener scan failed (e.g. timed out on Windows PS 5.x), fall back to a
+      // direct TCP probe. If the port accepts a connection it is listening; we record
+      // pid=0 because the PID is unknown from the probe alone. Do NOT probe when PS
+      // returned an empty result cleanly — that means no listener was found.
+      if (psListenerFailed && listeners.length === 0 && candidatePorts.length > 0) {
+        const reachable = await probeTcpPortsReachable(candidatePorts, Math.min(600, timeoutMs));
+        if (reachable.length > 0) {
+          listeners = reachable.map((port) => ({ pid: 0, port, address: '127.0.0.1' }));
+        }
+      }
     }
 
     return classifyTradingViewLaunchProfile({
       expectedCdpPort,
       processes,
       listeners,
-      devToolsActivePort: readTradingViewDevToolsActivePort(options?.devToolsActivePortPaths || buildDefaultDevToolsActivePortPaths())
+      devToolsActivePort
     });
   } catch (error) {
     return {
