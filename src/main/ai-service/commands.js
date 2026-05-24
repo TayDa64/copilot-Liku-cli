@@ -1,3 +1,5 @@
+const { createGitHubSlashCommandHandler } = require('../github/slash-command-handler');
+
 function createCommandHandler(dependencies) {
   const {
     aiProviders,
@@ -25,8 +27,20 @@ function createCommandHandler(dependencies) {
     setSessionCopilotModel,
     setProvider,
     slashCommandHelpers,
-    startCopilotOAuth
+    startCopilotOAuth,
+    githubSlashCommandHandler,
   } = dependencies;
+
+  const sharedGitHubSlashCommands = githubSlashCommandHandler || createGitHubSlashCommandHandler({
+    aiService: {
+      getStatus,
+      loadCopilotTokenIfNeeded,
+    },
+    env: process.env,
+    getCwd: () => process.cwd(),
+    parseLongOptions: slashCommandHelpers?.parseLongOptions,
+    tokenize: slashCommandHelpers?.tokenize,
+  });
 
   function getDisplayModels() {
     if (typeof getCopilotModels === 'function') {
@@ -123,6 +137,10 @@ function createCommandHandler(dependencies) {
   function handleCommand(command) {
     const parts = slashCommandHelpers.tokenize(String(command || '').trim());
     const cmd = (parts[0] || '').toLowerCase();
+
+    if (cmd === '/github') {
+      return sharedGitHubSlashCommands.executeSlashCommand(command);
+    }
 
     switch (cmd) {
       case '/provider':
@@ -307,6 +325,7 @@ function createCommandHandler(dependencies) {
 /provider [name] - Get/set AI provider (copilot, openai, anthropic, ollama)
 /setkey <provider> <key> - Set API key
 /status - Show authentication status
+/github ... - Read-only GitHub inspection via shared typed adapters
 /state [clear] - Show or clear session intent constraints
 /clear - Clear conversation history
 /vision [on|off] - Manage visual context

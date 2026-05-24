@@ -26,6 +26,48 @@ function tokenize(input) {
   return out;
 }
 
+function parseLongOptions(parts = []) {
+  const positionals = [];
+  const options = {};
+
+  for (let index = 0; index < parts.length; index += 1) {
+    const token = String(parts[index] || '').trim();
+    if (!token) {
+      continue;
+    }
+
+    if (token === '--') {
+      positionals.push(...parts.slice(index + 1).map((entry) => String(entry || '').trim()).filter(Boolean));
+      break;
+    }
+
+    if (!token.startsWith('--')) {
+      positionals.push(token);
+      continue;
+    }
+
+    let key = token.slice(2);
+    let value = true;
+    const equalsIndex = key.indexOf('=');
+    if (equalsIndex !== -1) {
+      value = key.slice(equalsIndex + 1);
+      key = key.slice(0, equalsIndex);
+    } else if (index + 1 < parts.length && !String(parts[index + 1] || '').trim().startsWith('--')) {
+      value = parts[index + 1];
+      index += 1;
+    }
+
+    if (key) {
+      options[key] = value;
+    }
+  }
+
+  return {
+    positionals,
+    options,
+  };
+}
+
 function createSlashCommandHelpers(dependencies) {
   const { modelRegistry } = dependencies;
 
@@ -50,11 +92,13 @@ function createSlashCommandHelpers(dependencies) {
 
   return {
     normalizeModelKey,
+    parseLongOptions,
     tokenize
   };
 }
 
 module.exports = {
   createSlashCommandHelpers,
+  parseLongOptions,
   tokenize
 };

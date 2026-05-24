@@ -20,43 +20,18 @@
  */
 
 const path = require('path');
-const fs = require('fs');
-const { validateProjectIdentity } = require('../shared/project-identity');
 
 // Resolve paths relative to CLI location
 const CLI_DIR = __dirname;
 const PROJECT_ROOT = path.resolve(CLI_DIR, '../..');
-const COMMANDS_DIR = path.join(CLI_DIR, 'commands');
 
 // Import output utilities
 const { log, success, error, warn, info, dim, highlight } = require('./util/output');
+const { COMMANDS } = require('./command-registry');
+const { buildCommandRequest, executeCommandRequest } = require('./command-seam');
 
 // Package info
 const pkg = require(path.join(PROJECT_ROOT, 'package.json'));
-
-// Command registry
-const COMMANDS = {
-  start: { desc: 'Start the Electron agent with overlay', file: 'start' },
-  doctor: { desc: 'Diagnostics: version, environment, active window', file: 'doctor' },
-  chat: { desc: 'Interactive AI chat in the terminal', file: 'chat' },
-  click: { desc: 'Click element by text or coordinates', file: 'click', args: '<text|x,y>' },
-  find: { desc: 'Find UI elements matching criteria', file: 'find', args: '<text>' },
-  type: { desc: 'Type text at current cursor position', file: 'type', args: '<text>' },
-  keys: { desc: 'Send keyboard shortcut', file: 'keys', args: '<combo>' },
-  screenshot: { desc: 'Capture screenshot', file: 'screenshot', args: '[path]' },
-  'verify-hash': { desc: 'Poll until screenshot hash changes', file: 'verify-hash' },
-  'verify-stable': { desc: 'Wait until visual output is stable', file: 'verify-stable' },
-  window: { desc: 'Focus or list windows', file: 'window', args: '[title]' },
-  mouse: { desc: 'Move mouse to coordinates', file: 'mouse', args: '<x> <y>' },
-  drag: { desc: 'Drag from one point to another', file: 'drag', args: '<x1> <y1> <x2> <y2>' },
-  scroll: { desc: 'Scroll up or down', file: 'scroll', args: '<up|down> [amount]' },
-  wait: { desc: 'Wait for element to appear', file: 'wait', args: '<text> [timeout]' },
-  repl: { desc: 'Interactive automation shell', file: 'repl' },
-  memory: { desc: 'Manage agent memory notes', file: 'memory', args: '[list|show|search|stats]' },
-  skills: { desc: 'Manage the skill library', file: 'skills', args: '[list|search|show]' },
-  tools: { desc: 'Manage dynamic tool registry', file: 'tools', args: '[list|show|approve|revoke]' },
-  analytics: { desc: 'View telemetry analytics', file: 'analytics', args: '[--days N] [--raw]' },
-};
 
 /**
  * Show help message
@@ -127,9 +102,48 @@ ${highlight('EXAMPLES:')}
   ${dim('# Interactive mode')}
   liku repl
 
+  ${dim('# Inspect read-only GitHub auth state')}
+  liku github auth status
+
+  ${dim('# Inspect the current repo via local identity + GitHub metadata')}
+  liku github repo inspect --json
+
+  ${dim('# List issues for the current or a specified GitHub repo')}
+  liku github issues list --state all --limit 10
+
+  ${dim('# Inspect one GitHub issue')}
+  liku github issues inspect 321
+
+  ${dim('# List pull requests')}
+  liku github pr list --state all --limit 10
+
+  ${dim('# Inspect one pull request')}
+  liku github pr inspect 7
+
+  ${dim('# Summarize the changed files in one pull request')}
+  liku github pr diff 7 --limit 30
+
+  ${dim('# List workflow runs')}
+  liku github workflow runs --workflow ci.yml --limit 5
+
+  ${dim('# Inspect one workflow run')}
+  liku github workflow inspect 9001
+
+  ${dim('# List releases')}
+  liku github releases list --limit 5
+
+  ${dim('# Inspect one release')}
+  liku github releases inspect latest
+
 ${highlight('ENVIRONMENT:')}
   LIKU_DEBUG=1     Enable debug output
   LIKU_JSON=1      Default to JSON output
+  LIKU_DISABLE_RUNTIME_TRACE=1  Disable CLI/runtime trace logging
+  LIKU_ENABLE_GITHUB=1          Opt in to future GitHub command surfaces
+  LIKU_ENABLE_AGENTS=0|1        Override seam-level agent feature availability
+  LIKU_ENABLE_DYNAMIC_TOOLS=0|1 Override seam-level dynamic tool availability
+  LIKU_APPROVAL_MODE=prompt|auto|never  Set the default approval preference
+  LIKU_DRY_RUN_DEFAULT=1        Mark seam requests as dry-run preferred by default
 
 ${dim('Documentation: https://github.com/TayDa64/copilot-Liku-cli')}
 `);
@@ -201,69 +215,71 @@ function parseArgs(argv) {
 }
 
 /**
- * Load and execute a command module
+ * Render a normalized execution failure
  */
-async function executeCommand(name, cmdArgs, flags, options) {
-  const cmdInfo = COMMANDS[name];
-  if (!cmdInfo) {
-    error(`Unknown command: ${name}`);
+function renderExecutionFailure(execution, flags, commandName) {
+  if (!execution || execution.ok !== false) {
+    return;
+  }
+
+  if (execution.error?.code === 'UNKNOWN_COMMAND') {
+    error(`Unknown command: ${commandName}`);
     console.log(`\nRun ${highlight('liku --help')} for available commands.`);
-    process.exit(1);
+    return;
   }
 
-  const cmdPath = path.join(COMMANDS_DIR, `${cmdInfo.file}.js`);
-  
-  if (!fs.existsSync(cmdPath)) {
-    error(`Command module not found: ${cmdPath}`);
-    process.exit(1);
-  }
-
-  if (options.project || options.repo) {
-    const validation = validateProjectIdentity({
-      cwd: process.cwd(),
-      expectedProjectRoot: options.project,
-      expectedRepo: options.repo
-    });
-    if (!validation.ok) {
-      const payload = {
-        success: false,
-        error: 'PROJECT_GUARD_MISMATCH',
-        expected: validation.expected,
-        detected: validation.detected,
-        details: validation.errors
-      };
-      if (flags.json) {
+  if (execution.error?.code === 'PROJECT_GUARD_MISMATCH') {
+    const payload = execution.error.payload || {
+      success: false,
+      error: 'PROJECT_GUARD_MISMATCH',
+      expected: {},
+      detected: {},
+      details: [],
+    };
+    if (flags.json) {
         console.log(JSON.stringify(payload, null, 2));
-      } else {
-        error('Project guard mismatch');
-        validation.errors.forEach((entry) => console.log(`- ${entry}`));
-        console.log(`Detected root: ${validation.detected.projectRoot}`);
-        console.log(`Detected repo: ${validation.detected.repoName}`);
-      }
-      process.exit(1);
+    } else {
+      error('Project guard mismatch');
+      (payload.details || []).forEach((entry) => console.log(`- ${entry}`));
+      console.log(`Detected root: ${payload.detected?.projectRoot}`);
+      console.log(`Detected repo: ${payload.detected?.repoName}`);
     }
+    return;
   }
 
-  try {
-    const command = require(cmdPath);
-    const result = await command.run(cmdArgs, { ...flags, ...options });
-    
-    // Output result
-    if (flags.json && result !== undefined) {
-      console.log(JSON.stringify(result, null, 2));
-    }
-    
-    // Exit with appropriate code
-    if (result && result.success === false) {
-      process.exit(1);
-    }
-  } catch (err) {
-    if (flags.debug) {
-      console.error(err);
-    } else {
-      error(err.message);
-    }
-    process.exit(1);
+  if (flags.debug && execution.cause) {
+    console.error(execution.cause);
+    return;
+  }
+
+  error(execution.error?.message || 'Command execution failed');
+}
+
+/**
+ * Execute a top-level CLI command through the typed command seam
+ */
+async function dispatchCommand(name, cmdArgs, flags, options) {
+  const request = buildCommandRequest({
+    command: name,
+    args: cmdArgs,
+    flags,
+    options,
+    cwd: process.cwd(),
+    env: process.env,
+  });
+
+  const execution = await executeCommandRequest(request);
+  if (!execution.ok) {
+    renderExecutionFailure(execution, flags, name);
+    process.exit(execution.exitCode || 1);
+  }
+
+  if (flags.json && execution.result !== undefined) {
+    console.log(JSON.stringify(execution.result, null, 2));
+  }
+
+  if (execution.success === false) {
+    process.exit(execution.exitCode || 1);
   }
 }
 
@@ -293,11 +309,21 @@ async function main() {
   const cmd = command || 'start';
 
   // Execute the command
-  await executeCommand(cmd, args, flags, options);
+  await dispatchCommand(cmd, args, flags, options);
 }
 
-// Run
-main().catch(err => {
-  error(err.message);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch(err => {
+    error(err.message);
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  dispatchCommand,
+  main,
+  parseArgs,
+  renderExecutionFailure,
+  showHelp,
+  showVersion,
+};

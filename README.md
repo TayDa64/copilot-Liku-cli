@@ -27,6 +27,7 @@ See also:
 - [QUICKSTART.md](QUICKSTART.md)
 - [INSTALLATION.md](INSTALLATION.md)
 - [docs/AGENT_ORCHESTRATION.md](docs/AGENT_ORCHESTRATION.md)
+- [docs/VSCODE_SLASH_COMMAND_IMPLEMENTATION.md](docs/VSCODE_SLASH_COMMAND_IMPLEMENTATION.md)
 
 ---
 
@@ -146,10 +147,37 @@ Useful invocation options:
 
 - `liku chat --model <copilotModelKey>`
 - `liku chat --execute prompt|true|false`
+- `liku chat --project <dir> --repo <name>` for explicit project-identity guarding
+
+Read-only GitHub Phase 2 entrypoints:
+
+- `liku github auth status`
+- `liku github repo inspect`
+- `liku github issues list`
+- `liku github issues inspect <number>`
+- `liku github pr list`
+- `liku github pr inspect <number>`
+- `liku github pr diff <number>`
+- `liku github workflow runs`
+- `liku github workflow inspect <run-id>`
+- `liku github releases list`
+- `liku github releases inspect <latest|tag|id>`
+- `liku github auth status --json --probe false`
+- `liku github repo inspect --json --api false`
+- `liku github issues list --state all --limit 20`
+- `liku github issues inspect 321 --slug owner/repo`
+- `liku github pr list --state all --limit 20`
+- `liku github pr inspect 123 --slug owner/repo`
+- `liku github pr diff 123 --limit 50`
+- `liku github workflow runs --workflow ci.yml --limit 10`
+- `liku github workflow inspect 9001 --slug owner/repo`
+- `liku github releases list --limit 5 --slug owner/repo`
+- `liku github releases inspect latest --slug owner/repo`
 
 Useful chat commands:
 
 - `/help`
+- `/github help`
 - `/login`
 - `/model`
 - `/provider`
@@ -168,6 +196,30 @@ Terminal-chat-specific controls:
 - `/sequence on|off`
 - `/recipes on|off`
 - `(plan) ...` for plan-only orchestration routing
+
+### CLI env defaults and Phase 0/1 seam flags
+
+Current top-level CLI defaults and seam controls:
+
+- `LIKU_DEBUG=1` enables CLI debug output by default
+- `LIKU_JSON=1` enables JSON output by default where commands support it
+- `LIKU_DISABLE_RUNTIME_TRACE=1` disables CLI/runtime trace logging
+
+Phase 0/1 introduces additive seam-level feature flags for future gated capabilities:
+
+- `LIKU_ENABLE_GITHUB=1` opt-in marker for future GitHub command surfaces
+- `LIKU_ENABLE_AGENTS=0|1` override seam-level agent availability metadata
+- `LIKU_ENABLE_DYNAMIC_TOOLS=0|1` override seam-level dynamic-tool availability metadata
+- `LIKU_APPROVAL_MODE=prompt|auto|never` set the default approval preference recorded by the command seam
+- `LIKU_DRY_RUN_DEFAULT=1` mark command-seam requests as dry-run preferred by default
+
+These Phase 0/1 flags are intentionally non-breaking scaffolding: they are available to the command seam and trace metadata now. The explicit read-only `liku github ...` commands added in Phase 2 are allowed directly, while `LIKU_ENABLE_GITHUB` remains useful metadata for broader future GitHub-assisted routing.
+
+Config precedence for the current CLI surface:
+
+1. explicit command-line flags/options
+2. supported environment defaults (`LIKU_DEBUG`, `LIKU_JSON`, and the seam flags above)
+3. command/module-local defaults
 
 ### Visual Electron mode
 
@@ -198,6 +250,18 @@ If you want the most relevant current regression bundle for AI/service behavior:
 npm run test:ai-focused
 ```
 
+For the Phase 0/1 CLI seam milestone specifically, run:
+
+```bash
+npm run test:cli-phase01
+```
+
+For the Phase 2 read-only GitHub milestone, run:
+
+```bash
+npm run test:github-phase2
+```
+
 ---
 
 ## CLI commands
@@ -225,12 +289,24 @@ The top-level CLI currently exposes these commands through `src/cli/liku.js`.
 | `memory` | Inspect/manage memory notes |
 | `skills` | Inspect/manage skill library |
 | `tools` | Inspect/manage dynamic tool registry |
+| `github` | Read-only GitHub auth, repo, issue, PR, workflow, and release inspection |
 | `analytics` | View telemetry analytics |
 
 Examples:
 
 ```bash
 liku doctor --json
+liku github auth status
+liku github repo inspect --json
+liku github issues list --state all --limit 10
+liku github issues inspect 321
+liku github pr list --state all --limit 10
+liku github pr inspect 7
+liku github pr diff 7 --limit 30
+liku github workflow runs --workflow ci.yml --limit 5
+liku github workflow inspect 9001
+liku github releases list --limit 5
+liku github releases inspect latest
 liku chat --model gpt-4.1
 liku click "Submit"
 liku find "Save" --type Button
@@ -321,6 +397,7 @@ When a TradingView chart has established focus, `Ctrl+E` is treated as the groun
 Handled through `ai-service.handleCommand()`:
 
 - `/help`
+- `/github ...` read-only GitHub inspection via shared typed adapters
 - `/login` / `/logout`
 - `/model [key]`
 - `/provider [name]`
@@ -334,6 +411,8 @@ Handled through `ai-service.handleCommand()`:
 - `/skills`
 - `/tools [approve|revoke <name>]`
 - `/rmodel [model|off]`
+
+GitHub read-only operations now ship both as top-level `liku github ...` commands and as shared `/github ...` slash commands routed through `ai-service.handleCommand()`. For the source-grounded VS Code / Codespaces implementation note, see [docs/VSCODE_SLASH_COMMAND_IMPLEMENTATION.md](docs/VSCODE_SLASH_COMMAND_IMPLEMENTATION.md).
 
 ### Electron-only orchestration commands
 
