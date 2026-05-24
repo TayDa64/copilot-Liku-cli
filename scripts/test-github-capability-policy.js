@@ -4,6 +4,10 @@ const assert = require('assert');
 const path = require('path');
 
 const {
+  inspectGitHubCapabilityCatalogEntry,
+  listGitHubCapabilityCatalog,
+} = require(path.join(__dirname, '..', 'src', 'main', 'github', 'capability-inspect.js'));
+const {
   findGitHubCapability,
   listGitHubCapabilities,
 } = require(path.join(__dirname, '..', 'src', 'main', 'github', 'capability-registry.js'));
@@ -29,6 +33,10 @@ async function test(name, fn) {
 
     const keys = capabilities.map((entry) => entry.key);
     assert.ok(keys.includes('auth.status'));
+    assert.ok(keys.includes('capabilities.list'));
+    assert.ok(keys.includes('capabilities.inspect'));
+    assert.ok(keys.includes('plan.build'));
+    assert.ok(keys.includes('plan.execute'));
     assert.ok(keys.includes('issues.list'));
     assert.ok(keys.includes('pr.diff'));
     assert.ok(keys.includes('workflow.inspect'));
@@ -41,6 +49,23 @@ async function test(name, fn) {
     assert.strictEqual(issueList.approvalRequirement, 'none');
     assert.strictEqual(issueList.riskLevel, 'low');
     assert.deepStrictEqual(issueList.allowedSources.slice().sort(), ['cli', 'slash']);
+  });
+
+  await test('capability catalog helpers summarize registered GitHub capabilities with policy previews', async () => {
+    const listReport = listGitHubCapabilityCatalog();
+    assert.strictEqual(listReport.success, true);
+    assert.strictEqual(listReport.schemaVersion, 'github.capabilities-list.v1');
+    assert.ok(Array.isArray(listReport.capabilities));
+    assert.ok(listReport.capabilities.some((entry) => entry.key === 'capabilities.list'));
+    assert.ok(listReport.capabilities.some((entry) => entry.key === 'plan.build'));
+    assert.ok(listReport.capabilities.some((entry) => entry.key === 'plan.execute'));
+
+    const inspectReport = inspectGitHubCapabilityCatalogEntry({ key: 'pr.diff' });
+    assert.strictEqual(inspectReport.success, true);
+    assert.strictEqual(inspectReport.schemaVersion, 'github.capability-inspect.v1');
+    assert.strictEqual(inspectReport.entry.key, 'pr.diff');
+    assert.strictEqual(inspectReport.entry.policyBySource.cli.allowed, true);
+    assert.strictEqual(inspectReport.entry.policyBySource.slash.allowed, true);
   });
 
   await test('policy allows registered read-only GitHub capabilities from supported sources', async () => {

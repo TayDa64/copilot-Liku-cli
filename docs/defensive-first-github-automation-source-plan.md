@@ -313,6 +313,7 @@ Current incremental implementation target for this repo slice:
 - route both `liku github ...` and shared `/github ...` execution through a common registry-aware executor
 - apply a read-only capability policy gate before adapter execution
 - emit structured telemetry records for each registered GitHub capability run
+- expose read-only capability catalog commands so humans and future bounded agents can inspect the approved GitHub surface directly
 
 Tasks:
 
@@ -338,6 +339,13 @@ npm run test:github-phase3
 
 Objective: let Copilot-Liku plan and execute GitHub work safely.
 
+Current incremental implementation target for this repo slice:
+
+- add a deterministic `github plan build ...` bridge that emits a typed one-step execution plan from the registered GitHub capability catalog
+- keep the planning artifact read-only and registry-backed instead of allowing free-form shell execution
+- reuse the same registry + policy metadata that the CLI and shared `/github ...` executor already enforce
+- add a bounded `github plan execute ...` path that enforces explicit step/time budgets and writes replayable plan/result artifacts while remaining limited to registered read-only capabilities
+
 Recommended initial roles:
 
 - planner — converts user goal into typed steps
@@ -356,6 +364,18 @@ Exit criteria:
 
 - agent flow produces auditable plans and tool traces
 - bounded execution is enforced technically, not just by prompt text
+
+Phase 4 bridge verification command for this repo slice:
+
+```bash
+npm run test:github-phase4-bridge
+```
+
+Phase 4 bounded executor verification command for this repo slice:
+
+```bash
+npm run test:github-phase4-executor
+```
 
 ### Phase 5 — Memory, context, and audit controls
 

@@ -41,6 +41,10 @@ async function main() {
 
     const githubHelp = await runNode(['src/cli/liku.js', 'github', 'help'], repoRoot, sharedEnv);
     assert.strictEqual(githubHelp.code, 0, 'github help exits 0');
+    assert(githubHelp.stdout.includes('liku github capabilities list'), 'github help lists capability listing');
+    assert(githubHelp.stdout.includes('liku github capabilities inspect pr.diff'), 'github help lists capability inspect');
+    assert(githubHelp.stdout.includes('liku github plan build pr diff 123 --limit 50'), 'github help lists plan build');
+    assert(githubHelp.stdout.includes('liku github plan execute pr diff 123 --limit 50'), 'github help lists plan execute');
     assert(githubHelp.stdout.includes('liku github issues inspect <number>'), 'github help lists issue inspect');
     assert(githubHelp.stdout.includes('liku github pr list'), 'github help lists pr list');
     assert(githubHelp.stdout.includes('liku github pr diff <number>'), 'github help lists pr diff');
@@ -64,6 +68,106 @@ async function main() {
     assert.strictEqual(authPayload.githubApi.probeAttempted, false);
     assert.strictEqual(authPayload.capability.key, 'auth.status');
     assert.strictEqual(authPayload.policy.allowed, true);
+
+    const capabilitiesList = await runNode([
+      'src/cli/liku.js',
+      'github',
+      'capabilities',
+      'list',
+      '--json',
+    ], repoRoot, sharedEnv);
+    assert.strictEqual(capabilitiesList.code, 0, 'github capabilities list exits 0');
+    const capabilitiesListPayload = JSON.parse(capabilitiesList.stdout);
+    assert.strictEqual(capabilitiesListPayload.schemaVersion, 'github.capabilities-list.v1');
+    assert.strictEqual(capabilitiesListPayload.capability.key, 'capabilities.list');
+    assert.strictEqual(capabilitiesListPayload.policy.allowed, true);
+    assert.ok(Array.isArray(capabilitiesListPayload.capabilities));
+    assert.ok(capabilitiesListPayload.capabilities.some((entry) => entry.key === 'pr.diff'));
+
+    const capabilityInspect = await runNode([
+      'src/cli/liku.js',
+      'github',
+      'capabilities',
+      'inspect',
+      'pr.diff',
+      '--json',
+    ], repoRoot, sharedEnv);
+    assert.strictEqual(capabilityInspect.code, 0, 'github capabilities inspect exits 0');
+    const capabilityInspectPayload = JSON.parse(capabilityInspect.stdout);
+    assert.strictEqual(capabilityInspectPayload.schemaVersion, 'github.capability-inspect.v1');
+    assert.strictEqual(capabilityInspectPayload.capability.key, 'capabilities.inspect');
+    assert.strictEqual(capabilityInspectPayload.policy.allowed, true);
+    assert.strictEqual(capabilityInspectPayload.entry.key, 'pr.diff');
+    assert.strictEqual(capabilityInspectPayload.entry.policyBySource.cli.allowed, true);
+
+    const planBuild = await runNode([
+      'src/cli/liku.js',
+      'github',
+      'plan',
+      'build',
+      'pr',
+      'diff',
+      '7',
+      '--json',
+      '--limit',
+      '30',
+      '--api',
+      'false',
+    ], repoRoot, sharedEnv);
+    assert.strictEqual(planBuild.code, 0, 'github plan build exits 0');
+    const planBuildPayload = JSON.parse(planBuild.stdout);
+    assert.strictEqual(planBuildPayload.schemaVersion, 'github.plan-build.v1');
+    assert.strictEqual(planBuildPayload.capability.key, 'plan.build');
+    assert.strictEqual(planBuildPayload.policy.allowed, true);
+    assert.strictEqual(planBuildPayload.targetCapability.key, 'pr.diff');
+    assert.strictEqual(planBuildPayload.plan.schemaVersion, 'github.execution-plan.v1');
+    assert.strictEqual(planBuildPayload.plan.steps[0].capabilityKey, 'pr.diff');
+    assert.strictEqual(planBuildPayload.plan.steps[0].runtimeInput.number, '7');
+    assert.strictEqual(planBuildPayload.plan.steps[0].runtimeInput.api, false);
+
+    const planExecute = await runNode([
+      'src/cli/liku.js',
+      'github',
+      'plan',
+      'execute',
+      'pr',
+      'diff',
+      '7',
+      '--json',
+      '--limit',
+      '30',
+      '--api',
+      'false',
+    ], repoRoot, sharedEnv);
+    assert.strictEqual(planExecute.code, 0, 'github plan execute exits 0');
+    const planExecutePayload = JSON.parse(planExecute.stdout);
+    assert.strictEqual(planExecutePayload.schemaVersion, 'github.plan-execute.v1');
+    assert.strictEqual(planExecutePayload.capability.key, 'plan.execute');
+    assert.strictEqual(planExecutePayload.policy.allowed, true);
+    assert.strictEqual(planExecutePayload.success, true);
+    assert.strictEqual(planExecutePayload.targetCapability.key, 'pr.diff');
+    assert.strictEqual(planExecutePayload.execution.stepsExecuted, 1);
+    assert.strictEqual(planExecutePayload.execution.timedOut, false);
+    assert.ok(planExecutePayload.planArtifact.filePath);
+    assert.ok(planExecutePayload.resultArtifact.filePath);
+    assert.ok(fs.existsSync(planExecutePayload.planArtifact.filePath));
+    assert.ok(fs.existsSync(planExecutePayload.resultArtifact.filePath));
+
+    const planReplay = await runNode([
+      'src/cli/liku.js',
+      'github',
+      'plan',
+      'execute',
+      '--json',
+      '--plan-file',
+      planExecutePayload.planArtifact.filePath,
+    ], repoRoot, sharedEnv);
+    assert.strictEqual(planReplay.code, 0, 'github plan execute replay exits 0');
+    const planReplayPayload = JSON.parse(planReplay.stdout);
+    assert.strictEqual(planReplayPayload.schemaVersion, 'github.plan-execute.v1');
+    assert.strictEqual(planReplayPayload.success, true);
+    assert.strictEqual(planReplayPayload.execution.planSource, 'artifact-replay');
+    assert.strictEqual(planReplayPayload.capability.key, 'plan.execute');
 
     const repoInspect = await runNode([
       'src/cli/liku.js',

@@ -149,9 +149,14 @@ Useful invocation options:
 - `liku chat --execute prompt|true|false`
 - `liku chat --project <dir> --repo <name>` for explicit project-identity guarding
 
-Read-only GitHub Phase 2 entrypoints:
+Read-only GitHub entrypoints:
 
 - `liku github auth status`
+- `liku github capabilities list`
+- `liku github capabilities inspect <capability-key>`
+- `liku github plan build <area> <action> [args...]`
+- `liku github plan execute <area> <action> [args...]`
+- `liku github plan execute --plan-file <path>`
 - `liku github repo inspect`
 - `liku github issues list`
 - `liku github issues inspect <number>`
@@ -178,6 +183,11 @@ Useful chat commands:
 
 - `/help`
 - `/github help`
+- `/github capabilities list`
+- `/github capabilities inspect pr.diff`
+- `/github plan build pr diff 7 --limit 30 --api false`
+- `/github plan execute pr diff 7 --limit 30 --api false`
+- `/github plan execute --plan-file <path>`
 - `/login`
 - `/model`
 - `/provider`

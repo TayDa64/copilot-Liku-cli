@@ -1,6 +1,10 @@
 const { writeTelemetry } = require('../telemetry/telemetry-writer');
 const { findGitHubCapability } = require('./capability-registry');
 const { evaluateGitHubCapabilityPolicy } = require('./capability-policy');
+const { inspectGitHubCapabilityCatalogEntry, listGitHubCapabilityCatalog } = require('./capability-inspect');
+const { buildGitHubExecutionPlan } = require('./plan-builder');
+const { executeGitHubExecutionPlan } = require('./plan-executor');
+const { readGitHubPlanArtifact, writeGitHubPlanArtifact, writeGitHubPlanResultArtifact } = require('./plan-artifacts');
 const { resolveGitHubAuthStatus } = require('./auth-status');
 const { inspectGitHubRepository } = require('./repo-inspect');
 const { inspectGitHubIssue } = require('./issue-inspect');
@@ -196,9 +200,46 @@ function buildTelemetryPayload({
 }
 
 function buildAdapterCall(capability, context, adapters) {
-  const { aiService, cwd, env, featureFlagEnabled, positionals, runtimeOptions } = context;
+  const { aiService, cwd, env, featureFlagEnabled, positionals, runtimeOptions, source, executionPreferences } = context;
 
   switch (capability.key) {
+    case 'capabilities.list':
+      return {
+        fn: adapters.listGitHubCapabilityCatalog,
+        input: {},
+      };
+    case 'capabilities.inspect':
+      return {
+        fn: adapters.inspectGitHubCapabilityCatalogEntry,
+        input: {
+          key: positionals[2],
+        },
+      };
+    case 'plan.build':
+      return {
+        fn: adapters.buildGitHubExecutionPlan,
+        input: {
+          source,
+          positionals,
+          runtimeOptions,
+          executionPreferences,
+          featureFlagEnabled,
+        },
+      };
+    case 'plan.execute':
+      return {
+        fn: adapters.executeGitHubExecutionPlan,
+        input: {
+          source,
+          positionals,
+          runtimeOptions,
+          executionPreferences,
+          featureFlagEnabled,
+          cwd,
+          env,
+          aiService,
+        },
+      };
     case 'auth.status':
       return {
         fn: adapters.resolveGitHubAuthStatus,
@@ -345,9 +386,13 @@ function buildAdapterCall(capability, context, adapters) {
 
 function createGitHubCommandExecutor(dependencies = {}) {
   const adapters = {
+    buildGitHubExecutionPlan: dependencies.buildGitHubExecutionPlan || buildGitHubExecutionPlan,
+    executeGitHubExecutionPlan: dependencies.executeGitHubExecutionPlan || executeGitHubExecutionPlan,
     inspectGitHubIssue: dependencies.inspectGitHubIssue || inspectGitHubIssue,
     inspectGitHubPullRequest: dependencies.inspectGitHubPullRequest || inspectGitHubPullRequest,
     inspectGitHubPullRequestDiff: dependencies.inspectGitHubPullRequestDiff || inspectGitHubPullRequestDiff,
+    inspectGitHubCapabilityCatalogEntry: dependencies.inspectGitHubCapabilityCatalogEntry || inspectGitHubCapabilityCatalogEntry,
+    listGitHubCapabilityCatalog: dependencies.listGitHubCapabilityCatalog || listGitHubCapabilityCatalog,
     inspectGitHubRelease: dependencies.inspectGitHubRelease || inspectGitHubRelease,
     inspectGitHubRepository: dependencies.inspectGitHubRepository || inspectGitHubRepository,
     inspectGitHubWorkflowRun: dependencies.inspectGitHubWorkflowRun || inspectGitHubWorkflowRun,
@@ -355,7 +400,10 @@ function createGitHubCommandExecutor(dependencies = {}) {
     listGitHubPullRequests: dependencies.listGitHubPullRequests || listGitHubPullRequests,
     listGitHubReleases: dependencies.listGitHubReleases || listGitHubReleases,
     listGitHubWorkflowRuns: dependencies.listGitHubWorkflowRuns || listGitHubWorkflowRuns,
+    readGitHubPlanArtifact: dependencies.readGitHubPlanArtifact || readGitHubPlanArtifact,
     resolveGitHubAuthStatus: dependencies.resolveGitHubAuthStatus || resolveGitHubAuthStatus,
+    writeGitHubPlanArtifact: dependencies.writeGitHubPlanArtifact || writeGitHubPlanArtifact,
+    writeGitHubPlanResultArtifact: dependencies.writeGitHubPlanResultArtifact || writeGitHubPlanResultArtifact,
   };
 
   const findCapability = typeof dependencies.findGitHubCapability === 'function'
@@ -420,6 +468,8 @@ function createGitHubCommandExecutor(dependencies = {}) {
       cwd,
       env,
       featureFlagEnabled,
+      source,
+      executionPreferences,
       positionals,
       runtimeOptions,
     }, adapters);
@@ -437,7 +487,26 @@ function createGitHubCommandExecutor(dependencies = {}) {
     }
 
     try {
-      const report = await adapterCall.fn(adapterCall.input);
+      const enrichedInput = capability.area === 'capabilities'
+        ? {
+            ...adapterCall.input,
+            evaluateGitHubCapabilityPolicy: evaluatePolicy,
+            executionPreferences,
+            runtimeOptions,
+          }
+        : capability.key === 'plan.execute'
+          ? {
+              ...adapterCall.input,
+              buildGitHubExecutionPlan: adapters.buildGitHubExecutionPlan,
+              evaluateGitHubCapabilityPolicy: evaluatePolicy,
+              executeGitHubCommand: execute,
+              findGitHubCapability: findCapability,
+              readGitHubPlanArtifact: adapters.readGitHubPlanArtifact,
+              writeGitHubPlanArtifact: adapters.writeGitHubPlanArtifact,
+              writeGitHubPlanResultArtifact: adapters.writeGitHubPlanResultArtifact,
+            }
+          : adapterCall.input;
+      const report = await adapterCall.fn(enrichedInput);
       const finalReport = attachCapabilityMetadata(report, capability, policy);
       try {
         writeTelemetryImpl(buildTelemetryPayload({

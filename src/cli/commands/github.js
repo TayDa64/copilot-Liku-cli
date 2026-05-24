@@ -30,6 +30,11 @@ ${bold('liku github')} — Read-only GitHub diagnostics and repository inspectio
 
 ${highlight('USAGE:')}
   liku github auth status
+  liku github capabilities list
+  liku github capabilities inspect pr.diff
+  liku github plan build pr diff 123 --limit 50
+  liku github plan execute pr diff 123 --limit 50
+  liku github plan execute --plan-file C:\\Users\\you\\.liku\\github\\plans\\github-plan-example.plan.json
   liku github repo inspect
   liku github issues list
   liku github issues inspect <number>
@@ -54,6 +59,10 @@ ${highlight('USAGE:')}
 
 ${highlight('COMMANDS:')}
   auth status    Inspect Copilot/GitHub auth state without mutating anything
+  capabilities list    List registered GitHub capabilities and policy metadata
+  capabilities inspect Inspect one registered GitHub capability by key
+  plan build     Build a deterministic one-step execution plan for a registered GitHub capability
+  plan execute   Execute a deterministic read-only GitHub plan within bounded budgets
   repo inspect   Inspect the current repository identity and GitHub metadata
   issues list    List issues for the current or specified GitHub repo
   issues inspect Inspect one issue by number
@@ -79,10 +88,12 @@ ${highlight('OPTIONS:')}
   --branch <name> Filter workflow runs to one branch
   --status <value> Filter workflow runs by status/conclusion-compatible value
   --event <name> Filter workflow runs by triggering event
+  --plan-file <path> Replay and execute a saved GitHub plan artifact instead of building a new plan
 
 ${highlight('NOTES:')}
   - These Phase 2 commands are read-only.
   - Every GitHub command is registered with capability metadata and passes a read-only policy gate before execution.
+  - The plan execute path writes replayable plan/result artifacts under the Liku home directory.
   - GH_TOKEN or GITHUB_TOKEN improves private-repo and authenticated REST inspection.
   - Existing Copilot auth state is reused when available, but GitHub REST prefers GH_TOKEN/GITHUB_TOKEN.
 `);
@@ -138,6 +149,120 @@ function printAuthStatus(report) {
   }
 
   printWarnings(report.warnings);
+}
+
+function printCapabilitiesList(report) {
+  console.log(`\n${bold('GitHub capabilities list')}\n`);
+  console.log(`${highlight('Total:')} ${report.total ?? (Array.isArray(report.capabilities) ? report.capabilities.length : 0)}`);
+
+  if (Array.isArray(report.capabilities) && report.capabilities.length > 0) {
+    table(
+      report.capabilities.map((entry) => [
+        entry.key,
+        entry.sideEffectClass || 'unknown',
+        entry.riskLevel || 'unknown',
+        entry.approvalRequirement || 'unknown',
+        Array.isArray(entry.allowedSources) ? entry.allowedSources.join(',') : '-',
+      ]),
+      ['Capability', 'Effect', 'Risk', 'Approval', 'Sources']
+    );
+    console.log(`\n${dim('Use `liku github capabilities inspect <capability-key>` for per-capability schema and policy details.')}`);
+  } else {
+    console.log(dim('No GitHub capabilities are currently registered.'));
+  }
+}
+
+function printCapabilityInspect(report) {
+  console.log(`\n${bold('GitHub capability inspect')}\n`);
+
+  if (!report.entry) {
+    warn(report.message || 'GitHub capability not found.');
+    if (Array.isArray(report.availableKeys) && report.availableKeys.length > 0) {
+      console.log(`${highlight('Available keys:')} ${report.availableKeys.join(', ')}`);
+    }
+    return;
+  }
+
+  const entry = report.entry;
+  console.log(`${highlight('Capability:')} ${entry.key}`);
+  console.log(`${highlight('Description:')} ${entry.description || dim('none provided')}`);
+  console.log(`${highlight('Schema:')} ${entry.responseSchemaVersion || dim('none')}`);
+  console.log(`${highlight('Effect/Risk/Approval:')} ${entry.sideEffectClass || 'unknown'} / ${entry.riskLevel || 'unknown'} / ${entry.approvalRequirement || 'unknown'}`);
+  console.log(`${highlight('Sources:')} ${Array.isArray(entry.allowedSources) && entry.allowedSources.length > 0 ? entry.allowedSources.join(', ') : dim('none')}`);
+  console.log(`${highlight('Positionals:')} ${Array.isArray(entry.positionalArguments) && entry.positionalArguments.length > 0 ? entry.positionalArguments.join(', ') : dim('none')}`);
+  console.log(`${highlight('Options:')} ${Array.isArray(entry.optionKeys) && entry.optionKeys.length > 0 ? entry.optionKeys.map((key) => `--${key}`).join(', ') : dim('none')}`);
+
+  const policyBySource = entry.policyBySource && typeof entry.policyBySource === 'object' ? entry.policyBySource : {};
+  const policySources = Object.keys(policyBySource);
+  if (policySources.length > 0) {
+    console.log(`\n${highlight('Policy preview:')}`);
+    policySources.forEach((source) => {
+      const policy = policyBySource[source] || {};
+      console.log(`  ${highlight(source + ':')} ${policy.allowed ? 'allowed' : 'denied'} ${dim(`(${policy.reason || 'unknown'})`)}`);
+    });
+  }
+}
+
+function printPlanBuild(report) {
+  console.log(`\n${bold('GitHub plan build')}\n`);
+
+  if (!report.plan || !Array.isArray(report.plan.steps) || report.plan.steps.length === 0) {
+    warn(report.message || 'GitHub plan was not created.');
+    if (Array.isArray(report.availableTargets) && report.availableTargets.length > 0) {
+      console.log(`${highlight('Available targets:')} ${report.availableTargets.join(', ')}`);
+    }
+    return;
+  }
+
+  console.log(`${highlight('Planner:')} ${report.planner?.mode || 'unknown'} via ${report.planner?.source || 'unknown'}`);
+  console.log(`${highlight('Target capability:')} ${report.targetCapability?.key || 'unknown'}`);
+  console.log(`${highlight('Goal:')} ${report.plan.goal || dim('none provided')}`);
+  console.log(`${highlight('Budget:')} maxSteps=${report.plan.budget?.maxSteps ?? '?'} timeoutMs=${report.plan.budget?.timeoutMs ?? '?'}`);
+
+  table(
+    report.plan.steps.map((step) => [
+      step.id || '-',
+      step.capabilityKey || '-',
+      step.policy?.allowed ? 'allowed' : 'denied',
+      step.expectedSchemaVersion || '-',
+    ]),
+    ['Step', 'Capability', 'Policy', 'Schema']
+  );
+
+  const firstStep = report.plan.steps[0];
+  if (firstStep?.runtimeInput && typeof firstStep.runtimeInput === 'object') {
+    console.log(`\n${highlight('Runtime input preview:')} ${JSON.stringify(firstStep.runtimeInput)}`);
+  }
+}
+
+function printPlanExecute(report) {
+  console.log(`\n${bold('GitHub plan execute')}\n`);
+
+  if (!report.execution || !Array.isArray(report.stepResults)) {
+    warn(report.message || 'GitHub execution plan did not run.');
+    if (report.planArtifact?.filePath) {
+      console.log(`${highlight('Plan artifact:')} ${report.planArtifact.filePath}`);
+    }
+    return;
+  }
+
+  console.log(`${highlight('Bounded executor:')} ${report.boundedExecutor?.mode || 'unknown'} via ${report.boundedExecutor?.source || 'unknown'}`);
+  console.log(`${highlight('Replay command:')} ${report.boundedExecutor?.replayCommand || dim('unavailable')}`);
+  console.log(`${highlight('Plan source:')} ${report.execution.planSource || 'unknown'}`);
+  console.log(`${highlight('Budget:')} maxSteps=${report.planSummary?.budget?.maxSteps ?? '?'} timeoutMs=${report.planSummary?.budget?.timeoutMs ?? '?'}`);
+  console.log(`${highlight('Artifacts:')} plan=${report.planArtifact?.filePath || 'n/a'} result=${report.resultArtifact?.filePath || 'n/a'}`);
+
+  table(
+    report.stepResults.map((step) => [
+      step.stepId || '-',
+      step.capabilityKey || '-',
+      step.success ? 'success' : 'failure',
+      step.schemaVersion || '-',
+    ]),
+    ['Step', 'Capability', 'Result', 'Schema']
+  );
+
+  console.log(`\n${highlight('Execution summary:')} elapsedMs=${report.execution.elapsedMs ?? '?'} stepsExecuted=${report.execution.stepsExecuted ?? '?'} timedOut=${report.execution.timedOut ? 'yes' : 'no'}`);
 }
 
 function printRepoInspect(report) {
@@ -462,6 +587,10 @@ const commandExecutor = createGitHubCommandExecutor();
 
 const printHandlers = {
   'auth.status': printAuthStatus,
+  'capabilities.list': printCapabilitiesList,
+  'capabilities.inspect': printCapabilityInspect,
+  'plan.build': printPlanBuild,
+  'plan.execute': printPlanExecute,
   'repo.inspect': printRepoInspect,
   'issues.list': printIssuesList,
   'issues.inspect': printIssueInspect,
@@ -496,7 +625,7 @@ async function run(args, options) {
     return {
       success: false,
       error: 'USAGE',
-      message: 'Usage: liku github <auth|repo|issues|pr|workflow|releases> <status|inspect|list|runs>',
+      message: 'Usage: liku github <auth|capabilities|plan|repo|issues|pr|workflow|releases> <status|inspect|list|build|execute|runs>',
     };
   }
 

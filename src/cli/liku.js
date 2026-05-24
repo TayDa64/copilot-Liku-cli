@@ -105,6 +105,21 @@ ${highlight('EXAMPLES:')}
   ${dim('# Inspect read-only GitHub auth state')}
   liku github auth status
 
+  ${dim('# List the registered GitHub capabilities and policy metadata')}
+  liku github capabilities list
+
+  ${dim('# Inspect one registered GitHub capability')}
+  liku github capabilities inspect pr.diff
+
+  ${dim('# Build a deterministic execution plan for one GitHub capability')}
+  liku github plan build pr diff 7 --limit 30 --api false
+
+  ${dim('# Execute a bounded read-only GitHub plan and persist replay artifacts')}
+  liku github plan execute pr diff 7 --limit 30 --api false
+
+  ${dim('# Replay a saved GitHub plan artifact')}
+  liku github plan execute --plan-file C:\\Users\\you\\.liku\\github\\plans\\github-plan-example.plan.json
+
   ${dim('# Inspect the current repo via local identity + GitHub metadata')}
   liku github repo inspect --json
 

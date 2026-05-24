@@ -149,6 +149,11 @@ Current adapter entrypoints:
 These adapters are exposed today through `src/cli/commands/github.js` as:
 
 - `liku github auth status`
+- `liku github capabilities list`
+- `liku github capabilities inspect <capability-key>`
+- `liku github plan build <area> <action> [args...]`
+- `liku github plan execute <area> <action> [args...]`
+- `liku github plan execute --plan-file <path>`
 - `liku github repo inspect`
 - `liku github issues list`
 - `liku github issues inspect <number>`
@@ -204,6 +209,10 @@ The slash handler now routes parsed `/github ...` input into `src/main/github/co
 - invokes the typed GitHub adapter for the capability
 - emits structured telemetry for the execution
 
+For the new planning bridge, the same executor now routes `/github plan build ...` into `src/main/github/plan-builder.js`, which emits a deterministic one-step execution plan artifact instead of performing the action immediately.
+
+For bounded execution, `/github plan execute ...` now routes into `src/main/github/plan-executor.js`, which validates the typed plan, enforces max-step and timeout budgets, limits execution to registered read-only GitHub capabilities, and writes replayable plan/result artifacts under the Liku home directory.
+
 Avoid spawning `liku github ...` as a subprocess from inside slash-command handling. That would create a second parsing/execution hop and make trace/policy alignment harder.
 
 ### Implemented formatting split: keep formatting separate from adapter output
@@ -236,6 +245,11 @@ For Codespaces / VS Code style usage, the Phase 2 read-only set should map one-t
 
 ```text
 /github auth status
+/github capabilities list
+/github capabilities inspect <capability-key>
+/github plan build <area> <action> [args...]
+/github plan execute <area> <action> [args...]
+/github plan execute --plan-file <path>
 /github repo inspect [--slug owner/repo] [--api false]
 /github issues list [--slug owner/repo] [--state open|closed|all] [--limit N] [--labels a,b]
 /github issues inspect <number> [--slug owner/repo] [--api false]
@@ -267,6 +281,11 @@ If later consumers need richer machine-readable data, an additive `data` propert
 The shared slash-command surface now maps one-to-one to the shipped read-only CLI capability:
 
 - `/github auth status`
+- `/github capabilities list`
+- `/github capabilities inspect <capability-key>`
+- `/github plan build <area> <action> [args...]`
+- `/github plan execute <area> <action> [args...]`
+- `/github plan execute --plan-file <path>`
 - `/github repo inspect`
 - `/github issues list`
 - `/github issues inspect <number>`

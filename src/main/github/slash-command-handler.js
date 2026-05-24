@@ -52,6 +52,11 @@ function formatHelp() {
   return [
     'Shared GitHub slash commands:',
     '/github auth status [--probe false]',
+    '/github capabilities list',
+    '/github capabilities inspect <capability-key>',
+    '/github plan build <auth|capabilities|repo|issues|pr|workflow|releases> <status|inspect|list|diff|runs> [...]',
+    '/github plan execute <auth|capabilities|repo|issues|pr|workflow|releases> <status|inspect|list|diff|runs> [...]',
+    '/github plan execute --plan-file <path>',
     '/github repo inspect [--slug owner/repo] [--api false]',
     '/github issues list [--slug owner/repo] [--state open|closed|all] [--limit N] [--labels a,b] [--api false]',
     '/github issues inspect <number> [--slug owner/repo] [--api false]',
@@ -66,6 +71,7 @@ function formatHelp() {
     'Notes:',
     '- Uses the same typed read-only GitHub adapters as `liku github ...`.',
     '- Every GitHub slash command is registered with capability metadata and passes a read-only policy gate before execution.',
+    '- `/github plan execute ...` writes replayable plan/result artifacts and can replay from `--plan-file`.',
     '- Slash-command responses are chat-friendly summaries; structured adapter reports are attached in the result `data` field.',
   ].join('\n');
 }
@@ -92,6 +98,110 @@ function formatAuthStatus(report) {
   }
 
   return [...lines, ...formatWarnings(report.warnings)].join('\n');
+}
+
+function formatCapabilitiesList(report) {
+  const lines = [
+    'GitHub capabilities list',
+    `Total: ${report.total ?? (Array.isArray(report.capabilities) ? report.capabilities.length : 0)}`,
+  ];
+
+  if (Array.isArray(report.capabilities) && report.capabilities.length > 0) {
+    lines.push(...report.capabilities.map((entry) => `- ${entry.key} — ${entry.sideEffectClass || 'unknown'} / ${entry.riskLevel || 'unknown'} / ${entry.approvalRequirement || 'unknown'} — sources: ${Array.isArray(entry.allowedSources) && entry.allowedSources.length ? entry.allowedSources.join(', ') : '-'}`));
+    lines.push('Use `/github capabilities inspect <capability-key>` for per-capability schema and policy details.');
+  } else {
+    lines.push('No GitHub capabilities are currently registered.');
+  }
+
+  return lines.join('\n');
+}
+
+function formatCapabilityInspect(report) {
+  const lines = ['GitHub capability inspect'];
+
+  if (!report.entry) {
+    lines.push(report.message || 'GitHub capability not found.');
+    if (Array.isArray(report.availableKeys) && report.availableKeys.length > 0) {
+      lines.push(`Available keys: ${report.availableKeys.join(', ')}`);
+    }
+    return lines.join('\n');
+  }
+
+  const entry = report.entry;
+  lines.push(
+    `Capability: ${entry.key}`,
+    `Description: ${entry.description || 'none provided'}`,
+    `Schema: ${entry.responseSchemaVersion || 'none'}`,
+    `Effect/Risk/Approval: ${entry.sideEffectClass || 'unknown'} / ${entry.riskLevel || 'unknown'} / ${entry.approvalRequirement || 'unknown'}`,
+    `Sources: ${Array.isArray(entry.allowedSources) && entry.allowedSources.length > 0 ? entry.allowedSources.join(', ') : 'none'}`,
+    `Positionals: ${Array.isArray(entry.positionalArguments) && entry.positionalArguments.length > 0 ? entry.positionalArguments.join(', ') : 'none'}`,
+    `Options: ${Array.isArray(entry.optionKeys) && entry.optionKeys.length > 0 ? entry.optionKeys.map((key) => `--${key}`).join(', ') : 'none'}`
+  );
+
+  const policyBySource = entry.policyBySource && typeof entry.policyBySource === 'object' ? entry.policyBySource : {};
+  const policySources = Object.keys(policyBySource);
+  if (policySources.length > 0) {
+    lines.push('Policy preview:');
+    policySources.forEach((source) => {
+      const policy = policyBySource[source] || {};
+      lines.push(`- ${source}: ${policy.allowed ? 'allowed' : 'denied'} (${policy.reason || 'unknown'})`);
+    });
+  }
+
+  return lines.join('\n');
+}
+
+function formatPlanBuild(report) {
+  const lines = ['GitHub plan build'];
+
+  if (!report.plan || !Array.isArray(report.plan.steps) || report.plan.steps.length === 0) {
+    lines.push(report.message || 'GitHub plan was not created.');
+    if (Array.isArray(report.availableTargets) && report.availableTargets.length > 0) {
+      lines.push(`Available targets: ${report.availableTargets.join(', ')}`);
+    }
+    return lines.join('\n');
+  }
+
+  lines.push(
+    `Planner: ${report.planner?.mode || 'unknown'} via ${report.planner?.source || 'unknown'}`,
+    `Target capability: ${report.targetCapability?.key || 'unknown'}`,
+    `Goal: ${report.plan.goal || 'none provided'}`,
+    `Budget: maxSteps=${report.plan.budget?.maxSteps ?? '?'} timeoutMs=${report.plan.budget?.timeoutMs ?? '?'}`
+  );
+
+  lines.push(...report.plan.steps.map((step) => `- ${step.id || '-'} ${step.capabilityKey || '-'} — ${step.policy?.allowed ? 'allowed' : 'denied'} — ${step.expectedSchemaVersion || 'no schema'}`));
+
+  const firstStep = report.plan.steps[0];
+  if (firstStep?.runtimeInput && typeof firstStep.runtimeInput === 'object') {
+    lines.push(`Runtime input preview: ${JSON.stringify(firstStep.runtimeInput)}`);
+  }
+
+  return lines.join('\n');
+}
+
+function formatPlanExecute(report) {
+  const lines = ['GitHub plan execute'];
+
+  if (!report.execution || !Array.isArray(report.stepResults)) {
+    lines.push(report.message || 'GitHub execution plan did not run.');
+    if (report.planArtifact?.filePath) {
+      lines.push(`Plan artifact: ${report.planArtifact.filePath}`);
+    }
+    return lines.join('\n');
+  }
+
+  lines.push(
+    `Bounded executor: ${report.boundedExecutor?.mode || 'unknown'} via ${report.boundedExecutor?.source || 'unknown'}`,
+    `Replay command: ${report.boundedExecutor?.replayCommand || 'unavailable'}`,
+    `Plan source: ${report.execution.planSource || 'unknown'}`,
+    `Budget: maxSteps=${report.planSummary?.budget?.maxSteps ?? '?'} timeoutMs=${report.planSummary?.budget?.timeoutMs ?? '?'}`,
+    `Artifacts: plan=${report.planArtifact?.filePath || 'n/a'} result=${report.resultArtifact?.filePath || 'n/a'}`
+  );
+
+  lines.push(...report.stepResults.map((step) => `- ${step.stepId || '-'} ${step.capabilityKey || '-'} — ${step.success ? 'success' : 'failure'} — ${step.schemaVersion || 'no schema'}`));
+  lines.push(`Execution summary: elapsedMs=${report.execution.elapsedMs ?? '?'} stepsExecuted=${report.execution.stepsExecuted ?? '?'} timedOut=${report.execution.timedOut ? 'yes' : 'no'}`);
+
+  return lines.join('\n');
 }
 
 function formatRepoInspect(report) {
@@ -363,6 +473,10 @@ function formatReleaseInspect(report) {
 
 const slashFormatters = {
   'auth.status': formatAuthStatus,
+  'capabilities.list': formatCapabilitiesList,
+  'capabilities.inspect': formatCapabilityInspect,
+  'plan.build': formatPlanBuild,
+  'plan.execute': formatPlanExecute,
   'repo.inspect': formatRepoInspect,
   'issues.list': formatIssuesList,
   'issues.inspect': formatIssueInspect,
