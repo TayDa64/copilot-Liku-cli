@@ -3,8 +3,17 @@ const { findGitHubCapability } = require('./capability-registry');
 const { evaluateGitHubCapabilityPolicy } = require('./capability-policy');
 const { inspectGitHubCapabilityCatalogEntry, listGitHubCapabilityCatalog } = require('./capability-inspect');
 const { buildGitHubExecutionPlan } = require('./plan-builder');
-const { executeGitHubExecutionPlan } = require('./plan-executor');
-const { readGitHubPlanArtifact, writeGitHubPlanArtifact, writeGitHubPlanResultArtifact } = require('./plan-artifacts');
+const { executeGitHubExecutionPlan, resumeGitHubExecutionPlan } = require('./plan-executor');
+const {
+  appendGitHubPlanEvent,
+  readGitHubPlanArtifact,
+  readGitHubPlanEventLog,
+  readGitHubPlanGuidanceArtifact,
+  readGitHubPlanResultArtifact,
+  writeGitHubPlanArtifact,
+  writeGitHubPlanGuidanceArtifact,
+  writeGitHubPlanResultArtifact,
+} = require('./plan-artifacts');
 const { resolveGitHubAuthStatus } = require('./auth-status');
 const { inspectGitHubRepository } = require('./repo-inspect');
 const { inspectGitHubIssue } = require('./issue-inspect');
@@ -240,6 +249,20 @@ function buildAdapterCall(capability, context, adapters) {
           aiService,
         },
       };
+    case 'plan.resume':
+      return {
+        fn: adapters.resumeGitHubExecutionPlan,
+        input: {
+          source,
+          positionals,
+          runtimeOptions,
+          executionPreferences,
+          featureFlagEnabled,
+          cwd,
+          env,
+          aiService,
+        },
+      };
     case 'auth.status':
       return {
         fn: adapters.resolveGitHubAuthStatus,
@@ -388,6 +411,7 @@ function createGitHubCommandExecutor(dependencies = {}) {
   const adapters = {
     buildGitHubExecutionPlan: dependencies.buildGitHubExecutionPlan || buildGitHubExecutionPlan,
     executeGitHubExecutionPlan: dependencies.executeGitHubExecutionPlan || executeGitHubExecutionPlan,
+    resumeGitHubExecutionPlan: dependencies.resumeGitHubExecutionPlan || resumeGitHubExecutionPlan,
     inspectGitHubIssue: dependencies.inspectGitHubIssue || inspectGitHubIssue,
     inspectGitHubPullRequest: dependencies.inspectGitHubPullRequest || inspectGitHubPullRequest,
     inspectGitHubPullRequestDiff: dependencies.inspectGitHubPullRequestDiff || inspectGitHubPullRequestDiff,
@@ -400,9 +424,14 @@ function createGitHubCommandExecutor(dependencies = {}) {
     listGitHubPullRequests: dependencies.listGitHubPullRequests || listGitHubPullRequests,
     listGitHubReleases: dependencies.listGitHubReleases || listGitHubReleases,
     listGitHubWorkflowRuns: dependencies.listGitHubWorkflowRuns || listGitHubWorkflowRuns,
+    appendGitHubPlanEvent: dependencies.appendGitHubPlanEvent || appendGitHubPlanEvent,
     readGitHubPlanArtifact: dependencies.readGitHubPlanArtifact || readGitHubPlanArtifact,
+    readGitHubPlanEventLog: dependencies.readGitHubPlanEventLog || readGitHubPlanEventLog,
+    readGitHubPlanGuidanceArtifact: dependencies.readGitHubPlanGuidanceArtifact || readGitHubPlanGuidanceArtifact,
+    readGitHubPlanResultArtifact: dependencies.readGitHubPlanResultArtifact || readGitHubPlanResultArtifact,
     resolveGitHubAuthStatus: dependencies.resolveGitHubAuthStatus || resolveGitHubAuthStatus,
     writeGitHubPlanArtifact: dependencies.writeGitHubPlanArtifact || writeGitHubPlanArtifact,
+    writeGitHubPlanGuidanceArtifact: dependencies.writeGitHubPlanGuidanceArtifact || writeGitHubPlanGuidanceArtifact,
     writeGitHubPlanResultArtifact: dependencies.writeGitHubPlanResultArtifact || writeGitHubPlanResultArtifact,
   };
 
@@ -500,11 +529,32 @@ function createGitHubCommandExecutor(dependencies = {}) {
               buildGitHubExecutionPlan: adapters.buildGitHubExecutionPlan,
               evaluateGitHubCapabilityPolicy: evaluatePolicy,
               executeGitHubCommand: execute,
+              appendGitHubPlanEvent: adapters.appendGitHubPlanEvent,
               findGitHubCapability: findCapability,
               readGitHubPlanArtifact: adapters.readGitHubPlanArtifact,
+              readGitHubPlanEventLog: adapters.readGitHubPlanEventLog,
+              readGitHubPlanGuidanceArtifact: adapters.readGitHubPlanGuidanceArtifact,
+              readGitHubPlanResultArtifact: adapters.readGitHubPlanResultArtifact,
               writeGitHubPlanArtifact: adapters.writeGitHubPlanArtifact,
+              writeGitHubPlanGuidanceArtifact: adapters.writeGitHubPlanGuidanceArtifact,
               writeGitHubPlanResultArtifact: adapters.writeGitHubPlanResultArtifact,
             }
+          : capability.key === 'plan.resume'
+            ? {
+                ...adapterCall.input,
+                buildGitHubExecutionPlan: adapters.buildGitHubExecutionPlan,
+                evaluateGitHubCapabilityPolicy: evaluatePolicy,
+                executeGitHubCommand: execute,
+                appendGitHubPlanEvent: adapters.appendGitHubPlanEvent,
+                findGitHubCapability: findCapability,
+                readGitHubPlanArtifact: adapters.readGitHubPlanArtifact,
+                readGitHubPlanEventLog: adapters.readGitHubPlanEventLog,
+                readGitHubPlanGuidanceArtifact: adapters.readGitHubPlanGuidanceArtifact,
+                readGitHubPlanResultArtifact: adapters.readGitHubPlanResultArtifact,
+                writeGitHubPlanArtifact: adapters.writeGitHubPlanArtifact,
+                writeGitHubPlanGuidanceArtifact: adapters.writeGitHubPlanGuidanceArtifact,
+                writeGitHubPlanResultArtifact: adapters.writeGitHubPlanResultArtifact,
+              }
           : adapterCall.input;
       const report = await adapterCall.fn(enrichedInput);
       const finalReport = attachCapabilityMetadata(report, capability, policy);

@@ -34,6 +34,16 @@ async function main() {
       LIKU_HOME_OLD_OVERRIDE: path.join(tempRoot, '.liku-cli-old'),
     };
 
+    process.env.LIKU_HOME_OVERRIDE = sharedEnv.LIKU_HOME_OVERRIDE;
+    process.env.LIKU_HOME_OLD_OVERRIDE = sharedEnv.LIKU_HOME_OLD_OVERRIDE;
+
+    const { buildGitHubExecutionPlan } = require(path.join(repoRoot, 'src', 'main', 'github', 'plan-builder.js'));
+    const {
+      appendGitHubPlanEvent,
+      writeGitHubPlanArtifact,
+      writeGitHubPlanGuidanceArtifact,
+    } = require(path.join(repoRoot, 'src', 'main', 'github', 'plan-artifacts.js'));
+
     const help = await runNode(['src/cli/liku.js', '--help'], repoRoot, sharedEnv);
     assert.strictEqual(help.code, 0, 'top-level help exits 0');
     assert(help.stdout.includes('github'), 'top-level help lists the github command');
@@ -45,6 +55,7 @@ async function main() {
     assert(githubHelp.stdout.includes('liku github capabilities inspect pr.diff'), 'github help lists capability inspect');
     assert(githubHelp.stdout.includes('liku github plan build pr diff 123 --limit 50'), 'github help lists plan build');
     assert(githubHelp.stdout.includes('liku github plan execute pr diff 123 --limit 50'), 'github help lists plan execute');
+    assert(githubHelp.stdout.includes('liku github plan resume --guidance-file'), 'github help lists plan resume');
     assert(githubHelp.stdout.includes('liku github issues inspect <number>'), 'github help lists issue inspect');
     assert(githubHelp.stdout.includes('liku github pr list'), 'github help lists pr list');
     assert(githubHelp.stdout.includes('liku github pr diff <number>'), 'github help lists pr diff');
@@ -148,8 +159,12 @@ async function main() {
     assert.strictEqual(planExecutePayload.targetCapability.key, 'pr.diff');
     assert.strictEqual(planExecutePayload.execution.stepsExecuted, 1);
     assert.strictEqual(planExecutePayload.execution.timedOut, false);
+    assert.strictEqual(planExecutePayload.execution.terminalEvent, 'execution.completed');
+    assert.ok(planExecutePayload.run.runId);
+    assert.ok(planExecutePayload.eventLog.filePath);
     assert.ok(planExecutePayload.planArtifact.filePath);
     assert.ok(planExecutePayload.resultArtifact.filePath);
+    assert.ok(fs.existsSync(planExecutePayload.eventLog.filePath));
     assert.ok(fs.existsSync(planExecutePayload.planArtifact.filePath));
     assert.ok(fs.existsSync(planExecutePayload.resultArtifact.filePath));
 
@@ -168,6 +183,90 @@ async function main() {
     assert.strictEqual(planReplayPayload.success, true);
     assert.strictEqual(planReplayPayload.execution.planSource, 'artifact-replay');
     assert.strictEqual(planReplayPayload.capability.key, 'plan.execute');
+    assert.ok(planReplayPayload.run.runId);
+    assert.ok(planReplayPayload.eventLog.filePath);
+    assert.ok(fs.existsSync(planReplayPayload.eventLog.filePath));
+
+    const resumePlanReport = buildGitHubExecutionPlan({
+      source: 'cli',
+      positionals: ['plan', 'build', 'issues', 'list'],
+      runtimeOptions: { limit: 5, api: false },
+    });
+    const resumeRunId = 'github-run-cli-resume';
+    const resumeToken = 'resume-token-cli';
+    const resumePlanArtifact = writeGitHubPlanArtifact({
+      source: 'cli',
+      metadata: { mode: 'bounded-executor', orchestrationMode: 'bounded-evented', runId: resumeRunId },
+      planReport: resumePlanReport,
+    });
+    appendGitHubPlanEvent({ artifactId: resumePlanArtifact.artifactId, runId: resumeRunId, sequence: 1, eventName: 'execution.started', source: 'cli', status: 'running' });
+    appendGitHubPlanEvent({ artifactId: resumePlanArtifact.artifactId, runId: resumeRunId, sequence: 2, eventName: 'step.started', source: 'cli', status: 'running', step: { stepId: 'step-1', capabilityKey: 'issues.list' } });
+    appendGitHubPlanEvent({ artifactId: resumePlanArtifact.artifactId, runId: resumeRunId, sequence: 3, eventName: 'guidance.requested', source: 'cli', status: 'blocked', step: { stepId: 'step-1', capabilityKey: 'issues.list' }, guidance: { guidanceId: 'github-guidance-cli', resumeToken } });
+    const resumeGuidanceArtifact = writeGitHubPlanGuidanceArtifact({
+      artifactId: resumePlanArtifact.artifactId,
+      runId: resumeRunId,
+      guidanceId: 'github-guidance-cli',
+      status: 'requested',
+      reason: 'user-clarification',
+      resumeToken,
+      requestedBy: { stepId: 'step-1', capabilityKey: 'issues.list' },
+      questions: [
+        {
+          id: 'state',
+          prompt: 'Which issue state should be used?',
+          kind: 'single-select',
+          targetType: 'option',
+          targetField: 'state',
+          allowFreeformInput: false,
+          options: [
+            { label: 'open', value: 'open' },
+            { label: 'all', value: 'all' },
+          ],
+        },
+      ],
+      planArtifact: resumePlanArtifact,
+      execution: {
+        planSource: 'runtime-build',
+        status: 'needs-guidance',
+        startedAt: new Date().toISOString(),
+        finishedAt: null,
+        elapsedMs: 0,
+        timedOut: false,
+        terminal: false,
+        stepsExecuted: 0,
+      },
+      blockedStepIndex: 0,
+      stepResults: [],
+    });
+    const resumeAnswersPath = path.join(tempRoot, 'resume-answers.json');
+    fs.writeFileSync(resumeAnswersPath, JSON.stringify({ state: 'all' }, null, 2));
+
+    const planResume = await runNode([
+      'src/cli/liku.js',
+      'github',
+      'plan',
+      'resume',
+      '--json',
+      '--guidance-file',
+      resumeGuidanceArtifact.filePath,
+      '--resume-token',
+      resumeToken,
+      '--answers-file',
+      resumeAnswersPath,
+    ], repoRoot, sharedEnv);
+    assert.strictEqual(planResume.code, 0, 'github plan resume exits 0');
+    const planResumePayload = JSON.parse(planResume.stdout);
+    assert.strictEqual(planResumePayload.schemaVersion, 'github.plan-resume.v1');
+    assert.strictEqual(planResumePayload.capability.key, 'plan.resume');
+    assert.strictEqual(planResumePayload.policy.allowed, true);
+    assert.strictEqual(planResumePayload.success, true);
+    assert.strictEqual(planResumePayload.run.runId, resumeRunId);
+    assert.strictEqual(planResumePayload.execution.status, 'completed');
+    assert.strictEqual(planResumePayload.stepResults[0].result.filters.state, 'all');
+    assert.ok(planResumePayload.resultArtifact.filePath);
+    assert.ok(fs.existsSync(planResumePayload.resultArtifact.filePath));
+    assert.ok(planResumePayload.eventLog.filePath);
+    assert.ok(fs.existsSync(planResumePayload.eventLog.filePath));
 
     const repoInspect = await runNode([
       'src/cli/liku.js',

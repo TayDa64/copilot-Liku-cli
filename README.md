@@ -157,6 +157,8 @@ Read-only GitHub entrypoints:
 - `liku github plan build <area> <action> [args...]`
 - `liku github plan execute <area> <action> [args...]`
 - `liku github plan execute --plan-file <path>`
+- `liku github plan resume --guidance-file <path> --resume-token <token> --answers-file <path>`
+- `liku github plan resume --guidance-file <path> --resume-token <token> --answers-json '{"field":"value"}'`
 - `liku github repo inspect`
 - `liku github issues list`
 - `liku github issues inspect <number>`
@@ -188,6 +190,7 @@ Useful chat commands:
 - `/github plan build pr diff 7 --limit 30 --api false`
 - `/github plan execute pr diff 7 --limit 30 --api false`
 - `/github plan execute --plan-file <path>`
+- `/github plan resume --guidance-file <path> --resume-token <token> --answers-file <path>`
 - `/login`
 - `/model`
 - `/provider`

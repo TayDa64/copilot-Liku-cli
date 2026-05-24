@@ -35,6 +35,7 @@ ${highlight('USAGE:')}
   liku github plan build pr diff 123 --limit 50
   liku github plan execute pr diff 123 --limit 50
   liku github plan execute --plan-file C:\\Users\\you\\.liku\\github\\plans\\github-plan-example.plan.json
+    liku github plan resume --guidance-file C:\\Users\\you\\.liku\\github\\plans\\github-plan-example.github-run-123.guidance.json --resume-token <token> --answers-json {"base-branch":"main"}
   liku github repo inspect
   liku github issues list
   liku github issues inspect <number>
@@ -63,6 +64,7 @@ ${highlight('COMMANDS:')}
   capabilities inspect Inspect one registered GitHub capability by key
   plan build     Build a deterministic one-step execution plan for a registered GitHub capability
   plan execute   Execute a deterministic read-only GitHub plan within bounded budgets
+  plan resume    Resume a blocked read-only GitHub plan from a saved guidance checkpoint
   repo inspect   Inspect the current repository identity and GitHub metadata
   issues list    List issues for the current or specified GitHub repo
   issues inspect Inspect one issue by number
@@ -89,11 +91,16 @@ ${highlight('OPTIONS:')}
   --status <value> Filter workflow runs by status/conclusion-compatible value
   --event <name> Filter workflow runs by triggering event
   --plan-file <path> Replay and execute a saved GitHub plan artifact instead of building a new plan
+  --guidance-file <path> Resume a blocked GitHub plan from a saved guidance checkpoint artifact
+  --resume-token <token> Single-use token that authorizes one blocked plan resume
+  --answers-file <path> JSON file containing guidance answers keyed by question id
+  --answers-json <json> Inline JSON object containing guidance answers keyed by question id
 
 ${highlight('NOTES:')}
   - These Phase 2 commands are read-only.
   - Every GitHub command is registered with capability metadata and passes a read-only policy gate before execution.
   - The plan execute path writes replayable plan/result artifacts under the Liku home directory.
+  - The plan resume path reads a saved guidance checkpoint and continues the bounded run without replaying completed steps.
   - GH_TOKEN or GITHUB_TOKEN improves private-repo and authenticated REST inspection.
   - Existing Copilot auth state is reused when available, but GitHub REST prefers GH_TOKEN/GITHUB_TOKEN.
 `);
@@ -236,7 +243,8 @@ function printPlanBuild(report) {
 }
 
 function printPlanExecute(report) {
-  console.log(`\n${bold('GitHub plan execute')}\n`);
+  const heading = report?.capability?.key === 'plan.resume' ? 'GitHub plan resume' : 'GitHub plan execute';
+  console.log(`\n${bold(heading)}\n`);
 
   if (!report.execution || !Array.isArray(report.stepResults)) {
     warn(report.message || 'GitHub execution plan did not run.');
@@ -247,10 +255,17 @@ function printPlanExecute(report) {
   }
 
   console.log(`${highlight('Bounded executor:')} ${report.boundedExecutor?.mode || 'unknown'} via ${report.boundedExecutor?.source || 'unknown'}`);
+  console.log(`${highlight('Run:')} ${report.run?.runId || 'unknown'} (${report.run?.status || report.status || 'unknown'})`);
+  console.log(`${highlight('Event log:')} ${report.eventLog?.filePath || 'n/a'}`);
   console.log(`${highlight('Replay command:')} ${report.boundedExecutor?.replayCommand || dim('unavailable')}`);
   console.log(`${highlight('Plan source:')} ${report.execution.planSource || 'unknown'}`);
   console.log(`${highlight('Budget:')} maxSteps=${report.planSummary?.budget?.maxSteps ?? '?'} timeoutMs=${report.planSummary?.budget?.timeoutMs ?? '?'}`);
   console.log(`${highlight('Artifacts:')} plan=${report.planArtifact?.filePath || 'n/a'} result=${report.resultArtifact?.filePath || 'n/a'}`);
+
+  if (report.status === 'needs-guidance') {
+    console.log(`${highlight('Guidance:')} ${report.guidanceArtifact?.filePath || 'n/a'}`);
+    console.log(`${highlight('Resume token:')} ${report.resume?.resumeToken || 'n/a'}`);
+  }
 
   table(
     report.stepResults.map((step) => [
@@ -262,7 +277,7 @@ function printPlanExecute(report) {
     ['Step', 'Capability', 'Result', 'Schema']
   );
 
-  console.log(`\n${highlight('Execution summary:')} elapsedMs=${report.execution.elapsedMs ?? '?'} stepsExecuted=${report.execution.stepsExecuted ?? '?'} timedOut=${report.execution.timedOut ? 'yes' : 'no'}`);
+  console.log(`\n${highlight('Execution summary:')} status=${report.execution.status || report.status || 'unknown'} elapsedMs=${report.execution.elapsedMs ?? '?'} stepsExecuted=${report.execution.stepsExecuted ?? '?'} timedOut=${report.execution.timedOut ? 'yes' : 'no'}`);
 }
 
 function printRepoInspect(report) {
@@ -591,6 +606,7 @@ const printHandlers = {
   'capabilities.inspect': printCapabilityInspect,
   'plan.build': printPlanBuild,
   'plan.execute': printPlanExecute,
+  'plan.resume': printPlanExecute,
   'repo.inspect': printRepoInspect,
   'issues.list': printIssuesList,
   'issues.inspect': printIssueInspect,
@@ -625,7 +641,7 @@ async function run(args, options) {
     return {
       success: false,
       error: 'USAGE',
-      message: 'Usage: liku github <auth|capabilities|plan|repo|issues|pr|workflow|releases> <status|inspect|list|build|execute|runs>',
+      message: 'Usage: liku github <auth|capabilities|plan|repo|issues|pr|workflow|releases> <status|inspect|list|build|execute|resume|runs>',
     };
   }
 
@@ -648,9 +664,13 @@ async function run(args, options) {
   if (!options.json && !options.quiet) {
     const handler = report?.capability?.key ? printHandlers[report.capability.key] : null;
     if (report?.success === false) {
-      printUsageFailure(report);
       if (report.error === 'USAGE') {
+        printUsageFailure(report);
         showHelp();
+      } else if (typeof handler === 'function') {
+        handler(report);
+      } else {
+        printUsageFailure(report);
       }
     } else if (typeof handler === 'function') {
       handler(report);

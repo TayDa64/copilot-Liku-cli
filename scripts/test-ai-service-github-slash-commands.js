@@ -10,6 +10,12 @@ process.env.LIKU_HOME_OVERRIDE = path.join(tempRoot, '.liku');
 process.env.LIKU_HOME_OLD_OVERRIDE = path.join(tempRoot, '.liku-cli-old');
 
 const aiService = require(path.join(__dirname, '..', 'src', 'main', 'ai-service.js'));
+const { buildGitHubExecutionPlan } = require(path.join(__dirname, '..', 'src', 'main', 'github', 'plan-builder.js'));
+const {
+  appendGitHubPlanEvent,
+  writeGitHubPlanArtifact,
+  writeGitHubPlanGuidanceArtifact,
+} = require(path.join(__dirname, '..', 'src', 'main', 'github', 'plan-artifacts.js'));
 
 let pass = 0;
 
@@ -29,6 +35,7 @@ async function test(name, fn) {
     assert.ok(result.message.includes('/github capabilities list'));
     assert.ok(result.message.includes('/github plan build'));
     assert.ok(result.message.includes('/github plan execute'));
+    assert.ok(result.message.includes('/github plan resume --guidance-file <path> --resume-token <token>'));
     assert.ok(result.message.includes('/github pr diff <number>'));
     assert.ok(result.message.includes('/github releases inspect <latest|tag|id>'));
     });
@@ -86,8 +93,12 @@ async function test(name, fn) {
       assert.strictEqual(result.data.targetCapability.key, 'pr.diff');
       assert.strictEqual(result.data.execution.stepsExecuted, 1);
       assert.strictEqual(result.data.execution.timedOut, false);
+      assert.strictEqual(result.data.execution.terminalEvent, 'execution.completed');
+      assert.ok(result.data.run.runId);
+      assert.ok(result.data.eventLog.filePath);
       assert.ok(result.data.planArtifact.filePath);
       assert.ok(result.data.resultArtifact.filePath);
+      assert.ok(fs.existsSync(result.data.eventLog.filePath));
       assert.ok(fs.existsSync(result.data.planArtifact.filePath));
       assert.ok(fs.existsSync(result.data.resultArtifact.filePath));
       assert.ok(result.message.includes('GitHub plan execute'));
@@ -105,7 +116,83 @@ async function test(name, fn) {
       assert.strictEqual(replay.data.success, true);
       assert.strictEqual(replay.data.execution.planSource, 'artifact-replay');
       assert.strictEqual(replay.data.capability.key, 'plan.execute');
+      assert.ok(replay.data.run.runId);
+      assert.ok(replay.data.eventLog.filePath);
+      assert.ok(fs.existsSync(replay.data.eventLog.filePath));
       assert.ok(replay.message.includes('GitHub plan execute'));
+    });
+
+    await test('aiService.handleCommand resumes /github plan resume from a saved guidance checkpoint', async () => {
+      const resumePlanReport = buildGitHubExecutionPlan({
+        source: 'slash',
+        positionals: ['plan', 'build', 'issues', 'list'],
+        runtimeOptions: { limit: 5, api: false },
+      });
+      const resumeRunId = 'github-run-slash-resume';
+      const resumeToken = 'resume-token-slash';
+      const resumePlanArtifact = writeGitHubPlanArtifact({
+        source: 'slash',
+        metadata: { mode: 'bounded-executor', orchestrationMode: 'bounded-evented', runId: resumeRunId },
+        planReport: resumePlanReport,
+      });
+      appendGitHubPlanEvent({ artifactId: resumePlanArtifact.artifactId, runId: resumeRunId, sequence: 1, eventName: 'execution.started', source: 'slash', status: 'running' });
+      appendGitHubPlanEvent({ artifactId: resumePlanArtifact.artifactId, runId: resumeRunId, sequence: 2, eventName: 'step.started', source: 'slash', status: 'running', step: { stepId: 'step-1', capabilityKey: 'issues.list' } });
+      appendGitHubPlanEvent({ artifactId: resumePlanArtifact.artifactId, runId: resumeRunId, sequence: 3, eventName: 'guidance.requested', source: 'slash', status: 'blocked', step: { stepId: 'step-1', capabilityKey: 'issues.list' }, guidance: { guidanceId: 'github-guidance-slash', resumeToken } });
+      const resumeGuidanceArtifact = writeGitHubPlanGuidanceArtifact({
+        artifactId: resumePlanArtifact.artifactId,
+        runId: resumeRunId,
+        guidanceId: 'github-guidance-slash',
+        status: 'requested',
+        reason: 'user-clarification',
+        resumeToken,
+        requestedBy: { stepId: 'step-1', capabilityKey: 'issues.list' },
+        questions: [
+          {
+            id: 'state',
+            prompt: 'Which issue state should be used?',
+            kind: 'single-select',
+            targetType: 'option',
+            targetField: 'state',
+            allowFreeformInput: false,
+            options: [
+              { label: 'open', value: 'open' },
+              { label: 'all', value: 'all' },
+            ],
+          },
+        ],
+        planArtifact: resumePlanArtifact,
+        execution: {
+          planSource: 'runtime-build',
+          status: 'needs-guidance',
+          startedAt: new Date().toISOString(),
+          finishedAt: null,
+          elapsedMs: 0,
+          timedOut: false,
+          terminal: false,
+          stepsExecuted: 0,
+        },
+        blockedStepIndex: 0,
+        stepResults: [],
+      });
+      const resumeAnswersPath = path.join(tempRoot, 'slash-resume-answers.json');
+      fs.writeFileSync(resumeAnswersPath, JSON.stringify({ state: 'all' }, null, 2));
+
+      const result = await aiService.handleCommand(`/github plan resume --guidance-file "${resumeGuidanceArtifact.filePath}" --resume-token ${resumeToken} --answers-file "${resumeAnswersPath}"`);
+      assert.ok(result);
+      assert.strictEqual(result.type, 'info');
+      assert.ok(result.data);
+      assert.strictEqual(result.data.schemaVersion, 'github.plan-resume.v1');
+      assert.strictEqual(result.data.capability.key, 'plan.resume');
+      assert.strictEqual(result.data.policy.allowed, true);
+      assert.strictEqual(result.data.success, true);
+      assert.strictEqual(result.data.run.runId, resumeRunId);
+      assert.strictEqual(result.data.execution.status, 'completed');
+      assert.strictEqual(result.data.stepResults[0].result.filters.state, 'all');
+      assert.ok(result.data.resultArtifact.filePath);
+      assert.ok(result.data.eventLog.filePath);
+      assert.ok(fs.existsSync(result.data.resultArtifact.filePath));
+      assert.ok(fs.existsSync(result.data.eventLog.filePath));
+      assert.ok(result.message.includes('GitHub plan resume'));
     });
 
     await test('aiService.handleCommand routes /github issues list through typed adapters', async () => {

@@ -154,6 +154,8 @@ These adapters are exposed today through `src/cli/commands/github.js` as:
 - `liku github plan build <area> <action> [args...]`
 - `liku github plan execute <area> <action> [args...]`
 - `liku github plan execute --plan-file <path>`
+- `liku github plan resume --guidance-file <path> --resume-token <token> --answers-file <path>`
+- `liku github plan resume --guidance-file <path> --resume-token <token> --answers-json '{"field":"value"}'`
 - `liku github repo inspect`
 - `liku github issues list`
 - `liku github issues inspect <number>`
@@ -212,6 +214,8 @@ The slash handler now routes parsed `/github ...` input into `src/main/github/co
 For the new planning bridge, the same executor now routes `/github plan build ...` into `src/main/github/plan-builder.js`, which emits a deterministic one-step execution plan artifact instead of performing the action immediately.
 
 For bounded execution, `/github plan execute ...` now routes into `src/main/github/plan-executor.js`, which validates the typed plan, enforces max-step and timeout budgets, limits execution to registered read-only GitHub capabilities, and writes replayable plan/result artifacts under the Liku home directory.
+
+For explicit continuation, `/github plan resume ...` now routes through that same bounded executor so a caller can resume a blocked run from a saved guidance checkpoint using `--guidance-file`, a single-use `--resume-token`, and either `--answers-file` or `--answers-json`, without replaying already completed steps.
 
 Avoid spawning `liku github ...` as a subprocess from inside slash-command handling. That would create a second parsing/execution hop and make trace/policy alignment harder.
 

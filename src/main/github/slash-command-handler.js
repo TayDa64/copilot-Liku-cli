@@ -57,6 +57,7 @@ function formatHelp() {
     '/github plan build <auth|capabilities|repo|issues|pr|workflow|releases> <status|inspect|list|diff|runs> [...]',
     '/github plan execute <auth|capabilities|repo|issues|pr|workflow|releases> <status|inspect|list|diff|runs> [...]',
     '/github plan execute --plan-file <path>',
+    '/github plan resume --guidance-file <path> --resume-token <token> [--answers-file <path> | --answers-json <json>]',
     '/github repo inspect [--slug owner/repo] [--api false]',
     '/github issues list [--slug owner/repo] [--state open|closed|all] [--limit N] [--labels a,b] [--api false]',
     '/github issues inspect <number> [--slug owner/repo] [--api false]',
@@ -72,6 +73,7 @@ function formatHelp() {
     '- Uses the same typed read-only GitHub adapters as `liku github ...`.',
     '- Every GitHub slash command is registered with capability metadata and passes a read-only policy gate before execution.',
     '- `/github plan execute ...` writes replayable plan/result artifacts and can replay from `--plan-file`.',
+    '- `/github plan resume ...` resumes a blocked bounded run from a saved guidance checkpoint without replaying completed steps.',
     '- Slash-command responses are chat-friendly summaries; structured adapter reports are attached in the result `data` field.',
   ].join('\n');
 }
@@ -180,7 +182,7 @@ function formatPlanBuild(report) {
 }
 
 function formatPlanExecute(report) {
-  const lines = ['GitHub plan execute'];
+  const lines = [report?.capability?.key === 'plan.resume' ? 'GitHub plan resume' : 'GitHub plan execute'];
 
   if (!report.execution || !Array.isArray(report.stepResults)) {
     lines.push(report.message || 'GitHub execution plan did not run.');
@@ -192,14 +194,23 @@ function formatPlanExecute(report) {
 
   lines.push(
     `Bounded executor: ${report.boundedExecutor?.mode || 'unknown'} via ${report.boundedExecutor?.source || 'unknown'}`,
+    `Run: ${report.run?.runId || 'unknown'} (${report.run?.status || report.status || 'unknown'})`,
+    `Event log: ${report.eventLog?.filePath || 'n/a'}`,
     `Replay command: ${report.boundedExecutor?.replayCommand || 'unavailable'}`,
     `Plan source: ${report.execution.planSource || 'unknown'}`,
     `Budget: maxSteps=${report.planSummary?.budget?.maxSteps ?? '?'} timeoutMs=${report.planSummary?.budget?.timeoutMs ?? '?'}`,
     `Artifacts: plan=${report.planArtifact?.filePath || 'n/a'} result=${report.resultArtifact?.filePath || 'n/a'}`
   );
 
+  if (report.status === 'needs-guidance') {
+    lines.push(
+      `Guidance: ${report.guidanceArtifact?.filePath || 'n/a'}`,
+      `Resume token: ${report.resume?.resumeToken || 'n/a'}`
+    );
+  }
+
   lines.push(...report.stepResults.map((step) => `- ${step.stepId || '-'} ${step.capabilityKey || '-'} — ${step.success ? 'success' : 'failure'} — ${step.schemaVersion || 'no schema'}`));
-  lines.push(`Execution summary: elapsedMs=${report.execution.elapsedMs ?? '?'} stepsExecuted=${report.execution.stepsExecuted ?? '?'} timedOut=${report.execution.timedOut ? 'yes' : 'no'}`);
+  lines.push(`Execution summary: status=${report.execution.status || report.status || 'unknown'} elapsedMs=${report.execution.elapsedMs ?? '?'} stepsExecuted=${report.execution.stepsExecuted ?? '?'} timedOut=${report.execution.timedOut ? 'yes' : 'no'}`);
 
   return lines.join('\n');
 }
@@ -477,6 +488,7 @@ const slashFormatters = {
   'capabilities.inspect': formatCapabilityInspect,
   'plan.build': formatPlanBuild,
   'plan.execute': formatPlanExecute,
+  'plan.resume': formatPlanExecute,
   'repo.inspect': formatRepoInspect,
   'issues.list': formatIssuesList,
   'issues.inspect': formatIssueInspect,
@@ -548,14 +560,18 @@ function createGitHubSlashCommandHandler(dependencies = {}) {
       executionPreferences: dependencies.executionPreferences,
     });
 
+    const formatter = report?.capability?.key ? slashFormatters[report.capability.key] : null;
+
     if (report?.success === false) {
       if (report.error === 'USAGE') {
         return buildUsageResult(report.message, helpText);
       }
+      if (typeof formatter === 'function') {
+        return buildResult(report, formatter(report), 'error');
+      }
       return buildResult(report, report.message || 'GitHub slash command failed.', 'error');
     }
 
-    const formatter = report?.capability?.key ? slashFormatters[report.capability.key] : null;
     if (typeof formatter !== 'function') {
       return buildResult(report, report?.message || 'GitHub slash command completed.');
     }

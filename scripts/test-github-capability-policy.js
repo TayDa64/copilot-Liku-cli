@@ -29,7 +29,7 @@ async function test(name, fn) {
 (async () => {
   await test('registry exposes read-only metadata for current GitHub capabilities', async () => {
     const capabilities = listGitHubCapabilities();
-    assert.ok(capabilities.length >= 11);
+    assert.ok(capabilities.length >= 12);
 
     const keys = capabilities.map((entry) => entry.key);
     assert.ok(keys.includes('auth.status'));
@@ -37,6 +37,7 @@ async function test(name, fn) {
     assert.ok(keys.includes('capabilities.inspect'));
     assert.ok(keys.includes('plan.build'));
     assert.ok(keys.includes('plan.execute'));
+    assert.ok(keys.includes('plan.resume'));
     assert.ok(keys.includes('issues.list'));
     assert.ok(keys.includes('pr.diff'));
     assert.ok(keys.includes('workflow.inspect'));
@@ -59,6 +60,7 @@ async function test(name, fn) {
     assert.ok(listReport.capabilities.some((entry) => entry.key === 'capabilities.list'));
     assert.ok(listReport.capabilities.some((entry) => entry.key === 'plan.build'));
     assert.ok(listReport.capabilities.some((entry) => entry.key === 'plan.execute'));
+    assert.ok(listReport.capabilities.some((entry) => entry.key === 'plan.resume'));
 
     const inspectReport = inspectGitHubCapabilityCatalogEntry({ key: 'pr.diff' });
     assert.strictEqual(inspectReport.success, true);

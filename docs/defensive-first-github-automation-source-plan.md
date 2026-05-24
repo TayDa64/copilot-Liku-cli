@@ -377,6 +377,175 @@ Phase 4 bounded executor verification command for this repo slice:
 npm run test:github-phase4-executor
 ```
 
+### Phase 4.1 — Orchestration event and resume addendum
+
+Objective: add observable bounded progress, explicit guidance checkpoints, and deterministic resume behavior without introducing background recursive autonomy or polling-driven control loops.
+
+Implementation stance for this repo slice:
+
+- keep `.github/hooks/**` focused on synchronous policy/audit enforcement and keep orchestration progress on a runtime event path instead
+- reuse the existing GitHub plan/result artifact model under `~/.liku/github/plans` instead of introducing a separate hidden state store
+- allow CLI, slash, Electron, or browser surfaces to observe the same event stream in parallel, but do not make PID watching or browser polling the source of orchestration truth
+- treat any future browser/CLI watcher as a non-authoritative watchdog only; success, failure, and resume readiness must come from typed artifacts and terminal events
+- do not let a hook directly trigger an unbounded follow-up model turn; all continuation must remain budgeted and require an explicit resume token
+
+Recommended event names for the bounded executor and future orchestration hook surface:
+
+- `execution.started`
+  - emitted once after plan validation succeeds and before the first step starts
+  - required fields: `runId`, `artifactId`, `source`, `budget`, `requestedTarget`
+- `step.started`
+  - emitted before each approved step invocation
+  - required fields: `runId`, `artifactId`, `step.stepId`, `step.capabilityKey`, `sequence`
+- `step.completed`
+  - emitted after a step succeeds
+  - required fields: `runId`, `artifactId`, `step.stepId`, `step.capabilityKey`, `sequence`, `elapsedMs`, `resultSchemaVersion`
+- `step.failed`
+  - emitted after a step fails without guidance recovery
+  - required fields: `runId`, `artifactId`, `step.stepId`, `step.capabilityKey`, `sequence`, `error`, `message`
+- `guidance.requested`
+  - emitted when the executor cannot continue safely without clarification, approval, or a constrained follow-up answer set
+  - required fields: `runId`, `artifactId`, `step.stepId`, `step.capabilityKey`, `guidance.guidanceId`, `guidance.resumeToken`, `guidance.questions`
+- `guidance.responded`
+  - emitted when a caller supplies answers for a blocked run
+  - required fields: `runId`, `artifactId`, `guidance.guidanceId`, `guidance.resumeToken`, `guidance.answerCount`
+- `execution.completed`
+  - emitted once on terminal success
+  - required fields: `runId`, `artifactId`, `stepsExecuted`, `elapsedMs`, `resultArtifactId`
+- `execution.aborted`
+  - emitted once on terminal timeout, policy denial, user cancel, or unrecoverable error
+  - required fields: `runId`, `artifactId`, `error`, `message`, `timedOut`
+
+These event names are the bounded runtime contract. If runtime lifecycle hooks are added for GitHub orchestration, they should observe or emit these exact names rather than inventing a separate free-form vocabulary.
+
+Artifact shapes should stay additive to the current implementation.
+
+Existing plan artifact remains the canonical replay input:
+
+```json
+{
+  "schemaVersion": "github.plan-artifact.v1",
+  "artifactId": "github-plan-...",
+  "createdAt": "2026-05-24T12:00:00.000Z",
+  "source": "cli",
+  "metadata": {
+    "mode": "bounded-executor",
+    "cwd": "C:\\dev\\copilot-Liku-cli",
+    "runId": "github-run-...",
+    "orchestrationMode": "bounded-evented"
+  },
+  "planReport": { "...": "existing typed plan payload" }
+}
+```
+
+Existing result artifact remains the canonical terminal output and should only be written for `execution.completed` or `execution.aborted`:
+
+```json
+{
+  "schemaVersion": "github.plan-result-artifact.v1",
+  "artifactId": "github-plan-result-...",
+  "createdAt": "2026-05-24T12:00:04.000Z",
+  "source": "cli",
+  "metadata": {
+    "outcome": "success",
+    "cwd": "C:\\dev\\copilot-Liku-cli",
+    "runId": "github-run-..."
+  },
+  "planArtifact": {
+    "artifactId": "github-plan-...",
+    "schemaVersion": "github.plan-artifact.v1",
+    "createdAt": "2026-05-24T12:00:00.000Z",
+    "filePath": "C:\\Users\\...\\github-plan-....plan.json"
+  },
+  "execution": {
+    "planSource": "runtime-build",
+    "startedAt": "2026-05-24T12:00:00.000Z",
+    "finishedAt": "2026-05-24T12:00:04.000Z",
+    "elapsedMs": 4000,
+    "timedOut": false,
+    "terminalEvent": "execution.completed",
+    "stepsExecuted": 1
+  },
+  "stepResults": []
+}
+```
+
+New event log sidecar should be append-only JSONL stored beside the current plan/result artifacts as `<artifactId>.<runId>.events.jsonl`, with one `github.plan-event.v1` record per line:
+
+```json
+{
+  "schemaVersion": "github.plan-event.v1",
+  "runId": "github-run-...",
+  "artifactId": "github-plan-...",
+  "timestamp": "2026-05-24T12:00:01.000Z",
+  "sequence": 3,
+  "eventName": "guidance.requested",
+  "status": "blocked",
+  "source": "cli",
+  "step": {
+    "stepId": "step-1",
+    "capabilityKey": "pr.diff"
+  },
+  "details": {
+    "reason": "user-clarification"
+  },
+  "guidance": {
+    "guidanceId": "github-guidance-...",
+    "resumeToken": "opaque-single-use-token"
+  }
+}
+```
+
+New guidance checkpoint sidecar should be written only when a run blocks for clarification and stored as `<artifactId>.<runId>.guidance.json` so replayed runs do not clobber one another:
+
+```json
+{
+  "schemaVersion": "github.plan-guidance.v1",
+  "runId": "github-run-...",
+  "artifactId": "github-plan-...",
+  "guidanceId": "github-guidance-...",
+  "createdAt": "2026-05-24T12:00:01.000Z",
+  "status": "requested",
+  "reason": "user-clarification",
+  "resumeToken": "opaque-single-use-token",
+  "requestedBy": {
+    "stepId": "step-1",
+    "capabilityKey": "pr.diff"
+  },
+  "questions": [
+    {
+      "id": "base-branch",
+      "prompt": "Which base branch should the diff be compared against?",
+      "kind": "single-select",
+      "required": true,
+      "allowFreeformInput": false,
+      "options": [
+        { "label": "main", "value": "main" },
+        { "label": "develop", "value": "develop" }
+      ]
+    }
+  ],
+  "answers": null
+}
+```
+
+Resume semantics for Phase 4.1 should be explicit and bounded:
+
+1. When guidance is required, execution pauses and returns a non-terminal response such as `status: "needs-guidance"`, `error: "GUIDANCE_REQUIRED"`, plus a `resume` block containing `runId`, `artifactId`, `guidanceId`, `resumeToken`, and `guidanceFilePath`.
+2. A caller may surface those questions to the user, another Liku surface, or a higher-level bounded planner, but the bounded executor itself must not auto-trigger a background Copilot iteration.
+3. Resume must be explicit through `github plan resume ...` or an equivalent typed programmatic call; no implicit continuation from a hook callback.
+4. A `resumeToken` is single-use and bound to one blocked run and one blocked step. Reusing the same token should return the current blocked or terminal state instead of replaying earlier steps.
+5. Guidance answers may only fill predeclared, schema-constrained fields for the blocked step. If the requested answers would materially change the target capability, side-effect class, or budget, the system should write a new plan artifact and begin a fresh bounded run instead of mutating the old plan in place.
+6. Result artifacts are terminal only. Guidance checkpoints must not masquerade as success/failure results; the event log and guidance artifact carry the non-terminal blocked state.
+7. If a process disappears before emitting either `execution.completed` or `execution.aborted`, the run should be treated as orphaned. PID observation or browser polling may report that condition to the user, but must not infer success or auto-resume the run.
+
+Exit criteria for this addendum when implemented:
+
+- every bounded run emits deterministic start/step/terminal events keyed by `runId` and `artifactId`
+- guidance-required runs can be resumed explicitly without re-running completed steps
+- CLI and chat surfaces can render progress and questions from typed artifacts rather than scraping logs
+- the orchestration state machine remains artifact-backed and bounded even when multiple runs execute in parallel
+
 ### Phase 5 — Memory, context, and audit controls
 
 Objective: improve continuity without uncontrolled persistence.
