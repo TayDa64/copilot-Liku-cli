@@ -32,6 +32,8 @@ async function test(name, fn) {
     assert.strictEqual(result.data.filters.state, 'all');
     assert.strictEqual(result.data.filters.limit, 5);
     assert.strictEqual(result.data.githubApi.attempted, false);
+    assert.strictEqual(result.data.capability.key, 'issues.list');
+    assert.strictEqual(result.data.policy.allowed, true);
     assert.ok(result.message.includes('GitHub issues list'));
   });
 
@@ -44,6 +46,8 @@ async function test(name, fn) {
     assert.strictEqual(result.data.pullRequestNumber, 7);
     assert.strictEqual(result.data.filters.limit, 30);
     assert.strictEqual(result.data.githubApi.attempted, false);
+    assert.strictEqual(result.data.capability.key, 'pr.diff');
+    assert.strictEqual(result.data.policy.allowed, true);
     assert.ok(result.message.includes('GitHub pull request diff summary'));
   });
 
@@ -55,6 +59,8 @@ async function test(name, fn) {
     assert.strictEqual(result.data.schemaVersion, 'github.release-inspect.v1');
     assert.strictEqual(result.data.selector.kind, 'latest');
     assert.strictEqual(result.data.githubApi.attempted, false);
+    assert.strictEqual(result.data.capability.key, 'releases.inspect');
+    assert.strictEqual(result.data.policy.allowed, true);
     assert.ok(result.message.includes('GitHub release inspect'));
   });
 

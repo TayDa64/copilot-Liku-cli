@@ -1,16 +1,6 @@
 const { bold, dim, highlight, table, warn } = require('../util/output');
 const { parseBooleanEnvFlag } = require('../feature-flags');
-const { resolveGitHubAuthStatus } = require('../../main/github/auth-status');
-const { inspectGitHubRepository } = require('../../main/github/repo-inspect');
-const { inspectGitHubIssue } = require('../../main/github/issue-inspect');
-const { listGitHubIssues } = require('../../main/github/issues-list');
-const { inspectGitHubPullRequestDiff } = require('../../main/github/pr-diff-summary');
-const { listGitHubPullRequests } = require('../../main/github/pr-list');
-const { inspectGitHubPullRequest } = require('../../main/github/pr-inspect');
-const { inspectGitHubRelease } = require('../../main/github/release-inspect');
-const { listGitHubReleases } = require('../../main/github/releases-list');
-const { inspectGitHubWorkflowRun } = require('../../main/github/workflow-inspect');
-const { listGitHubWorkflowRuns } = require('../../main/github/workflow-runs');
+const { createGitHubCommandExecutor } = require('../../main/github/command-executor');
 
 function truncate(text, maxLength = 56) {
   const value = String(text || '').trim();
@@ -92,6 +82,7 @@ ${highlight('OPTIONS:')}
 
 ${highlight('NOTES:')}
   - These Phase 2 commands are read-only.
+  - Every GitHub command is registered with capability metadata and passes a read-only policy gate before execution.
   - GH_TOKEN or GITHUB_TOKEN improves private-repo and authenticated REST inspection.
   - Existing Copilot auth state is reused when available, but GitHub REST prefers GH_TOKEN/GITHUB_TOKEN.
 `);
@@ -467,6 +458,22 @@ function printReleaseInspect(report) {
   printWarnings(report.warnings);
 }
 
+const commandExecutor = createGitHubCommandExecutor();
+
+const printHandlers = {
+  'auth.status': printAuthStatus,
+  'repo.inspect': printRepoInspect,
+  'issues.list': printIssuesList,
+  'issues.inspect': printIssueInspect,
+  'pr.list': printPullRequestList,
+  'pr.inspect': printPullRequestInspect,
+  'pr.diff': printPullRequestDiffSummary,
+  'workflow.runs': printWorkflowRuns,
+  'workflow.inspect': printWorkflowInspect,
+  'releases.list': printReleasesList,
+  'releases.inspect': printReleaseInspect,
+};
+
 async function run(args, options) {
   const area = normalizeArea(args[0]);
   const action = String(args[1] || '').trim().toLowerCase();
@@ -493,200 +500,35 @@ async function run(args, options) {
     };
   }
 
-  if (area === 'auth' && action === 'status') {
-    const report = await resolveGitHubAuthStatus({
-      env: process.env,
-      featureFlagEnabled,
+  const report = await commandExecutor.execute({
+    source: 'cli',
+    area,
+    action,
+    positionals: args,
+    options: {
+      ...options,
       probe: parseBooleanEnvFlag(options.probe, true),
-    });
-    if (!options.json && !options.quiet) {
-      printAuthStatus(report);
-    }
-    return report;
-  }
-
-  if (area === 'repo' && action === 'inspect') {
-    const report = await inspectGitHubRepository({
-      cwd: process.cwd(),
-      env: process.env,
-      featureFlagEnabled,
       api: parseBooleanEnvFlag(options.api, true),
-      slug: options.slug,
-    });
-    if (!options.json && !options.quiet) {
-      printRepoInspect(report);
-    }
-    return report;
-  }
-
-  if (area === 'issues' && action === 'list') {
-    const report = await listGitHubIssues({
-      cwd: process.cwd(),
-      env: process.env,
-      featureFlagEnabled,
-      api: parseBooleanEnvFlag(options.api, true),
-      slug: options.slug,
-      state: options.state,
-      limit: options.limit,
-      labels: options.labels,
-    });
-    if (!options.json && !options.quiet) {
-      printIssuesList(report);
-    }
-    return report;
-  }
-
-  if (area === 'issues' && action === 'inspect') {
-    const report = await inspectGitHubIssue({
-      cwd: process.cwd(),
-      env: process.env,
-      featureFlagEnabled,
-      api: parseBooleanEnvFlag(options.api, true),
-      slug: options.slug,
-      number: args[2],
-    });
-    if (!options.json && !options.quiet && report.success === false) {
-      printUsageFailure(report);
-      showHelp();
-    } else if (!options.json && !options.quiet) {
-      printIssueInspect(report);
-    }
-    return report;
-  }
-
-  if (area === 'pr' && action === 'list') {
-    const report = await listGitHubPullRequests({
-      cwd: process.cwd(),
-      env: process.env,
-      featureFlagEnabled,
-      api: parseBooleanEnvFlag(options.api, true),
-      slug: options.slug,
-      state: options.state,
-      limit: options.limit,
-      base: options.base,
-      head: options.head,
-    });
-    if (!options.json && !options.quiet) {
-      printPullRequestList(report);
-    }
-    return report;
-  }
-
-  if (area === 'pr' && action === 'inspect') {
-    const report = await inspectGitHubPullRequest({
-      cwd: process.cwd(),
-      env: process.env,
-      featureFlagEnabled,
-      api: parseBooleanEnvFlag(options.api, true),
-      slug: options.slug,
-      number: args[2],
-    });
-    if (!options.json && !options.quiet && report.success === false) {
-      printUsageFailure(report);
-      showHelp();
-    } else if (!options.json && !options.quiet) {
-      printPullRequestInspect(report);
-    }
-    return report;
-  }
-
-  if (area === 'pr' && action === 'diff') {
-    const report = await inspectGitHubPullRequestDiff({
-      cwd: process.cwd(),
-      env: process.env,
-      featureFlagEnabled,
-      api: parseBooleanEnvFlag(options.api, true),
-      slug: options.slug,
-      number: args[2],
-      limit: options.limit,
-    });
-    if (!options.json && !options.quiet && report.success === false) {
-      printUsageFailure(report);
-      showHelp();
-    } else if (!options.json && !options.quiet) {
-      printPullRequestDiffSummary(report);
-    }
-    return report;
-  }
-
-  if ((area === 'workflow' || area === 'workflows') && action === 'runs') {
-    const report = await listGitHubWorkflowRuns({
-      cwd: process.cwd(),
-      env: process.env,
-      featureFlagEnabled,
-      api: parseBooleanEnvFlag(options.api, true),
-      slug: options.slug,
-      workflow: options.workflow,
-      branch: options.branch,
-      status: options.status,
-      event: options.event,
-      limit: options.limit,
-    });
-    if (!options.json && !options.quiet) {
-      printWorkflowRuns(report);
-    }
-    return report;
-  }
-
-  if (area === 'workflow' && action === 'inspect') {
-    const report = await inspectGitHubWorkflowRun({
-      cwd: process.cwd(),
-      env: process.env,
-      featureFlagEnabled,
-      api: parseBooleanEnvFlag(options.api, true),
-      slug: options.slug,
-      runId: args[2],
-    });
-    if (!options.json && !options.quiet && report.success === false) {
-      printUsageFailure(report);
-      showHelp();
-    } else if (!options.json && !options.quiet) {
-      printWorkflowInspect(report);
-    }
-    return report;
-  }
-
-  if (area === 'releases' && action === 'list') {
-    const report = await listGitHubReleases({
-      cwd: process.cwd(),
-      env: process.env,
-      featureFlagEnabled,
-      api: parseBooleanEnvFlag(options.api, true),
-      slug: options.slug,
-      limit: options.limit,
-    });
-    if (!options.json && !options.quiet) {
-      printReleasesList(report);
-    }
-    return report;
-  }
-
-  if (area === 'releases' && action === 'inspect') {
-    const report = await inspectGitHubRelease({
-      cwd: process.cwd(),
-      env: process.env,
-      featureFlagEnabled,
-      api: parseBooleanEnvFlag(options.api, true),
-      slug: options.slug,
-      selector: args[2],
-    });
-    if (!options.json && !options.quiet && report.success === false) {
-      printUsageFailure(report);
-      showHelp();
-    } else if (!options.json && !options.quiet) {
-      printReleaseInspect(report);
-    }
-    return report;
-  }
+    },
+    executionPreferences: options.executionPreferences,
+    cwd: process.cwd(),
+    env: process.env,
+    featureFlagEnabled,
+  });
 
   if (!options.json && !options.quiet) {
-    showHelp();
+    const handler = report?.capability?.key ? printHandlers[report.capability.key] : null;
+    if (report?.success === false) {
+      printUsageFailure(report);
+      if (report.error === 'USAGE') {
+        showHelp();
+      }
+    } else if (typeof handler === 'function') {
+      handler(report);
+    }
   }
-  return {
-    success: false,
-    error: 'USAGE',
-    message: `Unknown github command: ${area} ${action}`.trim(),
-  };
+
+  return report;
 }
 
 module.exports = {

@@ -307,6 +307,13 @@ npm run test:github-phase2
 
 Objective: formalize capabilities before agent autonomy.
 
+Current incremental implementation target for this repo slice:
+
+- register the shipped read-only GitHub capabilities with declared schema, risk, side-effect, and source metadata
+- route both `liku github ...` and shared `/github ...` execution through a common registry-aware executor
+- apply a read-only capability policy gate before adapter execution
+- emit structured telemetry records for each registered GitHub capability run
+
 Tasks:
 
 - Create a tool registry for all GitHub and local tools.
@@ -320,6 +327,12 @@ Exit criteria:
 - no mutating tool runs without passing registry + policy checks
 - every tool has a schema and declared risk level
 - logs/trace are usable for replay and diagnosis
+
+Phase 3 verification command for this repo slice:
+
+```bash
+npm run test:github-phase3
+```
 
 ### Phase 4 — Introduce bounded agent orchestration
 

@@ -1,31 +1,5 @@
 const { parseLongOptions, tokenize } = require('../ai-service/slash-command-helpers');
-const { resolveGitHubAuthStatus } = require('./auth-status');
-const { inspectGitHubRepository } = require('./repo-inspect');
-const { inspectGitHubIssue } = require('./issue-inspect');
-const { listGitHubIssues } = require('./issues-list');
-const { inspectGitHubPullRequestDiff } = require('./pr-diff-summary');
-const { listGitHubPullRequests } = require('./pr-list');
-const { inspectGitHubPullRequest } = require('./pr-inspect');
-const { inspectGitHubRelease } = require('./release-inspect');
-const { listGitHubReleases } = require('./releases-list');
-const { inspectGitHubWorkflowRun } = require('./workflow-inspect');
-const { listGitHubWorkflowRuns } = require('./workflow-runs');
-
-function parseBooleanOption(value, fallback = true) {
-  if (value === undefined || value === null || value === '') {
-    return fallback;
-  }
-
-  if (typeof value === 'boolean') {
-    return value;
-  }
-
-  const normalized = String(value).trim().toLowerCase();
-  if (!normalized) return fallback;
-  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
-  if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
-  return fallback;
-}
+const { createGitHubCommandExecutor } = require('./command-executor');
 
 function isFeatureFlagEnabled(env = process.env) {
   return /^(1|true|yes|on)$/i.test(String(env.LIKU_ENABLE_GITHUB || '').trim());
@@ -91,6 +65,7 @@ function formatHelp() {
     '',
     'Notes:',
     '- Uses the same typed read-only GitHub adapters as `liku github ...`.',
+    '- Every GitHub slash command is registered with capability metadata and passes a read-only policy gate before execution.',
     '- Slash-command responses are chat-friendly summaries; structured adapter reports are attached in the result `data` field.',
   ].join('\n');
 }
@@ -386,6 +361,20 @@ function formatReleaseInspect(report) {
   return [...lines, ...formatWarnings(report.warnings)].join('\n');
 }
 
+const slashFormatters = {
+  'auth.status': formatAuthStatus,
+  'repo.inspect': formatRepoInspect,
+  'issues.list': formatIssuesList,
+  'issues.inspect': formatIssueInspect,
+  'pr.list': formatPullRequestList,
+  'pr.inspect': formatPullRequestInspect,
+  'pr.diff': formatPullRequestDiff,
+  'workflow.runs': formatWorkflowRuns,
+  'workflow.inspect': formatWorkflowInspect,
+  'releases.list': formatReleasesList,
+  'releases.inspect': formatReleaseInspect,
+};
+
 function createGitHubSlashCommandHandler(dependencies = {}) {
   const tokenizeImpl = typeof dependencies.tokenize === 'function' ? dependencies.tokenize : tokenize;
   const parseLongOptionsImpl = typeof dependencies.parseLongOptions === 'function' ? dependencies.parseLongOptions : parseLongOptions;
@@ -395,21 +384,26 @@ function createGitHubSlashCommandHandler(dependencies = {}) {
     : () => String(dependencies.cwd || process.cwd());
   const aiService = dependencies.aiService || null;
 
-  const adapters = {
-    inspectGitHubIssue: dependencies.inspectGitHubIssue || inspectGitHubIssue,
-    inspectGitHubPullRequest: dependencies.inspectGitHubPullRequest || inspectGitHubPullRequest,
-    inspectGitHubPullRequestDiff: dependencies.inspectGitHubPullRequestDiff || inspectGitHubPullRequestDiff,
-    inspectGitHubRelease: dependencies.inspectGitHubRelease || inspectGitHubRelease,
-    inspectGitHubRepository: dependencies.inspectGitHubRepository || inspectGitHubRepository,
-    inspectGitHubWorkflowRun: dependencies.inspectGitHubWorkflowRun || inspectGitHubWorkflowRun,
-    listGitHubIssues: dependencies.listGitHubIssues || listGitHubIssues,
-    listGitHubPullRequests: dependencies.listGitHubPullRequests || listGitHubPullRequests,
-    listGitHubReleases: dependencies.listGitHubReleases || listGitHubReleases,
-    listGitHubWorkflowRuns: dependencies.listGitHubWorkflowRuns || listGitHubWorkflowRuns,
-    resolveGitHubAuthStatus: dependencies.resolveGitHubAuthStatus || resolveGitHubAuthStatus,
-  };
-
   const helpText = formatHelp();
+  const commandExecutor = createGitHubCommandExecutor({
+    aiService,
+    env,
+    getCwd,
+    evaluateGitHubCapabilityPolicy: dependencies.evaluateGitHubCapabilityPolicy,
+    findGitHubCapability: dependencies.findGitHubCapability,
+    inspectGitHubIssue: dependencies.inspectGitHubIssue,
+    inspectGitHubPullRequest: dependencies.inspectGitHubPullRequest,
+    inspectGitHubPullRequestDiff: dependencies.inspectGitHubPullRequestDiff,
+    inspectGitHubRelease: dependencies.inspectGitHubRelease,
+    inspectGitHubRepository: dependencies.inspectGitHubRepository,
+    inspectGitHubWorkflowRun: dependencies.inspectGitHubWorkflowRun,
+    listGitHubIssues: dependencies.listGitHubIssues,
+    listGitHubPullRequests: dependencies.listGitHubPullRequests,
+    listGitHubReleases: dependencies.listGitHubReleases,
+    listGitHubWorkflowRuns: dependencies.listGitHubWorkflowRuns,
+    resolveGitHubAuthStatus: dependencies.resolveGitHubAuthStatus,
+    writeTelemetry: dependencies.writeTelemetry,
+  });
 
   async function executeSlashCommand(command) {
     const parts = tokenizeImpl(String(command || '').trim());
@@ -427,161 +421,32 @@ function createGitHubSlashCommandHandler(dependencies = {}) {
       return { type: 'info', message: helpText };
     }
 
-    if (area === 'auth' && action === 'status') {
-      const report = await adapters.resolveGitHubAuthStatus({
-        aiService,
-        env,
-        featureFlagEnabled,
-        probe: parseBooleanOption(options.probe, true),
-      });
-      return buildResult(report, formatAuthStatus(report));
-    }
+    const report = await commandExecutor.execute({
+      source: 'slash',
+      area,
+      action,
+      positionals,
+      options,
+      cwd,
+      env,
+      aiService,
+      featureFlagEnabled,
+      executionPreferences: dependencies.executionPreferences,
+    });
 
-    if (area === 'repo' && action === 'inspect') {
-      const report = await adapters.inspectGitHubRepository({
-        cwd,
-        env,
-        featureFlagEnabled,
-        api: parseBooleanOption(options.api, true),
-        slug: options.slug,
-      });
-      return buildResult(report, formatRepoInspect(report));
-    }
-
-    if (area === 'issues' && action === 'list') {
-      const report = await adapters.listGitHubIssues({
-        cwd,
-        env,
-        featureFlagEnabled,
-        api: parseBooleanOption(options.api, true),
-        slug: options.slug,
-        state: options.state,
-        limit: options.limit,
-        labels: options.labels,
-      });
-      return buildResult(report, formatIssuesList(report));
-    }
-
-    if (area === 'issues' && action === 'inspect') {
-      const report = await adapters.inspectGitHubIssue({
-        cwd,
-        env,
-        featureFlagEnabled,
-        api: parseBooleanOption(options.api, true),
-        slug: options.slug,
-        number: positionals[2],
-      });
-      if (report.success === false) {
+    if (report?.success === false) {
+      if (report.error === 'USAGE') {
         return buildUsageResult(report.message, helpText);
       }
-      return buildResult(report, formatIssueInspect(report));
+      return buildResult(report, report.message || 'GitHub slash command failed.', 'error');
     }
 
-    if (area === 'pr' && action === 'list') {
-      const report = await adapters.listGitHubPullRequests({
-        cwd,
-        env,
-        featureFlagEnabled,
-        api: parseBooleanOption(options.api, true),
-        slug: options.slug,
-        state: options.state,
-        limit: options.limit,
-        base: options.base,
-        head: options.head,
-      });
-      return buildResult(report, formatPullRequestList(report));
+    const formatter = report?.capability?.key ? slashFormatters[report.capability.key] : null;
+    if (typeof formatter !== 'function') {
+      return buildResult(report, report?.message || 'GitHub slash command completed.');
     }
 
-    if (area === 'pr' && action === 'inspect') {
-      const report = await adapters.inspectGitHubPullRequest({
-        cwd,
-        env,
-        featureFlagEnabled,
-        api: parseBooleanOption(options.api, true),
-        slug: options.slug,
-        number: positionals[2],
-      });
-      if (report.success === false) {
-        return buildUsageResult(report.message, helpText);
-      }
-      return buildResult(report, formatPullRequestInspect(report));
-    }
-
-    if (area === 'pr' && action === 'diff') {
-      const report = await adapters.inspectGitHubPullRequestDiff({
-        cwd,
-        env,
-        featureFlagEnabled,
-        api: parseBooleanOption(options.api, true),
-        slug: options.slug,
-        number: positionals[2],
-        limit: options.limit,
-      });
-      if (report.success === false) {
-        return buildUsageResult(report.message, helpText);
-      }
-      return buildResult(report, formatPullRequestDiff(report));
-    }
-
-    if (area === 'workflow' && action === 'runs') {
-      const report = await adapters.listGitHubWorkflowRuns({
-        cwd,
-        env,
-        featureFlagEnabled,
-        api: parseBooleanOption(options.api, true),
-        slug: options.slug,
-        workflow: options.workflow,
-        branch: options.branch,
-        status: options.status,
-        event: options.event,
-        limit: options.limit,
-      });
-      return buildResult(report, formatWorkflowRuns(report));
-    }
-
-    if (area === 'workflow' && action === 'inspect') {
-      const report = await adapters.inspectGitHubWorkflowRun({
-        cwd,
-        env,
-        featureFlagEnabled,
-        api: parseBooleanOption(options.api, true),
-        slug: options.slug,
-        runId: positionals[2],
-      });
-      if (report.success === false) {
-        return buildUsageResult(report.message, helpText);
-      }
-      return buildResult(report, formatWorkflowInspect(report));
-    }
-
-    if (area === 'releases' && action === 'list') {
-      const report = await adapters.listGitHubReleases({
-        cwd,
-        env,
-        featureFlagEnabled,
-        api: parseBooleanOption(options.api, true),
-        slug: options.slug,
-        limit: options.limit,
-      });
-      return buildResult(report, formatReleasesList(report));
-    }
-
-    if (area === 'releases' && action === 'inspect') {
-      const report = await adapters.inspectGitHubRelease({
-        cwd,
-        env,
-        featureFlagEnabled,
-        api: parseBooleanOption(options.api, true),
-        slug: options.slug,
-        selector: positionals[2],
-      });
-      if (report.success === false) {
-        return buildUsageResult(report.message, helpText);
-      }
-      return buildResult(report, formatReleaseInspect(report));
-    }
-
-    return buildUsageResult(`Unknown GitHub slash command: ${[area, action].filter(Boolean).join(' ') || '/github'}`, helpText);
+    return buildResult(report, formatter(report));
   }
 
   return {

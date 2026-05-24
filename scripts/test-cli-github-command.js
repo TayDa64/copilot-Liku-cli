@@ -62,6 +62,8 @@ async function main() {
     assert.strictEqual(authPayload.schemaVersion, 'github.auth-status.v1');
     assert.strictEqual(authPayload.featureFlagEnabled, true);
     assert.strictEqual(authPayload.githubApi.probeAttempted, false);
+    assert.strictEqual(authPayload.capability.key, 'auth.status');
+    assert.strictEqual(authPayload.policy.allowed, true);
 
     const repoInspect = await runNode([
       'src/cli/liku.js',
@@ -100,6 +102,8 @@ async function main() {
     assert.strictEqual(issuesPayload.githubApi.attempted, false);
     assert.strictEqual(issuesPayload.filters.state, 'all');
     assert.strictEqual(issuesPayload.filters.limit, 5);
+    assert.strictEqual(issuesPayload.capability.key, 'issues.list');
+    assert.strictEqual(issuesPayload.policy.allowed, true);
 
     const issueInspect = await runNode([
       'src/cli/liku.js',
@@ -155,6 +159,8 @@ async function main() {
     assert.strictEqual(prDiffPayload.pullRequestNumber, 7);
     assert.strictEqual(prDiffPayload.githubApi.attempted, false);
     assert.strictEqual(prDiffPayload.filters.limit, 30);
+    assert.strictEqual(prDiffPayload.capability.key, 'pr.diff');
+    assert.strictEqual(prDiffPayload.policy.allowed, true);
 
     const prInspect = await runNode([
       'src/cli/liku.js',

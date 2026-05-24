@@ -15,6 +15,9 @@ The shared `/github ...` slash-command path is now implemented in the root runti
 Current implementation seams:
 
 - `src/main/github/slash-command-handler.js` — shared `/github ...` parsing, adapter dispatch, and chat-friendly formatting
+- `src/main/github/command-executor.js` — shared GitHub capability executor used by CLI and slash-command surfaces
+- `src/main/github/capability-registry.js` — declared GitHub capability metadata (schema, risk, side-effect, sources)
+- `src/main/github/capability-policy.js` — read-only policy evaluation before GitHub capability execution
 - `src/main/ai-service/commands.js` — routes `/github ...` through the shared GitHub slash handler
 - `src/main/ai-service/slash-command-helpers.js` — now includes reusable long-option parsing for slash commands
 - `scripts/test-ai-service-github-slash-commands.js` — proof that `aiService.handleCommand('/github ...')` works through the real facade
@@ -192,21 +195,14 @@ The parser only needs to support the GitHub Phase 2 surface:
 
 Do **not** rely on freeform prompt interpretation for flags.
 
-### Implemented dispatch: call adapters directly, not by shelling out
+### Implemented dispatch: call the shared executor, not by shelling out
 
-The slash handler should call the adapter functions directly:
+The slash handler now routes parsed `/github ...` input into `src/main/github/command-executor.js`, which:
 
-- `resolveGitHubAuthStatus()`
-- `inspectGitHubRepository()`
-- `listGitHubIssues()`
-- `listGitHubPullRequests()`
-- `inspectGitHubIssue()`
-- `inspectGitHubPullRequest()`
-- `inspectGitHubPullRequestDiff()`
-- `listGitHubWorkflowRuns()`
-- `inspectGitHubWorkflowRun()`
-- `inspectGitHubRelease()`
-- `listGitHubReleases()`
+- resolves the registered GitHub capability from `src/main/github/capability-registry.js`
+- applies the read-only policy gate in `src/main/github/capability-policy.js`
+- invokes the typed GitHub adapter for the capability
+- emits structured telemetry for the execution
 
 Avoid spawning `liku github ...` as a subprocess from inside slash-command handling. That would create a second parsing/execution hop and make trace/policy alignment harder.
 
@@ -220,14 +216,14 @@ Recommended split:
 - CLI formatting stays in `src/cli/commands/github.js`
 - chat/slash formatting lives in a shared chat-facing formatter module if needed
 
-### Remaining recommendation: converge on the typed seam over time
+### Implemented convergence on the shared execution seam
 
 The root runtime already has a typed CLI seam in `src/cli/command-seam.js` with:
 
 - `cli.command-request.v1`
 - `cli.command-execution.v1`
 
-The best longer-term architecture is to extract the GitHub command execution core into a shared service that both of these surfaces call:
+That convergence is now started for GitHub read-only work through the shared GitHub executor used by both:
 
 - top-level CLI: `liku github ...`
 - shared slash commands: `/github ...`
