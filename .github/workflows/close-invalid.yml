@@ -5,7 +5,7 @@ name: Close issue/PR on adding invalid label
 on:
   issues:
     types: [labeled]
-  pull_request_target:
+  pull_request:
     types: [labeled]
 
 permissions:
@@ -29,7 +29,7 @@ jobs:
         run: gh issue close $URL
 
       - name: Close PR
-        if: ${{ github.event_name == 'pull_request_target' }}
+        if: ${{ github.event_name == 'pull_request' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           URL: ${{ github.event.pull_request.html_url }}

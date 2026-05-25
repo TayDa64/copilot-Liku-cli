@@ -18,6 +18,7 @@ Run the narrow release-facing checks locally before publishing:
 npm run test:cli-phase01
 npm run test:persistence-controls
 npm run test:github-phase5-bundles
+npm run verify:workflow-policy
 npm run verify:package
 ```
 
@@ -32,6 +33,7 @@ npm run verify:package
 
 - `validate.yml` — fast CLI seam and ai-service contract validation
 - `test.yml` — persistence + GitHub regression suites
+- `policy.yml` — dependency review, secret scanning, and workflow/action policy checks
 - `package.yml` — npm pack dry-run verification and manifest artifact upload
 - `publish-npm.yml` — release-time publish workflow
 
