@@ -37,6 +37,7 @@
     "smoke:tradingview-live": "node scripts/live-tradingview-smoke.js",
     "tradingview:inspect-launch": "node scripts/inspect-tradingview-launch-capability.js",
     "tradingview:write-launch-contract": "node scripts/write-tradingview-launch-contract.js",
+    "verify:package": "node scripts/verify-package-dry-run.js",
     "smoke": "node scripts/smoke-command-system.js",
     "liku": "node src/cli/liku.js",
     "build:uia": "powershell -ExecutionPolicy Bypass -File src/native/windows-uia-dotnet/build.ps1",
