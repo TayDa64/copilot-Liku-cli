@@ -53,6 +53,8 @@ async function main() {
     assert.strictEqual(githubHelp.code, 0, 'github help exits 0');
     assert(githubHelp.stdout.includes('liku github capabilities list'), 'github help lists capability listing');
     assert(githubHelp.stdout.includes('liku github capabilities inspect pr.diff'), 'github help lists capability inspect');
+    assert(githubHelp.stdout.includes('liku github context bundle pr 123 --slug owner/repo'), 'github help lists context bundle pr');
+    assert(githubHelp.stdout.includes('liku github context bundle repo --limit 5 --out-file'), 'github help lists context bundle repo');
     assert(githubHelp.stdout.includes('liku github plan build pr diff 123 --limit 50'), 'github help lists plan build');
     assert(githubHelp.stdout.includes('liku github plan execute pr diff 123 --limit 50'), 'github help lists plan execute');
     assert(githubHelp.stdout.includes('liku github plan resume --guidance-file'), 'github help lists plan resume');
@@ -110,6 +112,29 @@ async function main() {
     assert.strictEqual(capabilityInspectPayload.policy.allowed, true);
     assert.strictEqual(capabilityInspectPayload.entry.key, 'pr.diff');
     assert.strictEqual(capabilityInspectPayload.entry.policyBySource.cli.allowed, true);
+
+    const contextBundle = await runNode([
+      'src/cli/liku.js',
+      'github',
+      'context',
+      'bundle',
+      'pr',
+      '7',
+      '--json',
+      '--api',
+      'false',
+    ], repoRoot, sharedEnv);
+    assert.strictEqual(contextBundle.code, 0, 'github context bundle exits 0');
+    const contextBundlePayload = JSON.parse(contextBundle.stdout);
+    assert.strictEqual(contextBundlePayload.schemaVersion, 'github.context-bundle.v1');
+    assert.strictEqual(contextBundlePayload.capability.key, 'context.bundle');
+    assert.strictEqual(contextBundlePayload.policy.allowed, true);
+    assert.strictEqual(contextBundlePayload.target.kind, 'pr');
+    assert.strictEqual(contextBundlePayload.target.selector, '7');
+    assert.strictEqual(contextBundlePayload.review.exportKind, 'github-context-bundle');
+    assert.strictEqual(contextBundlePayload.review.reviewRequired, true);
+    assert.ok(contextBundlePayload.artifact.filePath);
+    assert.ok(fs.existsSync(contextBundlePayload.artifact.filePath));
 
     const planBuild = await runNode([
       'src/cli/liku.js',

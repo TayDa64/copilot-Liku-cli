@@ -77,6 +77,36 @@ test('conversation history store persists bounded entries', () => {
     reloaded.getConversationHistory().map((entry) => entry.content),
     ['two', 'three', 'four', 'five']
   );
+  reloaded.getConversationHistory().forEach((entry) => {
+    assert.strictEqual(entry.persistence.store, 'conversation-history');
+    assert.strictEqual(entry.persistence.lane, 'task');
+    assert.ok(entry.persistence.retention.expiresAt);
+  });
+
+  fs.rmSync(tempRoot, { recursive: true, force: true });
+});
+
+test('conversation history store redacts persisted secrets', () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'liku-history-'));
+  const historyFile = path.join(tempRoot, 'conversation-history.json');
+  const store = createConversationHistoryStore({
+    historyFile,
+    likuHome: tempRoot,
+    maxHistory: 4
+  });
+
+  store.pushConversationEntry({
+    role: 'user',
+    content: 'Use Authorization: Bearer ghp_1234567890abcdefghijklmn and api_key=secret-value'
+  });
+  store.saveConversationHistory();
+
+  const persisted = JSON.parse(fs.readFileSync(historyFile, 'utf8'));
+  assert.strictEqual(persisted.length, 1);
+  assert.ok(persisted[0].content.includes('[redacted token]'));
+  assert.ok(persisted[0].content.includes('[redacted secret]'));
+  assert.strictEqual(persisted[0].persistence.sensitivity, 'restricted');
+  assert.ok(persisted[0].persistence.redactionCount >= 2);
 
   fs.rmSync(tempRoot, { recursive: true, force: true });
 });

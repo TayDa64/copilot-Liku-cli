@@ -32,6 +32,9 @@ ${highlight('USAGE:')}
   liku github auth status
   liku github capabilities list
   liku github capabilities inspect pr.diff
+  liku github context bundle pr 123 --slug owner/repo
+  liku github context bundle issue 321 --slug owner/repo
+  liku github context bundle repo --limit 5 --out-file C:\\Users\\you\\bundle.json
   liku github plan build pr diff 123 --limit 50
   liku github plan execute pr diff 123 --limit 50
   liku github plan execute --plan-file C:\\Users\\you\\.liku\\github\\plans\\github-plan-example.plan.json
@@ -62,6 +65,7 @@ ${highlight('COMMANDS:')}
   auth status    Inspect Copilot/GitHub auth state without mutating anything
   capabilities list    List registered GitHub capabilities and policy metadata
   capabilities inspect Inspect one registered GitHub capability by key
+  context bundle Build a reviewed, sanitized GitHub context bundle for PR, issue, or repo context
   plan build     Build a deterministic one-step execution plan for a registered GitHub capability
   plan execute   Execute a deterministic read-only GitHub plan within bounded budgets
   plan resume    Resume a blocked read-only GitHub plan from a saved guidance checkpoint
@@ -90,6 +94,7 @@ ${highlight('OPTIONS:')}
   --branch <name> Filter workflow runs to one branch
   --status <value> Filter workflow runs by status/conclusion-compatible value
   --event <name> Filter workflow runs by triggering event
+  --out-file <path> Write a reviewed context bundle artifact to an explicit file path
   --plan-file <path> Replay and execute a saved GitHub plan artifact instead of building a new plan
   --guidance-file <path> Resume a blocked GitHub plan from a saved guidance checkpoint artifact
   --resume-token <token> Single-use token that authorizes one blocked plan resume
@@ -99,6 +104,7 @@ ${highlight('OPTIONS:')}
 ${highlight('NOTES:')}
   - These Phase 2 commands are read-only.
   - Every GitHub command is registered with capability metadata and passes a read-only policy gate before execution.
+  - The context bundle path writes a reviewed, sanitized local artifact under the Liku home directory unless --out-file is provided.
   - The plan execute path writes replayable plan/result artifacts under the Liku home directory.
   - The plan resume path reads a saved guidance checkpoint and continues the bounded run without replaying completed steps.
   - GH_TOKEN or GITHUB_TOKEN improves private-repo and authenticated REST inspection.
@@ -278,6 +284,31 @@ function printPlanExecute(report) {
   );
 
   console.log(`\n${highlight('Execution summary:')} status=${report.execution.status || report.status || 'unknown'} elapsedMs=${report.execution.elapsedMs ?? '?'} stepsExecuted=${report.execution.stepsExecuted ?? '?'} timedOut=${report.execution.timedOut ? 'yes' : 'no'}`);
+}
+
+function printContextBundle(report) {
+  console.log(`\n${bold('GitHub context bundle')}\n`);
+  console.log(`${highlight('Bundle:')} ${report.bundleId || 'unknown'} (${report.target?.kind || 'unknown'}${report.target?.selector ? ` ${report.target.selector}` : ''})`);
+  console.log(`${highlight('Target repo:')} ${report.target?.slug || report.repoContext?.target?.slug || report.repoContext?.repoIdentity?.repoName || 'unknown'}`);
+  console.log(`${highlight('Artifact:')} ${report.artifact?.filePath || 'n/a'}`);
+  console.log(`${highlight('Review:')} sensitivity=${report.review?.sensitivity || 'unknown'} redactions=${report.review?.redactionCount ?? 0} reviewRequired=${report.review?.reviewRequired ? 'yes' : 'no'}`);
+  console.log(`${highlight('Components:')} ${report.summary?.componentCount ?? '?'}`);
+
+  if (report.target?.kind === 'pr') {
+    console.log(`${highlight('PR state:')} ${report.summary?.pullRequestState || 'unknown'}`);
+    console.log(`${highlight('Diff summary:')} files=${report.summary?.changedFileCount ?? 0} +${report.summary?.totalAdditions ?? 0} -${report.summary?.totalDeletions ?? 0}`);
+  } else if (report.target?.kind === 'issue') {
+    console.log(`${highlight('Issue state/comments:')} ${report.summary?.issueState || 'unknown'} / ${report.summary?.commentCount ?? 0}`);
+  } else if (report.target?.kind === 'repo') {
+    console.log(`${highlight('Repo summary:')} issues=${report.summary?.issueCount ?? 0} prs=${report.summary?.pullRequestCount ?? 0} workflowRuns=${report.summary?.workflowRunCount ?? 0}`);
+  }
+
+  if (Array.isArray(report.review?.reasons) && report.review.reasons.length > 0) {
+    console.log(`\n${highlight('Review notes:')}`);
+    report.review.reasons.forEach((reason) => console.log(`- ${reason}`));
+  }
+
+  printWarnings(report.warnings);
 }
 
 function printRepoInspect(report) {
@@ -604,6 +635,7 @@ const printHandlers = {
   'auth.status': printAuthStatus,
   'capabilities.list': printCapabilitiesList,
   'capabilities.inspect': printCapabilityInspect,
+  'context.bundle': printContextBundle,
   'plan.build': printPlanBuild,
   'plan.execute': printPlanExecute,
   'plan.resume': printPlanExecute,
@@ -641,7 +673,7 @@ async function run(args, options) {
     return {
       success: false,
       error: 'USAGE',
-      message: 'Usage: liku github <auth|capabilities|plan|repo|issues|pr|workflow|releases> <status|inspect|list|build|execute|resume|runs>',
+      message: 'Usage: liku github <auth|capabilities|context|plan|repo|issues|pr|workflow|releases> <status|inspect|list|bundle|build|execute|resume|runs>',
     };
   }
 

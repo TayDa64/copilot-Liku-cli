@@ -29,12 +29,13 @@ async function test(name, fn) {
 (async () => {
   await test('registry exposes read-only metadata for current GitHub capabilities', async () => {
     const capabilities = listGitHubCapabilities();
-    assert.ok(capabilities.length >= 12);
+    assert.ok(capabilities.length >= 13);
 
     const keys = capabilities.map((entry) => entry.key);
     assert.ok(keys.includes('auth.status'));
     assert.ok(keys.includes('capabilities.list'));
     assert.ok(keys.includes('capabilities.inspect'));
+    assert.ok(keys.includes('context.bundle'));
     assert.ok(keys.includes('plan.build'));
     assert.ok(keys.includes('plan.execute'));
     assert.ok(keys.includes('plan.resume'));
@@ -50,6 +51,12 @@ async function test(name, fn) {
     assert.strictEqual(issueList.approvalRequirement, 'none');
     assert.strictEqual(issueList.riskLevel, 'low');
     assert.deepStrictEqual(issueList.allowedSources.slice().sort(), ['cli', 'slash']);
+
+    const contextBundle = findGitHubCapability('context', 'bundle');
+    assert.ok(contextBundle);
+    assert.strictEqual(contextBundle.responseSchemaVersion, 'github.context-bundle.v1');
+    assert.strictEqual(contextBundle.sideEffectClass, 'read');
+    assert.deepStrictEqual(contextBundle.allowedSources.slice().sort(), ['cli', 'slash']);
   });
 
   await test('capability catalog helpers summarize registered GitHub capabilities with policy previews', async () => {
@@ -58,6 +65,7 @@ async function test(name, fn) {
     assert.strictEqual(listReport.schemaVersion, 'github.capabilities-list.v1');
     assert.ok(Array.isArray(listReport.capabilities));
     assert.ok(listReport.capabilities.some((entry) => entry.key === 'capabilities.list'));
+    assert.ok(listReport.capabilities.some((entry) => entry.key === 'context.bundle'));
     assert.ok(listReport.capabilities.some((entry) => entry.key === 'plan.build'));
     assert.ok(listReport.capabilities.some((entry) => entry.key === 'plan.execute'));
     assert.ok(listReport.capabilities.some((entry) => entry.key === 'plan.resume'));

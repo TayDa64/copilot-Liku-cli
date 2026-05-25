@@ -4,6 +4,11 @@ const path = require('path');
 const { LIKU_HOME } = require('../shared/liku-home');
 const { normalizeName, resolveProjectIdentity } = require('../shared/project-identity');
 const { buildExecutionContextEnvelope } = require('./ai-service/execution-context');
+const {
+  buildSessionStatePersistence,
+  PERSISTENCE_ENTRY_SCHEMA_VERSION,
+  sanitizePersistedValue
+} = require('./persistence-controls');
 
 const SESSION_INTENT_SCHEMA_VERSION = 'session-intent.v1';
 const SESSION_INTENT_FILE = path.join(LIKU_HOME, 'session-intent-state.json');
@@ -1009,6 +1014,27 @@ function ensureParentDir(filePath) {
   }
 }
 
+function serializePersistedSessionState(state) {
+  const stateWithoutPersistence = cloneState(state || defaultState());
+  delete stateWithoutPersistence.persistence;
+
+  const sanitized = sanitizePersistedValue(stateWithoutPersistence, {
+    path: ['sessionIntentState']
+  });
+  const recordedAt = sanitized.value.updatedAt || sanitized.value.createdAt || nowIso();
+
+  return {
+    state: {
+      ...sanitized.value,
+      persistence: buildSessionStatePersistence({
+        recordedAt,
+        redactions: sanitized.redactions
+      })
+    },
+    redactions: sanitized.redactions
+  };
+}
+
 function buildRepoSnapshot(cwd) {
   const identity = resolveProjectIdentity({ cwd });
   return {
@@ -1623,7 +1649,13 @@ function createSessionIntentStateStore(options = {}) {
 
   function loadState() {
     if (cachedState) return cachedState;
-    const loaded = safeReadJson(stateFile);
+    const loadedRaw = safeReadJson(stateFile);
+    const loaded = loadedRaw && typeof loadedRaw === 'object'
+      ? { ...loadedRaw }
+      : null;
+    if (loaded && loaded.persistence) {
+      delete loaded.persistence;
+    }
     cachedState = {
       ...defaultState(),
       ...(loaded && typeof loaded === 'object' ? loaded : {})
@@ -1634,9 +1666,12 @@ function createSessionIntentStateStore(options = {}) {
     cachedState = migrateLegacyCompartmentState(cachedState);
     const cleaned = cleanupLifecycleState(cachedState, { addMemoryNote, nowProvider });
     cachedState = cleaned.state;
-    if (cleaned.changed) {
+    const requiresPersistenceRewrite = !loadedRaw?.persistence
+      || loadedRaw.persistence.schemaVersion !== PERSISTENCE_ENTRY_SCHEMA_VERSION;
+    const serialized = serializePersistedSessionState(cachedState);
+    if (cleaned.changed || requiresPersistenceRewrite || serialized.redactions.length > 0) {
       ensureParentDir(stateFile);
-      fs.writeFileSync(stateFile, JSON.stringify(cachedState, null, 2));
+      fs.writeFileSync(stateFile, JSON.stringify(serialized.state, null, 2));
     }
     return cachedState;
   }
@@ -1686,7 +1721,8 @@ function createSessionIntentStateStore(options = {}) {
     const state = mirroredState;
     cachedState = state;
     ensureParentDir(stateFile);
-    fs.writeFileSync(stateFile, JSON.stringify(state, null, 2));
+    const serialized = serializePersistedSessionState(state);
+    fs.writeFileSync(stateFile, JSON.stringify(serialized.state, null, 2));
     return cloneState(state);
   }
 

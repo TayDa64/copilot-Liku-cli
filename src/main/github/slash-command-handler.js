@@ -54,6 +54,9 @@ function formatHelp() {
     '/github auth status [--probe false]',
     '/github capabilities list',
     '/github capabilities inspect <capability-key>',
+    '/github context bundle pr <number> [--slug owner/repo] [--api false] [--out-file <path>]',
+    '/github context bundle issue <number> [--slug owner/repo] [--api false] [--out-file <path>]',
+    '/github context bundle repo [--slug owner/repo] [--limit N] [--api false] [--out-file <path>]',
     '/github plan build <auth|capabilities|repo|issues|pr|workflow|releases> <status|inspect|list|diff|runs> [...]',
     '/github plan execute <auth|capabilities|repo|issues|pr|workflow|releases> <status|inspect|list|diff|runs> [...]',
     '/github plan execute --plan-file <path>',
@@ -72,6 +75,7 @@ function formatHelp() {
     'Notes:',
     '- Uses the same typed read-only GitHub adapters as `liku github ...`.',
     '- Every GitHub slash command is registered with capability metadata and passes a read-only policy gate before execution.',
+    '- `/github context bundle ...` writes a reviewed, sanitized local artifact for PR, issue, or repo context before any future orchestration consumes it.',
     '- `/github plan execute ...` writes replayable plan/result artifacts and can replay from `--plan-file`.',
     '- `/github plan resume ...` resumes a blocked bounded run from a saved guidance checkpoint without replaying completed steps.',
     '- Slash-command responses are chat-friendly summaries; structured adapter reports are attached in the result `data` field.',
@@ -482,10 +486,39 @@ function formatReleaseInspect(report) {
   return [...lines, ...formatWarnings(report.warnings)].join('\n');
 }
 
+function formatContextBundle(report) {
+  const lines = [
+    'GitHub context bundle',
+    `Bundle: ${report.bundleId || 'unknown'} (${report.target?.kind || 'unknown'}${report.target?.selector ? ` ${report.target.selector}` : ''})`,
+    `Target repo: ${report.target?.slug || report.repoContext?.target?.slug || report.repoContext?.repoIdentity?.repoName || 'unknown'}`,
+    `Artifact: ${report.artifact?.filePath || 'n/a'}`,
+    `Review: sensitivity=${report.review?.sensitivity || 'unknown'} redactions=${report.review?.redactionCount ?? 0} required=${report.review?.reviewRequired ? 'yes' : 'no'}`,
+    `Components: ${report.summary?.componentCount ?? '?'}`,
+  ];
+
+  if (report.target?.kind === 'pr') {
+    lines.push(
+      `PR state: ${report.summary?.pullRequestState || 'unknown'}`,
+      `Diff summary: files=${report.summary?.changedFileCount ?? 0} +${report.summary?.totalAdditions ?? 0} -${report.summary?.totalDeletions ?? 0}`
+    );
+  } else if (report.target?.kind === 'issue') {
+    lines.push(`Issue state/comments: ${report.summary?.issueState || 'unknown'} / ${report.summary?.commentCount ?? 0}`);
+  } else if (report.target?.kind === 'repo') {
+    lines.push(`Repo summary: issues=${report.summary?.issueCount ?? 0} prs=${report.summary?.pullRequestCount ?? 0} workflowRuns=${report.summary?.workflowRunCount ?? 0}`);
+  }
+
+  if (Array.isArray(report.review?.reasons) && report.review.reasons.length > 0) {
+    lines.push('Review notes:', ...report.review.reasons.map((reason) => `- ${reason}`));
+  }
+
+  return [...lines, ...formatWarnings(report.warnings)].join('\n');
+}
+
 const slashFormatters = {
   'auth.status': formatAuthStatus,
   'capabilities.list': formatCapabilitiesList,
   'capabilities.inspect': formatCapabilityInspect,
+  'context.bundle': formatContextBundle,
   'plan.build': formatPlanBuild,
   'plan.execute': formatPlanExecute,
   'plan.resume': formatPlanExecute,

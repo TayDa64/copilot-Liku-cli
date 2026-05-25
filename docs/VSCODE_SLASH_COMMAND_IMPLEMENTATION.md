@@ -133,6 +133,8 @@ Use `resolveGitHubRepoContext()` instead of re-implementing remote/token parsing
 Current adapter entrypoints:
 
 - `resolveGitHubAuthStatus()` — `src/main/github/auth-status.js`
+- `buildGitHubContextBundle()` — `src/main/github/context-bundle.js`
+- `writeGitHubContextBundleArtifact()` — `src/main/github/context-bundle-artifacts.js`
 - `inspectGitHubRepository()` — `src/main/github/repo-inspect.js`
 - `inspectGitHubIssue()` — `src/main/github/issue-inspect.js`
 - `listGitHubIssues()` — `src/main/github/issues-list.js`
@@ -151,6 +153,9 @@ These adapters are exposed today through `src/cli/commands/github.js` as:
 - `liku github auth status`
 - `liku github capabilities list`
 - `liku github capabilities inspect <capability-key>`
+- `liku github context bundle pr <number> [--slug owner/repo] [--api false] [--out-file <path>]`
+- `liku github context bundle issue <number> [--slug owner/repo] [--api false] [--out-file <path>]`
+- `liku github context bundle repo [--slug owner/repo] [--limit N] [--api false] [--out-file <path>]`
 - `liku github plan build <area> <action> [args...]`
 - `liku github plan execute <area> <action> [args...]`
 - `liku github plan execute --plan-file <path>`
@@ -251,6 +256,9 @@ For Codespaces / VS Code style usage, the Phase 2 read-only set should map one-t
 /github auth status
 /github capabilities list
 /github capabilities inspect <capability-key>
+/github context bundle pr <number> [--slug owner/repo] [--api false] [--out-file <path>]
+/github context bundle issue <number> [--slug owner/repo] [--api false] [--out-file <path>]
+/github context bundle repo [--slug owner/repo] [--limit N] [--api false] [--out-file <path>]
 /github plan build <area> <action> [args...]
 /github plan execute <area> <action> [args...]
 /github plan execute --plan-file <path>
@@ -265,6 +273,8 @@ For Codespaces / VS Code style usage, the Phase 2 read-only set should map one-t
 /github releases list [--slug owner/repo] [--limit N] [--api false]
 /github releases inspect <latest|tag|id> [--slug owner/repo] [--api false]
 ```
+
+The reviewed bundle surface is the current Phase 5.1 bridge toward local Copilot-like GitHub orchestration: it composes typed read-only GitHub adapters, sanitizes sensitive fields, writes an explicit local artifact, and returns review metadata before any later prompt or agent consumes the bundle.
 
 A `/github help` alias is also worth adding so chat users do not need to remember the CLI syntax.
 

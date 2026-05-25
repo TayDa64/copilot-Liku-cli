@@ -564,6 +564,26 @@ Exit criteria:
 - memory retention and deletion behavior is explicit
 - tests cover redaction and retention boundaries
 
+### Phase 5.1 / 5.2 addendum — reviewed GitHub context bundles before public durable-memory import/export
+
+The lack of a public durable-memory import/export surface should not block local GitHub orchestration. The safer next bridge is a reviewed GitHub context bundle flow that stays read-only against GitHub while producing an explicit sanitized local artifact.
+
+Tasks:
+
+- Treat durable-memory import/export as a later Phase 5.1 / 5.2 enabler rather than a prerequisite for local GitHub orchestration.
+- Add a typed `github context bundle ...` capability for `pr`, `issue`, and bounded `repo` summary targets.
+- Compose the bundle from the existing registered read-only GitHub adapters instead of creating a second GitHub client path.
+- Sanitize issue bodies, diff previews, workflow logs, secrets, and tokens before writing the bundle artifact.
+- Write reviewed bundle artifacts under `~/.liku/github/context-bundles` unless the caller explicitly provides an output path.
+- Return review metadata that makes the bundle safe to inspect, approve, or pass to later bounded orchestration steps.
+
+Exit criteria:
+
+- reviewed bundle artifacts are explicit, local, and sanitized
+- no raw GitHub issue/PR bodies, diff previews, workflow logs, or secrets leak into durable storage
+- CLI and shared `/github ...` surfaces expose the same reviewed bundle seam
+- focused tests prove composition, sanitization, artifact persistence, and review metadata
+
 ### Phase 6 — CI/CD hardening and release controls
 
 Objective: make the implementation safe to ship.

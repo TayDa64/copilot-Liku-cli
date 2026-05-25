@@ -58,6 +58,34 @@ test('session intent store re-enables forgone feature on explicit resume', () =>
   fs.rmSync(tempDir, { recursive: true, force: true });
 });
 
+test('session intent store persists redacted task-state metadata', () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'liku-session-intent-'));
+  const stateFile = path.join(tempDir, 'session-intent-state.json');
+  const store = createSessionIntentStateStore({ stateFile });
+
+  store.recordExecutedTurn({
+    userMessage: 'Authorization: Bearer github_pat_abcdefghijklmnopqrstuvwxyz123456 and api_key=super-secret',
+    executionIntent: 'check persisted session state safety',
+    committedSubgoal: 'Persist the latest turn safely',
+    actionPlan: [{ type: 'focus_window' }],
+    success: true,
+    observationEvidence: { captureMode: 'window', captureTrusted: true },
+    verification: { status: 'verified' }
+  }, {
+    cwd: path.join(__dirname, '..')
+  });
+
+  const persisted = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+  assert.strictEqual(persisted.persistence.store, 'session-intent-state');
+  assert.strictEqual(persisted.persistence.lane, 'task');
+  assert.ok(persisted.persistence.retention.expiresAt);
+  assert.strictEqual(persisted.persistence.sensitivity, 'restricted');
+  assert.ok(persisted.chatContinuity.lastTurn.userMessage.includes('[redacted token]'));
+  assert.ok(persisted.chatContinuity.lastTurn.userMessage.includes('[redacted secret]'));
+
+  fs.rmSync(tempDir, { recursive: true, force: true });
+});
+
 test('session intent formatters emit compact system and summary views', () => {
   const state = {
     currentRepo: { repoName: 'copilot-liku-cli', projectRoot: 'C:/dev/copilot-Liku-cli' },

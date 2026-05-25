@@ -84,6 +84,9 @@ const {
   createConversationHistoryStore
 } = require('./ai-service/conversation-history');
 const {
+  sanitizeJsonLinesForExport
+} = require('./persistence-controls');
+const {
   createPreferenceParser
 } = require('./ai-service/preference-parser');
 const {
@@ -614,15 +617,18 @@ function exportLastRuntimeTrace(destinationPath = null) {
     ? path.resolve(process.cwd(), requestedDestination)
     : path.join(process.cwd(), `liku-runtime-trace-${safeSessionId}.jsonl`);
 
-  if (path.resolve(traceSummary.filePath) !== resolvedDestination) {
-    fs.mkdirSync(path.dirname(resolvedDestination), { recursive: true });
-    fs.copyFileSync(traceSummary.filePath, resolvedDestination);
-  }
+  const sourceText = fs.readFileSync(traceSummary.filePath, 'utf8');
+  const sanitizedExport = sanitizeJsonLinesForExport(sourceText, {
+    exportKind: 'runtime-trace'
+  });
+  fs.mkdirSync(path.dirname(resolvedDestination), { recursive: true });
+  fs.writeFileSync(resolvedDestination, sanitizedExport.text, 'utf8');
 
   return {
     sessionId: traceSummary.sessionId,
     sourcePath: traceSummary.filePath,
-    filePath: resolvedDestination
+    filePath: resolvedDestination,
+    review: sanitizedExport.review
   };
 }
 
@@ -10305,6 +10311,7 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
         context: userMessage || actionData.thought || '',
         keywords: extractKeywords(userMessage || actionData.thought || ''),
         tags: ['execution', outcomeLabel],
+        memoryLane: 'task',
         scope: {
           repoNames: [executionContextEnvelope?.repo?.name || ''].filter(Boolean),
           projectRoots: [executionContextEnvelope?.repo?.projectRoot || ''].filter(Boolean),
@@ -11749,6 +11756,7 @@ function saveSessionNote() {
       context: { source: 'session-exit', messageCount: history.length },
       keywords,
       tags: ['session', 'episodic'],
+      memoryLane: 'task',
       source: { type: 'session', timestamp: new Date().toISOString() }
     });
   } catch (err) {

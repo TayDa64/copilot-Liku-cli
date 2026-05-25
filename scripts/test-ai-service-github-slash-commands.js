@@ -33,6 +33,7 @@ async function test(name, fn) {
     assert.strictEqual(result.type, 'info');
     assert.ok(result.message.includes('Shared GitHub slash commands:'));
     assert.ok(result.message.includes('/github capabilities list'));
+    assert.ok(result.message.includes('/github context bundle pr <number>'));
     assert.ok(result.message.includes('/github plan build'));
     assert.ok(result.message.includes('/github plan execute'));
     assert.ok(result.message.includes('/github plan resume --guidance-file <path> --resume-token <token>'));
@@ -64,6 +65,22 @@ async function test(name, fn) {
     assert.strictEqual(result.data.entry.key, 'pr.diff');
     assert.strictEqual(result.data.entry.policyBySource.slash.allowed, true);
     assert.ok(result.message.includes('GitHub capability inspect'));
+    });
+
+    await test('aiService.handleCommand exposes /github context bundle through the reviewed bundle seam', async () => {
+    const result = await aiService.handleCommand('/github context bundle repo --api false --limit 3');
+    assert.ok(result);
+    assert.strictEqual(result.type, 'info');
+    assert.ok(result.data);
+    assert.strictEqual(result.data.schemaVersion, 'github.context-bundle.v1');
+    assert.strictEqual(result.data.capability.key, 'context.bundle');
+    assert.strictEqual(result.data.policy.allowed, true);
+    assert.strictEqual(result.data.target.kind, 'repo');
+    assert.strictEqual(result.data.review.exportKind, 'github-context-bundle');
+    assert.strictEqual(result.data.review.reviewRequired, true);
+    assert.ok(result.data.artifact.filePath);
+    assert.ok(fs.existsSync(result.data.artifact.filePath));
+    assert.ok(result.message.includes('GitHub context bundle'));
     });
 
     await test('aiService.handleCommand exposes /github plan build through the registry-backed planner', async () => {

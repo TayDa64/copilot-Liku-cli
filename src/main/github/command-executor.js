@@ -2,6 +2,7 @@ const { writeTelemetry } = require('../telemetry/telemetry-writer');
 const { findGitHubCapability } = require('./capability-registry');
 const { evaluateGitHubCapabilityPolicy } = require('./capability-policy');
 const { inspectGitHubCapabilityCatalogEntry, listGitHubCapabilityCatalog } = require('./capability-inspect');
+const { buildGitHubContextBundle } = require('./context-bundle');
 const { buildGitHubExecutionPlan } = require('./plan-builder');
 const { executeGitHubExecutionPlan, resumeGitHubExecutionPlan } = require('./plan-executor');
 const {
@@ -263,6 +264,23 @@ function buildAdapterCall(capability, context, adapters) {
           aiService,
         },
       };
+    case 'context.bundle':
+      return {
+        fn: adapters.buildGitHubContextBundle,
+        input: {
+          source,
+          positionals,
+          runtimeOptions: {
+            ...runtimeOptions,
+            outFile: runtimeOptions.outFile || runtimeOptions['out-file'] || runtimeOptions.outfile || null,
+          },
+          executionPreferences,
+          featureFlagEnabled,
+          cwd,
+          env,
+          aiService,
+        },
+      };
     case 'auth.status':
       return {
         fn: adapters.resolveGitHubAuthStatus,
@@ -409,6 +427,7 @@ function buildAdapterCall(capability, context, adapters) {
 
 function createGitHubCommandExecutor(dependencies = {}) {
   const adapters = {
+    buildGitHubContextBundle: dependencies.buildGitHubContextBundle || buildGitHubContextBundle,
     buildGitHubExecutionPlan: dependencies.buildGitHubExecutionPlan || buildGitHubExecutionPlan,
     executeGitHubExecutionPlan: dependencies.executeGitHubExecutionPlan || executeGitHubExecutionPlan,
     resumeGitHubExecutionPlan: dependencies.resumeGitHubExecutionPlan || resumeGitHubExecutionPlan,
@@ -523,6 +542,11 @@ function createGitHubCommandExecutor(dependencies = {}) {
             executionPreferences,
             runtimeOptions,
           }
+        : capability.key === 'context.bundle'
+          ? {
+              ...adapterCall.input,
+              executeGitHubCommand: execute,
+            }
         : capability.key === 'plan.execute'
           ? {
               ...adapterCall.input,

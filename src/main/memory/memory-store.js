@@ -19,6 +19,13 @@ const path = require('path');
 const { LIKU_HOME } = require('../../shared/liku-home');
 const linker = require('./memory-linker');
 const { countTokens, truncateToTokenBudget } = require('../../shared/token-counter');
+const {
+  buildMemoryNotePersistence,
+  isPersistenceEntryExpired,
+  normalizeIsoTimestamp,
+  normalizeMemoryLane,
+  sanitizePersistedValue
+} = require('../persistence-controls');
 
 const MEMORY_DIR = path.join(LIKU_HOME, 'memory');
 const NOTES_DIR = path.join(MEMORY_DIR, 'notes');
@@ -260,6 +267,74 @@ function deleteNoteFile(id) {
   }
 }
 
+function buildSanitizedNoteFields(noteInput = {}, options = {}) {
+  const createdAt = normalizeIsoTimestamp(options.createdAt || new Date().toISOString());
+  const contentResult = sanitizePersistedValue(String(noteInput.content || ''), { path: ['content'] });
+  const contextResult = noteInput.context === undefined
+    ? { value: '', redactions: [] }
+    : sanitizePersistedValue(noteInput.context, { path: ['context'] });
+  const sourceResult = noteInput.source === undefined
+    ? { value: null, redactions: [] }
+    : sanitizePersistedValue(noteInput.source, { path: ['source'] });
+  const lane = normalizeMemoryLane(
+    noteInput.memoryLane
+      || noteInput.retentionLane
+      || noteInput.persistence?.lane
+      || options.defaultLane
+  );
+  const redactions = [
+    ...contentResult.redactions,
+    ...contextResult.redactions,
+    ...sourceResult.redactions
+  ];
+
+  return {
+    content: contentResult.value,
+    context: contextResult.value,
+    source: sourceResult.value,
+    persistence: buildMemoryNotePersistence({
+      lane,
+      recordedAt: createdAt,
+      redactions
+    })
+  };
+}
+
+function isNoteExpired(noteOrIndexEntry, referenceTime = Date.now()) {
+  return isPersistenceEntryExpired(noteOrIndexEntry, referenceTime);
+}
+
+function shouldIncludeNoteInSelection(indexEntry, options = {}) {
+  if (!indexEntry) return false;
+  if (isNoteExpired(indexEntry)) return false;
+
+  const lane = normalizeMemoryLane(indexEntry.memoryLane || indexEntry?.persistence?.lane);
+  if (lane === 'task' && options.includeTaskNotes !== true) {
+    return false;
+  }
+
+  return true;
+}
+
+function pruneExpiredNotes(referenceTime = Date.now()) {
+  const index = loadIndex();
+  const expiredIds = Object.entries(index.notes || {})
+    .filter(([, entry]) => isNoteExpired(entry, referenceTime))
+    .map(([id]) => id);
+
+  expiredIds.forEach((id) => {
+    try {
+      removeNote(id);
+    } catch (error) {
+      if (MEMORY_VERBOSE) {
+        console.warn(`[Memory] Failed to prune expired note ${id}:`, error.message);
+      }
+    }
+  });
+
+  return expiredIds.length;
+}
+
 // ─── LRU Pruning ────────────────────────────────────────────
 
 /**
@@ -267,6 +342,7 @@ function deleteNoteFile(id) {
  * Removes least-recently-updated notes first.
  */
 function pruneOldNotes() {
+  pruneExpiredNotes();
   const index = loadIndex();
   const noteIds = Object.keys(index.notes || {});
   if (noteIds.length <= MAX_NOTES) return 0;
@@ -355,16 +431,21 @@ function addNote(noteData) {
   const id = generateNoteId();
   const now = new Date().toISOString();
   const normalizedScope = normalizeScope(noteData.scope);
+  const sanitizedFields = buildSanitizedNoteFields(noteData, {
+    createdAt: now,
+    defaultLane: 'durable'
+  });
 
   const note = {
     id,
     type: noteData.type || 'episodic',
-    content: noteData.content,
-    context: noteData.context || '',
+    content: sanitizedFields.content,
+    context: sanitizedFields.context,
     keywords: noteData.keywords || [],
     tags: noteData.tags || [],
     scope: normalizedScope,
-    source: noteData.source || null,
+    source: sanitizedFields.source,
+    persistence: sanitizedFields.persistence,
     links: [],
     createdAt: now,
     updatedAt: now
@@ -379,6 +460,10 @@ function addNote(noteData) {
     keywords: note.keywords,
     tags: note.tags,
     scope: note.scope,
+    memoryLane: note.persistence?.lane || 'durable',
+    sensitivity: note.persistence?.sensitivity || 'internal',
+    expiresAt: note.persistence?.retention?.expiresAt || null,
+    persistence: note.persistence,
     links: [],
     createdAt: now,
     updatedAt: now
@@ -410,6 +495,29 @@ function updateNote(id, updates) {
   if (updates.tags) note.tags = updates.tags;
   if (updates.scope !== undefined) note.scope = normalizeScope(updates.scope);
   if (updates.links) note.links = updates.links;
+  if (updates.source !== undefined) note.source = updates.source;
+  if (updates.memoryLane !== undefined || updates.retentionLane !== undefined) {
+    note.persistence = {
+      ...(note.persistence || {}),
+      lane: normalizeMemoryLane(updates.memoryLane || updates.retentionLane, note.persistence?.lane || 'durable')
+    };
+  }
+
+  const sanitizedFields = buildSanitizedNoteFields({
+    content: note.content,
+    context: note.context,
+    source: note.source,
+    persistence: note.persistence,
+    memoryLane: updates.memoryLane || updates.retentionLane || note.persistence?.lane
+  }, {
+    createdAt: note.createdAt,
+    defaultLane: note.persistence?.lane || 'durable'
+  });
+
+  note.content = sanitizedFields.content;
+  note.context = sanitizedFields.context;
+  note.source = sanitizedFields.source;
+  note.persistence = sanitizedFields.persistence;
   note.updatedAt = now;
 
   writeNote(note);
@@ -420,6 +528,10 @@ function updateNote(id, updates) {
     index.notes[id].keywords = note.keywords;
     index.notes[id].tags = note.tags;
     index.notes[id].scope = note.scope || null;
+    index.notes[id].memoryLane = note.persistence?.lane || 'durable';
+    index.notes[id].sensitivity = note.persistence?.sensitivity || 'internal';
+    index.notes[id].expiresAt = note.persistence?.retention?.expiresAt || null;
+    index.notes[id].persistence = note.persistence;
     index.notes[id].updatedAt = now;
 
     // Re-link after keyword/tag changes
@@ -464,6 +576,7 @@ function removeNote(id) {
  * Retrieve a single note by ID.
  */
 function getNote(id) {
+  pruneExpiredNotes();
   return readNote(id);
 }
 
@@ -474,6 +587,7 @@ function getNote(id) {
  * @returns {object[]} Array of full note objects, highest relevance first
  */
 function getRelevantNotesSelection(query, options = {}) {
+  pruneExpiredNotes();
   if (!query) {
     return {
       text: '',
@@ -488,7 +602,8 @@ function getRelevantNotesSelection(query, options = {}) {
   const limit = normalizedOptions.limit || DEFAULT_NOTE_LIMIT;
 
   const index = loadIndex();
-  const entries = Object.entries(index.notes || {});
+  const entries = Object.entries(index.notes || {})
+    .filter(([, entry]) => shouldIncludeNoteInSelection(entry, normalizedOptions));
   if (entries.length === 0) return { text: '', ids: [], notes: [], matches: [], summary: buildSelectionSummary([], buildSelectionContext(normalizedOptions)) };
 
   const queryLower = query.toLowerCase();
@@ -566,6 +681,7 @@ function getMemoryContext(query, limitOrOptions) {
  * List all note IDs and their index metadata.
  */
 function listNotes() {
+  pruneExpiredNotes();
   return loadIndex().notes || {};
 }
 
@@ -578,6 +694,7 @@ module.exports = {
   getRelevantNotes,
   getMemoryContext,
   listNotes,
+  pruneExpiredNotes,
   pruneOldNotes,
   generateNoteId,
   MEMORY_DIR,

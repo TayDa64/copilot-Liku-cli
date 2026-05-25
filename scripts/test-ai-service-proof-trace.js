@@ -432,6 +432,7 @@ async function main() {
         assert.strictEqual(exported.sessionId, 'runtime-export-session');
         assert.strictEqual(exported.filePath, exportFile);
         assert(fs.existsSync(exportFile), 'exportLastRuntimeTrace should copy the trace to the requested destination');
+        assert.strictEqual(exported.review.exportKind, 'runtime-trace');
 
         const exportedText = fs.readFileSync(exportFile, 'utf8');
         assert(exportedText.includes('runtime:session:end'), 'exported runtime trace should preserve the closing session summary entry');

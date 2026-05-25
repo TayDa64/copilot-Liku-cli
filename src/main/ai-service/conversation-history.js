@@ -1,14 +1,40 @@
 const fs = require('fs');
+const {
+  buildConversationHistoryEntry,
+  HISTORY_RETENTION_MS,
+  isPersistenceEntryExpired
+} = require('../persistence-controls');
 
 function createConversationHistoryStore({ historyFile, likuHome, maxHistory }) {
   let conversationHistory = [];
+  const historyMaxAgeMs = HISTORY_RETENTION_MS;
+
+  function normalizeHistoryEntries(entries = []) {
+    return (Array.isArray(entries) ? entries : [])
+      .map((entry) => buildConversationHistoryEntry(entry, { maxAgeMs: historyMaxAgeMs }))
+      .filter((entry) => !isPersistenceEntryExpired(entry))
+      .slice(-maxHistory * 2);
+  }
+
+  function persistNormalizedHistory(entries) {
+    if (!fs.existsSync(likuHome)) {
+      fs.mkdirSync(likuHome, { recursive: true, mode: 0o700 });
+    }
+    fs.writeFileSync(historyFile, JSON.stringify(entries), { mode: 0o600 });
+  }
 
   function loadConversationHistory() {
     try {
       if (fs.existsSync(historyFile)) {
         const data = JSON.parse(fs.readFileSync(historyFile, 'utf-8'));
         if (Array.isArray(data)) {
-          conversationHistory = data.slice(-maxHistory * 2);
+          const normalizedEntries = normalizeHistoryEntries(data);
+          conversationHistory = normalizedEntries;
+          const requiresRewrite = normalizedEntries.length !== data.length
+            || normalizedEntries.some((entry, index) => !data[index]?.persistence);
+          if (requiresRewrite) {
+            persistNormalizedHistory(normalizedEntries);
+          }
           if (process.env.LIKU_CHAT_TRANSCRIPT_QUIET !== '1') {
             console.log(`[AI] Restored ${conversationHistory.length} history entries from disk`);
           }
@@ -21,10 +47,8 @@ function createConversationHistoryStore({ historyFile, likuHome, maxHistory }) {
 
   function saveConversationHistory() {
     try {
-      if (!fs.existsSync(likuHome)) {
-        fs.mkdirSync(likuHome, { recursive: true, mode: 0o700 });
-      }
-      fs.writeFileSync(historyFile, JSON.stringify(conversationHistory.slice(-maxHistory * 2)), { mode: 0o600 });
+      conversationHistory = normalizeHistoryEntries(conversationHistory);
+      persistNormalizedHistory(conversationHistory);
     } catch (error) {
       console.warn('[AI] Could not save conversation history:', error.message);
     }
@@ -39,7 +63,7 @@ function createConversationHistoryStore({ historyFile, likuHome, maxHistory }) {
   }
 
   function pushConversationEntry(entry) {
-    conversationHistory.push(entry);
+    conversationHistory.push(buildConversationHistoryEntry(entry, { maxAgeMs: historyMaxAgeMs }));
   }
 
   function popConversationEntry() {
@@ -47,9 +71,7 @@ function createConversationHistoryStore({ historyFile, likuHome, maxHistory }) {
   }
 
   function trimConversationHistory() {
-    while (conversationHistory.length > maxHistory * 2) {
-      conversationHistory.shift();
-    }
+    conversationHistory = normalizeHistoryEntries(conversationHistory);
   }
 
   function clearConversationHistory() {

@@ -154,6 +154,9 @@ Read-only GitHub entrypoints:
 - `liku github auth status`
 - `liku github capabilities list`
 - `liku github capabilities inspect <capability-key>`
+- `liku github context bundle pr <number> [--slug owner/repo]`
+- `liku github context bundle issue <number> [--slug owner/repo]`
+- `liku github context bundle repo [--slug owner/repo] [--limit N] [--out-file <path>]`
 - `liku github plan build <area> <action> [args...]`
 - `liku github plan execute <area> <action> [args...]`
 - `liku github plan execute --plan-file <path>`
@@ -187,6 +190,8 @@ Useful chat commands:
 - `/github help`
 - `/github capabilities list`
 - `/github capabilities inspect pr.diff`
+- `/github context bundle pr 7 --api false`
+- `/github context bundle repo --limit 5 --api false`
 - `/github plan build pr diff 7 --limit 30 --api false`
 - `/github plan execute pr diff 7 --limit 30 --api false`
 - `/github plan execute --plan-file <path>`
@@ -311,6 +316,8 @@ Examples:
 liku doctor --json
 liku github auth status
 liku github repo inspect --json
+liku github context bundle pr 7 --api false
+liku github context bundle repo --limit 5 --api false
 liku github issues list --state all --limit 10
 liku github issues inspect 321
 liku github pr list --state all --limit 10
