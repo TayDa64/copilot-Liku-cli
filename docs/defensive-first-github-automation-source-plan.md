@@ -576,6 +576,9 @@ Tasks:
 - Sanitize issue bodies, diff previews, workflow logs, secrets, and tokens before writing the bundle artifact.
 - Write reviewed bundle artifacts under `~/.liku/github/context-bundles` unless the caller explicitly provides an output path.
 - Return review metadata that makes the bundle safe to inspect, approve, or pass to later bounded orchestration steps.
+- After the reviewed bundle bridge exists, expose explicit public durable-memory transfer commands with review-first semantics rather than silent background sync.
+- Keep public durable-memory transfer scoped to durable notes only; task-lane/session-lane state should remain local and ephemeral.
+- Require reviewed export metadata on import, then re-sanitize imported notes and preserve explicit provenance so repeated imports can be deduplicated.
 
 Exit criteria:
 
@@ -583,6 +586,7 @@ Exit criteria:
 - no raw GitHub issue/PR bodies, diff previews, workflow logs, or secrets leak into durable storage
 - CLI and shared `/github ...` surfaces expose the same reviewed bundle seam
 - focused tests prove composition, sanitization, artifact persistence, and review metadata
+- public durable-memory export/import remains explicit, durable-only, and review-backed
 
 ### Phase 6 — CI/CD hardening and release controls
 

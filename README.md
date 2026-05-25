@@ -203,6 +203,8 @@ Useful chat commands:
 - `/capture`
 - `/vision on|off`
 - `/memory`
+- `/memory export [path]`
+- `/memory import <path>`
 - `/skills`
 - `/tools`
 - `/rmodel`

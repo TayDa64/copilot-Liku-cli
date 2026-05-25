@@ -202,6 +202,10 @@ const { buildCapabilityPolicySnapshot } = require('./capability-policy');
 const { SYSTEM_PROMPT } = require('./ai-service/system-prompt');
 const skillRouter = require('./memory/skill-router');
 const memoryStore = require('./memory/memory-store');
+const {
+  exportDurableMemory: exportDurableMemoryArtifact,
+  importDurableMemory: importDurableMemoryArtifact,
+} = require('./memory/memory-portability');
 const reflectionTrigger = require('./telemetry/reflection-trigger');
 const { runPreToolUseHook, runPostToolUseHook } = require('./tools/hook-runner');
 
@@ -630,6 +634,23 @@ function exportLastRuntimeTrace(destinationPath = null) {
     filePath: resolvedDestination,
     review: sanitizedExport.review
   };
+}
+
+function exportDurableMemory(destinationPath = null) {
+  return exportDurableMemoryArtifact({
+    destinationPath,
+    cwd: process.cwd()
+  });
+}
+
+function importDurableMemory(sourcePath) {
+  if (!String(sourcePath || '').trim()) {
+    throw new Error('A durable memory export file path is required.');
+  }
+  return importDurableMemoryArtifact({
+    sourcePath,
+    cwd: process.cwd()
+  });
 }
 
 // ===== CONFIGURATION =====
@@ -2725,6 +2746,35 @@ function handleCommand(command) {
       };
 
     case '/memory': {
+      if (parts[1] === 'export') {
+        try {
+          const destinationPath = parts.length > 2 ? parts.slice(2).join(' ') : null;
+          const exported = exportDurableMemory(destinationPath);
+          return {
+            type: 'info',
+            message: `Exported durable memory to ${exported.artifact.filePath}\nNotes: ${exported.summary.noteCount}\nReview: sensitivity=${exported.review.sensitivity} redactions=${exported.review.redactionCount} required=${exported.review.reviewRequired ? 'yes' : 'no'}`,
+            data: exported,
+          };
+        } catch (error) {
+          return { type: 'error', message: `Memory export failed: ${error.message}` };
+        }
+      }
+      if (parts[1] === 'import') {
+        if (parts.length < 3) {
+          return { type: 'error', message: 'Usage: /memory import <path>' };
+        }
+        try {
+          const sourcePath = parts.slice(2).join(' ');
+          const imported = importDurableMemory(sourcePath);
+          return {
+            type: 'info',
+            message: `Imported durable memory from ${imported.sourcePath}\nImported: ${imported.importedCount}\nSkipped: ${imported.skippedCount}`,
+            data: imported,
+          };
+        } catch (error) {
+          return { type: 'error', message: `Memory import failed: ${error.message}` };
+        }
+      }
       if (parts[1] === 'clear') {
         const notesMap = memoryStore.listNotes();
         let removed = 0;
@@ -2747,11 +2797,11 @@ function handleCommand(command) {
       const notesMap = memoryStore.listNotes();
       const allNotes = Object.entries(notesMap);
       if (allNotes.length === 0) {
-        return { type: 'info', message: 'No memory notes yet. Notes are created automatically from task outcomes and reflections.' };
+        return { type: 'info', message: 'No memory notes yet. Notes are created automatically from task outcomes and reflections. Use /memory export [path] and /memory import <path> for reviewed durable transfers.' };
       }
       const recent = allNotes.slice(-10);
       const list = recent.map(([id, n]) => `  ${id} [${n.type}] ${(n.content || '').slice(0, 60)}${(n.content || '').length > 60 ? '...' : ''}`).join('\n');
-      return { type: 'info', message: `Memory (${allNotes.length} total, showing last ${recent.length}):\n${list}\n\nUse /memory search <query> to find specific notes, /memory clear to reset.` };
+      return { type: 'info', message: `Memory (${allNotes.length} total, showing last ${recent.length}):\n${list}\n\nUse /memory search <query> to find specific notes, /memory export [path] to create a reviewed durable export, /memory import <path> to import one, or /memory clear to reset.` };
     }
 
     case '/skills': {
@@ -2820,7 +2870,7 @@ function handleCommand(command) {
 /clear - Clear conversation history
 /vision [on|off] - Manage visual context
 /capture - Capture screen for AI analysis
-/memory [search <query>|clear] - View/search/clear long-term memory
+/memory [search <query>|clear|export [path]|import <path>] - View/search/clear/export/import long-term memory
 /skills - List learned skills
 /tools [approve|revoke <name>] - Manage dynamic tools
 /rmodel [model|off] - Set reflection model for self-correction
@@ -11828,6 +11878,7 @@ module.exports = {
   resumeAfterConfirmation,
   getLastRuntimeTraceSummary,
   formatLastRuntimeTraceSummary,
+  exportDurableMemory,
   exportLastRuntimeTrace,
   // UI awareness
   setUIWatcher,
@@ -11841,6 +11892,7 @@ module.exports = {
   // Cognitive layer (v0.0.15)
   memoryStore,
   skillRouter,
+  importDurableMemory,
   getChatContinuityState,
   getSessionIntentState,
   clearChatContinuityState,

@@ -15,7 +15,7 @@
     "test:chat-actionability": "node scripts/test-chat-actionability.js",
     "test:tradingview-registry": "node scripts/test-tradingview-registry-parity.js",
     "test:ai-focused": "node scripts/test-windows-observation-flow.js && node scripts/test-bug-fixes.js && node scripts/test-chat-actionability.js && node scripts/test-ai-service-contract.js && node scripts/test-ai-service-browser-rewrite.js && node scripts/test-ai-service-state.js && node scripts/test-tradingview-registry-parity.js",
-    "test:persistence-controls": "node scripts/test-persistence-controls.js && node scripts/test-memory-store-persistence.js && node scripts/test-ai-service-state.js && node scripts/test-session-intent-state.js && node scripts/test-ai-service-proof-trace.js && node scripts/test-ai-service-contract.js",
+    "test:persistence-controls": "node scripts/test-persistence-controls.js && node scripts/test-memory-store-persistence.js && node scripts/test-memory-portability.js && node scripts/test-ai-service-state.js && node scripts/test-session-intent-state.js && node scripts/test-ai-service-proof-trace.js && node scripts/test-ai-service-contract.js",
     "test:cli-phase01": "node scripts/test-cli-feature-flags.js && node scripts/test-cli-command-seam.js && node scripts/test-cli-project-guard.js",
     "test:github-phase2": "npm run test:cli-phase01 && node scripts/test-github-readonly.js && node scripts/test-cli-github-command.js && node scripts/test-ai-service-github-slash-commands.js",
     "test:github-phase3": "npm run test:github-phase2 && node scripts/test-github-capability-policy.js",
