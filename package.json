@@ -37,6 +37,7 @@
     "smoke:tradingview-live": "node scripts/live-tradingview-smoke.js",
     "tradingview:inspect-launch": "node scripts/inspect-tradingview-launch-capability.js",
     "tradingview:write-launch-contract": "node scripts/write-tradingview-launch-contract.js",
+    "test:workflow-policy": "node scripts/test-workflow-policy.js",
     "verify:workflow-policy": "node scripts/check-workflow-policy.js",
     "verify:package": "node scripts/verify-package-dry-run.js",
     "smoke": "node scripts/smoke-command-system.js",

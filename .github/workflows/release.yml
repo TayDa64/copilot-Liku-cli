@@ -29,6 +29,8 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
+          fetch-depth: 0
+          persist-credentials: false
           ref: ${{ inputs.ref || github.ref }}
       
       - name: Setup Node.js
@@ -37,6 +39,22 @@ jobs:
           node-version: '22.14.0'
           cache: npm
           registry-url: 'https://registry.npmjs.org'
+
+      - name: Verify release tag matches package version
+        shell: bash
+        run: |
+          TARGET_TAG=$(git describe --tags --exact-match HEAD 2>/dev/null || true)
+          if [ -z "$TARGET_TAG" ]; then
+            echo "Release workflow must run from an exact git tag." >&2
+            exit 1
+          fi
+
+          PACKAGE_VERSION=$(node -p "require('./package.json').version")
+          NORMALIZED_TAG="${TARGET_TAG#v}"
+          if [ "$NORMALIZED_TAG" != "$PACKAGE_VERSION" ]; then
+            echo "Release tag ${TARGET_TAG} does not match package.json version ${PACKAGE_VERSION}." >&2
+            exit 1
+          fi
       
       - name: Install dependencies
         run: npm ci

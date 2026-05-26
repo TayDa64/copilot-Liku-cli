@@ -7,6 +7,7 @@ This checklist is the Phase 6 shipping guardrail for `copilot-liku-cli`.
 - Confirm the branch is synced with `origin/main`.
 - Confirm the working tree is clean.
 - Confirm the version in `package.json` is the intended release version.
+- Confirm the release tag matches the version in `package.json`.
 - Review the most recent release notes / changelog text.
 - Confirm the `npm-release` environment protections are configured for reviewed releases.
 - Confirm npm trusted publishing is configured for this repository/workflow on npmjs.com, or that the `NPM_TOKEN` fallback remains available.

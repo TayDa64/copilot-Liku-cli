@@ -185,6 +185,7 @@ Once set up, publishing is automatic:
 3. **Automated workflow runs**:
    - Waits for the protected `npm-release` environment approval
    - Checks out code
+   - Verifies the checked-out ref is an exact git tag matching `package.json`
    - Installs dependencies
    - Runs release-facing validation and workflow policy checks
    - Verifies package contents

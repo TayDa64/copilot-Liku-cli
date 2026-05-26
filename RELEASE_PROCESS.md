@@ -82,12 +82,13 @@ Once the release is published on GitHub:
 
 1. The `release.yml` workflow will automatically trigger
 2. It will wait for the protected `npm-release` environment approval
-3. It will run tests and workflow policy verification
-4. Verify package contents
-5. Build the npm tarball and generate the SPDX SBOM
-6. Upload release artifacts and emit provenance/SBOM attestations
-7. Publish to npm with provenance enabled, preferring trusted publishing via OIDC and falling back to `NPM_TOKEN` when needed
-8. Write install instructions to the workflow summary
+3. It will verify the checked-out ref is an exact git tag that matches `package.json`
+4. It will run tests and workflow policy verification
+5. Verify package contents
+6. Build the npm tarball and generate the SPDX SBOM
+7. Upload release artifacts and emit provenance/SBOM attestations
+8. Publish to npm with provenance enabled, preferring trusted publishing via OIDC and falling back to `NPM_TOKEN` when needed
+9. Write install instructions to the workflow summary
 
 ### 7. Verify Publication
 
