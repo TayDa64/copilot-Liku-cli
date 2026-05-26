@@ -139,20 +139,32 @@ This repository includes automated publishing via GitHub Actions. Publishing is 
 
 ### Setup
 
-The workflow is already configured in `.github/workflows/publish-npm.yml`. To enable it:
+The workflow is already configured in `.github/workflows/release.yml`. To enable the hardened release path:
 
-1. **Create an npm access token**:
+1. **Configure the protected release environment**:
+   - Go to repository settings → Environments
+   - Create or update the `npm-release` environment
+   - Require the approvals you want before publish proceeds
+
+2. **Configure npm trusted publishing**:
+   - Go to the package settings on npmjs.com
+   - Add this repository/workflow as a trusted publisher for GitHub Actions
+   - This enables OIDC-backed publishing and automatic provenance generation
+
+3. **Optional fallback: create an npm access token**:
    - Go to https://www.npmjs.com/settings/YOUR-USERNAME/tokens
    - Click "Generate New Token" → "Automation"
    - Copy the token
 
-2. **Add token to GitHub secrets**:
+4. **Optional fallback: add token to GitHub secrets**:
    - Go to your repository settings
    - Navigate to Secrets and variables → Actions
    - Click "New repository secret"
    - Name: `NPM_TOKEN`
    - Value: Paste your npm token
    - Click "Add secret"
+
+The release workflow prefers npm trusted publishing via OIDC. If trusted publishing is not yet configured, npm can fall back to `NPM_TOKEN`.
 
 ### Usage
 
@@ -171,19 +183,28 @@ Once set up, publishing is automatic:
    - Click "Publish release"
 
 3. **Automated workflow runs**:
+   - Waits for the protected `npm-release` environment approval
    - Checks out code
    - Installs dependencies
-   - Runs tests
+   - Runs release-facing validation and workflow policy checks
    - Verifies package contents
-   - Publishes to npm automatically
-   - Comments on release with install instructions
+   - Builds the release tarball
+   - Generates an SPDX SBOM
+   - Uploads tarball/SBOM artifacts
+   - Emits provenance + SBOM attestations
+   - Publishes to npm automatically with provenance enabled
+   - Writes install instructions to the workflow summary
 
 ### Workflow Features
 
 - ✅ Automatic version checking (won't republish existing versions)
 - ✅ Package verification before publishing
+- ✅ Protected release environment support
+- ✅ OIDC-ready trusted publishing with `NPM_TOKEN` fallback
+- ✅ SPDX SBOM generation
+- ✅ Tarball provenance + SBOM attestation
 - ✅ Test execution
-- ✅ Automatic comment with install instructions
+- ✅ Workflow summary with install instructions
 - ✅ Manual dispatch option for testing
 
 For detailed release process, see [RELEASE_PROCESS.md](RELEASE_PROCESS.md).

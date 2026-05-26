@@ -8,6 +8,8 @@ This checklist is the Phase 6 shipping guardrail for `copilot-liku-cli`.
 - Confirm the working tree is clean.
 - Confirm the version in `package.json` is the intended release version.
 - Review the most recent release notes / changelog text.
+- Confirm the `npm-release` environment protections are configured for reviewed releases.
+- Confirm npm trusted publishing is configured for this repository/workflow on npmjs.com, or that the `NPM_TOKEN` fallback remains available.
 - Confirm no generated artifacts, local traces, secrets, or scratch files are staged.
 
 ## Validation
@@ -25,6 +27,7 @@ npm run verify:package
 ## Package Review
 
 - Inspect the `npm pack --dry-run` summary.
+- Review the generated SPDX SBOM artifact.
 - Confirm the published bin target (`src/cli/liku.js`) is present.
 - Confirm required docs (`README.md`, `LICENSE.md`, `QUICKSTART.md`, `INSTALLATION.md`) are present.
 - Confirm test scripts, workflow files, traces, and other non-shipping artifacts are absent.
@@ -34,14 +37,17 @@ npm run verify:package
 - `validate.yml` — fast CLI seam and ai-service contract validation
 - `test.yml` — persistence + GitHub regression suites
 - `policy.yml` — dependency review, secret scanning, and workflow/action policy checks
-- `package.yml` — npm pack dry-run verification and manifest artifact upload
-- `publish-npm.yml` — release-time publish workflow
+- `package.yml` — npm pack dry-run verification, SPDX SBOM generation, and artifact upload
+- `release.yml` — protected release environment, tarball/SBOM attestations, provenance-enabled npm publish
 
 ## Publish
 
-- Trigger the npm publish workflow only from the reviewed release path.
+- Trigger the release workflow only from the reviewed release path.
+- Require the protected `npm-release` environment approval before publish proceeds.
 - Ensure package verification passes before `npm publish` runs.
+- Review the uploaded tarball, manifest, SBOM, and attestation outputs.
 - Verify the target version is not already published.
+- Prefer npm trusted publishing via OIDC; keep `NPM_TOKEN` only as an explicit fallback.
 - After publish, confirm the package is installable from npm.
 
 ## Rollback / Recovery

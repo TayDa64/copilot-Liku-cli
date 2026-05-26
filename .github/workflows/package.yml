@@ -38,8 +38,13 @@ jobs:
       - name: Capture npm pack manifest
         run: npm pack --dry-run --json > pack-dry-run.json
 
+      - name: Generate package SBOM
+        run: npm sbom --omit=dev --sbom-format spdx --sbom-type application > sbom.spdx.json
+
       - name: Upload npm pack manifest
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: npm-pack-dry-run
-          path: pack-dry-run.json
+          name: npm-package-verification
+          path: |
+            pack-dry-run.json
+            sbom.spdx.json

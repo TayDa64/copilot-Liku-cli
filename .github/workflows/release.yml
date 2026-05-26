@@ -1,32 +1,40 @@
-name: Publish to npm
+name: Release
 
 on:
   release:
     types: [published]
   workflow_dispatch:
     inputs:
-      tag:
-        description: 'Tag to publish (leave empty for latest)'
+      ref:
+        description: 'Tag or ref to release (leave empty to use the triggering ref)'
         required: false
 
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
-  publish:
+  release:
     runs-on: ubuntu-latest
+    environment: npm-release
     
     permissions:
       contents: read
+      attestations: write
       id-token: write
     
     steps:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ inputs.ref || github.ref }}
       
       - name: Setup Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
-          node-version: '22'
+          node-version: '22.14.0'
           cache: npm
           registry-url: 'https://registry.npmjs.org'
       
@@ -47,6 +55,37 @@ jobs:
       
       - name: Verify package contents
         run: npm run verify:package
+
+      - name: Build release tarball
+        id: pack
+        shell: bash
+        run: |
+          npm pack --json > pack-output.json
+          PACKAGE_FILENAME=$(node -e "const manifest = require('./pack-output.json'); process.stdout.write(manifest[0].filename);")
+          echo "filename=${PACKAGE_FILENAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate release SBOM
+        run: npm sbom --omit=dev --sbom-format spdx --sbom-type application > sbom.spdx.json
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: release-artifacts
+          path: |
+            pack-output.json
+            ${{ steps.pack.outputs.filename }}
+            sbom.spdx.json
+
+      - name: Attest npm tarball provenance
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32
+        with:
+          subject-path: ${{ steps.pack.outputs.filename }}
+
+      - name: Attest npm tarball SBOM
+        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e
+        with:
+          subject-path: ${{ steps.pack.outputs.filename }}
+          sbom-path: sbom.spdx.json
       
       - name: Check if version already published
         id: check-version
@@ -64,7 +103,7 @@ jobs:
       
       - name: Publish to npm
         if: steps.check-version.outputs.already_published != 'true'
-        run: npm publish --access public
+        run: npm publish "${{ steps.pack.outputs.filename }}" --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       
@@ -77,6 +116,10 @@ jobs:
             echo "## npm publish"
             echo ""
             echo "Published \\`${PACKAGE_NAME}@${PACKAGE_VERSION}\\` to npm."
+            echo ""
+            echo "Release artifacts uploaded: tarball manifest, tarball, and SPDX SBOM."
+            echo ""
+            echo "Tarball provenance and SBOM attestations were emitted before publish."
             echo ""
             echo "Install with:"
             echo "\\`\\`\\`bash"
