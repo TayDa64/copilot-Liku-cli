@@ -7,6 +7,59 @@ const { getEnvGitHubToken, maskToken, requestGitHubJson } = require('./client');
 const GITHUB_AUTH_STATUS_SCHEMA_VERSION = 'github.auth-status.v1';
 const DEFAULT_COPILOT_TOKEN_FILE = path.join(LIKU_HOME, 'copilot-token.json');
 
+function buildGovernanceAccessHints(options = {}) {
+  const tokenPresent = options.tokenPresent === true;
+  const authenticated = options.authenticated === true;
+  const scopes = Array.isArray(options.scopes) ? options.scopes.slice() : [];
+  const normalizedScopes = scopes.map((entry) => String(entry || '').trim().toLowerCase()).filter(Boolean);
+  const warnings = [];
+
+  if (!tokenPresent) {
+    warnings.push('Repository governance inventory usually needs GH_TOKEN or GITHUB_TOKEN, and several endpoints also require repository administration access.');
+  } else if (authenticated && normalizedScopes.length > 0) {
+    const hasRepoGradeScope = normalizedScopes.some((scope) => ['repo', 'public_repo', 'admin:repo_hook', 'read:org'].includes(scope));
+    if (!hasRepoGradeScope) {
+      warnings.push('Current GitHub scopes do not advertise repo/admin-style access; rulesets, environments, secrets, variables, webhooks, or app-installation inspection may return limited results.');
+    }
+  }
+
+  return {
+    hints: [
+      {
+        id: 'repo-governance-admin',
+        title: 'Repository administration access is commonly required for governance inventory.',
+        capabilities: [
+          'ruleset.list',
+          'ruleset.inspect',
+          'environment.list',
+          'environment.inspect',
+          'secret.list',
+          'secret.inspect',
+          'variable.list',
+          'variable.inspect',
+          'webhook.list',
+          'webhook.inspect',
+          'app.installation.inspect',
+          'app.permissions.inspect',
+        ],
+      },
+      {
+        id: 'metadata-only-redaction',
+        title: 'Sensitive governance surfaces stay metadata-only in model-visible output.',
+        capabilities: [
+          'secret.list',
+          'secret.inspect',
+          'variable.list',
+          'variable.inspect',
+          'webhook.inspect',
+        ],
+      },
+    ],
+    warnings,
+    scopesObserved: scopes,
+  };
+}
+
 function readCopilotTokenFileState(options = {}) {
   const fsModule = options.fsModule || fs;
   const tokenFile = options.tokenFile || DEFAULT_COPILOT_TOKEN_FILE;
@@ -105,6 +158,13 @@ async function resolveGitHubAuthStatus(options = {}) {
     warnings.push('Copilot authentication may be available for chat/model flows, but GitHub REST inspection prefers GH_TOKEN or GITHUB_TOKEN.');
   }
 
+  const governanceAccess = buildGovernanceAccessHints({
+    tokenPresent: githubApi.tokenPresent,
+    authenticated: githubApi.authenticated,
+    scopes: githubApi.scopes,
+  });
+  warnings.push(...governanceAccess.warnings);
+
   return {
     schemaVersion: GITHUB_AUTH_STATUS_SCHEMA_VERSION,
     success: true,
@@ -120,6 +180,7 @@ async function resolveGitHubAuthStatus(options = {}) {
         : [],
     },
     githubApi,
+    governanceAccess,
     warnings,
   };
 }
@@ -127,6 +188,7 @@ async function resolveGitHubAuthStatus(options = {}) {
 module.exports = {
   DEFAULT_COPILOT_TOKEN_FILE,
   GITHUB_AUTH_STATUS_SCHEMA_VERSION,
+  buildGovernanceAccessHints,
   readCopilotTokenFileState,
   resolveGitHubAuthStatus,
 };

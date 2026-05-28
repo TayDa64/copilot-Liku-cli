@@ -45,6 +45,7 @@ test('readCliFeatureFlags returns safe defaults', () => {
   const flags = readCliFeatureFlags({});
   assert.deepStrictEqual(flags, {
     enableGitHub: false,
+    enableGitHubWrites: false,
     enableAgents: true,
     enableDynamicTools: true,
     approvalMode: 'prompt',
@@ -55,6 +56,7 @@ test('readCliFeatureFlags returns safe defaults', () => {
 test('readCliFeatureFlags honors explicit environment overrides', () => {
   const flags = readCliFeatureFlags({
     LIKU_ENABLE_GITHUB: '1',
+    LIKU_ENABLE_GITHUB_WRITES: 'yes',
     LIKU_ENABLE_AGENTS: '0',
     LIKU_ENABLE_DYNAMIC_TOOLS: 'false',
     LIKU_APPROVAL_MODE: 'always',
@@ -63,6 +65,7 @@ test('readCliFeatureFlags honors explicit environment overrides', () => {
 
   assert.deepStrictEqual(flags, {
     enableGitHub: true,
+    enableGitHubWrites: true,
     enableAgents: false,
     enableDynamicTools: false,
     approvalMode: 'auto',

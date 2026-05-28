@@ -18,7 +18,7 @@ const COMMANDS = Object.freeze({
   memory: { desc: 'Manage agent memory notes', file: 'memory', args: '[list|show|search|stats]' },
   skills: { desc: 'Manage the skill library', file: 'skills', args: '[list|search|show]' },
   tools: { desc: 'Manage dynamic tool registry', file: 'tools', args: '[list|show|approve|revoke]' },
-  github: { desc: 'Read-only GitHub auth, capability, bounded plan, repo, issue, PR, workflow, and release diagnostics', file: 'github', args: '<auth|capabilities|plan|repo|issues|pr|workflow|releases> ...' },
+  github: { desc: 'GitHub auth, capability, bounded plan, branch-associated PR status, reviewed issue/PR-comment previews, explicit apply, repo, issue, PR, workflow, and release diagnostics', file: 'github', args: '<auth|capabilities|context|plan|apply|repo|issues|pr|workflow|releases> ...' },
   analytics: { desc: 'View telemetry analytics', file: 'analytics', args: '[--days N] [--raw]' },
 });
 

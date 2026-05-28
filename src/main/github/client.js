@@ -78,6 +78,7 @@ async function requestGitHubJson(options = {}) {
     apiBaseUrl = 'https://api.github.com',
     token = '',
     method = 'GET',
+    body,
     headers = {},
     fetchImpl = global.fetch,
     timeoutMs = 8000,
@@ -88,6 +89,9 @@ async function requestGitHubJson(options = {}) {
   }
 
   const requestUrl = buildGitHubApiUrl(apiPath, apiBaseUrl);
+  const requestBody = body === undefined || body === null
+    ? undefined
+    : (typeof body === 'string' ? body : JSON.stringify(body));
   const controller = typeof AbortController === 'function' ? new AbortController() : null;
   const timeoutHandle = controller
     ? setTimeout(() => controller.abort(), Math.max(1, Number(timeoutMs) || 8000))
@@ -100,9 +104,11 @@ async function requestGitHubJson(options = {}) {
         Accept: 'application/vnd.github+json',
         'User-Agent': 'copilot-liku-cli',
         'X-GitHub-Api-Version': '2022-11-28',
+        ...(requestBody !== undefined ? { 'Content-Type': 'application/json' } : {}),
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
         ...headers,
       },
+      body: requestBody,
       signal: controller ? controller.signal : undefined,
     });
 

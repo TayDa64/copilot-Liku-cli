@@ -40,6 +40,7 @@ function normalizeApprovalMode(value, defaultValue = DEFAULT_APPROVAL_MODE) {
 function readCliFeatureFlags(env = process.env) {
   return {
     enableGitHub: parseBooleanEnvFlag(env.LIKU_ENABLE_GITHUB, false),
+    enableGitHubWrites: parseBooleanEnvFlag(env.LIKU_ENABLE_GITHUB_WRITES, false),
     enableAgents: parseBooleanEnvFlag(env.LIKU_ENABLE_AGENTS, true),
     enableDynamicTools: parseBooleanEnvFlag(env.LIKU_ENABLE_DYNAMIC_TOOLS, true),
     approvalMode: normalizeApprovalMode(env.LIKU_APPROVAL_MODE, DEFAULT_APPROVAL_MODE),

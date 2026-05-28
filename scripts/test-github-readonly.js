@@ -1,8 +1,11 @@
 #!/usr/bin/env node
 
 const assert = require('assert');
+const fs = require('fs');
+const os = require('os');
 const path = require('path');
 
+const { resolveCurrentGitBranch } = require(path.join(__dirname, '..', 'src', 'main', 'github', 'git-branch.js'));
 const { parseGitHubRemote } = require(path.join(__dirname, '..', 'src', 'main', 'github', 'remote.js'));
 const { getEnvGitHubToken, maskToken } = require(path.join(__dirname, '..', 'src', 'main', 'github', 'client.js'));
 const { resolveGitHubAuthStatus } = require(path.join(__dirname, '..', 'src', 'main', 'github', 'auth-status.js'));
@@ -12,6 +15,7 @@ const { listGitHubIssues } = require(path.join(__dirname, '..', 'src', 'main', '
 const { inspectGitHubPullRequestDiff } = require(path.join(__dirname, '..', 'src', 'main', 'github', 'pr-diff-summary.js'));
 const { listGitHubPullRequests } = require(path.join(__dirname, '..', 'src', 'main', 'github', 'pr-list.js'));
 const { inspectGitHubPullRequest } = require(path.join(__dirname, '..', 'src', 'main', 'github', 'pr-inspect.js'));
+const { inspectGitHubPullRequestStatus } = require(path.join(__dirname, '..', 'src', 'main', 'github', 'pr-status.js'));
 const { inspectGitHubRelease } = require(path.join(__dirname, '..', 'src', 'main', 'github', 'release-inspect.js'));
 const { listGitHubReleases } = require(path.join(__dirname, '..', 'src', 'main', 'github', 'releases-list.js'));
 const { inspectGitHubWorkflowRun } = require(path.join(__dirname, '..', 'src', 'main', 'github', 'workflow-inspect.js'));
@@ -48,6 +52,24 @@ function createHeaders(entries = {}) {
     assert.strictEqual(https.isGitHub, true);
     assert.strictEqual(https.slug, 'TayDa64/copilot-Liku-cli');
     assert.strictEqual(https.protocol, 'https');
+  });
+
+  await test('resolveCurrentGitBranch reads the current branch from git HEAD metadata', async () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'liku-git-head-'));
+    try {
+      fs.writeFileSync(path.join(tempRoot, 'package.json'), JSON.stringify({ name: 'git-head-test' }, null, 2));
+      fs.mkdirSync(path.join(tempRoot, '.git'));
+      fs.writeFileSync(path.join(tempRoot, '.git', 'HEAD'), 'ref: refs/heads/feature/github-status\n', 'utf8');
+
+      const report = resolveCurrentGitBranch({ cwd: tempRoot });
+
+      assert.strictEqual(report.available, true);
+      assert.strictEqual(report.currentBranch, 'feature/github-status');
+      assert.strictEqual(report.detached, false);
+      assert.strictEqual(report.source, 'git-head');
+    } finally {
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
   });
 
   await test('getEnvGitHubToken prefers GH_TOKEN and maskToken redacts output', async () => {
@@ -453,6 +475,109 @@ function createHeaders(entries = {}) {
     assert.strictEqual(report.pullRequests[0].number, 42);
     assert.strictEqual(report.filters.state, 'all');
     assert.strictEqual(report.filters.base, 'main');
+  });
+
+  await test('inspectGitHubPullRequestStatus matches the branch-associated pull request and enriches its details', async () => {
+    const seenUrls = [];
+    const report = await inspectGitHubPullRequestStatus({
+      env: { GITHUB_TOKEN: 'github_pat_1234567890' },
+      branch: 'feature/github-phase2',
+      state: 'open',
+      resolveProjectIdentity() {
+        return {
+          repoName: 'copilot-liku-cli',
+          normalizedRepoName: 'copilot-liku-cli',
+          projectRoot: 'C:/dev/copilot-Liku-cli',
+          gitRemote: 'git@github.com:TayDa64/copilot-Liku-cli.git',
+        };
+      },
+      fetchImpl: async (url) => {
+        const targetUrl = String(url);
+        seenUrls.push(targetUrl);
+
+        if (targetUrl.includes('/pulls?')) {
+          return {
+            ok: true,
+            status: 200,
+            url: targetUrl,
+            headers: createHeaders({
+              'x-ratelimit-limit': '5000',
+              'x-ratelimit-remaining': '4998',
+              'x-ratelimit-reset': '1767225600',
+            }),
+            async text() {
+              return JSON.stringify([
+                {
+                  number: 42,
+                  title: 'Add read-only GitHub workflow inspection',
+                  state: 'open',
+                  draft: false,
+                  merged: false,
+                  mergeable: true,
+                  mergeable_state: 'clean',
+                  html_url: 'https://github.com/TayDa64/copilot-Liku-cli/pull/42',
+                  updated_at: '2026-05-23T01:23:45Z',
+                  user: { login: 'octocat', type: 'User', html_url: 'https://github.com/octocat' },
+                  head: { ref: 'feature/github-phase2', sha: 'abc123', repo: { full_name: 'TayDa64/copilot-Liku-cli' } },
+                  base: { ref: 'main', sha: 'def456', repo: { full_name: 'TayDa64/copilot-Liku-cli' } },
+                },
+              ]);
+            },
+          };
+        }
+
+        if (targetUrl.endsWith('/pulls/42')) {
+          return {
+            ok: true,
+            status: 200,
+            url: targetUrl,
+            headers: createHeaders({
+              'x-ratelimit-limit': '5000',
+              'x-ratelimit-remaining': '4997',
+              'x-ratelimit-reset': '1767225600',
+            }),
+            async text() {
+              return JSON.stringify({
+                number: 42,
+                title: 'Add read-only GitHub workflow inspection',
+                state: 'open',
+                draft: false,
+                merged: false,
+                mergeable: true,
+                mergeable_state: 'clean',
+                html_url: 'https://github.com/TayDa64/copilot-Liku-cli/pull/42',
+                created_at: '2026-05-22T12:00:00Z',
+                updated_at: '2026-05-23T01:23:45Z',
+                additions: 120,
+                deletions: 8,
+                changed_files: 6,
+                commits: 3,
+                comments: 1,
+                review_comments: 2,
+                user: { login: 'octocat', type: 'User', html_url: 'https://github.com/octocat' },
+                head: { ref: 'feature/github-phase2', sha: 'abc123', repo: { full_name: 'TayDa64/copilot-Liku-cli' } },
+                base: { ref: 'main', sha: 'def456', repo: { full_name: 'TayDa64/copilot-Liku-cli' } },
+                labels: [{ name: 'enhancement', color: '84b6eb' }],
+              });
+            },
+          };
+        }
+
+        throw new Error(`Unexpected URL: ${targetUrl}`);
+      },
+    });
+
+    assert.strictEqual(report.schemaVersion, 'github.pr-status.v1');
+    assert.strictEqual(report.githubApi.attempted, true);
+    assert.strictEqual(report.lookup.status, 'matched');
+    assert.strictEqual(report.lookup.selectedPullRequestNumber, 42);
+    assert.strictEqual(report.branchContext.currentBranch, 'feature/github-phase2');
+    assert.strictEqual(report.branchContext.source, 'explicit-branch');
+    assert.strictEqual(report.filters.head, 'TayDa64:feature/github-phase2');
+    assert.strictEqual(report.pullRequests.length, 1);
+    assert.strictEqual(report.pullRequest.number, 42);
+    assert.ok(seenUrls.some((url) => url.includes('head=TayDa64%3Afeature%2Fgithub-phase2')));
+    assert.ok(seenUrls.some((url) => url.endsWith('/pulls/42')));
   });
 
   await test('inspectGitHubPullRequestDiff summarizes changed files and directories', async () => {

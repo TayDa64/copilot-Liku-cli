@@ -128,6 +128,7 @@ function createCliTraceLog(request, deps = {}) {
         projectGuardRequested: !!(request.options?.project || request.options?.repo),
         featureFlags: {
           enableGitHub: request.featureFlags.enableGitHub,
+          enableGitHubWrites: request.featureFlags.enableGitHubWrites,
           enableAgents: request.featureFlags.enableAgents,
           enableDynamicTools: request.featureFlags.enableDynamicTools,
         },

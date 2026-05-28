@@ -53,6 +53,8 @@ async function test(name, fn) {
     assert.ok(Array.isArray(report.availableTargets));
     assert.ok(report.availableTargets.includes('pr.diff'));
     assert.ok(!report.availableTargets.includes('plan.execute'));
+    assert.ok(!report.availableTargets.includes('plan.runs'));
+    assert.ok(!report.availableTargets.includes('plan.inspect'));
   });
 
   await test('buildGitHubExecutionPlan rejects unknown planner targets', async () => {

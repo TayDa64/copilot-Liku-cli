@@ -1,5 +1,6 @@
 const { findGitHubCapability, listGitHubCapabilities } = require('./capability-registry');
 const { evaluateGitHubCapabilityPolicy } = require('./capability-policy');
+const { resolveGitHubRepoContext } = require('./context');
 
 const GITHUB_PLAN_BUILD_SCHEMA_VERSION = 'github.plan-build.v1';
 const GITHUB_EXECUTION_PLAN_SCHEMA_VERSION = 'github.execution-plan.v1';
@@ -34,6 +35,22 @@ function cloneRuntimeOptions(options) {
     return {};
   }
   return { ...options };
+}
+
+function hydrateRuntimeOptionsWithRepoSlug(options, runtimeOptions) {
+  const requestedOptions = cloneRuntimeOptions(runtimeOptions);
+  const context = resolveGitHubRepoContext({
+    cwd: options.cwd,
+    env: options.env,
+    slug: requestedOptions.slug,
+  });
+  const effectiveSlug = String(context?.target?.slug || '').trim() || null;
+
+  if (effectiveSlug && !String(requestedOptions.slug || '').trim()) {
+    requestedOptions.slug = effectiveSlug;
+  }
+
+  return requestedOptions;
 }
 
 function listAvailablePlanTargets(options = {}) {
@@ -84,6 +101,14 @@ function buildTargetRuntimeInput(targetCapability, targetPositionals, runtimeOpt
         state: runtimeOptions.state,
         limit: runtimeOptions.limit,
         base: runtimeOptions.base,
+        head: runtimeOptions.head,
+      };
+    case 'pr.status':
+      return {
+        api: parseBooleanOption(runtimeOptions.api, true),
+        slug: runtimeOptions.slug,
+        state: runtimeOptions.state,
+        branch: runtimeOptions.branch,
         head: runtimeOptions.head,
       };
     case 'pr.inspect':
@@ -164,7 +189,7 @@ function buildUsageFailure(message) {
 function buildGitHubExecutionPlan(options = {}) {
   const source = String(options.source || 'unknown').trim().toLowerCase() || 'unknown';
   const positionals = Array.isArray(options.positionals) ? options.positionals.slice() : [];
-  const runtimeOptions = cloneRuntimeOptions(options.runtimeOptions || options.options);
+  const runtimeOptions = hydrateRuntimeOptionsWithRepoSlug(options, options.runtimeOptions || options.options);
   const executionPreferences = options.executionPreferences && typeof options.executionPreferences === 'object'
     ? { ...options.executionPreferences }
     : {};

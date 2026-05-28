@@ -325,7 +325,7 @@ function createCommandHandler(dependencies) {
 /provider [name] - Get/set AI provider (copilot, openai, anthropic, ollama)
 /setkey <provider> <key> - Set API key
 /status - Show authentication status
-/github ... - Read-only GitHub inspection via shared typed adapters
+/github ... - GitHub inspection plus reviewed preview creation via shared typed adapters
 /state [clear] - Show or clear session intent constraints
 /clear - Clear conversation history
 /vision [on|off] - Manage visual context

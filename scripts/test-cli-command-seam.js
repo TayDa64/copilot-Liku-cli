@@ -37,6 +37,7 @@ function createFakeTraceLog(events) {
       flags: { json: true },
       env: {
         LIKU_ENABLE_GITHUB: '1',
+        LIKU_ENABLE_GITHUB_WRITES: '1',
         LIKU_APPROVAL_MODE: 'never',
         LIKU_DRY_RUN_DEFAULT: '1',
       },
@@ -46,6 +47,7 @@ function createFakeTraceLog(events) {
     assert.strictEqual(request.command, 'start');
     assert.strictEqual(request.flags.json, true);
     assert.strictEqual(request.featureFlags.enableGitHub, true);
+    assert.strictEqual(request.featureFlags.enableGitHubWrites, true);
     assert.strictEqual(request.executionPreferences.approvalMode, 'never');
     assert.strictEqual(request.executionPreferences.dryRunDefault, true);
   });
@@ -107,6 +109,7 @@ function createFakeTraceLog(events) {
       flags: { json: true },
       env: {
         LIKU_ENABLE_GITHUB: '1',
+        LIKU_ENABLE_GITHUB_WRITES: '1',
         LIKU_ENABLE_AGENTS: '1',
         LIKU_ENABLE_DYNAMIC_TOOLS: '1',
         LIKU_APPROVAL_MODE: 'prompt',
@@ -139,6 +142,7 @@ function createFakeTraceLog(events) {
     assert.deepStrictEqual(receivedArgs, ['--deep']);
     assert.strictEqual(receivedOptions.json, true);
     assert.strictEqual(receivedOptions.featureFlags.enableGitHub, true);
+    assert.strictEqual(receivedOptions.featureFlags.enableGitHubWrites, true);
     assert.strictEqual(receivedOptions.executionPreferences.approvalMode, 'prompt');
     assert.ok(events.some((entry) => entry.event === 'cli:command:start'));
     assert.ok(events.some((entry) => entry.event === 'cli:command:result'));

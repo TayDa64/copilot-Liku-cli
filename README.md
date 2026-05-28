@@ -27,6 +27,7 @@ See also:
 - [QUICKSTART.md](QUICKSTART.md)
 - [INSTALLATION.md](INSTALLATION.md)
 - [docs/AGENT_ORCHESTRATION.md](docs/AGENT_ORCHESTRATION.md)
+- [docs/GITHUB_GOVERNANCE_VALIDATION_RUNBOOK.md](docs/GITHUB_GOVERNANCE_VALIDATION_RUNBOOK.md)
 - [docs/VSCODE_SLASH_COMMAND_IMPLEMENTATION.md](docs/VSCODE_SLASH_COMMAND_IMPLEMENTATION.md)
 
 ---
@@ -149,7 +150,7 @@ Useful invocation options:
 - `liku chat --execute prompt|true|false`
 - `liku chat --project <dir> --repo <name>` for explicit project-identity guarding
 
-Read-only GitHub entrypoints:
+GitHub entrypoints (read-only + reviewed preview/apply):
 
 - `liku github auth status`
 - `liku github capabilities list`
@@ -157,19 +158,61 @@ Read-only GitHub entrypoints:
 - `liku github context bundle pr <number> [--slug owner/repo]`
 - `liku github context bundle issue <number> [--slug owner/repo]`
 - `liku github context bundle repo [--slug owner/repo] [--limit N] [--out-file <path>]`
+- `liku github issues comment draft <number> (--body <text> | --body-file <path>) [--slug owner/repo]`
+- `liku github pr create draft --title <text> [--body <text> | --body-file <path>] [--base branch] [--head branch|owner:branch] [--draft true|false] [--slug owner/repo] [--api false]`
+- `liku github pr comment draft <number> (--body <text> | --body-file <path>) [--slug owner/repo]`
+- `liku github pr review draft <number> --event <comment|approve|request-changes> [--body <text> | --body-file <path>] [--slug owner/repo]`
+- `liku github pr close draft <number> [--slug owner/repo]`
+- `liku github pr reopen draft <number> [--slug owner/repo]`
+- `liku github apply <preview-id> --approve [--apply-token <token> | --approval-file <path>]`
 - `liku github plan build <area> <action> [args...]`
 - `liku github plan execute <area> <action> [args...]`
 - `liku github plan execute --plan-file <path>`
 - `liku github plan resume --guidance-file <path> --resume-token <token> --answers-file <path>`
 - `liku github plan resume --guidance-file <path> --resume-token <token> --answers-json '{"field":"value"}'`
+- `liku github plan runs [--slug owner/repo] [--limit N] [--state completed|blocked|aborted|all]`
+- `liku github plan inspect <run-id> [--slug owner/repo] [--plan-file <path>] [--event-log-file <path>]`
 - `liku github repo inspect`
+- `liku github ruleset list [--slug owner/repo] [--limit N] [--api false]`
+- `liku github ruleset inspect <id> [--slug owner/repo] [--api false]`
+- `liku github environment list [--slug owner/repo] [--limit N] [--api false]`
+- `liku github environment inspect <name> [--slug owner/repo] [--api false]`
+- `liku github secret list [--slug owner/repo] [--limit N] [--api false]`
+- `liku github secret inspect <name> [--slug owner/repo] [--api false]`
+- `liku github variable list [--slug owner/repo] [--limit N] [--api false]`
+- `liku github variable inspect <name> [--slug owner/repo] [--api false]`
+- `liku github codeowners inspect [--slug owner/repo] [--api false]`
+- `liku github codeowners create draft [--path <path>] [--body <text> | --body-file <path>] [--base branch] [--head branch] [--slug owner/repo] [--api false]`
+- `liku github codeowners update draft [--path <path>] [--body <text> | --body-file <path>] [--base branch] [--head branch] [--slug owner/repo] [--api false]`
+- `liku github template inspect [--slug owner/repo] [--api false]`
+- `liku github webhook list [--slug owner/repo] [--limit N] [--api false]`
+- `liku github webhook inspect <id> [--slug owner/repo] [--api false]`
+- `liku github webhook create draft --events a,b --target-url <url> --secret-ref repo:<ENV_NAME> [--content-type json|form] [--active true|false] [--slug owner/repo]`
+- `liku github webhook update draft <id> [--events a,b] [--target-url <url>] [--secret-ref repo:<ENV_NAME>] [--content-type json|form] [--active true|false] [--slug owner/repo]`
+- `liku github webhook ping draft <id> [--slug owner/repo]`
+- `liku github event list [--slug owner/repo] [--limit N] [--event <name>]`
+- `liku github event inspect <event-id> [--slug owner/repo]`
+- `liku github app status [--slug owner/repo] [--probe false] [--api false]`
+- `liku github app installation inspect [--slug owner/repo] [--api false]`
+- `liku github app permissions inspect [--slug owner/repo] [--api false]`
 - `liku github issues list`
 - `liku github issues inspect <number>`
 - `liku github pr list`
+- `liku github pr status [--branch name] [--slug owner/repo]`
+- `liku github pr view [--branch name] [--slug owner/repo]`
+- `liku github pr feedback [<number>] [--branch name] [--slug owner/repo] [--limit N]`
 - `liku github pr inspect <number>`
 - `liku github pr diff <number>`
 - `liku github workflow runs`
 - `liku github workflow inspect <run-id>`
+- `liku github workflow validate <path> [--body <text> | --body-file <path>] [--slug owner/repo]`
+- `liku github workflow permissions inspect <path> [--body <text> | --body-file <path>] [--slug owner/repo]`
+- `liku github workflow requirements inspect <path> [--body <text> | --body-file <path>] [--slug owner/repo]`
+- `liku github workflow create draft <path> [--body <text> | --body-file <path>] [--base branch] [--head branch] [--slug owner/repo] [--api false]`
+- `liku github workflow update draft <path> [--body <text> | --body-file <path>] [--base branch] [--head branch] [--slug owner/repo] [--api false]`
+- `liku github workflow dispatch draft <workflow-id|file> [--ref branch|tag|sha] [--inputs-json <json> | --inputs-file <path>] [--slug owner/repo]`
+- `liku github workflow rerun draft <run-id> [--failed-only true|false] [--slug owner/repo]`
+- `liku github workflow cancel draft <run-id> [--slug owner/repo]`
 - `liku github releases list`
 - `liku github releases inspect <latest|tag|id>`
 - `liku github auth status --json --probe false`
@@ -177,12 +220,45 @@ Read-only GitHub entrypoints:
 - `liku github issues list --state all --limit 20`
 - `liku github issues inspect 321 --slug owner/repo`
 - `liku github pr list --state all --limit 20`
+- `liku github pr status --branch feature/demo --slug owner/repo`
+- `liku github pr feedback --branch feature/demo --slug owner/repo --limit 5`
+- `liku github pr review draft 123 --event approve --body "Looks good overall" --slug owner/repo`
+- `liku github pr close draft 123 --slug owner/repo`
+- `liku github pr reopen draft 123 --slug owner/repo`
+- `liku github pr create draft --title "Add overlay diagnostics" --base main --head feature/demo --slug owner/repo`
 - `liku github pr inspect 123 --slug owner/repo`
 - `liku github pr diff 123 --limit 50`
 - `liku github workflow runs --workflow ci.yml --limit 10`
 - `liku github workflow inspect 9001 --slug owner/repo`
+- `liku github workflow validate .github/workflows/validate.yml --body-file C:\Users\you\validate.yml --slug owner/repo`
+- `liku github workflow permissions inspect .github/workflows/validate.yml --slug owner/repo`
+- `liku github workflow requirements inspect .github/workflows/validate.yml --slug owner/repo`
+- `liku github codeowners create draft --body-file C:\Users\you\CODEOWNERS --base main --slug owner/repo`
+- `liku github webhook create draft --events push,pull_request,workflow_run --target-url https://assistant.example.com/github/webhook --secret-ref repo:LIKU_WEBHOOK_SECRET --content-type json --slug owner/repo`
+- `liku github event list --slug owner/repo --limit 10 --event push`
+- `liku github plan runs --slug owner/repo --limit 10 --state blocked`
+- `liku github plan inspect github-run-123 --slug owner/repo`
+- `liku github workflow create draft .github/workflows/validate.yml --body-file C:\Users\you\validate.yml --base main --slug owner/repo`
+- `liku github workflow update draft .github/workflows/validate.yml --body-file C:\Users\you\validate.yml --base main --slug owner/repo`
+- `liku github workflow dispatch draft validate.yml --ref main --inputs-json '{"target":"staging"}' --slug owner/repo`
+- `liku github workflow rerun draft 9001 --failed-only true --slug owner/repo`
+- `liku github workflow cancel draft 9002 --slug owner/repo`
 - `liku github releases list --limit 5 --slug owner/repo`
 - `liku github releases inspect latest --slug owner/repo`
+- `liku github issues comment draft 321 --body "Please retest with 0.0.16" --slug owner/repo`
+- `liku github pr comment draft 123 --body "Looks good overall" --slug owner/repo`
+- `liku github apply github-write-preview-123 --approve --approval-file C:\Users\you\.liku\github\writes\github-write-preview-123.approval.json`
+
+Repo governance inventory notes:
+
+- rulesets, environments, webhooks, and app installation visibility are repo-scoped and read-only
+- Actions secrets and variables stay metadata-only in model-visible output
+- `codeowners inspect` and `template inspect` can prefer the current workspace and run offline with `--api false`
+- `codeowners create draft` and `codeowners update draft` stay reviewed previews only; apply still goes through `liku github apply ...` and opens a dedicated branch plus draft PR for the CODEOWNERS patch
+- `webhook create draft`, `webhook update draft`, and `webhook ping draft` stay reviewed previews only; apply still goes through `liku github apply ...`, and `repo:<ENV_NAME>` secret refs are resolved from the local environment only at apply time so raw webhook secrets are never persisted in preview artifacts
+- `event list` and `event inspect` read the local GitHub event journal under `~/.liku/github/events`; this Phase 10B slice persists sanitized delivery artifacts and a durable JSONL journal locally, but intentionally stops short of starting a live webhook receiver
+- `plan runs` and `plan inspect` read the local GitHub plan ledger under `~/.liku/github/plans`; this Phase 10C slice adds durable local run inspection and replay context only, and does not introduce a new orchestration or apply path
+- missing GitHub tokens or repo-admin scopes should warn and fail soft instead of mutating or hard failing the command surface
 
 Useful chat commands:
 
@@ -192,6 +268,30 @@ Useful chat commands:
 - `/github capabilities inspect pr.diff`
 - `/github context bundle pr 7 --api false`
 - `/github context bundle repo --limit 5 --api false`
+- `/github ruleset list --limit 5 --slug owner/repo --api false`
+- `/github codeowners inspect --api false`
+- `/github codeowners create draft --body-file <path> --base main --slug owner/repo`
+- `/github template inspect --api false`
+- `/github webhook create draft --events push,pull_request --target-url https://assistant.example.com/github/webhook --secret-ref repo:LIKU_WEBHOOK_SECRET --content-type json --slug owner/repo`
+- `/github webhook update draft 12345 --events workflow_run,pull_request_review --target-url https://assistant.example.com/github/webhook --secret-ref repo:LIKU_WEBHOOK_SECRET --slug owner/repo`
+- `/github webhook ping draft 12345 --slug owner/repo`
+- `/github event list --slug owner/repo --limit 10 --event push`
+- `/github event inspect <event-id> --slug owner/repo`
+- `/github plan runs --slug owner/repo --limit 10 --state blocked`
+- `/github plan inspect <run-id> --slug owner/repo`
+- `/github app status --slug owner/repo --probe false --api false`
+- `/github issues comment draft 321 --body "Please retest with 0.0.16" --slug owner/repo`
+- `/github pr create draft --title "Add overlay diagnostics" --base main --head feature/demo --slug owner/repo --api false`
+- `/github pr comment draft 123 --body "Looks good overall" --slug owner/repo`
+- `/github pr review draft 123 --event approve --body "Looks good overall" --slug owner/repo`
+- `/github pr close draft 123 --slug owner/repo`
+- `/github pr reopen draft 123 --slug owner/repo`
+- `/github workflow validate .github/workflows/validate.yml --body-file <path> --slug owner/repo`
+- `/github workflow create draft .github/workflows/validate.yml --body-file <path> --base main --slug owner/repo`
+- `/github workflow dispatch draft validate.yml --ref main --inputs-json '{"target":"staging"}' --slug owner/repo`
+- `/github pr status --branch feature/demo --slug owner/repo --api false`
+- `/github pr view --branch feature/demo --slug owner/repo --api false`
+- `/github pr feedback --branch feature/demo --slug owner/repo --limit 5 --api false`
 - `/github plan build pr diff 7 --limit 30 --api false`
 - `/github plan execute pr diff 7 --limit 30 --api false`
 - `/github plan execute --plan-file <path>`
@@ -228,12 +328,14 @@ Current top-level CLI defaults and seam controls:
 Phase 0/1 introduces additive seam-level feature flags for future gated capabilities:
 
 - `LIKU_ENABLE_GITHUB=1` opt-in marker for future GitHub command surfaces
+- `LIKU_ENABLE_GITHUB_WRITES=1` enable the low-risk reviewed GitHub write preview/apply surface
+- `LIKU_HOME_OVERRIDE=<path>` override the Liku home directory for isolated proof/test artifact runs
 - `LIKU_ENABLE_AGENTS=0|1` override seam-level agent availability metadata
 - `LIKU_ENABLE_DYNAMIC_TOOLS=0|1` override seam-level dynamic-tool availability metadata
 - `LIKU_APPROVAL_MODE=prompt|auto|never` set the default approval preference recorded by the command seam
 - `LIKU_DRY_RUN_DEFAULT=1` mark command-seam requests as dry-run preferred by default
 
-These Phase 0/1 flags are intentionally non-breaking scaffolding: they are available to the command seam and trace metadata now. The explicit read-only `liku github ...` commands added in Phase 2 are allowed directly, while `LIKU_ENABLE_GITHUB` remains useful metadata for broader future GitHub-assisted routing.
+These Phase 0/1 flags remain additive seam scaffolding. The explicit read-only `liku github ...` commands added in Phase 2 are still allowed directly, while the low-risk Phase 7 write surface requires both `LIKU_ENABLE_GITHUB=1` and `LIKU_ENABLE_GITHUB_WRITES=1` before preview/apply issue-comment and PR-comment flows are allowed.
 
 Config precedence for the current CLI surface:
 
@@ -282,6 +384,12 @@ For the Phase 2 read-only GitHub milestone, run:
 npm run test:github-phase2
 ```
 
+For the Phase 7 reviewed GitHub write-preview/apply milestone, run:
+
+```bash
+npm run test:github-phase7-writes
+```
+
 ---
 
 ## CLI commands
@@ -309,7 +417,7 @@ The top-level CLI currently exposes these commands through `src/cli/liku.js`.
 | `memory` | Inspect/manage memory notes |
 | `skills` | Inspect/manage skill library |
 | `tools` | Inspect/manage dynamic tool registry |
-| `github` | Read-only GitHub auth, repo, issue, PR, workflow, and release inspection |
+| `github` | GitHub auth, repo, issue, PR, workflow, and release inspection plus reviewed issue/PR-comment previews and explicit CLI apply |
 | `analytics` | View telemetry analytics |
 
 Examples:
@@ -320,6 +428,17 @@ liku github auth status
 liku github repo inspect --json
 liku github context bundle pr 7 --api false
 liku github context bundle repo --limit 5 --api false
+liku github ruleset list --limit 10 --slug owner/repo --api false
+liku github codeowners inspect --api false
+liku github codeowners create draft --body-file C:\Users\you\CODEOWNERS --base main --slug owner/repo
+liku github webhook create draft --events push,pull_request,workflow_run --target-url https://assistant.example.com/github/webhook --secret-ref repo:LIKU_WEBHOOK_SECRET --content-type json --slug owner/repo
+liku github event list --slug owner/repo --limit 10 --event push
+liku github plan runs --slug owner/repo --limit 10 --state blocked
+liku github plan inspect github-run-123 --slug owner/repo
+liku github app permissions inspect --slug owner/repo --api false
+liku github issues comment draft 321 --body "Please retest with 0.0.16" --slug owner/repo
+liku github pr comment draft 123 --body "Looks good overall" --slug owner/repo
+liku github apply github-write-preview-123 --approve --approval-file C:\Users\you\.liku\github\writes\github-write-preview-123.approval.json
 liku github issues list --state all --limit 10
 liku github issues inspect 321
 liku github pr list --state all --limit 10
@@ -419,7 +538,7 @@ When a TradingView chart has established focus, `Ctrl+E` is treated as the groun
 Handled through `ai-service.handleCommand()`:
 
 - `/help`
-- `/github ...` read-only GitHub inspection via shared typed adapters
+- `/github ...` GitHub inspection plus reviewed preview creation via shared typed adapters
 - `/login` / `/logout`
 - `/model [key]`
 - `/provider [name]`
@@ -434,7 +553,7 @@ Handled through `ai-service.handleCommand()`:
 - `/tools [approve|revoke <name>]`
 - `/rmodel [model|off]`
 
-GitHub read-only operations now ship both as top-level `liku github ...` commands and as shared `/github ...` slash commands routed through `ai-service.handleCommand()`. For the source-grounded VS Code / Codespaces implementation note, see [docs/VSCODE_SLASH_COMMAND_IMPLEMENTATION.md](docs/VSCODE_SLASH_COMMAND_IMPLEMENTATION.md).
+GitHub inspection operations and reviewed preview creation now ship both as top-level `liku github ...` commands and as shared `/github ...` slash commands routed through `ai-service.handleCommand()`. Actual apply remains CLI-only. For the source-grounded VS Code / Codespaces implementation note, see [docs/VSCODE_SLASH_COMMAND_IMPLEMENTATION.md](docs/VSCODE_SLASH_COMMAND_IMPLEMENTATION.md).
 
 ### Electron-only orchestration commands
 
@@ -519,6 +638,8 @@ npm run test:ai-focused
 npm run test:windows-observation-flow
 npm run test:chat-actionability
 npm run test:ui
+npm run test:github-phase8-workflows
+npm run test:github-phase9-readonly
 ```
 
 ### Other useful scripts
@@ -543,6 +664,10 @@ The current focused AI bundle runs:
 - `scripts/test-tradingview-registry-parity.js`
 
 TradingView runtime behavior changes should also use `docs/TRADINGVIEW_VALIDATION_RUNBOOK.md`. The live smoke lane is opt-in and writes artifacts under `artifacts\live-validation\`; Playwright/browser evidence is secondary and must only validate browser-visible state after Liku actions.
+
+GitHub workflow capability changes should also use `docs/GITHUB_WORKFLOW_VALIDATION_RUNBOOK.md`. Phase 8 workflow dispatch/rerun/cancel live proofs must stay on reversible, non-production workflows and keep apply on the CLI only.
+
+GitHub governance inventory changes should also use `docs/GITHUB_GOVERNANCE_VALIDATION_RUNBOOK.md`. Phase 9A proofs should stay read-only, capture redacted metadata only, and prefer `--api false` local inspection for CODEOWNERS/template validation when possible.
 
 ---
 
@@ -574,6 +699,8 @@ docs/                       # Architecture and orchestration docs
 - [CONTRIBUTING.md](CONTRIBUTING.md)
 - [RELEASE_PROCESS.md](RELEASE_PROCESS.md)
 - [docs/AGENT_ORCHESTRATION.md](docs/AGENT_ORCHESTRATION.md)
+- [docs/GITHUB_GOVERNANCE_VALIDATION_RUNBOOK.md](docs/GITHUB_GOVERNANCE_VALIDATION_RUNBOOK.md)
+- [docs/GITHUB_WORKFLOW_VALIDATION_RUNBOOK.md](docs/GITHUB_WORKFLOW_VALIDATION_RUNBOOK.md)
 - [docs/INTEGRATED_TERMINAL_ARCHITECTURE.md](docs/INTEGRATED_TERMINAL_ARCHITECTURE.md)
 
 ---

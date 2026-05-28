@@ -22,6 +22,8 @@ function buildPolicyBySource(capability, options = {}) {
   const runtimeOptions = options.runtimeOptions && typeof options.runtimeOptions === 'object'
     ? options.runtimeOptions
     : {};
+  const featureFlagEnabled = options.featureFlagEnabled === true;
+  const writeFeatureFlagEnabled = options.writeFeatureFlagEnabled === true;
   const evaluatePolicy = typeof options.evaluateGitHubCapabilityPolicy === 'function'
     ? options.evaluateGitHubCapabilityPolicy
     : evaluateGitHubCapabilityPolicy;
@@ -33,6 +35,8 @@ function buildPolicyBySource(capability, options = {}) {
       source,
       executionPreferences,
       runtimeOptions,
+      featureFlagEnabled,
+      writeFeatureFlagEnabled,
     });
   });
   return preview;

@@ -187,6 +187,8 @@ Safe first capabilities:
 - identify current repo from local git remote
 - inspect GitHub auth status and token scopes
 - fetch repo metadata
+- inspect repository governance posture such as rulesets, environments, webhook metadata, and GitHub App installation visibility
+- inspect metadata-only Actions secret/variable inventory plus repo-content governance files such as CODEOWNERS and issue/PR templates
 - list/open issues and pull requests
 - inspect workflow runs and statuses
 - read release history
@@ -613,6 +615,32 @@ Exit criteria:
 - publishing is isolated from PR credentials
 - package contents are verified before release
 - supply-chain controls are visible and enforced
+
+### Current addendum — repo governance inventory and admin posture
+
+Objective: expand the read-only GitHub surface to cover repository governance posture without introducing write/apply behavior.
+
+Tasks:
+
+- Add typed read-only adapters for repository rulesets, environments, webhook metadata, and GitHub App installation posture.
+- Keep Actions secrets and variables metadata-only in all model-visible output.
+- Prefer the current workspace for `codeowners inspect` and `template inspect` when the repo target matches, with `--api false` support for deterministic offline proof.
+- Reuse shared governance redaction helpers so webhook config, tokens, and other sensitive fields stay sanitized.
+- Surface governance/admin visibility hints through the auth-status and app-status reports instead of failing hard when scopes are missing.
+- Expose the same command surface through both `liku github ...` and shared `/github ...` slash commands.
+
+Exit criteria:
+
+- governance inventory remains repo-scoped and read-only
+- secrets, variables, and sensitive webhook config stay redacted
+- local offline CODEOWNERS/template inspection is deterministic
+- registry/policy, CLI, slash, and focused runtime tests cover the new surface
+
+Verification command for this repo slice:
+
+```bash
+npm run test:github-phase9-readonly
+```
 
 ## 9. Concrete repo changes to prefer
 

@@ -117,11 +117,43 @@ ${highlight('EXAMPLES:')}
   ${dim('# Execute a bounded read-only GitHub plan and persist replay artifacts')}
   liku github plan execute pr diff 7 --limit 30 --api false
 
+  ${dim('# List or inspect locally recorded GitHub plan runs')}
+  liku github plan runs --slug owner/repo --limit 10 --state blocked
+  liku github plan inspect github-run-123 --slug owner/repo
+
+  ${dim('# Draft a reviewed GitHub issue-comment preview without mutating GitHub yet')}
+  liku github issues comment draft 321 --body "Thanks for the detailed report" --slug owner/repo
+
+  ${dim('# Draft a reviewed GitHub pull-request-create preview without mutating GitHub yet')}
+  liku github pr create draft --title "Add overlay diagnostics" --base main --head feature/demo --slug owner/repo
+
+  ${dim('# Draft a reviewed GitHub PR-comment preview without mutating GitHub yet')}
+  liku github pr comment draft 123 --body "Looks good overall" --slug owner/repo
+
+  ${dim('# Apply one reviewed GitHub write preview from the CLI')}
+  liku github apply github-write-preview-123 --approve --approval-file C:\\Users\\you\\.liku\\github\\writes\\github-write-preview-123.approval.json
+
   ${dim('# Replay a saved GitHub plan artifact')}
   liku github plan execute --plan-file C:\\Users\\you\\.liku\\github\\plans\\github-plan-example.plan.json
 
   ${dim('# Inspect the current repo via local identity + GitHub metadata')}
   liku github repo inspect --json
+
+  ${dim('# List repository rulesets or inspect templates locally/offline')}
+  liku github ruleset list --slug owner/repo --limit 10
+  liku github template inspect --api false
+
+  ${dim('# Draft a reviewed CODEOWNERS patch through a dedicated branch + draft PR')}
+  liku github codeowners create draft --body-file C:\\Users\\you\\CODEOWNERS --base main --slug owner/repo
+
+  ${dim('# Preview a reviewed repository webhook create flow')}
+  liku github webhook create draft --events push,pull_request,workflow_run --target-url https://assistant.example.com/github/webhook --secret-ref repo:LIKU_WEBHOOK_SECRET --content-type json --slug owner/repo
+
+  ${dim('# Inspect the local GitHub event journal for one repository')}
+  liku github event list --slug owner/repo --limit 10 --event push
+
+  ${dim('# Summarize GitHub App posture for a repository')}
+  liku github app status --slug owner/repo
 
   ${dim('# List issues for the current or a specified GitHub repo')}
   liku github issues list --state all --limit 10
@@ -131,6 +163,19 @@ ${highlight('EXAMPLES:')}
 
   ${dim('# List pull requests')}
   liku github pr list --state all --limit 10
+
+  ${dim('# Show the branch-associated pull request status')}
+  liku github pr status --branch feature/demo --slug owner/repo
+
+  ${dim('# Summarize pull-request comments and reviews for the current branch or one PR')}
+  liku github pr feedback --branch feature/demo --slug owner/repo
+
+  ${dim('# Draft a reviewed GitHub PR review preview without mutating GitHub yet')}
+  liku github pr review draft 123 --event approve --body "Looks good overall" --slug owner/repo
+
+  ${dim('# Draft a reviewed GitHub PR close/reopen preview without mutating GitHub yet')}
+  liku github pr close draft 123 --slug owner/repo
+  liku github pr reopen draft 123 --slug owner/repo
 
   ${dim('# Inspect one pull request')}
   liku github pr inspect 7
@@ -144,6 +189,19 @@ ${highlight('EXAMPLES:')}
   ${dim('# Inspect one workflow run')}
   liku github workflow inspect 9001
 
+  ${dim('# Validate one workflow file locally before opening a PR')}
+  liku github workflow validate .github/workflows/ci.yml --body-file C:\\Users\\you\\ci.yml --slug owner/repo
+
+  ${dim('# Draft a reviewed workflow-file change through a dedicated branch + draft PR')}
+  liku github workflow create draft .github/workflows/ci.yml --body-file C:\\Users\\you\\ci.yml --base main --slug owner/repo
+
+  ${dim('# Draft a reviewed workflow dispatch preview for a sandbox workflow')}
+  liku github workflow dispatch draft ci.yml --ref main --inputs-json '{"target":"staging"}' --slug owner/repo
+
+  ${dim('# Draft a reviewed rerun/cancel preview for one workflow run')}
+  liku github workflow rerun draft 9001 --failed-only true --slug owner/repo
+  liku github workflow cancel draft 9001 --slug owner/repo
+
   ${dim('# List releases')}
   liku github releases list --limit 5
 
@@ -155,6 +213,7 @@ ${highlight('ENVIRONMENT:')}
   LIKU_JSON=1      Default to JSON output
   LIKU_DISABLE_RUNTIME_TRACE=1  Disable CLI/runtime trace logging
   LIKU_ENABLE_GITHUB=1          Opt in to future GitHub command surfaces
+  LIKU_ENABLE_GITHUB_WRITES=1   Enable reviewed GitHub write preview/apply flows
   LIKU_ENABLE_AGENTS=0|1        Override seam-level agent feature availability
   LIKU_ENABLE_DYNAMIC_TOOLS=0|1 Override seam-level dynamic tool availability
   LIKU_APPROVAL_MODE=prompt|auto|never  Set the default approval preference
