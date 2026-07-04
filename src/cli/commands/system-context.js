@@ -142,7 +142,15 @@ async function run(args, flags) {
 
     case 'confirm': {
       const keyOrId = args[1];
-      if (!keyOrId) { error('Usage: liku system-context confirm <key|id> [--apply|--reject]'); return { success: false }; }
+      const action = flags.reject ? 'reject' : 'apply';
+      // Batch confirm: liku system-context confirm --all [--apply|--reject]
+      if (flags.all) {
+        const res = mgr.confirmAllPending(action);
+        if (flags.json) return { success: true, ...res };
+        success(`Batch ${action}: ${res.count} item(s) (applied=${res.applied.length}, rejected=${res.rejected.length}).`);
+        return { success: true, ...res };
+      }
+      if (!keyOrId) { error('Usage: liku system-context confirm <key|id> [--apply|--reject] | --all'); return { success: false }; }
       const matches = mgr.getPending(keyOrId);
       if (!matches.length) {
         if (flags.json) return { success: false, reason: 'not-found', key: keyOrId };
@@ -161,7 +169,6 @@ async function run(args, flags) {
         log(dim('\nRe-run with --apply to accept or --reject to discard.'));
         return { success: true, preview: true };
       }
-      const action = flags.reject ? 'reject' : 'apply';
       const res = mgr.confirmPending(keyOrId, action);
       if (flags.json) return { success: !!res.ok, ...res };
       if (!res.ok) { error(`Confirm failed: ${res.reason}`); return { success: false, ...res }; }
@@ -170,6 +177,25 @@ async function run(args, flags) {
       } else {
         success(`Rejected pending update for ${res.key}.`);
       }
+      return { success: true, ...res };
+    }
+
+    case 'prune': {
+      // Governed delete of retired reg.*/cap.* keys (with history record).
+      //   liku system-context prune <key>
+      //   liku system-context prune --evidence   (clear all operational evidence keys)
+      if (flags.evidence) {
+        const res = mgr.pruneEvidence();
+        if (flags.json) return { success: true, ...res };
+        success(`Pruned ${res.removed} evidence key(s).`);
+        return { success: true, ...res };
+      }
+      const key = args[1];
+      if (!key) { error('Usage: liku system-context prune <reg.*|cap.* key> | --evidence'); return { success: false }; }
+      const res = mgr.pruneKey(key);
+      if (flags.json) return { success: !!res.ok, ...res };
+      if (!res.ok) { error(`Prune failed: ${res.reason} (${res.key || key})`); return { success: false, ...res }; }
+      success(`Pruned ${res.key} (was: ${res.oldValue}).`);
       return { success: true, ...res };
     }
 
@@ -182,7 +208,7 @@ async function run(args, flags) {
 
     default:
       error(`Unknown subcommand: ${subcommand}`);
-      log('Usage: liku system-context [show|get <path>|fragment [fmt]|diff [key]|pending|confirm <key> [--apply|--reject]|record-regression <status>|refresh|json]');
+      log('Usage: liku system-context [show|get <path>|fragment [fmt]|diff [key]|pending|confirm <key> [--apply|--reject]|confirm --all|prune <key>|prune --evidence|record-regression <status>|refresh|json]');
       return { success: false };
   }
 }

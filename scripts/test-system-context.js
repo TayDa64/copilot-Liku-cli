@@ -237,6 +237,110 @@ test('recordRegressionOutcome writes cap.lang.*.regression.status', () => {
   assert.strictEqual(mgr.get('reg.lastRegressionQuality'), 1);
 });
 
+// ── Phase 4: governance + evidence hygiene ──
+
+test('evidence keys are excluded from the default fragment but queryable', () => {
+  mgr.recordRegressionOutcome('fail', { lang: 'py', quality: 0 });
+  // Queryable...
+  assert.strictEqual(mgr.get('cap.lang.py.regression.status'), 'fail');
+  // ...but not in the default (no-signal) fragment.
+  const def = mgr.toPromptFragment('structured');
+  assert.ok(!def.includes('cap.lang.py.regression.status'), 'evidence excluded by default');
+  // Included when the query is relevant to it.
+  const rel = mgr.toPromptFragment('structured', { query: 'did the python regression pass?' });
+  assert.ok(rel.includes('cap.lang.py.regression.status'), 'evidence included when relevant');
+});
+
+test('confirm --all batch applies all pending items', () => {
+  mgr.proposeUpdate('reg.batchA', 'a', { source: 'telemetry', confidence: 0.1 });
+  mgr.proposeUpdate('reg.batchB', 'b', { source: 'telemetry', confidence: 0.1 });
+  const res = mgr.confirmAllPending('apply');
+  assert.ok(res.count >= 2);
+  assert.strictEqual(mgr.get('reg.batchA'), 'a');
+  assert.strictEqual(mgr.get('reg.batchB'), 'b');
+  assert.strictEqual(mgr.getPendingUpdates().length, 0, 'queue must be empty after batch confirm');
+});
+
+test('prune retires reg.*/cap.* keys but protects core groups', () => {
+  mgr.proposeUpdate('reg.toPrune', 'x', { source: 'telemetry', confidence: 0.9 });
+  assert.strictEqual(mgr.pruneKey('reg.toPrune').ok, true);
+  assert.strictEqual(mgr.get('reg.toPrune'), undefined);
+  // Core grounded groups are protected.
+  assert.strictEqual(mgr.pruneKey('env.platform').ok, false);
+  assert.strictEqual(mgr.pruneKey('guard.net.mode').ok, false);
+  // History records the prune.
+  const last = mgr.getLastChange('reg.toPrune');
+  assert.ok(last && last.decision === 'pruned');
+});
+
+test('sweepPending removes expired queued items', () => {
+  mgr.proposeUpdate('reg.willExpire', 'v', { source: 'telemetry', confidence: 0.1, ttl: 3600 });
+  // Force expiry on the pending item, then sweep.
+  const item = mgr._pending.find((p) => p.key === 'reg.willExpire');
+  item.expiresAt = new Date(Date.now() - 1000).toISOString();
+  const res = mgr.sweepPending();
+  assert.ok(res.removed >= 1);
+  assert.strictEqual(mgr.getPending('reg.willExpire').length, 0);
+});
+
+// ── Phase 4: Peripheral Abstraction Layer (feature-flag isolation) ──
+
+test('PAL is completely inert when LIKU_ENABLE_PERIPHERALS is off', () => {
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  assert.strictEqual(pal.isPeripheralsEnabled(), false);
+  assert.deepStrictEqual(pal.scan(), { enabled: false, devices: [] });
+  assert.strictEqual(pal.get('mock-lock-01'), null);
+  assert.deepStrictEqual(pal.execute('mock-lock-01', 'unlock'), { enabled: false });
+  assert.strictEqual(typeof pal.subscribe(() => {}), 'function');
+  // No peripherals.json should be created while disabled.
+  assert.ok(!fs.existsSync(require('../src/main/peripherals/peripheral-registry').PERIPHERALS_FILE), 'no file when off');
+});
+
+test('PAL enabled: scan registers Class A/B/C mock devices', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  const res = pal.scan();
+  assert.strictEqual(res.enabled, true);
+  const classes = new Set(res.devices.map((d) => d.class));
+  assert.ok(classes.has('A') && classes.has('B') && classes.has('C'), 'all three classes registered');
+});
+
+test('PAL Class C sensor read is allowed immediately', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  const res = pal.execute('mock-temp-01', 'read');
+  assert.strictEqual(res.ok, true);
+  assert.strictEqual(res.klass, 'C');
+});
+
+test('PAL Class B safe actuator is gated + auto-approved', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  const res = pal.execute('mock-light-01', 'on');
+  assert.strictEqual(res.ok, true);
+  assert.strictEqual(res.klass, 'B');
+  assert.strictEqual(pal.get('mock-light-01').state.power, 'on');
+});
+
+test('PAL Class A high-risk action routes through pending/confirm and never bypasses it', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  const before = pal.get('mock-lock-01').state.locked;
+  const blocked = pal.execute('mock-lock-01', 'unlock');
+  assert.strictEqual(blocked.ok, false, 'Class A must not auto-execute');
+  assert.strictEqual(blocked.pending, true);
+  assert.ok(blocked.confirmKey.startsWith('guard.peripheral.'));
+  assert.strictEqual(pal.get('mock-lock-01').state.locked, before, 'state must be unchanged while pending');
+  // Human confirms the guard authorization, then the action proceeds.
+  const cres = mgr.confirmPending(blocked.confirmKey, 'apply');
+  assert.strictEqual(cres.ok, true);
+  const allowed = pal.execute('mock-lock-01', 'unlock');
+  assert.strictEqual(allowed.ok, true, 'action proceeds after confirmation');
+  assert.strictEqual(pal.get('mock-lock-01').state.locked, false);
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
 test('env.hostname is stored but excluded from injected fragment by default', () => {
   // Stored for local diagnostics...
   assert.strictEqual(typeof mgr.get('env.hostname'), 'string');

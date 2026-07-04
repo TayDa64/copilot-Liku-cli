@@ -116,6 +116,23 @@ const PROMPT_PRIVACY_GATES = Object.freeze({
 });
 
 /**
+ * Evidence-injection hygiene (Phase 4): operational evidence keys accumulate as
+ * the substrate self-updates. They are kept queryable (get/getSection/getAll)
+ * but EXCLUDED from the default injected fragment so it stays lean. They are
+ * re-included only when the current query/foreground is relevant to them (or
+ * when a caller passes { includeEvidence: true }). This keeps the default
+ * fragment byte-identical on a fresh store while preventing unbounded growth.
+ */
+const EVIDENCE_KEY_PATTERN = /^(reg\.last(Tool|Verification|Reflection|Regression)|reg\.tradingViewLiveMode|cap\.)/;
+
+/** Keys that may be retired via the governed prune/delete path (Phase 4). */
+const PRUNABLE_KEY_PATTERN = /^(reg|cap)\./;
+
+function isEvidenceKey(key) {
+  return EVIDENCE_KEY_PATTERN.test(String(key || ''));
+}
+
+/**
  * Phase 0/1 grounded sources — deterministic, non-LLM. autoDetectEnvironment()
  * writes exclusively through these via _setGrounded().
  */
@@ -556,6 +573,8 @@ class SystemContextManager {
     // Phase 3: overlay live guardrail values (best-effort). Safer-or-equal values
     // apply; any relaxation queues for confirmation. Never fatal.
     try { this.refreshGuardRails(); } catch { /* non-fatal */ }
+    // Phase 4: sweep expired pending items (best-effort governance).
+    try { this.sweepPending(); } catch { /* non-fatal */ }
     verboseLog('autoDetectEnvironment applied', updated, 'grounded facts');
     return { updated, total: Object.keys(this._entries).length };
   }
@@ -961,6 +980,78 @@ class SystemContextManager {
     return { ok: true, action: 'apply', key: item.key, applied: { ...applied }, count: matches.length };
   }
 
+  // ── Pending governance (Phase 4) ─────────────────────────
+
+  /**
+   * Remove expired pending items, recording each removal in the change history.
+   * Safe to call at startup. @returns {{removed:number, remaining:number}}
+   */
+  sweepPending() {
+    const expired = this._pending.filter((p) => isExpired(p));
+    if (expired.length) {
+      for (const p of expired) {
+        this._recordChange({
+          key: p.key, oldValue: undefined, newValue: p.value,
+          source: p.source, confidence: p.confidence, decision: 'expired'
+        });
+      }
+      this._pending = this._pending.filter((p) => !isExpired(p));
+      this._persistPending();
+    }
+    return { removed: expired.length, remaining: this._pending.length };
+  }
+
+  /**
+   * Batch-confirm ALL live pending items (apply or reject). Iterates unique keys
+   * so key-collision groups are processed once.
+   * @param {'apply'|'reject'} [action]
+   * @returns {{count:number, action:string, applied:string[], rejected:string[]}}
+   */
+  confirmAllPending(action = 'apply') {
+    const uniqueKeys = [...new Set(this._pending.filter((p) => !isExpired(p)).map((p) => p.key))];
+    const applied = [];
+    const rejected = [];
+    for (const key of uniqueKeys) {
+      if (!this.getPending(key).length) continue;
+      const res = this.confirmPending(key, action);
+      if (res.ok && res.action === 'apply') applied.push(key);
+      if (res.ok && res.action === 'reject') rejected.push(key);
+    }
+    return { count: applied.length + rejected.length, action, applied, rejected };
+  }
+
+  /**
+   * Governed prune/delete of a retired evidence key. Only reg.* / cap.* keys are
+   * prunable — core grounded groups (meta/env/hardware/guard/flags) are
+   * protected. Every prune is recorded in history for audit.
+   * @param {string} key
+   * @returns {{ok:boolean, key?:string, oldValue?:*, reason?:string}}
+   */
+  pruneKey(key) {
+    const safeKey = sanitizeKey(key);
+    if (!safeKey) return { ok: false, reason: 'invalid-key' };
+    if (!PRUNABLE_KEY_PATTERN.test(safeKey)) return { ok: false, reason: 'not-prunable', key: safeKey };
+    if (!this._entries[safeKey]) return { ok: false, reason: 'not-found', key: safeKey };
+    const oldValue = this._entries[safeKey].value;
+    delete this._entries[safeKey];
+    this._recordChange({ key: safeKey, oldValue, newValue: undefined, source: 'system', confidence: 1, decision: 'pruned' });
+    this._persist();
+    verboseLog('pruneKey', safeKey);
+    return { ok: true, key: safeKey, oldValue };
+  }
+
+  /**
+   * Prune ALL operational evidence keys (reg.last*, reg.tradingViewLiveMode,
+   * cap.*). Grounded reg.homeDir/reg.schema are NOT evidence and are retained.
+   * @returns {{removed:number, keys:string[]}}
+   */
+  pruneEvidence() {
+    const keys = Object.keys(this._entries).filter(isEvidenceKey);
+    const removed = [];
+    for (const k of keys) { if (this.pruneKey(k).ok) removed.push(k); }
+    return { removed: removed.length, keys: removed };
+  }
+
   // ── History / auditability ───────────────────────────────
 
   /**
@@ -1198,6 +1289,32 @@ class SystemContextManager {
     }
   }
 
+  /**
+   * Evidence hygiene gate (Phase 4). Operational evidence keys are excluded from
+   * the default fragment; included only when explicitly requested, or when the
+   * query/foreground text overlaps the key's own tokens (e.g. a query about
+   * "regression" surfaces cap.lang.*.regression.status). Excluded by default.
+   * @private
+   */
+  _isEvidenceKeyRelevant(key, options = {}) {
+    if (options.includeEvidence === true) return true;
+    const hasSignal = (typeof options.query === 'string' && options.query.trim())
+      || (options.foreground && typeof options.foreground === 'object');
+    if (!hasSignal) return false; // default: exclude evidence keys
+    try {
+      const haystack = new Set([
+        String(options.query || ''),
+        String(options.foreground?.processName || ''),
+        String(options.foreground?.title || ''),
+        String(options.foreground?.appId || '')
+      ].join(' ').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean));
+      const keyTokens = String(key).toLowerCase().split(/[^a-z0-9]+/).filter((t) => t.length >= 4);
+      return keyTokens.some((t) => haystack.has(t));
+    } catch {
+      return false;
+    }
+  }
+
   // ── Prompt fragment ──────────────────────────────────────
 
   /**
@@ -1242,6 +1359,9 @@ class SystemContextManager {
       if (sectionFilter && !sectionFilter.some((s) => key === s || key.startsWith(`${s}.`) || key.split('.')[0] === s)) continue;
       // Selective / relevance-based injection for contextual sections.
       if (!this._isKeyRelevant(key, options)) continue;
+      // Evidence hygiene: operational evidence keys are excluded from the default
+      // fragment (kept queryable) unless relevant or explicitly requested.
+      if (isEvidenceKey(key) && !this._isEvidenceKeyRelevant(key, options)) continue;
 
       const group = key.split('.')[0];
       (grouped[group] = grouped[group] || []).push({ key, value: live[key].value });
@@ -1456,6 +1576,26 @@ function refreshGuardRails(context = {}) {
   }
 }
 
+/** Convenience: batch-confirm all pending updates. Never throws. */
+function confirmAllPending(action = 'apply') {
+  try {
+    return getInstance().confirmAllPending(action);
+  } catch (err) {
+    console.warn('[SystemContext] confirmAllPending failed:', err.message);
+    return { count: 0, action, applied: [], rejected: [] };
+  }
+}
+
+/** Convenience: governed prune of a reg./cap. key. Never throws. */
+function pruneKey(key) {
+  try {
+    return getInstance().pruneKey(key);
+  } catch (err) {
+    console.warn('[SystemContext] pruneKey failed:', err.message);
+    return { ok: false, reason: 'internal-error' };
+  }
+}
+
 module.exports = {
   SystemContextManager,
   getInstance,
@@ -1467,6 +1607,8 @@ module.exports = {
   recordRegressionOutcome,
   refreshGuardRails,
   confirmPending,
+  confirmAllPending,
+  pruneKey,
   SCHEMA_VERSION,
   SYSTEM_CONTEXT_TOKEN_BUDGET,
   CONTEXT_FILE,

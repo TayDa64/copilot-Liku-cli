@@ -21,6 +21,7 @@ const COMMANDS = Object.freeze({
   tools: { desc: 'Manage dynamic tool registry', file: 'tools', args: '[list|show|approve|revoke]' },
   github: { desc: 'GitHub auth, capability, bounded plan, branch-associated PR status, reviewed issue/PR-comment previews, explicit apply, repo, issue, PR, workflow, and release diagnostics', file: 'github', args: '<auth|capabilities|context|plan|apply|repo|issues|pr|workflow|releases> ...' },
   analytics: { desc: 'View telemetry analytics', file: 'analytics', args: '[--days N] [--raw]' },
+  peripherals: { desc: 'Peripheral Abstraction Layer (mock; requires LIKU_ENABLE_PERIPHERALS=1)', file: 'peripherals', args: '[scan|list|status|execute]' },
 });
 
 function getCommandRegistry() {
