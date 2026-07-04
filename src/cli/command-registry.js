@@ -16,7 +16,7 @@ const COMMANDS = Object.freeze({
   wait: { desc: 'Wait for element to appear', file: 'wait', args: '<text> [timeout]' },
   repl: { desc: 'Interactive automation shell', file: 'repl' },
   memory: { desc: 'Manage agent memory notes', file: 'memory', args: '[list|show|search|stats]' },
-  'system-context': { desc: 'Inspect the evidence-gated self-awareness context (Cognitive Substrate)', file: 'system-context', args: '[show|get|fragment|diff|refresh|json]' },
+  'system-context': { desc: 'Inspect + confirm the evidence-gated self-awareness context (Cognitive Substrate)', file: 'system-context', args: '[show|get|fragment|diff|pending|confirm|refresh|json]' },
   skills: { desc: 'Manage the skill library', file: 'skills', args: '[list|search|show]' },
   tools: { desc: 'Manage dynamic tool registry', file: 'tools', args: '[list|show|approve|revoke]' },
   github: { desc: 'GitHub auth, capability, bounded plan, branch-associated PR status, reviewed issue/PR-comment previews, explicit apply, repo, issue, PR, workflow, and release diagnostics', file: 'github', args: '<auth|capabilities|context|plan|apply|repo|issues|pr|workflow|releases> ...' },

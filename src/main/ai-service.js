@@ -10375,6 +10375,31 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
         source: { type: 'execution', timestamp: new Date().toISOString(), outcome: outcomeLabel }
       });
 
+      // Cognitive Substrate (Phase 2): wire grounded runtime evidence into the
+      // self-awareness store. Deterministic signals (outcome label, verification
+      // result) — NOT model free-text. Best-effort + fully non-fatal. Skipped
+      // under test entrypoints so regression runs never mutate the user's store.
+      try {
+        if (!isTestScriptEntrypoint()) {
+          const systemContext = require('./system-context-manager');
+          const taskFamily = String(executionContextEnvelope?.taskFamily || 'general').slice(0, 40);
+          // (1) post-tool-use success path
+          systemContext.proposeUpdate({
+            'reg.lastToolOutcome': outcomeLabel,
+            'reg.lastToolTaskFamily': taskFamily,
+            'reg.lastToolAt': new Date().toISOString()
+          }, { source: 'post-tool-use', confidence: 0.95 });
+          // (2) verifier / post-verification quality
+          if (postVerification && postVerification.applicable === true) {
+            const vq = postVerification.verified === true ? 1 : (postVerification.healed === true ? 0.7 : 0.3);
+            systemContext.recordVerificationQuality(vq, {
+              status: postVerification.verified ? 'verified' : (postVerification.healed ? 'healed' : 'unverified'),
+              detail: taskFamily
+            });
+          }
+        }
+      } catch (_) { /* self-awareness evidence is best-effort */ }
+
       // AWM — Agent Workflow Memory: extract reusable procedures from successful multi-step sequences
       const MIN_STEPS_FOR_PROCEDURE = 3;
       if (outcomeLabel === 'success' && actionSummary.length >= MIN_STEPS_FOR_PROCEDURE) {
@@ -10507,12 +10532,14 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
               } catch (_) { /* audit is non-fatal */ }
               // Cognitive Substrate (Phase 1): record grounded reflection-quality
               // evidence. Deterministic signal (applied? + action), NOT model text.
-              // Fully non-fatal + evidence-gated inside proposeUpdate().
+              // Fully non-fatal + evidence-gated; skipped under test entrypoints.
               try {
-                require('./system-context-manager').recordReflectionQuality(
-                  reflectionApplied.applied ? 1 : 0.4,
-                  { detail: reflectionApplied.action, source: 'reflection' }
-                );
+                if (!isTestScriptEntrypoint()) {
+                  require('./system-context-manager').recordReflectionQuality(
+                    reflectionApplied.applied ? 1 : 0.4,
+                    { detail: reflectionApplied.action, source: 'reflection' }
+                  );
+                }
               } catch (_) { /* self-awareness update is best-effort */ }
               // If reflection applied a concrete action, stop iterating
               if (reflectionApplied.applied) break;

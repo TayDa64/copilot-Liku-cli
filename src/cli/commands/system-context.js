@@ -11,12 +11,16 @@
  *   liku system-context get <dot.path>  Print one fact value
  *   liku system-context fragment [fmt]  Print injected fragment (structured|compact|flat-kv)
  *   liku system-context diff [key]      Show the most recent change(s) w/ provenance
+ *   liku system-context pending         List sub-threshold updates awaiting confirmation
+ *   liku system-context confirm <key>   Preview a pending update (add --apply or --reject)
  *   liku system-context refresh         Re-run grounded auto-detection + persist
  *   liku system-context json            Full serializable snapshot (metadata)
  *
  * Flags:
  *   --json    Machine-readable output for scripting
  *   --limit N Number of changes to show for `diff` (default 5)
+ *   --apply   Apply a pending update (with `confirm`)
+ *   --reject  Reject/discard a pending update (with `confirm`)
  */
 
 const { log, success, error, dim, highlight } = require('../util/output');
@@ -104,6 +108,71 @@ async function run(args, flags) {
       return { success: true, ...result };
     }
 
+    case 'record-regression': {
+      // CI / test-runner evidence entry point (Phase 3). Example:
+      //   liku system-context record-regression pass --lang js --quality 1
+      const status = args[1];
+      if (!status) { error('Usage: liku system-context record-regression <pass|fail> [--lang js] [--quality N]'); return { success: false }; }
+      const store = getManager();
+      const res = store.recordRegressionOutcome(status, {
+        lang: flags.lang || 'js',
+        quality: flags.quality !== undefined ? Number(flags.quality) : (status === 'pass' ? 1 : 0),
+        detail: flags.detail
+      });
+      if (flags.json) return { success: !!res.accepted, ...res };
+      if (res.accepted) success(`Recorded regression outcome: ${status} (lang=${flags.lang || 'js'}).`);
+      else error(`Regression outcome not applied: ${res.reason || 'gated'}`);
+      return { success: !!res.accepted, ...res };
+    }
+
+    case 'pending': {
+      const items = mgr.getPendingUpdates();
+      if (flags.json) return { success: true, count: items.length, pending: items };
+      if (!items.length) {
+        log('No pending updates awaiting confirmation.');
+        return { success: true, count: 0 };
+      }
+      log(highlight(`Pending updates (${items.length}) — confirm with: liku system-context confirm <key> --apply|--reject`));
+      for (const p of items) {
+        log(`  ${highlight(p.key)} = ${p.value} ${dim(`[${p.source} conf=${p.confidence} < ${p.threshold}]`)}`);
+        log(dim(`    id=${p.id} queuedAt=${p.queuedAt}${p.expiresAt ? ` expiresAt=${p.expiresAt}` : ''}`));
+      }
+      return { success: true, count: items.length };
+    }
+
+    case 'confirm': {
+      const keyOrId = args[1];
+      if (!keyOrId) { error('Usage: liku system-context confirm <key|id> [--apply|--reject]'); return { success: false }; }
+      const matches = mgr.getPending(keyOrId);
+      if (!matches.length) {
+        if (flags.json) return { success: false, reason: 'not-found', key: keyOrId };
+        error(`No pending update found for: ${keyOrId}`);
+        return { success: false };
+      }
+      // Preview mode (no --apply/--reject): show the proposed change + provenance.
+      if (!flags.apply && !flags.reject) {
+        if (flags.json) return { success: true, preview: true, pending: matches };
+        log(highlight(`Pending update for ${keyOrId} (${matches.length}):`));
+        for (const p of matches) {
+          const current = mgr.get(p.key);
+          log(`  ${highlight(p.key)}: ${dim(current === undefined ? '(none)' : String(current))} → ${p.value}`);
+          log(dim(`    source=${p.source} confidence=${p.confidence} threshold=${p.threshold} queuedAt=${p.queuedAt}`));
+        }
+        log(dim('\nRe-run with --apply to accept or --reject to discard.'));
+        return { success: true, preview: true };
+      }
+      const action = flags.reject ? 'reject' : 'apply';
+      const res = mgr.confirmPending(keyOrId, action);
+      if (flags.json) return { success: !!res.ok, ...res };
+      if (!res.ok) { error(`Confirm failed: ${res.reason}`); return { success: false, ...res }; }
+      if (action === 'apply') {
+        success(`Applied ${res.key} = ${res.applied ? res.applied.value : ''} (from pending).`);
+      } else {
+        success(`Rejected pending update for ${res.key}.`);
+      }
+      return { success: true, ...res };
+    }
+
     case 'json': {
       const snapshot = mgr.toJSON();
       if (flags.json) return { success: true, ...snapshot };
@@ -113,7 +182,7 @@ async function run(args, flags) {
 
     default:
       error(`Unknown subcommand: ${subcommand}`);
-      log('Usage: liku system-context [show|get <path>|fragment [fmt]|diff [key]|refresh|json]');
+      log('Usage: liku system-context [show|get <path>|fragment [fmt]|diff [key]|pending|confirm <key> [--apply|--reject]|record-regression <status>|refresh|json]');
       return { success: false };
   }
 }

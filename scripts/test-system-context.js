@@ -151,6 +151,92 @@ test('recordReflectionQuality writes grounded reg.* evidence', () => {
   assert.ok(mgr.get('reg.lastReflectionAt'), 'reflection timestamp must be set');
 });
 
+// ── Phase 2: durable pending queue + confirmation + new evidence ──
+
+test('sub-threshold update is written to the durable pending file', () => {
+  const res = mgr.proposeUpdate('reg.pendingDemo', 'candidate', { source: 'telemetry', confidence: 0.2 });
+  assert.strictEqual(res.accepted, false);
+  assert.ok(res.queued.includes('reg.pendingDemo'));
+  assert.ok(fs.existsSync(m.PENDING_FILE), 'pending file must exist');
+  const parsed = JSON.parse(fs.readFileSync(m.PENDING_FILE, 'utf-8'));
+  assert.ok(parsed.pending.some((p) => p.key === 'reg.pendingDemo'), 'pending file must contain the item');
+  assert.strictEqual(mgr.get('reg.pendingDemo'), undefined, 'sub-threshold value must NOT be applied');
+});
+
+test('pending queue survives a restart (fresh instance reloads from disk)', () => {
+  const fresh = new m.SystemContextManager(); // simulate process restart
+  const items = fresh.getPendingUpdates();
+  assert.ok(items.some((p) => p.key === 'reg.pendingDemo'), 'restarted instance must restore pending queue');
+});
+
+test('confirm --apply promotes a pending item to a grounded entry', () => {
+  const res = mgr.confirmPending('reg.pendingDemo', 'apply');
+  assert.strictEqual(res.ok, true);
+  assert.strictEqual(res.action, 'apply');
+  assert.strictEqual(mgr.get('reg.pendingDemo'), 'candidate', 'applied value must now be readable');
+  assert.strictEqual(mgr.getPending('reg.pendingDemo').length, 0, 'item must be removed from pending');
+  const last = mgr.getLastChange('reg.pendingDemo');
+  assert.ok(last && last.newValue === 'candidate', 'apply must be recorded in history');
+});
+
+test('confirm --reject discards a pending item and logs it', () => {
+  mgr.proposeUpdate('reg.rejectDemo', 'nope', { source: 'telemetry', confidence: 0.2 });
+  const res = mgr.confirmPending('reg.rejectDemo', 'reject');
+  assert.strictEqual(res.ok, true);
+  assert.strictEqual(res.action, 'reject');
+  assert.strictEqual(mgr.get('reg.rejectDemo'), undefined, 'rejected value must not be applied');
+  assert.strictEqual(mgr.getPending('reg.rejectDemo').length, 0, 'item must be removed from pending');
+  const last = mgr.getLastChange('reg.rejectDemo');
+  assert.ok(last && last.decision === 'rejected', 'reject must be recorded in history');
+});
+
+test('recordVerificationQuality writes grounded verifier evidence', () => {
+  const res = mgr.recordVerificationQuality(1, { status: 'verified', detail: 'python' });
+  assert.strictEqual(res.accepted, true);
+  assert.strictEqual(mgr.get('reg.lastVerificationQuality'), 1);
+  assert.strictEqual(mgr.get('reg.lastVerificationStatus'), 'verified');
+});
+
+// ── Phase 3: TF-IDF relevance + live guard grounding + regression evidence ──
+
+test('TF-IDF relevance scores TradingView query high and unrelated query low', () => {
+  const kws = ['tradingview', 'trading', 'chart', 'pine', 'ticker', 'symbol'];
+  const hot = mgr._scoreRelevance('guard.tradingview', kws, 'open the tradingview chart pine editor');
+  const cold = mgr._scoreRelevance('guard.tradingview', kws, 'what is the weather today');
+  assert.ok(hot > cold, `TV query (${hot}) must score higher than unrelated (${cold})`);
+  assert.ok(hot >= m.RELEVANCE_THRESHOLD, `TV query must meet threshold ${m.RELEVANCE_THRESHOLD}`);
+  assert.ok(cold < m.RELEVANCE_THRESHOLD, 'unrelated query must fall below threshold');
+});
+
+test('TF-IDF selective injection includes TV only when relevant', () => {
+  mgr.proposeUpdate('guard.tradingview.p3Flag', 'on', { source: 'verifier', confidence: 0.95 });
+  assert.ok(!mgr.toPromptFragment('structured', { query: 'summarize my emails' }).includes('guard.tradingview.p3Flag'));
+  assert.ok(mgr.toPromptFragment('structured', { query: 'set a tradingview alert on the chart' }).includes('guard.tradingview.p3Flag'));
+  assert.ok(mgr.toPromptFragment('structured').includes('guard.tradingview.p3Flag'), 'no-signal must still include (compat)');
+});
+
+test('live guard grounding applies safe values and populates guard.*', () => {
+  const res = mgr.refreshGuardRails({ foreground: { processName: 'tradingview' }, userMessage: 'open tradingview' });
+  assert.ok(Array.isArray(res.applied));
+  assert.strictEqual(mgr.get('guard.tradingview.mode'), 'advisory-observational');
+  assert.strictEqual(mgr.get('guard.tradingview.orderEntry'), 'disabled');
+});
+
+test('live guard relaxation is queued for confirmation (not applied)', () => {
+  // net.mode is 'read-only' (rank 3); a live 'read-write' (rank 0) must NOT apply.
+  const before = mgr.get('guard.net.mode');
+  const res = mgr.refreshGuardRails({ guardOverrides: { 'guard.net.mode': 'read-write' } });
+  assert.ok(res.queued.includes('guard.net.mode'), 'relaxation must be queued');
+  assert.strictEqual(mgr.get('guard.net.mode'), before, 'rail must not be relaxed without confirmation');
+});
+
+test('recordRegressionOutcome writes cap.lang.*.regression.status', () => {
+  const res = mgr.recordRegressionOutcome('pass', { lang: 'js', quality: 1, detail: 'ai-focused' });
+  assert.strictEqual(res.accepted, true);
+  assert.strictEqual(mgr.get('cap.lang.js.regression.status'), 'pass');
+  assert.strictEqual(mgr.get('reg.lastRegressionQuality'), 1);
+});
+
 test('env.hostname is stored but excluded from injected fragment by default', () => {
   // Stored for local diagnostics...
   assert.strictEqual(typeof mgr.get('env.hostname'), 'string');

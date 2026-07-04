@@ -64,6 +64,17 @@ try {
   countTokens = (text) => Math.ceil(String(text || '').length / 4);
 }
 
+/**
+ * Reuse the PROVEN TF-IDF / cosine-similarity primitives from the skill router
+ * (Phase 3) for smarter selective injection. Loaded lazily + defensively — if
+ * unavailable, relevance scoring falls back to a whole-word keyword heuristic.
+ */
+let skillRouterTfidf = null;
+try {
+  const sr = require('./memory/skill-router');
+  if (sr && typeof sr.tfidfScores === 'function') skillRouterTfidf = sr;
+} catch { /* non-fatal: relevance falls back to keyword scoring */ }
+
 // ─── Constants ──────────────────────────────────────────────
 
 const SCHEMA_VERSION = '1.2.0';
@@ -74,6 +85,10 @@ const HISTORY_DIR = path.join(LIKU_HOME, 'system-context.history');
 const CHANGES_LOG = path.join(HISTORY_DIR, 'changes.jsonl');
 const HISTORY_MAX_SNAPSHOTS = 10;   // full-context snapshots retained
 const CHANGES_LOG_MAX = 200;        // change-log lines retained (rolling)
+
+/** Durable pending (sub-threshold) update queue (Phase 2). */
+const PENDING_FILE = path.join(LIKU_HOME, 'system-context.pending.json');
+const PENDING_MAX = 100;            // queued items retained (drop oldest)
 
 /**
  * Hard budget for the injected fragment. The global system-message hard cap is
@@ -114,7 +129,7 @@ const GROUNDED_SOURCES = Object.freeze(['os', 'process', 'package', 'env', 'cons
  */
 const TRUSTED_UPDATE_SOURCES = Object.freeze([
   ...GROUNDED_SOURCES,
-  'reflection', 'post-tool-use', 'telemetry', 'regression', 'verifier', 'hook'
+  'reflection', 'post-tool-use', 'telemetry', 'regression', 'verifier', 'hook', 'ci', 'test-runner'
 ]);
 
 /**
@@ -142,6 +157,41 @@ const CONTEXTUAL_SECTIONS = Object.freeze({
 
 /** Per-section hard cap for injected fragments (defense-in-depth). */
 const DEFAULT_MAX_SECTION_TOKENS = 160;
+
+/**
+ * TF-IDF relevance threshold (Phase 3): a contextual section is injected when
+ * its cosine similarity to the current query/foreground meets this bar. Tunable
+ * via env for future calibration; safe default keeps prior behavior on strong
+ * keyword overlap while suppressing unrelated queries.
+ */
+const RELEVANCE_THRESHOLD = (() => {
+  const n = Number(process.env.LIKU_CONTEXT_RELEVANCE_THRESHOLD);
+  return Number.isFinite(n) && n >= 0 && n <= 1 ? n : 0.05;
+})();
+
+/**
+ * Background "document" of generic terms. Including it in the tiny TF-IDF corpus
+ * keeps IDF > 0 for section-specific terms (single-doc corpora otherwise
+ * collapse to zero similarity). These are common, non-distinctive words.
+ */
+const RELEVANCE_BACKGROUND_TERMS = Object.freeze([
+  'the', 'open', 'show', 'me', 'please', 'help', 'what', 'how', 'is', 'do',
+  'file', 'window', 'app', 'run', 'check', 'status', 'today', 'weather', 'code', 'text'
+]);
+
+/**
+ * Live guard grounding (Phase 3): safety ranking per guard key. Higher rank =
+ * SAFER. A live value that is safer-or-equal to the current rail is applied at
+ * high confidence; a value that would RELAX (lower) a rail is proposed at low
+ * confidence so it must pass the pending/confirm flow. Unknown values rank -1
+ * (treated as least-safe → queued).
+ */
+const GUARD_SAFETY_RANK = Object.freeze({
+  'guard.tradingview.mode': { 'advisory-observational': 3, observational: 3, advisory: 2, active: 0 },
+  'guard.tradingview.orderEntry': { disabled: 3, 'confirm-required': 1, enabled: 0 },
+  'guard.net.mode': { 'read-only': 3, restricted: 2, 'read-write': 0 },
+  'guard.fs.writeScope': { 'liku-home-only': 3, workspace: 1, unrestricted: 0 }
+});
 
 const CONTEXT_VERBOSE = /^(1|true|yes)$/i.test(String(process.env.LIKU_SYSTEM_CONTEXT_VERBOSE || '').trim());
 
@@ -313,14 +363,17 @@ class SystemContextManager {
      */
     this._entries = {};
     /**
-     * Pending (sub-threshold) updates awaiting confirmation. In-memory only for
-     * Phase 1; Phase 2 may persist + surface a confirmation UI/CLI.
+     * Pending (sub-threshold) updates awaiting confirmation. Durable in Phase 2:
+     * mirrored to ~/.liku/system-context.pending.json via atomic writes. The
+     * queue is RESTORED on startup but never auto-applied — sub-threshold
+     * evidence still requires explicit confirmation.
      * @type {Array<object>}
      */
     this._pending = [];
     this._schemaVersion = SCHEMA_VERSION;
     this._loaded = false;
     this._loadFromDisk();
+    this._loadPending();
   }
 
   // ── Persistence ──────────────────────────────────────────
@@ -393,6 +446,75 @@ class SystemContextManager {
     }
   }
 
+  // ── Durable pending queue (Phase 2) ──────────────────────
+
+  /** Generate a stable pending-item id. @private */
+  _makePendingId() {
+    return `pend-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  /**
+   * Load the durable pending queue from disk, dropping malformed or already
+   * expired items. Corruption/absence is non-fatal (empty queue). @private
+   */
+  _loadPending() {
+    try {
+      if (!fs.existsSync(PENDING_FILE)) return;
+      const raw = JSON.parse(fs.readFileSync(PENDING_FILE, 'utf-8'));
+      const items = raw && Array.isArray(raw.pending) ? raw.pending : [];
+      const restored = [];
+      for (const item of items) {
+        const key = item && sanitizeKey(item.key);
+        const value = item && sanitizeValue(item.value);
+        const source = item && sanitizeValue(item.source);
+        const confidence = item && clampConfidence(item.confidence);
+        if (!key || value === undefined || !source || confidence === null) continue;
+        // Respect TTL/expiry — never restore stale evidence.
+        if (item.expiresAt && isExpired(item)) continue;
+        restored.push({
+          id: sanitizeValue(item.id) || this._makePendingId(),
+          key,
+          value,
+          source,
+          confidence,
+          threshold: clampConfidence(item.threshold) ?? this._thresholdFor(key),
+          observedAt: sanitizeValue(item.observedAt) || undefined,
+          ttl: Number.isFinite(Number(item.ttl)) ? Number(item.ttl) : undefined,
+          expiresAt: sanitizeValue(item.expiresAt) || undefined,
+          provenance: sanitizeValue(item.provenance) || undefined,
+          queuedAt: sanitizeValue(item.queuedAt) || nowIso()
+        });
+      }
+      this._pending = restored;
+      verboseLog('restored', restored.length, 'pending items');
+    } catch (err) {
+      console.warn('[SystemContext] Failed to load pending queue:', err.message);
+    }
+  }
+
+  /**
+   * Persist the pending queue atomically (tmp + rename), capped to PENDING_MAX
+   * (dropping oldest). Never throws into the caller. @private
+   */
+  _persistPending() {
+    try {
+      if (this._pending.length > PENDING_MAX) {
+        this._pending = this._pending.slice(-PENDING_MAX);
+      }
+      if (!fs.existsSync(LIKU_HOME)) {
+        fs.mkdirSync(LIKU_HOME, { recursive: true, mode: 0o700 });
+      }
+      const payload = { schemaVersion: this._schemaVersion, updatedAt: nowIso(), pending: this._pending };
+      const tmpFile = `${PENDING_FILE}.${process.pid}.${Date.now()}.tmp`;
+      fs.writeFileSync(tmpFile, JSON.stringify(payload, null, 2), { encoding: 'utf-8', mode: 0o600 });
+      fs.renameSync(tmpFile, PENDING_FILE);
+      return true;
+    } catch (err) {
+      console.warn('[SystemContext] Failed to persist pending queue:', err.message);
+      return false;
+    }
+  }
+
   // ── Grounded mutation (internal only) ────────────────────
 
   /**
@@ -431,6 +553,9 @@ class SystemContextManager {
     // Migrate the persisted schema version forward on refresh.
     this._schemaVersion = SCHEMA_VERSION;
     this._persist();
+    // Phase 3: overlay live guardrail values (best-effort). Safer-or-equal values
+    // apply; any relaxation queues for confirmation. Never fatal.
+    try { this.refreshGuardRails(); } catch { /* non-fatal */ }
     verboseLog('autoDetectEnvironment applied', updated, 'grounded facts');
     return { updated, total: Object.keys(this._entries).length };
   }
@@ -541,6 +666,7 @@ class SystemContextManager {
     }
 
     let mutated = false;
+    let queuedPending = false;
     for (const [rawKey, rawValue] of pairs) {
       const key = sanitizeKey(rawKey);
       const value = sanitizeValue(rawValue);
@@ -559,12 +685,31 @@ class SystemContextManager {
         result.rejected.push({ key, reason: 'below-threshold', threshold, confidence });
       } else {
         // Queue for confirmation rather than silently applying weak evidence.
-        this._pending.push({ key, value, ...meta, threshold, queuedAt: nowIso() });
+        // Durable in Phase 2: mirrored to disk so it survives restarts.
+        const observedAt = meta.observedAt || nowIso();
+        const pendingItem = {
+          id: this._makePendingId(),
+          key,
+          value,
+          source,
+          confidence,
+          threshold,
+          observedAt,
+          queuedAt: nowIso()
+        };
+        if (Number.isFinite(Number(meta.ttl)) && Number(meta.ttl) > 0) {
+          pendingItem.ttl = Number(meta.ttl);
+          pendingItem.expiresAt = new Date(Date.now() + Number(meta.ttl) * 1000).toISOString();
+        }
+        if (meta.provenance) pendingItem.provenance = sanitizeValue(meta.provenance);
+        this._pending.push(pendingItem);
+        queuedPending = true;
         result.queued.push(key);
       }
     }
 
     if (mutated) this._persist();
+    if (queuedPending) this._persistPending();
     result.accepted = result.applied.length > 0;
     verboseLog('proposeUpdate', JSON.stringify({ source, applied: result.applied, queued: result.queued, rejected: result.rejected.length }));
     return result;
@@ -597,9 +742,223 @@ class SystemContextManager {
     });
   }
 
-  /** In-memory queue of sub-threshold updates awaiting confirmation. */
+  /**
+   * Evidence extension point (Phase 2): record post-execution verification /
+   * regression quality as grounded evidence. Deterministic signal (verified?,
+   * healed?, attempts) — NOT model free-text. reg.* keys use the normal gate.
+   *
+   * @param {number} quality 0..1 verification quality/confidence signal
+   * @param {object} [opts] { source, detail, status, ttl, confidence }
+   * @returns {object} proposeUpdate result
+   */
+  recordVerificationQuality(quality, opts = {}) {
+    const q = clampConfidence(quality);
+    if (q === null) return { accepted: false, applied: [], queued: [], rejected: [], reason: 'invalid-quality' };
+    const delta = {
+      'reg.lastVerificationQuality': q,
+      'reg.lastVerificationAt': nowIso()
+    };
+    if (opts.status) delta['reg.lastVerificationStatus'] = String(opts.status).slice(0, 40);
+    if (opts.detail) delta['reg.lastVerificationDetail'] = String(opts.detail).slice(0, 120);
+    return this.proposeUpdate(delta, {
+      source: opts.source || 'verifier',
+      confidence: Number.isFinite(Number(opts.confidence)) ? Number(opts.confidence) : 0.95,
+      ttl: opts.ttl
+    });
+  }
+
+  /**
+   * Evidence extension point (Phase 3): record a regression / CI test-run
+   * outcome. Deterministic signal (pass/fail counts) — NOT model text. Targets
+   * cap.lang.*.regression.status + reg.lastRegression* (normal, non-guard gate).
+   *
+   * @param {string} status e.g. 'pass' | 'fail'
+   * @param {object} [opts] { lang, quality, source, detail, ttl, confidence }
+   * @returns {object} proposeUpdate result
+   */
+  recordRegressionOutcome(status, opts = {}) {
+    const safeStatus = sanitizeValue(status);
+    if (safeStatus === undefined) return { accepted: false, applied: [], queued: [], rejected: [], reason: 'invalid-status' };
+    const lang = String(opts.lang || 'js').trim().toLowerCase().replace(/[^a-z0-9]/g, '') || 'js';
+    const q = clampConfidence(opts.quality);
+    const delta = {
+      [`cap.lang.${lang}.regression.status`]: String(safeStatus).slice(0, 40),
+      'reg.lastRegressionAt': nowIso()
+    };
+    if (q !== null) delta['reg.lastRegressionQuality'] = q;
+    if (opts.detail) delta['reg.lastRegressionDetail'] = String(opts.detail).slice(0, 120);
+    return this.proposeUpdate(delta, {
+      source: opts.source || 'regression',
+      confidence: Number.isFinite(Number(opts.confidence)) ? Number(opts.confidence) : 0.95,
+      ttl: opts.ttl
+    });
+  }
+
+  // ── Live guard.* grounding (Phase 3) ─────────────────────
+
+  /**
+   * Safety rank for a guard value (higher = safer). Unknown value → -1.
+   * @private
+   */
+  _guardRank(key, value) {
+    const table = GUARD_SAFETY_RANK[key];
+    if (!table) return 0; // no ranking table → treat all as neutral/equal
+    const v = String(value || '').trim().toLowerCase();
+    return Object.prototype.hasOwnProperty.call(table, v) ? table[v] : -1;
+  }
+
+  /**
+   * Confidence to use when grounding a live guard value:
+   *   - safer-or-equal than current (or no current) → 0.95 (applies, ≥0.9)
+   *   - would RELAX (lower) the rail                 → 0.5  (queues for confirm)
+   * This guarantees a human confirms any rail relaxation.
+   * @private
+   */
+  _guardUpdateConfidence(key, newValue) {
+    if (!GUARD_SAFETY_RANK[key]) return 0.95; // informational guard key
+    const current = this.get(key);
+    const currentRank = current === undefined ? -Infinity : this._guardRank(key, current);
+    const newRank = this._guardRank(key, newValue);
+    return newRank >= currentRank ? 0.95 : 0.5;
+  }
+
+  /**
+   * Source live guardrail values from authoritative runtime modules
+   * (capability-policy / TradingView verification) instead of static constants.
+   * Best-effort: each source is guarded; unknown → safe documented default.
+   *
+   * @param {object} [context] { foreground, userMessage, guardOverrides }
+   * @returns {Record<string, string>} guard.key → live value
+   */
+  getLiveGuardValues(context = {}) {
+    const live = {};
+    try {
+      const fg = context.foreground || {};
+      const haystack = [fg.processName, fg.title, context.userMessage]
+        .map((v) => String(v || '').trim().toLowerCase()).filter(Boolean).join(' ');
+      const isTradingView = /tradingview|trading\s*view/.test(haystack);
+      if (isTradingView) {
+        // Authoritative: infer the live TradingView trading mode.
+        let mode = { mode: 'unknown' };
+        try {
+          const { inferTradingViewTradingMode } = require('./tradingview/verification');
+          mode = inferTradingViewTradingMode({ textSignals: haystack }) || mode;
+        } catch { /* fall back to safe default */ }
+        // We remain observational regardless of paper/live; order entry stays disabled.
+        live['guard.tradingview.mode'] = 'advisory-observational';
+        live['guard.tradingview.orderEntry'] = 'disabled';
+        live['reg.tradingViewLiveMode'] = String(mode.mode || 'unknown').slice(0, 20);
+      }
+    } catch { /* non-fatal */ }
+
+    // Extension/test hook: explicit candidate overrides (still safety-gated below).
+    if (context.guardOverrides && typeof context.guardOverrides === 'object') {
+      for (const [k, v] of Object.entries(context.guardOverrides)) {
+        const key = sanitizeKey(k);
+        const val = sanitizeValue(v);
+        if (key && key.startsWith('guard.') && val !== undefined) live[key] = val;
+      }
+    }
+    return live;
+  }
+
+  /**
+   * Merge live guard values into the substrate via the gated proposeUpdate path.
+   * Safer-or-equal values apply immediately; relaxations queue for confirmation.
+   * @param {object} [context]
+   * @returns {{applied: string[], queued: string[]}}
+   */
+  refreshGuardRails(context = {}) {
+    const live = this.getLiveGuardValues(context);
+    const applied = [];
+    const queued = [];
+    for (const [key, value] of Object.entries(live)) {
+      const isGuard = key.startsWith('guard.');
+      const confidence = isGuard ? this._guardUpdateConfidence(key, value) : 0.95;
+      const res = this.proposeUpdate(key, value, { source: 'system', confidence });
+      if (res.applied.includes(key)) applied.push(key);
+      if (res.queued.includes(key)) queued.push(key);
+    }
+    verboseLog('refreshGuardRails', JSON.stringify({ applied, queued }));
+    return { applied, queued };
+  }
+
+  /**
+   * Return pending (sub-threshold) updates awaiting confirmation. Expired items
+   * are dropped lazily (and pruned from disk). Durable across restarts (Phase 2).
+   * @returns {object[]} copies of pending items
+   */
   getPendingUpdates() {
+    const live = this._pending.filter((p) => !isExpired(p));
+    if (live.length !== this._pending.length) {
+      this._pending = live;
+      this._persistPending();
+    }
     return this._pending.map((p) => ({ ...p }));
+  }
+
+  /**
+   * Find pending items for a key (or a specific pending id).
+   * @param {string} keyOrId
+   * @returns {object[]}
+   */
+  getPending(keyOrId) {
+    const needle = String(keyOrId || '').trim();
+    const safeKey = sanitizeKey(needle);
+    return this._pending
+      .filter((p) => !isExpired(p))
+      .filter((p) => p.id === needle || (safeKey && p.key === safeKey))
+      .map((p) => ({ ...p }));
+  }
+
+  /**
+   * Confirm a pending update by key or id: either apply it (promote to a normal
+   * grounded entry via _applyEvidence) or reject it. Both outcomes remove the
+   * item from the queue and are recorded in the change history for audit.
+   *
+   * @param {string} keyOrId
+   * @param {'apply'|'reject'} action
+   * @returns {{ok: boolean, action?: string, key?: string, applied?: object, reason?: string, count?: number}}
+   */
+  confirmPending(keyOrId, action = 'apply') {
+    const matches = this._pending.filter((p) => !isExpired(p))
+      .filter((p) => p.id === String(keyOrId).trim() || p.key === sanitizeKey(keyOrId));
+    if (!matches.length) {
+      return { ok: false, reason: 'not-found', key: String(keyOrId) };
+    }
+    // Operate on the MOST RECENT matching item (newest queuedAt).
+    const item = matches.reduce((a, b) => (a.queuedAt >= b.queuedAt ? a : b));
+    // Remove ALL matching items for this key/id from the queue.
+    const removedKeys = new Set(matches.map((m) => m.id));
+    this._pending = this._pending.filter((p) => !removedKeys.has(p.id));
+
+    if (action === 'reject') {
+      this._recordChange({
+        key: item.key,
+        oldValue: this.get(item.key),
+        newValue: item.value,
+        source: item.source,
+        confidence: item.confidence,
+        observedAt: item.observedAt,
+        decision: 'rejected'
+      });
+      this._persistPending();
+      verboseLog('confirmPending rejected', item.key);
+      return { ok: true, action: 'reject', key: item.key, count: matches.length };
+    }
+
+    // action === 'apply' → promote to a grounded entry with provenance.
+    const applied = this._applyEvidence(item.key, item.value, {
+      source: item.source,
+      confidence: item.confidence,
+      observedAt: item.observedAt,
+      ttl: item.ttl,
+      provenance: item.provenance || 'confirmed'
+    });
+    this._persist();
+    this._persistPending();
+    verboseLog('confirmPending applied', item.key);
+    return { ok: true, action: 'apply', key: item.key, applied: { ...applied }, count: matches.length };
   }
 
   // ── History / auditability ───────────────────────────────
@@ -770,32 +1129,73 @@ class SystemContextManager {
   // ── Relevance / selective injection ──────────────────────
 
   /**
+   * Score the relevance of a contextual section to a haystack (query +
+   * foreground text) using the skill-router's proven TF-IDF cosine similarity.
+   * Falls back to a whole-word keyword-overlap ratio when the TF-IDF module is
+   * unavailable. Returns a number in [0,1].
+   * @private
+   * @param {string} prefix contextual section prefix (e.g. 'guard.tradingview')
+   * @param {string[]} keywords the section's relevance keywords
+   * @param {string} haystack lowercased query + foreground text
+   * @returns {number}
+   */
+  _scoreRelevance(prefix, keywords, haystack) {
+    if (!haystack) return 0;
+    // Primary path: reuse skill-router TF-IDF (whole-word tokenization avoids the
+    // substring false-positives of a naive includes() check).
+    if (skillRouterTfidf) {
+      try {
+        const index = {
+          [prefix]: { keywords, tags: [] },
+          __background__: { keywords: RELEVANCE_BACKGROUND_TERMS, tags: [] }
+        };
+        const scores = skillRouterTfidf.tfidfScores(index, haystack);
+        return Number(scores.get(prefix)) || 0;
+      } catch { /* fall through to keyword heuristic */ }
+    }
+    // Fallback: fraction of section keywords present as whole words.
+    const tokens = new Set(haystack.replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean));
+    const hits = keywords.filter((kw) => tokens.has(String(kw).toLowerCase())).length;
+    return keywords.length ? hits / keywords.length : 0;
+  }
+
+  /**
    * Decide whether a contextual (expensive) key should be injected given the
    * current relevance signal. Returns true when:
    *   - the key is not contextual (always relevant), OR
-   *   - no relevance signal was supplied (preserve Phase 0 default output), OR
-   *   - the query/foreground text matches the section's relevance keywords.
+   *   - no relevance signal was supplied (preserve Phase 0/1/2 default output), OR
+   *   - the TF-IDF relevance score meets the (tunable) threshold.
+   * Fails OPEN: any scoring error → include the section.
    * @private
    */
   _isKeyRelevant(key, options = {}) {
     let matchedSectionKeywords = null;
+    let matchedPrefix = null;
     for (const [prefix, keywords] of Object.entries(CONTEXTUAL_SECTIONS)) {
-      if (key === prefix || key.startsWith(`${prefix}.`)) { matchedSectionKeywords = keywords; break; }
+      if (key === prefix || key.startsWith(`${prefix}.`)) { matchedSectionKeywords = keywords; matchedPrefix = prefix; break; }
     }
     if (!matchedSectionKeywords) return true; // not a contextual key
 
     const hasSignal = (typeof options.query === 'string' && options.query.trim())
       || (options.foreground && typeof options.foreground === 'object')
       || options.selective === true;
-    if (!hasSignal) return true; // Phase 0 compatibility: include when no signal
+    if (!hasSignal) return true; // compatibility: include when no relevance signal
 
-    const haystack = [
-      String(options.query || ''),
-      String(options.foreground?.processName || ''),
-      String(options.foreground?.title || ''),
-      String(options.foreground?.appId || '')
-    ].join(' ').toLowerCase();
-    return matchedSectionKeywords.some((kw) => haystack.includes(kw));
+    try {
+      const haystack = [
+        String(options.query || ''),
+        String(options.foreground?.processName || ''),
+        String(options.foreground?.title || ''),
+        String(options.foreground?.appId || '')
+      ].join(' ').toLowerCase().trim();
+      if (!haystack) return true; // fail open
+
+      const threshold = Number.isFinite(Number(options.relevanceThreshold))
+        ? Number(options.relevanceThreshold) : RELEVANCE_THRESHOLD;
+      return this._scoreRelevance(matchedPrefix, matchedSectionKeywords, haystack) >= threshold;
+    } catch {
+      return true; // fail open on any scoring error
+    }
   }
 
   // ── Prompt fragment ──────────────────────────────────────
@@ -1001,6 +1401,61 @@ function recordReflectionQuality(quality, opts = {}) {
   }
 }
 
+/**
+ * Convenience: record verification/regression-quality evidence. Never throws.
+ * @param {number} quality 0..1
+ * @param {object} [opts]
+ */
+function recordVerificationQuality(quality, opts = {}) {
+  try {
+    return getInstance().recordVerificationQuality(quality, opts);
+  } catch (err) {
+    console.warn('[SystemContext] recordVerificationQuality failed:', err.message);
+    return { accepted: false, applied: [], queued: [], rejected: [], reason: 'internal-error' };
+  }
+}
+
+/**
+ * Convenience: confirm (apply/reject) a pending update. Never throws.
+ * @param {string} keyOrId
+ * @param {'apply'|'reject'} [action]
+ */
+function confirmPending(keyOrId, action = 'apply') {
+  try {
+    return getInstance().confirmPending(keyOrId, action);
+  } catch (err) {
+    console.warn('[SystemContext] confirmPending failed:', err.message);
+    return { ok: false, reason: 'internal-error' };
+  }
+}
+
+/**
+ * Convenience: record a regression / CI outcome. Never throws.
+ * @param {string} status
+ * @param {object} [opts]
+ */
+function recordRegressionOutcome(status, opts = {}) {
+  try {
+    return getInstance().recordRegressionOutcome(status, opts);
+  } catch (err) {
+    console.warn('[SystemContext] recordRegressionOutcome failed:', err.message);
+    return { accepted: false, applied: [], queued: [], rejected: [], reason: 'internal-error' };
+  }
+}
+
+/**
+ * Convenience: refresh live guardrail grounding. Never throws.
+ * @param {object} [context]
+ */
+function refreshGuardRails(context = {}) {
+  try {
+    return getInstance().refreshGuardRails(context);
+  } catch (err) {
+    console.warn('[SystemContext] refreshGuardRails failed:', err.message);
+    return { applied: [], queued: [] };
+  }
+}
+
 module.exports = {
   SystemContextManager,
   getInstance,
@@ -1008,10 +1463,16 @@ module.exports = {
   toPromptFragment,
   proposeUpdate,
   recordReflectionQuality,
+  recordVerificationQuality,
+  recordRegressionOutcome,
+  refreshGuardRails,
+  confirmPending,
   SCHEMA_VERSION,
   SYSTEM_CONTEXT_TOKEN_BUDGET,
   CONTEXT_FILE,
   HISTORY_DIR,
+  PENDING_FILE,
+  RELEVANCE_THRESHOLD,
   DEFAULT_CONFIDENCE_THRESHOLD,
   HIGH_RISK_CONFIDENCE_THRESHOLD,
   TRUSTED_UPDATE_SOURCES
