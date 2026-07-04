@@ -123,10 +123,15 @@ const PROMPT_PRIVACY_GATES = Object.freeze({
  * when a caller passes { includeEvidence: true }). This keeps the default
  * fragment byte-identical on a fresh store while preventing unbounded growth.
  */
-const EVIDENCE_KEY_PATTERN = /^(reg\.last(Tool|Verification|Reflection|Regression)|reg\.tradingViewLiveMode|cap\.)/;
+const EVIDENCE_KEY_PATTERN = /^(reg\.last(Tool|Verification|Reflection|Regression)|reg\.tradingViewLiveMode|cap\.|sensor\.)/;
 
-/** Keys that may be retired via the governed prune/delete path (Phase 4). */
-const PRUNABLE_KEY_PATTERN = /^(reg|cap)\./;
+/**
+ * Keys that may be retired via the governed prune/delete path (Phase 4/5).
+ * reg.* and cap.* (operational evidence) plus guard.peripheral.* (consumable
+ * one-shot Class A authorizations). Core rails (guard.tradingview/fs/net/agents,
+ * meta/env/hardware/flags) remain protected.
+ */
+const PRUNABLE_KEY_PATTERN = /^(reg|cap)\.|^guard\.peripheral\./;
 
 function isEvidenceKey(key) {
   return EVIDENCE_KEY_PATTERN.test(String(key || ''));

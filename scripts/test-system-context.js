@@ -341,6 +341,100 @@ test('PAL Class A high-risk action routes through pending/confirm and never bypa
   delete process.env.LIKU_ENABLE_PERIPHERALS;
 });
 
+// ── Phase 5: DCP policy + real driver + monitor + Class A TTL/consume ──
+
+test('DCP evaluateCommand enforces capability scoping + param validation', () => {
+  const policy = require('../src/main/peripherals/peripheral-policy');
+  const lock = { id: 'x', class: 'A', capabilities: ['lock', 'unlock'] };
+  assert.strictEqual(policy.evaluateCommand(lock, 'explode').code, 'unsupported-action');
+  const light = { id: 'l', class: 'B', capabilities: ['brightness'] };
+  assert.strictEqual(policy.evaluateCommand(light, 'brightness', { level: 150 }).code, 'invalid-params');
+  assert.strictEqual(policy.evaluateCommand(light, 'brightness', { level: 50 }).ok, true);
+});
+
+test('PAL host-side rejects malformed / out-of-scope commands (DCP)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  pal.scan();
+  const bad = pal.execute('mock-light-01', 'brightness', { level: 999 });
+  assert.strictEqual(bad.ok, false);
+  assert.strictEqual(bad.rejected, true);
+  assert.strictEqual(bad.code, 'invalid-params');
+  const nope = pal.execute('mock-lock-01', 'explode');
+  assert.strictEqual(nope.rejected, true);
+  assert.strictEqual(nope.code, 'unsupported-action');
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('Class A authorize shortcut grants a one-shot TTL authorization', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  pal.scan();
+  const auth = pal.authorize('mock-lock-01', 'unlock');
+  assert.strictEqual(auth.ok, true);
+  assert.strictEqual(auth.klass, 'A');
+  assert.ok(auth.ttlSec > 0, 'authorization carries a TTL');
+  assert.strictEqual(mgr.get('guard.peripheral.mock-lock-01'), 'unlock');
+  // Executing consumes the one-shot authorization…
+  const ex = pal.execute('mock-lock-01', 'unlock');
+  assert.strictEqual(ex.ok, true);
+  assert.strictEqual(mgr.get('guard.peripheral.mock-lock-01'), undefined, 'auth consumed after use');
+  // …so a second execute requires re-confirmation.
+  const ex2 = pal.execute('mock-lock-01', 'unlock');
+  assert.strictEqual(ex2.pending, true, 'Class A re-requires confirmation after consumption');
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('real MQTT driver is gated by config and keeps mock as default', () => {
+  delete process.env.LIKU_MQTT_URL;
+  delete process.env.LIKU_MQTT_DEVICES;
+  const mqtt = require('../src/main/peripherals/drivers/mqtt-driver');
+  assert.strictEqual(mqtt.isAvailable(), false, 'unavailable without config');
+  assert.strictEqual(mqtt.discover().length, 0);
+  process.env.LIKU_MQTT_URL = 'mqtt://localhost:1883';
+  process.env.LIKU_MQTT_DEVICES = JSON.stringify([
+    { id: 'mqtt-lock-01', name: 'Gate Lock', class: 'A', kind: 'lock', capabilities: ['lock', 'unlock'] }
+  ]);
+  assert.strictEqual(mqtt.isAvailable(), true, 'available once configured');
+  assert.strictEqual(mqtt.discover()[0].id, 'mqtt-lock-01');
+  // Real driver device follows the SAME Class A safety gate.
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  const s = pal.scan();
+  assert.ok(s.devices.some((d) => d.id === 'mqtt-lock-01' && d.driver === 'mqtt'), 'mqtt device registered');
+  const r = pal.execute('mqtt-lock-01', 'unlock');
+  assert.strictEqual(r.pending, true, 'mqtt Class A action still requires confirmation');
+  delete process.env.LIKU_MQTT_URL;
+  delete process.env.LIKU_MQTT_DEVICES;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('PeripheralMonitor grounds sensor facts and wakes Supervisor on breach', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  pal.scan();
+  const { PeripheralMonitor } = require('../src/main/peripherals/peripheral-monitor');
+  let woke = null;
+  const mon = new PeripheralMonitor({ pal, systemContext: m, onSupervisorWake: (e) => { woke = e; } });
+  assert.strictEqual(mon.start(), true);
+  // Normal reading → grounds sensor fact, no alert.
+  pal.ingestSensorReading('mock-temp-01', { celsius: 22 });
+  assert.strictEqual(mgr.get('sensor.mock-temp-01.celsius'), 22);
+  assert.strictEqual(woke, null);
+  // Breach reading → hardware alert + supervisor wake.
+  pal.ingestSensorReading('mock-temp-01', { celsius: 45 });
+  assert.ok(woke && woke.breach.level === 'high', 'supervisor woken on breach');
+  assert.strictEqual(mgr.get('hardware.mock-temp-01.alert'), 'celsius:high');
+  mon.stop();
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('sensor.* facts are excluded from the default fragment but queryable', () => {
+  // Seeded by the monitor test above.
+  assert.strictEqual(mgr.get('sensor.mock-temp-01.celsius'), 45);
+  assert.ok(!mgr.toPromptFragment('structured').includes('sensor.mock-temp-01'), 'sensor facts excluded by default');
+});
+
 test('env.hostname is stored but excluded from injected fragment by default', () => {
   // Stored for local diagnostics...
   assert.strictEqual(typeof mgr.get('env.hostname'), 'string');

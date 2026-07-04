@@ -77,17 +77,53 @@ async function run(args, flags) {
         if (res.result && res.result.state) log(dim(`  state: ${JSON.stringify(res.result.state)}`));
       } else if (res.pending) {
         log(highlight(`Class ${res.klass} action requires confirmation.`));
-        log(`  Approve with: ${dim(`liku system-context confirm ${res.confirmKey} --apply`)}`);
-        log(`  Then re-run: ${dim(`liku peripherals execute ${id} ${action}`)}`);
+        log(`  Shortcut: ${dim(`liku peripherals confirm ${id} ${action} --execute`)}`);
+        log(`  Or: ${dim(`liku system-context confirm ${res.confirmKey} --apply`)} then re-run execute`);
+      } else if (res.rejected) {
+        error(`Rejected by policy (${res.code}): ${res.reason}`);
       } else {
         error(`Action not performed: ${res.reason || 'unknown'}`);
       }
       return { success: !!res.ok, ...res };
     }
 
+    case 'confirm': {
+      // Convenience wrapper around the system-context confirm flow for Class A.
+      const id = args[1];
+      const action = args[2];
+      if (!id || !action) { error('Usage: liku peripherals confirm <id> <action> [--execute]'); return { success: false }; }
+      const res = pal.authorize(id, action);
+      if (!res.ok) {
+        if (flags.json) return { success: false, ...res };
+        error(`Authorization failed: ${res.reason || res.code || 'unknown'}`);
+        return { success: false, ...res };
+      }
+      let executed = null;
+      if (flags.execute) {
+        executed = pal.execute(id, action, flags.level !== undefined ? { level: Number(flags.level) } : {});
+      }
+      if (flags.json) return { success: true, authorize: res, execute: executed };
+      if (res.klass === 'A') success(`Authorized ${action} on ${id} (TTL ${res.ttlSec || 'n/a'}s).`);
+      else success(`No confirmation required for class ${res.klass} device ${id}.`);
+      if (executed) {
+        if (executed.ok) { success(`Executed ${action} on ${id}.`); if (executed.result?.state) log(dim(`  state: ${JSON.stringify(executed.result.state)}`)); }
+        else error(`Execute after authorize failed: ${executed.reason || 'unknown'}`);
+      } else if (res.klass === 'A') {
+        log(dim(`  Run: liku peripherals execute ${id} ${action}`));
+      }
+      return { success: true, ...res };
+    }
+
+    case 'drivers': {
+      const res = pal.listDrivers();
+      if (flags.json) return { success: true, ...res };
+      log(highlight(`Available drivers: ${res.drivers.join(', ') || 'none'}`));
+      return { success: true, ...res };
+    }
+
     default:
       error(`Unknown subcommand: ${sub}`);
-      log('Usage: liku peripherals [scan|list|status <id>|execute <id> <action>]');
+      log('Usage: liku peripherals [scan|list|status <id>|execute <id> <action>|confirm <id> <action> [--execute]|drivers]');
       return { success: false };
   }
 }

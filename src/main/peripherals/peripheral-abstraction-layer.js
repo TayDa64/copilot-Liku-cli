@@ -33,31 +33,63 @@ function isPeripheralsEnabled() {
   return String(process.env[FLAG] || '').trim() === '1';
 }
 
-// Lazy accessors so nothing (disk/registry) is touched unless the flag is on
-// and a method is actually invoked.
+const EventEmitter = require('events');
+
+// Lazy accessors so nothing (disk/registry/driver) is touched unless the flag is
+// on and a method is actually invoked.
 function registry() { return require('./peripheral-registry').getInstance(); }
-function mockDriver() { return require('./drivers/mock-driver'); }
 function systemContext() { return require('../system-context-manager'); }
+function policy() { return require('./peripheral-policy'); }
 
-/** In-memory subscribers (only used while enabled). */
-const _subscribers = new Set();
-
-function _emit(event) {
-  for (const cb of _subscribers) {
-    try { cb(event); } catch { /* subscriber errors are non-fatal */ }
+// ── Driver registry ──────────────────────────────────────────
+// The mock driver is ALWAYS available (first-class test driver). Real drivers
+// (e.g. mqtt) are used only when they report isAvailable() — otherwise the mock
+// remains the default. All drivers share the same interface:
+//   id, isAvailable(), discover(), perform(device, action, params), start(emit)
+const DRIVER_IDS = Object.freeze(['mock', 'mqtt']);
+const _driverCache = {};
+function _driver(id) {
+  if (!(id in _driverCache)) {
+    try {
+      if (id === 'mock') _driverCache[id] = require('./drivers/mock-driver');
+      else if (id === 'mqtt') _driverCache[id] = require('./drivers/mqtt-driver');
+      else _driverCache[id] = null;
+    } catch { _driverCache[id] = null; }
   }
+  return _driverCache[id] || null;
+}
+function availableDrivers() {
+  return DRIVER_IDS.map(_driver).filter((d) => d && (typeof d.isAvailable !== 'function' || d.isAvailable()));
+}
+function driverFor(device) {
+  return _driver(device && device.driver) || _driver('mock');
+}
+
+// ── Event bus (event-driven monitoring) ──────────────────────
+const _bus = new EventEmitter();
+_bus.setMaxListeners(100);
+function _emit(event) {
+  try {
+    _bus.emit('event', event);
+    if (event && event.type) _bus.emit(event.type, event);
+  } catch { /* listener errors are non-fatal */ }
 }
 
 /**
- * Discover devices via the mock driver and register them.
+ * Discover devices across all available drivers and register them. The mock
+ * driver is always included; real drivers only when configured/available.
  * @returns {{ enabled: boolean, devices: object[] }}
  */
 function scan() {
   if (!isPeripheralsEnabled()) return { enabled: false, devices: [] };
   const reg = registry();
-  const found = mockDriver().discover();
-  for (const d of found) reg.register(d);
-  _emit({ type: 'scan', count: found.length, at: new Date().toISOString() });
+  let count = 0;
+  for (const d of availableDrivers()) {
+    try {
+      for (const dev of d.discover()) { reg.register(dev); count++; }
+    } catch { /* one bad driver never breaks the scan */ }
+  }
+  _emit({ type: 'scan', count, at: new Date().toISOString() });
   return { enabled: true, devices: reg.list() };
 }
 
@@ -81,32 +113,49 @@ function list(filter = {}) {
   return { enabled: true, devices: registry().list(filter) };
 }
 
-/**
- * Build the guard key that authorizes a specific Class A action.
- * @private
- */
+/** List available driver ids. */
+function listDrivers() {
+  if (!isPeripheralsEnabled()) return { enabled: false, drivers: [] };
+  return { enabled: true, drivers: availableDrivers().map((d) => d.DRIVER_ID) };
+}
+
+/** Build the guard key that authorizes a specific Class A device. @private */
 function _authKey(device) {
   return `guard.peripheral.${String(device.id).replace(/[^a-zA-Z0-9_-]/g, '')}`;
 }
 
-const READ_ONLY_ACTIONS = new Set(['read', 'status']);
+/** Read the optional global power budget from the substrate. @private */
+function _powerBudgetW() {
+  try {
+    const v = Number(systemContext().getInstance().get('guard.peripherals.max_total_power_w'));
+    return Number.isFinite(v) ? v : undefined;
+  } catch { return undefined; }
+}
 
 /**
- * Decide whether a physical action may proceed, routing through the gated
- * proposeUpdate + pending/confirm system. Returns a decision object.
+ * Decide whether a physical action may proceed. First runs the DCP host-side
+ * dry-run (capability scoping + param validation + power budget), then routes
+ * through the gated proposeUpdate + pending/confirm system.
  *
  * @param {object} device
  * @param {string} action
  * @param {object} [params]
- * @returns {{ allowed: boolean, pending?: boolean, confirmKey?: string, klass: string, reason?: string }}
+ * @returns {object} decision
  */
 function isPhysicalActionAllowed(device, action, params = {}) {
-  const klass = device.class;
-  const act = String(action || '').trim().toLowerCase();
+  const P = policy();
+  // DCP host-side rejection of malformed / out-of-scope / over-budget commands.
+  const evalRes = P.evaluateCommand(device, action, params, { maxTotalPowerW: _powerBudgetW() });
+  if (!evalRes.ok) {
+    return { allowed: false, rejected: true, code: evalRes.code, reason: evalRes.reason, klass: device.class };
+  }
+  const act = evalRes.normalized.action;
+  const pol = evalRes.policy;
+  const klass = pol.class;
 
-  // Class C or any read-only action → always allowed (no state change).
-  if (klass === 'C' || READ_ONLY_ACTIONS.has(act)) {
-    return { allowed: true, klass, reason: 'read-only' };
+  // Class C or read-only → allowed immediately.
+  if (evalRes.readOnly || klass === 'C') {
+    return { allowed: true, klass, reason: 'read-only', normalized: evalRes.normalized };
   }
 
   const sc = systemContext();
@@ -114,23 +163,25 @@ function isPhysicalActionAllowed(device, action, params = {}) {
   // Class B (safe actuator) → gated proposeUpdate at high confidence → applies.
   if (klass === 'B') {
     sc.proposeUpdate(`cap.peripheral.${device.id}.lastAction`, act, { source: 'hook', confidence: 0.95 });
-    return { allowed: true, klass, reason: 'safe-actuator-gated' };
+    return { allowed: true, klass, reason: 'safe-actuator-gated', normalized: evalRes.normalized };
   }
 
   // Class A (high-risk) → require a CONFIRMED guard authorization for this action.
   const authKey = _authKey(device);
-  const authorized = sc.getInstance ? sc.getInstance().get(authKey) : undefined;
+  const authorized = sc.getInstance().get(authKey);
   if (authorized === act) {
-    return { allowed: true, klass, reason: 'confirmed' };
+    return { allowed: true, klass, reason: 'confirmed', normalized: evalRes.normalized, authKey };
   }
-  // Not yet authorized → propose to a guard.* key at LOW confidence so it queues
-  // for human confirmation (guard.* threshold is 0.9). Never auto-applies.
-  sc.proposeUpdate(authKey, act, { source: 'system', confidence: 0.5 });
-  return { allowed: false, pending: true, confirmKey: authKey, klass, reason: 'confirmation-required' };
+  // Not authorized → propose to a guard.* key at LOW confidence with a TTL so it
+  // queues for human confirmation and auto-expires. Never auto-applies.
+  const ttl = pol.confirmationTtlSec > 0 ? pol.confirmationTtlSec : undefined;
+  sc.proposeUpdate(authKey, act, { source: 'system', confidence: 0.5, ttl });
+  _emit({ type: 'pending-confirmation', id: device.id, action: act, confirmKey: authKey, ttlSec: ttl });
+  return { allowed: false, pending: true, confirmKey: authKey, klass, reason: 'confirmation-required', normalized: evalRes.normalized };
 }
 
 /**
- * Execute an action on a device (safety gated).
+ * Execute an action on a device (DCP-validated + safety gated + driver-dispatched).
  * @param {string} id
  * @param {string} action
  * @param {object} [params]
@@ -143,28 +194,117 @@ function execute(id, action, params = {}) {
 
   const decision = isPhysicalActionAllowed(device, action, params);
   if (!decision.allowed) {
-    _emit({ type: 'blocked', id, action, confirmKey: decision.confirmKey });
+    _emit({ type: 'blocked', id, action, code: decision.code, confirmKey: decision.confirmKey });
     return {
-      enabled: true, ok: false, pending: !!decision.pending,
-      confirmKey: decision.confirmKey, klass: decision.klass, reason: decision.reason
+      enabled: true, ok: false, pending: !!decision.pending, rejected: !!decision.rejected,
+      code: decision.code, confirmKey: decision.confirmKey, klass: decision.klass, reason: decision.reason
     };
   }
 
-  const result = mockDriver().perform(device, action, params);
+  const drv = driverFor(device);
+  const result = drv.perform(device, decision.normalized.action, decision.normalized.params);
   if (result.ok && result.state) registry().updateState(id, result.state);
-  _emit({ type: 'action', id, action, result });
+
+  // Class A one-shot: consume the authorization after a successful use so each
+  // confirmation grants exactly one action (TTL is the time-based backstop).
+  if (decision.klass === 'A' && result.ok && decision.authKey) {
+    try { systemContext().pruneKey(decision.authKey); } catch { /* non-fatal */ }
+  }
+
+  _emit({ type: 'action', id, action: decision.normalized.action, klass: decision.klass, result });
   return { enabled: true, ok: result.ok, klass: decision.klass, result, reason: result.reason };
 }
 
 /**
- * Subscribe to device events. Returns an unsubscribe function.
+ * Convenience: grant a Class A authorization (wraps the system-context confirm
+ * flow). The human running this command IS the confirmation act. Returns the
+ * granted auth + its TTL; the action itself is still performed via execute().
+ * @param {string} id
+ * @param {string} action
+ * @returns {object}
+ */
+function authorize(id, action) {
+  if (!isPeripheralsEnabled()) return { enabled: false };
+  const device = registry().get(id);
+  if (!device) return { enabled: true, ok: false, reason: 'device-not-found' };
+
+  const P = policy();
+  const evalRes = P.evaluateCommand(device, action, {}, { maxTotalPowerW: _powerBudgetW() });
+  if (!evalRes.ok) return { enabled: true, ok: false, code: evalRes.code, reason: evalRes.reason };
+
+  const act = evalRes.normalized.action;
+  if (device.class !== 'A') {
+    return { enabled: true, ok: true, granted: true, klass: device.class, reason: 'no-confirmation-required' };
+  }
+  const sc = systemContext();
+  const authKey = _authKey(device);
+  const ttl = evalRes.policy.confirmationTtlSec > 0 ? evalRes.policy.confirmationTtlSec : undefined;
+  // Queue a fresh authorization for THIS action, then confirm it.
+  sc.proposeUpdate(authKey, act, { source: 'system', confidence: 0.5, ttl });
+  const res = sc.confirmPending(authKey, 'apply');
+  return { enabled: true, ok: !!res.ok, granted: !!res.ok, authKey, action: act, ttlSec: ttl, klass: 'A' };
+}
+
+/**
+ * Ingest an inbound sensor reading (event-driven). Real drivers call this on
+ * incoming messages; it updates last-known state (read-only) and emits a
+ * 'reading' event that the PeripheralMonitor consumes.
+ * @param {string} id
+ * @param {object} metrics
+ * @returns {object}
+ */
+function ingestSensorReading(id, metrics = {}) {
+  if (!isPeripheralsEnabled()) return { enabled: false };
+  const device = registry().get(id);
+  if (!device) return { enabled: true, ok: false, reason: 'device-not-found' };
+  const patch = {};
+  for (const [k, v] of Object.entries(metrics || {})) {
+    if (typeof v === 'number' || typeof v === 'string' || typeof v === 'boolean') patch[k] = v;
+  }
+  registry().updateState(id, patch);
+  const reading = { type: 'reading', id, klass: device.class, metrics: patch, at: new Date().toISOString() };
+  _emit(reading);
+  return { enabled: true, ok: true, reading };
+}
+
+/**
+ * Start real-driver event streams (drivers push readings via ingestSensorReading).
+ * Returns a stop() that tears down all streams. No-op when disabled.
+ * @returns {() => void}
+ */
+function startStreaming() {
+  if (!isPeripheralsEnabled()) return () => {};
+  const stops = [];
+  for (const d of availableDrivers()) {
+    if (typeof d.start === 'function') {
+      try { stops.push(d.start((reading) => ingestSensorReading(reading.id, reading.metrics))); } catch { /* non-fatal */ }
+    }
+  }
+  return () => { for (const s of stops) { try { s(); } catch { /* ignore */ } } };
+}
+
+/**
+ * Subscribe to ALL device events. Returns an unsubscribe function.
  * @param {(event:object)=>void} cb
  * @returns {() => void}
  */
 function subscribe(cb) {
   if (!isPeripheralsEnabled() || typeof cb !== 'function') return () => {};
-  _subscribers.add(cb);
-  return () => _subscribers.delete(cb);
+  _bus.on('event', cb);
+  return () => _bus.off('event', cb);
+}
+
+/**
+ * Subscribe to a specific event type ('reading' | 'action' | 'blocked' |
+ * 'pending-confirmation' | 'scan'). Returns an unsubscribe function.
+ * @param {string} eventType
+ * @param {(event:object)=>void} cb
+ * @returns {() => void}
+ */
+function on(eventType, cb) {
+  if (!isPeripheralsEnabled() || typeof cb !== 'function') return () => {};
+  _bus.on(eventType, cb);
+  return () => _bus.off(eventType, cb);
 }
 
 module.exports = {
@@ -173,7 +313,13 @@ module.exports = {
   scan,
   get,
   list,
+  listDrivers,
   execute,
+  authorize,
+  ingestSensorReading,
+  startStreaming,
   subscribe,
+  on,
   isPhysicalActionAllowed
 };
+

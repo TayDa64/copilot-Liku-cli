@@ -19,19 +19,22 @@ const DRIVER_ID = 'mock';
 const DEVICE_DEFS = Object.freeze({
   'mock-lock-01': {
     id: 'mock-lock-01', name: 'Front Door Smart Lock', class: 'A', kind: 'lock',
-    capabilities: ['lock', 'unlock', 'status'], state: { locked: true }
+    capabilities: ['lock', 'unlock', 'status'], state: { locked: true }, powerW: 6
   },
   'mock-light-01': {
     id: 'mock-light-01', name: 'Living Room Smart Light', class: 'B', kind: 'light',
-    capabilities: ['on', 'off', 'brightness', 'status'], state: { power: 'off', brightness: 0 }
+    capabilities: ['on', 'off', 'brightness', 'status'], state: { power: 'off', brightness: 0 }, powerW: 10
   },
   'mock-temp-01': {
     id: 'mock-temp-01', name: 'Bedroom Temperature Sensor', class: 'C', kind: 'sensor',
-    capabilities: ['read', 'status'], state: { celsius: 21.5, humidity: 44 }
+    capabilities: ['read', 'status'], state: { celsius: 21.5, humidity: 44 }, powerW: 1
   }
 });
 
 function clone(obj) { return JSON.parse(JSON.stringify(obj)); }
+
+/** The mock driver is always available (first-class test driver). */
+function isAvailable() { return true; }
 
 /**
  * Discover the mock fleet. Returns fresh device records (with driver tag).
@@ -80,4 +83,25 @@ function perform(device, action, params = {}) {
   return { ok: true, action: act, state, result: `mock:${device.id}:${act}` };
 }
 
-module.exports = { DRIVER_ID, discover, perform, DEVICE_DEFS };
+/**
+ * Optional event stream. The mock driver does NOT push readings on its own
+ * (no timers), but exposes a no-op start()/stop() so it satisfies the driver
+ * interface. Tests drive the event-driven monitor via PAL.ingestSensorReading.
+ * @param {(reading:object)=>void} _emit
+ * @returns {() => void}
+ */
+function start(_emit) {
+  return () => {};
+}
+
+/**
+ * Helper: synthesize a sensor reading payload (real-driver parity for tests).
+ * @param {string} id
+ * @param {object} metrics
+ * @returns {{ id:string, metrics:object, at:string }}
+ */
+function makeReading(id, metrics) {
+  return { id, metrics: { ...metrics }, at: new Date().toISOString() };
+}
+
+module.exports = { DRIVER_ID, isAvailable, discover, perform, start, makeReading, DEVICE_DEFS };
