@@ -681,6 +681,8 @@ const { LIKU_HOME, ensureLikuStructure, migrateIfNeeded } = require('../shared/l
 // Bootstrap home directory on module load
 ensureLikuStructure();
 migrateIfNeeded();
+// Cognitive Substrate (Phase 0): populate read-only grounded self-awareness once at startup.
+try { require('./system-context-manager').autoDetectEnvironment(); } catch {}
 const TOKEN_FILE = path.join(LIKU_HOME, 'copilot-token.json');
 
 // OAuth state

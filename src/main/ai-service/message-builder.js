@@ -13,6 +13,14 @@ const {
 const { formatInheritedCompartmentContext } = require('../session-intent-state');
 const { TRADINGVIEW_PINE_PROMPT_OVERLAY } = require('./system-prompt');
 
+// Cognitive Substrate (Pillar 1, Phase 0): read-only grounded self-awareness.
+// Required directly (matches sibling module requires above); fully optional at
+// runtime — any failure degrades to an empty fragment and prior behavior.
+let systemContextManager = null;
+try {
+  systemContextManager = require('../system-context-manager');
+} catch { /* non-fatal: self-awareness injection is optional */ }
+
 function classifyActiveAppCapability(options) {
   return classifyActiveAppCapabilityFromPolicy(options);
 }
@@ -331,6 +339,20 @@ function createMessageBuilder(dependencies) {
     try {
       if (typeof memoryContext === 'string' && memoryContext.trim()) {
         messages.push({ role: 'system', content: `## Working Memory\n${memoryContext.trim()}` });
+      }
+    } catch {}
+
+    // Inject grounded system self-awareness (Cognitive Substrate, Phase 0).
+    // Read-only, token-bounded (< 1,200 BPE cap). The try/catch is defensive by
+    // design: self-awareness is an additive, best-effort enhancement, so any
+    // failure here (missing module, disk/tokenizer error) must degrade silently
+    // to prior behavior and never disrupt message assembly for the model call.
+    try {
+      if (systemContextManager && typeof systemContextManager.toPromptFragment === 'function') {
+        const selfAwareness = systemContextManager.toPromptFragment('structured');
+        if (typeof selfAwareness === 'string' && selfAwareness.trim()) {
+          messages.push({ role: 'system', content: selfAwareness.trim() });
+        }
       }
     } catch {}
 
