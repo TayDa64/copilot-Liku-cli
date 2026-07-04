@@ -9,12 +9,14 @@
  *   liku system-context                 Show grounded facts (structured view)
  *   liku system-context show            Same as above
  *   liku system-context get <dot.path>  Print one fact value
- *   liku system-context fragment        Print the exact injected prompt fragment
+ *   liku system-context fragment [fmt]  Print injected fragment (structured|compact|flat-kv)
+ *   liku system-context diff [key]      Show the most recent change(s) w/ provenance
  *   liku system-context refresh         Re-run grounded auto-detection + persist
  *   liku system-context json            Full serializable snapshot (metadata)
  *
  * Flags:
  *   --json    Machine-readable output for scripting
+ *   --limit N Number of changes to show for `diff` (default 5)
  */
 
 const { log, success, error, dim, highlight } = require('../util/output');
@@ -62,16 +64,36 @@ async function run(args, flags) {
     }
 
     case 'fragment': {
-      const fragment = mgr.toPromptFragment('structured');
-      const tokens = mgr.getFragmentTokenCount('structured');
-      if (flags.json) return { success: true, fragment, tokens, budget: mgr.tokenBudget };
+      const fmt = ['structured', 'compact', 'flat-kv'].includes(String(args[1] || '').toLowerCase())
+        ? String(args[1]).toLowerCase() : 'structured';
+      const fragment = mgr.toPromptFragment(fmt);
+      const tokens = mgr.getFragmentTokenCount(fmt);
+      if (flags.json) return { success: true, format: fmt, fragment, tokens, budget: mgr.tokenBudget };
       if (!fragment) {
         log('Fragment is empty. Run: liku system-context refresh');
         return { success: true, fragment: '', tokens: 0 };
       }
       log(fragment);
-      log(dim(`\n(${tokens} BPE tokens / budget ${mgr.tokenBudget})`));
-      return { success: true, fragment, tokens };
+      log(dim(`\n(${fmt} — ${tokens} BPE tokens / budget ${mgr.tokenBudget})`));
+      return { success: true, format: fmt, fragment, tokens };
+    }
+
+    case 'diff': {
+      const key = args[1] || null;
+      const limit = Number.isFinite(Number(flags.limit)) ? Number(flags.limit) : 5;
+      const changes = mgr.getChanges(limit, key);
+      if (flags.json) return { success: true, key: key || null, count: changes.length, changes };
+      if (!changes.length) {
+        log(key ? `No recorded changes for key: ${key}` : 'No recorded context changes yet.');
+        return { success: true, count: 0 };
+      }
+      log(highlight(`System Context Changes${key ? ` for ${key}` : ''} (most recent first):`));
+      for (const c of changes) {
+        const oldV = c.oldValue === undefined ? '(none)' : c.oldValue;
+        log(`  ${highlight(c.key)}: ${dim(String(oldV))} → ${c.newValue}`);
+        log(dim(`    ${c.ts}  source=${c.source} confidence=${c.confidence}`));
+      }
+      return { success: true, count: changes.length };
     }
 
     case 'refresh': {
@@ -91,7 +113,7 @@ async function run(args, flags) {
 
     default:
       error(`Unknown subcommand: ${subcommand}`);
-      log('Usage: liku system-context [show|get <path>|fragment|refresh|json]');
+      log('Usage: liku system-context [show|get <path>|fragment [fmt]|diff [key]|refresh|json]');
       return { success: false };
   }
 }

@@ -342,14 +342,19 @@ function createMessageBuilder(dependencies) {
       }
     } catch {}
 
-    // Inject grounded system self-awareness (Cognitive Substrate, Phase 0).
-    // Read-only, token-bounded (< 1,200 BPE cap). The try/catch is defensive by
+    // Inject grounded system self-awareness (Cognitive Substrate, Phase 1).
+    // Read-only for the model, token-bounded (< 1,200 BPE cap). Selective: pass
+    // the current query + foreground so contextual sections (e.g. TradingView
+    // guards) are only injected when relevant. The try/catch is defensive by
     // design: self-awareness is an additive, best-effort enhancement, so any
     // failure here (missing module, disk/tokenizer error) must degrade silently
     // to prior behavior and never disrupt message assembly for the model call.
     try {
       if (systemContextManager && typeof systemContextManager.toPromptFragment === 'function') {
-        const selfAwareness = systemContextManager.toPromptFragment('structured');
+        const selfAwareness = systemContextManager.toPromptFragment('structured', {
+          query: userMessage,
+          foreground: currentForeground
+        });
         if (typeof selfAwareness === 'string' && selfAwareness.trim()) {
           messages.push({ role: 'system', content: selfAwareness.trim() });
         }

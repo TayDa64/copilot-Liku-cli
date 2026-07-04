@@ -10505,6 +10505,15 @@ async function executeActions(actionData, onAction = null, onScreenshot = null, 
                   result: reflectionApplied.action
                 });
               } catch (_) { /* audit is non-fatal */ }
+              // Cognitive Substrate (Phase 1): record grounded reflection-quality
+              // evidence. Deterministic signal (applied? + action), NOT model text.
+              // Fully non-fatal + evidence-gated inside proposeUpdate().
+              try {
+                require('./system-context-manager').recordReflectionQuality(
+                  reflectionApplied.applied ? 1 : 0.4,
+                  { detail: reflectionApplied.action, source: 'reflection' }
+                );
+              } catch (_) { /* self-awareness update is best-effort */ }
               // If reflection applied a concrete action, stop iterating
               if (reflectionApplied.applied) break;
             }
