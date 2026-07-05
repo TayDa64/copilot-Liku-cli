@@ -107,8 +107,15 @@ function perform(device, action, params = {}) {
   const client = _ensureConnected();
   if (!client) return { ok: false, action: act, state: {}, reason: 'not-connected' };
   try {
-    client.publish(cfg.cmdTopic, JSON.stringify({ action: act, params }));
-    return { ok: true, action: act, state: { lastCommand: act }, result: `mqtt:${cfg.id}:${act}` };
+    // DCP wire format (Phase 8): publish a versioned envelope carrying a scoped
+    // capability token. For networked transports (MQTT) signing is recommended
+    // — set LIKU_DCP_SECRET to emit verifiable tokens; otherwise the token is an
+    // explicit `unsigned` local-mode marker (backward compatible).
+    const dcp = require('../dcp-protocol');
+    const token = dcp.issueCapabilityToken({ deviceId: cfg.id, actions: [act], ttlSec: 60 });
+    const envelope = dcp.buildCommandEnvelope({ device: cfg, action: act, params, token });
+    client.publish(cfg.cmdTopic, JSON.stringify(envelope));
+    return { ok: true, action: act, state: { lastCommand: act }, result: `mqtt:${cfg.id}:${act}`, envelope };
   } catch (err) {
     return { ok: false, action: act, state: {}, reason: `publish-failed: ${err.message}` };
   }

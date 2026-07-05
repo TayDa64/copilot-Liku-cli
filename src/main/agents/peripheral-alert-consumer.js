@@ -9,6 +9,8 @@
  *     → buildSupervisorNotification() (bounded, advisory-only)
  *       → SupervisorAgent.receiveNotification() (bounded inbox, human-gated)
  *         → orchestrator.emit('supervisor:notification', ...) (for CLI/UI/telemetry)
+ *           → (Phase 8, optional) SupervisorAgent.createPeripheralTask()
+ *             → orchestrator.emit('supervisor:task', ...) (reviewable work item)
  *
  * SAFETY CONTRACT (non-negotiable):
  *   - This module NEVER actuates hardware and NEVER calls the LLM autonomously.
@@ -102,12 +104,26 @@ function attachPeripheralAlertConsumer(orchestrator, options = {}) {
       if (supervisor && typeof supervisor.receiveNotification === 'function') {
         delivered = supervisor.receiveNotification(notification);
       }
+      const finalNotification = delivered || notification;
 
       // Re-emit a decoupled event so CLI / chat UI / telemetry can react too.
-      try { orchestrator.emit('supervisor:notification', delivered || notification); } catch { /* non-fatal */ }
+      try { orchestrator.emit('supervisor:notification', finalNotification); } catch { /* non-fatal */ }
+
+      // Phase 8: OPTIONALLY convert the notification into a bounded, human-gated
+      // Supervisor task. Enabled by default; disable via options.createTasks:false
+      // or env LIKU_PERIPHERAL_CREATE_TASKS=0. A task is a REVIEWABLE work item \u2014
+      // it never runs itself and never actuates hardware.
+      const createTasks = options.createTasks !== false
+        && String(process.env.LIKU_PERIPHERAL_CREATE_TASKS || '1') !== '0';
+      if (createTasks && supervisor && typeof supervisor.createPeripheralTask === 'function') {
+        const task = supervisor.createPeripheralTask(finalNotification);
+        if (task) {
+          try { orchestrator.emit('supervisor:task', task); } catch { /* non-fatal */ }
+        }
+      }
 
       if (typeof options.onNotification === 'function') {
-        try { options.onNotification(delivered || notification); } catch { /* non-fatal */ }
+        try { options.onNotification(finalNotification); } catch { /* non-fatal */ }
       }
     } catch { /* consumption is best-effort + non-blocking */ }
   };

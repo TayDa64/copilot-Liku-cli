@@ -40,6 +40,13 @@ class SupervisorAgent extends BaseAgent {
     // or actuates hardware. Bounded to avoid overwhelming the workflow.
     this.notifications = [];
     this.maxNotifications = options.maxNotifications || 20;
+
+    // Phase 8: bounded, human-gated TASKS derived from peripheral alerts. A task
+    // is a reviewable work item (status 'pending-review') — it NEVER runs itself
+    // and NEVER actuates hardware. Any action a human approves still flows
+    // through PAL.execute() → DCP → class gate → pending/confirm.
+    this.peripheralTasks = [];
+    this.maxPeripheralTasks = options.maxPeripheralTasks || 5;
   }
 
   getSystemPrompt() {
@@ -419,12 +426,104 @@ ${readResults.map(r => `--- ${r.filePath} ---\n${r.content?.slice(0, 2000)}`).jo
     this.notifications = [];
   }
 
+  // ===== Bounded Peripheral Tasks (Phase 8) =====
+  //
+  // Turn an advisory notification into a REVIEWABLE work item. These tasks are
+  // human-gated by construction: status starts at 'pending-review', requiresHuman
+  // is always true, autonomousAction is always false, and there is NO code path
+  // that executes a task or actuates hardware. A human decides; any physical
+  // response still travels the full PAL safety chain.
+
+  /**
+   * Create (or coalesce) a bounded peripheral task from a notification.
+   * Deduplicates by device+metric+level while an open task exists so a repeating
+   * breach bumps a counter instead of flooding the queue. Returns the task.
+   */
+  createPeripheralTask(notification, options = {}) {
+    if (!notification || typeof notification !== 'object') return null;
+    const device = notification.device || {};
+    const breach = notification.breach || {};
+    const dedupeKey = `${device.id || '?'}:${breach.metric || '?'}:${breach.level || '?'}`;
+
+    // Coalesce into an existing open task for the same condition.
+    const open = this.peripheralTasks.find((t) => t.dedupeKey === dedupeKey && t.status === 'pending-review');
+    if (open) {
+      open.count += 1;
+      open.lastSeenAt = new Date().toISOString();
+      try { this.emit('peripheral-task', open); } catch { /* non-fatal */ }
+      return open;
+    }
+
+    const severity = notification.severity || 'info';
+    const priority = severity === 'critical' ? 'high' : (severity === 'warning' ? 'medium' : 'low');
+    const task = {
+      id: `periph-task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      type: 'peripheral-response',
+      source: 'peripheral-alert',
+      createdAt: new Date().toISOString(),
+      lastSeenAt: new Date().toISOString(),
+      status: 'pending-review', // human must review; a task NEVER auto-runs
+      priority,
+      dedupeKey,
+      device: { id: device.id, class: device.class, kind: device.kind, name: device.name },
+      breach: { metric: breach.metric, level: breach.level, value: breach.value, threshold: breach.threshold },
+      advisory: notification.advisory,
+      // ADVISORY suggestion only — executing it still requires PAL.execute + confirm.
+      proposedAction: options.proposedAction || null,
+      requiresHuman: true, // peripheral tasks are ALWAYS human-gated
+      autonomousAction: false,
+      safety: 'physical-actions-require-pal-gating',
+      notificationId: notification.id,
+      count: 1
+    };
+    this.peripheralTasks.push(task);
+
+    // Bounded: prefer evicting an already-resolved task, else the oldest.
+    if (this.peripheralTasks.length > this.maxPeripheralTasks) {
+      const resolvedIdx = this.peripheralTasks.findIndex((t) => t.status !== 'pending-review');
+      if (resolvedIdx >= 0) this.peripheralTasks.splice(resolvedIdx, 1);
+      else this.peripheralTasks.splice(0, this.peripheralTasks.length - this.maxPeripheralTasks);
+    }
+    try { this.emit('peripheral-task', task); } catch { /* non-fatal */ }
+    return task;
+  }
+
+  /** All peripheral tasks (any status), newest last. */
+  getPeripheralTasks() {
+    return this.peripheralTasks.slice();
+  }
+
+  /** Peripheral tasks still awaiting human review. */
+  getPendingPeripheralTasks() {
+    return this.peripheralTasks.filter((t) => t.status === 'pending-review');
+  }
+
+  /**
+   * Resolve a peripheral task (human-in-the-loop). Does NOT execute anything —
+   * it only records the human's decision.
+   * @param {string} id
+   * @param {'acknowledged'|'dismissed'} [resolution]
+   */
+  resolvePeripheralTask(id, resolution = 'acknowledged') {
+    const t = this.peripheralTasks.find((x) => x.id === id);
+    if (!t) return null;
+    t.status = resolution === 'dismissed' ? 'dismissed' : 'acknowledged';
+    t.resolvedAt = new Date().toISOString();
+    return t;
+  }
+
+  /** Clear the peripheral task queue. */
+  clearPeripheralTasks() {
+    this.peripheralTasks = [];
+  }
+
   reset() {
     super.reset();
     this.currentPlan = null;
     this.decomposedTasks = [];
     this.assumptions = [];
     this.notifications = [];
+    this.peripheralTasks = [];
   }
 }
 

@@ -17,6 +17,8 @@
 
 'use strict';
 
+const dcp = require('./dcp-protocol');
+
 const VALID_CLASSES = Object.freeze(['A', 'B', 'C']);
 
 /**
@@ -129,6 +131,37 @@ function evaluateCommand(device, action, params = {}, ctx = {}) {
   return { ok: true, normalized: { action: act, params: normalizedParams }, policy, readOnly };
 }
 
+/**
+ * DCP-native evaluation: verify a formal command ENVELOPE (structure + freshness
+ * + nonce replay + capability token scope) and THEN run the same host-side
+ * capability/param/power validation as evaluateCommand(). Used for inbound
+ * commands arriving over a wire (networked / remote devices). Backward compatible
+ * — local callers keep using evaluateCommand() directly.
+ *
+ * @param {object} device registry device record
+ * @param {object} envelope DCP command envelope (see dcp-protocol.buildCommandEnvelope)
+ * @param {object} [ctx] { secret, now, freshnessMs, seenNonces, requireCapability, maxTotalPowerW }
+ * @returns {{ ok:boolean, code?:string, reason?:string, normalized?:object, policy?:object, readOnly?:boolean, command?:object }}
+ */
+function evaluateCommandEnvelope(device, envelope, ctx = {}) {
+  const v = dcp.verifyEnvelope(envelope, {
+    secret: ctx.secret,
+    now: ctx.now,
+    freshnessMs: ctx.freshnessMs,
+    seenNonces: ctx.seenNonces,
+    requireCapability: ctx.requireCapability
+  });
+  if (!v.ok) return { ok: false, code: `envelope-${v.reason}`, reason: v.reason };
+
+  // The envelope's target device MUST match the device we are evaluating against.
+  if (device && device.id && String(device.id) !== v.command.device) {
+    return { ok: false, code: 'device-mismatch', reason: 'envelope device does not match target device' };
+  }
+
+  const res = evaluateCommand(device, v.command.action, v.command.params, ctx);
+  return res.ok ? { ...res, command: v.command } : res;
+}
+
 module.exports = {
   VALID_CLASSES,
   CLASS_POLICY,
@@ -137,5 +170,7 @@ module.exports = {
   normalizeAction,
   getDevicePolicy,
   estimateActionPowerW,
-  evaluateCommand
+  evaluateCommand,
+  evaluateCommandEnvelope,
+  dcp
 };

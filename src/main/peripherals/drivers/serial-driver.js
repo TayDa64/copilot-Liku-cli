@@ -105,8 +105,15 @@ function perform(device, action, params = {}) {
   const port = _ensureOpen();
   if (!port) return { ok: false, action: act, state: {}, reason: 'not-connected' };
   try {
-    port.write(`${JSON.stringify({ id: cfg.id, action: act, params })}\n`);
-    return { ok: true, action: act, state: { lastCommand: act }, result: `serial:${cfg.id}:${act}` };
+    // DCP wire format (Phase 8): send a versioned, signed-capability envelope
+    // instead of an ad-hoc payload. Backward compatible — the envelope is a
+    // superset; the capability token is `unsigned` local-mode unless
+    // LIKU_DCP_SECRET is configured.
+    const dcp = require('../dcp-protocol');
+    const token = dcp.issueCapabilityToken({ deviceId: cfg.id, actions: [act], ttlSec: 60 });
+    const envelope = dcp.buildCommandEnvelope({ device: cfg, action: act, params, token });
+    port.write(`${JSON.stringify(envelope)}\n`);
+    return { ok: true, action: act, state: { lastCommand: act }, result: `serial:${cfg.id}:${act}`, envelope };
   } catch (err) {
     return { ok: false, action: act, state: {}, reason: `write-failed: ${err.message}` };
   }

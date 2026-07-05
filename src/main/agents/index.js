@@ -77,7 +77,8 @@ module.exports = {
       // Advisory-only: nothing is auto-actuated; any physical response a human
       // approves still flows through the PAL (DCP → class gate → pending/confirm).
       peripheralAlertConsumer = attachPeripheralAlertConsumer(orchestrator, {
-        onNotification: options.onPeripheralNotification
+        onNotification: options.onPeripheralNotification,
+        createTasks: options.createPeripheralTasks
       });
     } catch { /* peripheral integration is best-effort */ }
 

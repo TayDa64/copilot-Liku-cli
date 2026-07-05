@@ -647,6 +647,161 @@ test('peripheral alert consumer is inert when the feature flag is off', () => {
   assert.strictEqual(sup.getNotifications().length, 0, 'no notifications generated when disabled');
 });
 
+// ── Phase 8: bounded human-gated tasks + formal DCP wire format ──
+
+test('peripheral breach creates a bounded, human-gated Supervisor task', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const EventEmitter = require('events');
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  pal.scan();
+  const orch = new EventEmitter();
+  orch.agents = new Map();
+  orch.stateManager = { registerAgent: () => {} };
+  const { SupervisorAgent } = require('../src/main/agents/supervisor');
+  const supervisor = new SupervisorAgent({});
+  orch.agents.set('supervisor', supervisor);
+  const { attachPeripheralMonitor } = require('../src/main/agents/peripheral-monitor-agent');
+  const { attachPeripheralAlertConsumer } = require('../src/main/agents/peripheral-alert-consumer');
+  const { agent } = attachPeripheralMonitor(orch, {});
+  let emittedTask = null;
+  attachPeripheralAlertConsumer(orch);
+  orch.on('supervisor:task', (t) => { emittedTask = t; });
+
+  pal.ingestSensorReading('mock-lock-01', { battery: 4 });
+  const tasks = supervisor.getPendingPeripheralTasks();
+  assert.strictEqual(tasks.length, 1, 'exactly one reviewable task created');
+  const t = tasks[0];
+  assert.strictEqual(t.status, 'pending-review', 'task starts pending human review');
+  assert.strictEqual(t.requiresHuman, true);
+  assert.strictEqual(t.autonomousAction, false, 'never autonomous');
+  assert.strictEqual(t.priority, 'high', 'Class A critical → high priority');
+  assert.strictEqual(t.safety, 'physical-actions-require-pal-gating');
+  assert.ok(emittedTask, 'supervisor:task emitted for CLI/UI review');
+  // Human resolves it — still no execution.
+  assert.ok(supervisor.resolvePeripheralTask(t.id, 'acknowledged'));
+  assert.strictEqual(supervisor.getPendingPeripheralTasks().length, 0, 'acknowledged leaves pending');
+  agent.stop();
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('peripheral tasks are bounded + coalesce duplicate breaches', () => {
+  const { SupervisorAgent } = require('../src/main/agents/supervisor');
+  const sup = new SupervisorAgent({ maxPeripheralTasks: 2 });
+  const mk = (id, metric, level) => ({
+    id: `n-${Math.random()}`, severity: 'warning',
+    device: { id, class: 'B', kind: 'light' }, breach: { metric, level }
+  });
+  const a = sup.createPeripheralTask(mk('d1', 'celsius', 'high'));
+  const aDup = sup.createPeripheralTask(mk('d1', 'celsius', 'high'));
+  assert.strictEqual(a.id, aDup.id, 'duplicate condition coalesces into the same task');
+  assert.strictEqual(a.count, 2, 'coalesced task bumps its count');
+  sup.createPeripheralTask(mk('d2', 'celsius', 'high'));
+  sup.createPeripheralTask(mk('d3', 'celsius', 'high'));
+  assert.ok(sup.getPeripheralTasks().length <= 2, 'queue stays bounded at maxPeripheralTasks');
+  assert.strictEqual(sup.createPeripheralTask(null), null, 'invalid input rejected');
+  sup.reset();
+  assert.strictEqual(sup.getPeripheralTasks().length, 0, 'reset clears tasks');
+});
+
+test('task creation never bypasses the PAL gate for physical actions', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const EventEmitter = require('events');
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  pal.scan();
+  const orch = new EventEmitter();
+  orch.agents = new Map();
+  orch.stateManager = { registerAgent: () => {} };
+  const { SupervisorAgent } = require('../src/main/agents/supervisor');
+  orch.agents.set('supervisor', new SupervisorAgent({}));
+  const { attachPeripheralMonitor } = require('../src/main/agents/peripheral-monitor-agent');
+  const { attachPeripheralAlertConsumer } = require('../src/main/agents/peripheral-alert-consumer');
+  const { agent } = attachPeripheralMonitor(orch, {});
+  attachPeripheralAlertConsumer(orch);
+  pal.ingestSensorReading('mock-lock-01', { battery: 4 });
+  // Even with a task open, actuating the Class A lock still requires confirmation.
+  const r = pal.execute('mock-lock-01', 'lock');
+  assert.strictEqual(r.pending, true, 'Class A action still pending confirmation');
+  agent.stop();
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('createTasks can be disabled (notification only)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const EventEmitter = require('events');
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  pal.scan();
+  const orch = new EventEmitter();
+  orch.agents = new Map();
+  orch.stateManager = { registerAgent: () => {} };
+  const { SupervisorAgent } = require('../src/main/agents/supervisor');
+  const supervisor = new SupervisorAgent({});
+  orch.agents.set('supervisor', supervisor);
+  const { attachPeripheralMonitor } = require('../src/main/agents/peripheral-monitor-agent');
+  const { attachPeripheralAlertConsumer } = require('../src/main/agents/peripheral-alert-consumer');
+  const { agent } = attachPeripheralMonitor(orch, {});
+  attachPeripheralAlertConsumer(orch, { createTasks: false });
+  pal.ingestSensorReading('mock-temp-01', { celsius: 60 });
+  assert.ok(supervisor.getPendingNotifications().length >= 1, 'notification still delivered');
+  assert.strictEqual(supervisor.getPendingPeripheralTasks().length, 0, 'no task created when disabled');
+  agent.stop();
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('DCP capability token: issue + verify scope, expiry, tamper (signed)', () => {
+  const dcp = require('../src/main/peripherals/dcp-protocol');
+  const secret = 'test-secret-key';
+  const now = 1_000_000_000_000;
+  const token = dcp.issueCapabilityToken({ deviceId: 'lock-1', actions: ['unlock'], ttlSec: 60, secret, now });
+  // Valid within scope + window.
+  assert.strictEqual(dcp.verifyCapabilityToken(token, { deviceId: 'lock-1', action: 'unlock', secret, now }).ok, true);
+  // Wrong action / wrong device rejected.
+  assert.strictEqual(dcp.verifyCapabilityToken(token, { deviceId: 'lock-1', action: 'lock', secret, now }).reason, 'action-scope-mismatch');
+  assert.strictEqual(dcp.verifyCapabilityToken(token, { deviceId: 'lock-2', action: 'unlock', secret, now }).reason, 'device-scope-mismatch');
+  // Expired.
+  assert.strictEqual(dcp.verifyCapabilityToken(token, { deviceId: 'lock-1', action: 'unlock', secret, now: now + 61000 }).reason, 'expired');
+  // Tampered signature.
+  const tampered = token.slice(0, -2) + (token.slice(-2) === 'aa' ? 'bb' : 'aa');
+  assert.strictEqual(dcp.verifyCapabilityToken(tampered, { deviceId: 'lock-1', action: 'unlock', secret, now }).ok, false);
+  // A signed token cannot be verified without the secret.
+  assert.strictEqual(dcp.verifyCapabilityToken(token, { deviceId: 'lock-1', action: 'unlock', now }).reason, 'no-secret-to-verify');
+});
+
+test('DCP envelope: build/parse + freshness + nonce replay protection', () => {
+  const dcp = require('../src/main/peripherals/dcp-protocol');
+  const now = 2_000_000_000_000;
+  const env = dcp.buildCommandEnvelope({ device: 'lock-1', action: 'unlock', now });
+  assert.strictEqual(env.dcp, '1.0');
+  assert.strictEqual(dcp.parseCommandEnvelope(env).ok, true);
+  assert.strictEqual(dcp.parseCommandEnvelope({ dcp: '9.9', type: 'command' }).reason, 'unsupported-version');
+  // Fresh envelope + first-use nonce is accepted; replay is rejected.
+  const seen = new Map();
+  assert.strictEqual(dcp.verifyEnvelope(env, { now, seenNonces: seen }).ok, true);
+  assert.strictEqual(dcp.verifyEnvelope(env, { now, seenNonces: seen }).reason, 'replay-detected');
+  // Stale envelope (outside freshness window) rejected.
+  assert.strictEqual(dcp.verifyEnvelope(env, { now: now + 60000 }).reason, 'stale-envelope');
+});
+
+test('DCP evaluateCommandEnvelope verifies wire then applies capability scoping', () => {
+  const policy = require('../src/main/peripherals/peripheral-policy');
+  const dcp = require('../src/main/peripherals/dcp-protocol');
+  const device = { id: 'lock-1', class: 'A', capabilities: ['lock', 'unlock', 'status'], powerW: 6 };
+  const now = 3_000_000_000_000;
+  const secret = 'wire-secret';
+  const token = dcp.issueCapabilityToken({ deviceId: 'lock-1', actions: ['unlock'], secret, now });
+  const env = dcp.buildCommandEnvelope({ device, action: 'unlock', token, now });
+  const ok = policy.evaluateCommandEnvelope(device, env, { secret, now, requireCapability: true });
+  assert.strictEqual(ok.ok, true, 'valid signed envelope for a declared action passes');
+  assert.strictEqual(ok.normalized.action, 'unlock');
+  // Envelope internally valid but targeting a DIFFERENT device than we evaluate
+  // against is rejected as a device mismatch by the policy layer.
+  const otherToken = dcp.issueCapabilityToken({ deviceId: 'lock-2', actions: ['unlock'], secret, now });
+  const wrongDev = dcp.buildCommandEnvelope({ device: 'lock-2', action: 'unlock', token: otherToken, now });
+  assert.strictEqual(policy.evaluateCommandEnvelope(device, wrongDev, { secret, now, requireCapability: true }).code, 'device-mismatch');
+  // Unsupported action still rejected by host-side capability scoping.
+  const badAct = dcp.buildCommandEnvelope({ device, action: 'explode', now });
+  assert.strictEqual(policy.evaluateCommandEnvelope(device, badAct, { now }).code, 'unsupported-action');
+});
+
 test('env.hostname is stored but excluded from injected fragment by default', () => {
   // Stored for local diagnostics...
   assert.strictEqual(typeof mgr.get('env.hostname'), 'string');

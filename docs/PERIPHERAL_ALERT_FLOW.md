@@ -33,9 +33,36 @@ Supervisor notification — and, only if a human approves, a gated physical acti
    │  bounded inbox (cap 20, oldest dropped); emits 'notification'
    ▼
  orchestrator.emit('supervisor:notification', n)   ← CLI / chat UI / telemetry react
+   │
+   │  (Phase 8, optional — on by default) convert to a reviewable work item
+   ▼
+ SupervisorAgent.createPeripheralTask(n)       src/main/agents/supervisor.js
+   │  bounded task queue (cap 5, dedupe by device+metric+level);
+   │  status 'pending-review', requiresHuman=true, autonomousAction=false
+   ▼
+ orchestrator.emit('supervisor:task', task)    ← CLI / chat UI review + acknowledge
 ```
 
-At this point the human sees an advisory. **Nothing has actuated.**
+At this point the human sees an advisory and (optionally) a reviewable task.
+**Nothing has actuated.**
+
+## Bounded Supervisor tasks (Phase 8)
+
+A `supervisor:notification` can be converted into a **reviewable, human-gated
+task** so peripheral events become actionable inside the multi-agent workflow —
+without ever running themselves.
+
+| Property | Guarantee |
+| --- | --- |
+| `status` | Starts at `pending-review`; a human moves it to `acknowledged`/`dismissed`. |
+| `requiresHuman` | Always `true`. |
+| `autonomousAction` | Always `false` — there is no code path that executes a task. |
+| `proposedAction` | Advisory only; executing it still requires `PAL.execute()` + confirm. |
+| Bounded | Queue capped (`maxPeripheralTasks`, default 5); repeats coalesce via `dedupeKey` + `count`. |
+| Priority | Derived from severity: `critical→high`, `warning→medium`, else `low`. |
+
+Task creation is **optional**: disable via `attachPeripheralAlertConsumer(orch,
+{ createTasks: false })` or `LIKU_PERIPHERAL_CREATE_TASKS=0`.
 
 ## If a human decides to act
 
@@ -62,11 +89,62 @@ never shortcuts it:
 Together these implement a per-`device:metric` state machine: a breach fires
 once, is held while the value hovers, and only re-arms after recovery + cooldown.
 
+## DCP wire format + capability tokens (Phase 8)
+
+`src/main/peripherals/dcp-protocol.js` formalizes the Device Control Protocol
+that was previously implicit in `peripheral-policy.js`. It is a **pure** module
+(crypto + structure only).
+
+### Command envelope (wire format)
+
+```json
+{
+  "dcp": "1.0",
+  "type": "command",
+  "id": "<correlation id>",
+  "ts": 1751700000000,
+  "nonce": "<per-command nonce>",
+  "device": "<deviceId>",
+  "action": "unlock",
+  "params": {},
+  "capability": "<base64url(payload)>.<signature|unsigned>"
+}
+```
+
+- `ts` + `nonce` provide a **freshness/replay window** (default 30 s) and
+  **replay protection** (caller-owned `seenNonces` map).
+- `capability` is an optional **signed capability token** (HMAC-SHA256) scoping
+  the token to `device` + `action(s)` with an `exp`. Set `LIKU_DCP_SECRET` to
+  sign/verify; without a secret, tokens are an explicit `unsigned` local-mode
+  marker (backward compatible for the mock + trusted local links).
+
+### API
+
+| Function | Purpose |
+| --- | --- |
+| `issueCapabilityToken({ deviceId, actions, ttlSec })` | Mint a scoped, expiring token. |
+| `verifyCapabilityToken(token, { deviceId, action })` | Check signature, expiry, device + action scope. |
+| `buildCommandEnvelope({ device, action, params, token })` | Construct a versioned envelope. |
+| `parseCommandEnvelope(env)` | Structural validation (version/type/fields). |
+| `verifyEnvelope(env, { secret, seenNonces, requireCapability })` | Full verify: structure + freshness + replay + capability. |
+
+`peripheral-policy.js` exposes `evaluateCommandEnvelope(device, envelope, ctx)`
+which verifies the envelope **then** runs the same host-side capability/param/
+power validation as `evaluateCommand()` — so inbound wire commands get the full
+safety treatment. Local callers keep using `evaluateCommand()` unchanged.
+
+The **serial** and **MQTT** drivers now emit DCP envelopes (with a scoped
+capability token) on `perform()`, replacing their ad-hoc payloads. The mock
+driver stays local/in-process and needs no wire format.
+
 ## Safety invariants (do not regress)
 
 - **Advisory-only.** Notifications carry `autonomousAction: false` and, for Class A
   (actuation/lock-capable) devices, `requiresHuman: true`. The consumer never
   calls the LLM and never actuates hardware.
+- **Tasks are reviewable, not executable.** Peripheral tasks start at
+  `pending-review`, are always `requiresHuman: true` / `autonomousAction: false`,
+  and have no execution path. Approving one still goes through `PAL.execute()`.
 - **Best-effort + non-blocking.** Every callback is wrapped; a bad reading or a
   consumer error can never crash the monitor or the orchestrator.
 - **Bounded.** The Supervisor inbox is capped so alerts cannot overwhelm the
