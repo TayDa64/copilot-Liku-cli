@@ -34,6 +34,12 @@ class SupervisorAgent extends BaseAgent {
     this.currentPlan = null;
     this.decomposedTasks = [];
     this.assumptions = [];
+
+    // Phase 7: bounded, human-gated inbox for peripheral (and other) alerts.
+    // The Supervisor is NOTIFIED, never auto-driven — nothing here calls the LLM
+    // or actuates hardware. Bounded to avoid overwhelming the workflow.
+    this.notifications = [];
+    this.maxNotifications = options.maxNotifications || 20;
   }
 
   getSystemPrompt() {
@@ -359,6 +365,66 @@ ${readResults.map(r => `--- ${r.filePath} ---\n${r.content?.slice(0, 2000)}`).jo
       context: response.text,
       filesRead: files
     };
+  }
+
+  // ===== Peripheral Alert Intake (Phase 7) =====
+  //
+  // These methods are DELIBERATELY passive: they record advisory notifications
+  // (e.g. from the PeripheralMonitorAgent) into a bounded inbox for a human to
+  // review. They never call the LLM and never actuate hardware. Any physical
+  // response a human later approves still flows through the PAL safety chain
+  // (DCP evaluateCommand → class gate → pending/confirm).
+
+  /**
+   * Record an advisory notification into the bounded, human-gated inbox.
+   * Oldest entries are dropped when the cap is exceeded so the Supervisor is
+   * never overwhelmed. Returns the stored entry (or null if invalid).
+   */
+  receiveNotification(notification) {
+    if (!notification || typeof notification !== 'object') return null;
+    const entry = {
+      ...notification,
+      receivedAt: notification.receivedAt || new Date().toISOString(),
+      acknowledged: false,
+      // Hard safety invariant regardless of caller input.
+      autonomousAction: false
+    };
+    this.notifications.push(entry);
+    if (this.notifications.length > this.maxNotifications) {
+      this.notifications.splice(0, this.notifications.length - this.maxNotifications);
+    }
+    try { this.emit('notification', entry); } catch { /* non-fatal */ }
+    return entry;
+  }
+
+  /** Notifications a human has not yet acknowledged. */
+  getPendingNotifications() {
+    return this.notifications.filter((n) => !n.acknowledged);
+  }
+
+  /** All notifications (acknowledged + pending), newest last. */
+  getNotifications() {
+    return this.notifications.slice();
+  }
+
+  /** Acknowledge a notification by id (human-in-the-loop). */
+  acknowledgeNotification(id) {
+    const n = this.notifications.find((x) => x.id === id);
+    if (n) { n.acknowledged = true; return true; }
+    return false;
+  }
+
+  /** Clear the notification inbox. */
+  clearNotifications() {
+    this.notifications = [];
+  }
+
+  reset() {
+    super.reset();
+    this.currentPlan = null;
+    this.decomposedTasks = [];
+    this.assumptions = [];
+    this.notifications = [];
   }
 }
 

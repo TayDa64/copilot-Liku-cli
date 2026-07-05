@@ -50,6 +50,8 @@ class PeripheralMonitorAgent extends EventEmitter {
     this.orchestrator = options.orchestrator || null;
     this.pal = options.pal || require('../peripherals/peripheral-abstraction-layer');
     this.thresholds = options.thresholds || {};
+    this.cooldownMs = options.cooldownMs;
+    this.hysteresisFraction = options.hysteresisFraction;
     this._monitor = null;
     this._started = false;
   }
@@ -111,6 +113,8 @@ class PeripheralMonitorAgent extends EventEmitter {
     this._monitor = new PeripheralMonitor({
       pal: this.pal,
       thresholds: this.thresholds,
+      cooldownMs: this.cooldownMs,
+      hysteresisFraction: this.hysteresisFraction,
       onSupervisorWake: (event) => this._onWake(event)
     });
     this._started = !!this._monitor.start();

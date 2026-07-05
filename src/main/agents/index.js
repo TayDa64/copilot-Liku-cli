@@ -18,6 +18,7 @@ const { VerifierAgent } = require('./verifier');
 const { ProducerAgent } = require('./producer');
 const { ResearcherAgent } = require('./researcher');
 const { PeripheralMonitorAgent, attachPeripheralMonitor } = require('./peripheral-monitor-agent');
+const { attachPeripheralAlertConsumer, buildSupervisorNotification } = require('./peripheral-alert-consumer');
 const { AgentStateManager } = require('./state-manager');
 const { TraceWriter } = require('./trace-writer');
 
@@ -30,6 +31,8 @@ module.exports = {
   ResearcherAgent,
   PeripheralMonitorAgent,
   attachPeripheralMonitor,
+  attachPeripheralAlertConsumer,
+  buildSupervisorNotification,
   AgentStateManager,
   TraceWriter,
   
@@ -60,15 +63,26 @@ module.exports = {
     // LIKU_ENABLE_PERIPHERALS is off). Fully decoupled: it only emits
     // 'peripheral:alert' events on the orchestrator; it never actuates hardware.
     let peripheralMonitor = null;
+    let peripheralAlertConsumer = null;
     try {
       const attached = attachPeripheralMonitor(orchestrator, {
-        thresholds: options.peripheralThresholds
+        thresholds: options.peripheralThresholds,
+        cooldownMs: options.peripheralAlertCooldownMs,
+        hysteresisFraction: options.peripheralHysteresisFraction
       });
       peripheralMonitor = attached.agent;
+
+      // Pillar 3 (Phase 7): CLOSE THE LOOP. Consume 'peripheral:alert' events and
+      // inject a bounded, human-gated notification into the Supervisor workflow.
+      // Advisory-only: nothing is auto-actuated; any physical response a human
+      // approves still flows through the PAL (DCP → class gate → pending/confirm).
+      peripheralAlertConsumer = attachPeripheralAlertConsumer(orchestrator, {
+        onNotification: options.onPeripheralNotification
+      });
     } catch { /* peripheral integration is best-effort */ }
 
-    // Return object with orchestrator, stateManager, and peripheral monitor
-    return { orchestrator, stateManager, traceWriter, peripheralMonitor };
+    // Return object with orchestrator, stateManager, and peripheral integration
+    return { orchestrator, stateManager, traceWriter, peripheralMonitor, peripheralAlertConsumer };
   },
   
   // Recovery function for checkpoint restoration

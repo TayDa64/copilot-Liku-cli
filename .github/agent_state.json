@@ -998,6 +998,90 @@
       "lastActive": "2026-07-05T07:55:09.474Z",
       "tasksCompleted": 0,
       "tasksFailed": 0
+    },
+    "agent-1783240389207-ajaadqgmq": {
+      "type": "supervisor",
+      "capabilities": [
+        "search",
+        "read",
+        "web_fetch",
+        "todo",
+        "handoff"
+      ],
+      "registeredAt": "2026-07-05T08:33:09.208Z",
+      "lastActive": "2026-07-05T08:33:09.209Z",
+      "tasksCompleted": 0,
+      "tasksFailed": 0
+    },
+    "agent-1783240389207-nl0dxhg76": {
+      "type": "builder",
+      "capabilities": [
+        "search",
+        "read",
+        "edit",
+        "execute",
+        "todo",
+        "handoff"
+      ],
+      "registeredAt": "2026-07-05T08:33:09.210Z",
+      "lastActive": "2026-07-05T08:33:09.210Z",
+      "tasksCompleted": 0,
+      "tasksFailed": 0
+    },
+    "agent-1783240389207-zxtf82jh0": {
+      "type": "verifier",
+      "capabilities": [
+        "search",
+        "read",
+        "execute",
+        "todo",
+        "handoff"
+      ],
+      "registeredAt": "2026-07-05T08:33:09.211Z",
+      "lastActive": "2026-07-05T08:33:09.211Z",
+      "tasksCompleted": 0,
+      "tasksFailed": 0
+    },
+    "agent-1783240389208-nsbiw8w2s": {
+      "type": "researcher",
+      "capabilities": [
+        "search",
+        "read",
+        "web_fetch",
+        "todo",
+        "handoff"
+      ],
+      "registeredAt": "2026-07-05T08:33:09.212Z",
+      "lastActive": "2026-07-05T08:33:09.212Z",
+      "tasksCompleted": 0,
+      "tasksFailed": 0
+    },
+    "agent-1783240389208-9ze7y80xl": {
+      "type": "producer",
+      "capabilities": [
+        "search",
+        "read",
+        "execute",
+        "todo",
+        "handoff"
+      ],
+      "registeredAt": "2026-07-05T08:33:09.213Z",
+      "lastActive": "2026-07-05T08:33:09.213Z",
+      "tasksCompleted": 0,
+      "tasksFailed": 0
+    },
+    "peripheral-monitor-1783240389216-qzpu90": {
+      "type": "peripheral_monitor",
+      "capabilities": [
+        "monitor",
+        "sensor_grounding",
+        "alert",
+        "handoff"
+      ],
+      "registeredAt": "2026-07-05T08:33:09.219Z",
+      "lastActive": "2026-07-05T08:33:09.219Z",
+      "tasksCompleted": 0,
+      "tasksFailed": 0
     }
   },
   "sessions": [
@@ -1091,7 +1175,7 @@
       "tasks": []
     }
   ],
-  "lastModified": "2026-07-05T07:55:09.474Z",
+  "lastModified": "2026-07-05T08:33:09.219Z",
   "modelMetadata": {
     "modelId": "stub",
     "provider": "test",

@@ -517,6 +517,136 @@ test('serial/ESP32 driver is gated by config and follows Class A safety', () => 
   delete process.env.LIKU_ENABLE_PERIPHERALS;
 });
 
+// ── Phase 7: closing the loop — human-gated alert consumption + signal quality ──
+
+test('peripheral:alert is consumed into a bounded, human-gated Supervisor inbox', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const EventEmitter = require('events');
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  pal.scan();
+  const orch = new EventEmitter();
+  orch.agents = new Map();
+  orch.stateManager = { registerAgent: () => {} };
+  // Minimal Supervisor stand-in exercising the REAL inbox implementation.
+  const { SupervisorAgent } = require('../src/main/agents/supervisor');
+  const supervisor = new SupervisorAgent({});
+  orch.agents.set('supervisor', supervisor);
+  const { attachPeripheralMonitor } = require('../src/main/agents/peripheral-monitor-agent');
+  const { attachPeripheralAlertConsumer } = require('../src/main/agents/peripheral-alert-consumer');
+  const { agent } = attachPeripheralMonitor(orch, {});
+  let supervisorNotif = null;
+  attachPeripheralAlertConsumer(orch);
+  orch.on('supervisor:notification', (n) => { supervisorNotif = n; });
+
+  // A significant breach on a Class A device flows all the way to the inbox.
+  pal.ingestSensorReading('mock-lock-01', { battery: 5 });
+  const pending = supervisor.getPendingNotifications();
+  assert.strictEqual(pending.length, 1, 'exactly one notification reached the Supervisor');
+  const n = pending[0];
+  assert.strictEqual(n.kind, 'peripheral-alert');
+  assert.strictEqual(n.device.id, 'mock-lock-01');
+  assert.strictEqual(n.requiresHuman, true, 'Class A alert is human-gated');
+  assert.strictEqual(n.autonomousAction, false, 'never autonomous');
+  assert.strictEqual(n.safety, 'physical-actions-require-pal-gating');
+  assert.ok(supervisorNotif, 'supervisor:notification re-emitted for CLI/UI/telemetry');
+  agent.stop();
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('debounce (cooldown) + hysteresis suppress duplicate/flapping alerts', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  pal.scan();
+  const { PeripheralMonitor } = require('../src/main/peripherals/peripheral-monitor');
+  let clock = 1000;
+  const wakes = [];
+  const mon = new PeripheralMonitor({
+    pal, systemContext: m,
+    cooldownMs: 10000,
+    now: () => clock,
+    onSupervisorWake: (e) => wakes.push(e)
+  });
+  mon.start();
+
+  // First breach → one alert.
+  pal.ingestSensorReading('mock-temp-01', { celsius: 50 });
+  assert.strictEqual(wakes.length, 1, 'first breach alerts');
+  // Continued/worsening breach while still active → hysteresis suppresses.
+  pal.ingestSensorReading('mock-temp-01', { celsius: 55 });
+  assert.strictEqual(wakes.length, 1, 'no re-alert while still breached (hysteresis)');
+  // Value dips only into the deadband (high=30, margin=1.5 → clears below 28.5).
+  pal.ingestSensorReading('mock-temp-01', { celsius: 29 });
+  pal.ingestSensorReading('mock-temp-01', { celsius: 50 });
+  assert.strictEqual(wakes.length, 1, 'deadband dip does not re-arm the alert');
+  // Full recovery clears the breach, but a new breach within cooldown is debounced.
+  pal.ingestSensorReading('mock-temp-01', { celsius: 20 });
+  clock += 5000; // < cooldown
+  pal.ingestSensorReading('mock-temp-01', { celsius: 50 });
+  assert.strictEqual(wakes.length, 1, 'new breach within cooldown is debounced');
+  // After cooldown elapses, a fresh breach alerts again.
+  clock += 10000; // > cooldown since last alert
+  pal.ingestSensorReading('mock-temp-01', { celsius: 20 }); // recover
+  pal.ingestSensorReading('mock-temp-01', { celsius: 50 }); // re-breach
+  assert.strictEqual(wakes.length, 2, 'alert re-arms after recovery + cooldown');
+  mon.stop();
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('alert consumption never actuates hardware — physical actions stay gated', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const EventEmitter = require('events');
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  pal.scan();
+  const orch = new EventEmitter();
+  orch.agents = new Map();
+  orch.stateManager = { registerAgent: () => {} };
+  const { SupervisorAgent } = require('../src/main/agents/supervisor');
+  orch.agents.set('supervisor', new SupervisorAgent({}));
+  const { attachPeripheralMonitor } = require('../src/main/agents/peripheral-monitor-agent');
+  const { attachPeripheralAlertConsumer } = require('../src/main/agents/peripheral-alert-consumer');
+  const { agent } = attachPeripheralMonitor(orch, {});
+  attachPeripheralAlertConsumer(orch);
+  // Alert on the Class A lock.
+  pal.ingestSensorReading('mock-lock-01', { battery: 5 });
+  // A physical action on that device must STILL go through the confirm gate.
+  const r = pal.execute('mock-lock-01', 'lock');
+  assert.strictEqual(r.pending, true, 'Class A action pending confirmation despite the alert');
+  agent.stop();
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('Supervisor notification inbox is bounded and clears on reset', () => {
+  const { SupervisorAgent } = require('../src/main/agents/supervisor');
+  const sup = new SupervisorAgent({ maxNotifications: 3 });
+  for (let i = 0; i < 6; i++) {
+    sup.receiveNotification({ id: `n-${i}`, kind: 'peripheral-alert', requiresHuman: true });
+  }
+  assert.strictEqual(sup.getNotifications().length, 3, 'inbox capped at maxNotifications');
+  assert.strictEqual(sup.getPendingNotifications()[0].id, 'n-3', 'oldest dropped, newest kept');
+  assert.strictEqual(sup.acknowledgeNotification('n-3'), true);
+  assert.strictEqual(sup.getPendingNotifications().length, 2, 'acknowledged removed from pending');
+  assert.strictEqual(sup.receiveNotification(null), null, 'invalid notification rejected');
+  sup.reset();
+  assert.strictEqual(sup.getNotifications().length, 0, 'reset clears the inbox');
+});
+
+test('peripheral alert consumer is inert when the feature flag is off', () => {
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+  const EventEmitter = require('events');
+  const orch = new EventEmitter();
+  orch.agents = new Map();
+  orch.stateManager = { registerAgent: () => {} };
+  const { SupervisorAgent } = require('../src/main/agents/supervisor');
+  const sup = new SupervisorAgent({});
+  orch.agents.set('supervisor', sup);
+  const { attachPeripheralMonitor } = require('../src/main/agents/peripheral-monitor-agent');
+  const { attachPeripheralAlertConsumer } = require('../src/main/agents/peripheral-alert-consumer');
+  const { started } = attachPeripheralMonitor(orch, {});
+  attachPeripheralAlertConsumer(orch);
+  assert.strictEqual(started, false, 'monitor does not start when peripherals disabled');
+  assert.strictEqual(sup.getNotifications().length, 0, 'no notifications generated when disabled');
+});
+
 test('env.hostname is stored but excluded from injected fragment by default', () => {
   // Stored for local diagnostics...
   assert.strictEqual(typeof mgr.get('env.hostname'), 'string');
