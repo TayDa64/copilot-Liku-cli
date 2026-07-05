@@ -435,6 +435,88 @@ test('sensor.* facts are excluded from the default fragment but queryable', () =
   assert.ok(!mgr.toPromptFragment('structured').includes('sensor.mock-temp-01'), 'sensor facts excluded by default');
 });
 
+// ── Phase 6: multi-agent peripheral orchestration ──
+
+test('attachPeripheralMonitor registers a first-class role + starts', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const EventEmitter = require('events');
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  pal.scan();
+  const orch = new EventEmitter();
+  orch.agents = new Map();
+  const registered = [];
+  orch.stateManager = { registerAgent: (id, role, caps) => registered.push({ id, role, caps }) };
+  const { attachPeripheralMonitor } = require('../src/main/agents/peripheral-monitor-agent');
+  const { agent, started } = attachPeripheralMonitor(orch, {});
+  assert.strictEqual(started, true);
+  assert.strictEqual(agent.role, 'peripheral_monitor');
+  assert.strictEqual(orch.agents.get('peripheral_monitor'), agent, 'registered in agents map');
+  assert.ok(registered.some((r) => r.role === 'peripheral_monitor'), 'registered with state manager');
+  assert.ok(agent.responsibilities.length >= 3, 'documented responsibilities');
+  agent.stop();
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('peripheral breach emits decoupled peripheral:alert on the orchestrator', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const EventEmitter = require('events');
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  pal.scan();
+  const orch = new EventEmitter();
+  orch.agents = new Map();
+  orch.stateManager = { registerAgent: () => {} };
+  const { attachPeripheralMonitor } = require('../src/main/agents/peripheral-monitor-agent');
+  const { agent } = attachPeripheralMonitor(orch, {});
+  let alert = null;
+  orch.on('peripheral:alert', (ctx) => { alert = ctx; });
+  // A breach reading flows: PAL 'reading' → monitor → agent → orchestrator event.
+  pal.ingestSensorReading('mock-temp-01', { celsius: 50 });
+  assert.ok(alert, 'orchestrator received a peripheral:alert');
+  assert.strictEqual(alert.type, 'peripheral-alert');
+  assert.strictEqual(alert.device.id, 'mock-temp-01');
+  assert.strictEqual(alert.breach.level, 'high');
+  assert.strictEqual(alert.groundedFacts['sensor.mock-temp-01.celsius'], 50);
+  assert.ok(alert.suggestedAction && alert.suggestedAction.kind === 'advisory', 'advisory-only suggestion');
+  assert.strictEqual(alert.safety, 'physical-actions-require-pal-gating');
+  agent.stop();
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('peripheral monitor agent is inert when the feature flag is off', () => {
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+  const EventEmitter = require('events');
+  const orch = new EventEmitter();
+  orch.agents = new Map();
+  orch.stateManager = { registerAgent: () => {} };
+  const { attachPeripheralMonitor } = require('../src/main/agents/peripheral-monitor-agent');
+  const { started } = attachPeripheralMonitor(orch, {});
+  assert.strictEqual(started, false, 'monitor does not start when peripherals are disabled');
+});
+
+test('serial/ESP32 driver is gated by config and follows Class A safety', () => {
+  delete process.env.LIKU_SERIAL_PORT;
+  delete process.env.LIKU_SERIAL_DEVICES;
+  const serial = require('../src/main/peripherals/drivers/serial-driver');
+  assert.strictEqual(serial.isAvailable(), false);
+  assert.strictEqual(serial.discover().length, 0);
+  process.env.LIKU_SERIAL_PORT = '/dev/ttyUSB0';
+  process.env.LIKU_SERIAL_DEVICES = JSON.stringify([
+    { id: 'esp32-relay-01', name: 'Relay', class: 'A', kind: 'relay', capabilities: ['on', 'off'] }
+  ]);
+  assert.strictEqual(serial.isAvailable(), true);
+  assert.strictEqual(serial.discover()[0].id, 'esp32-relay-01');
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  const s = pal.scan();
+  assert.ok(s.devices.some((d) => d.id === 'esp32-relay-01' && d.driver === 'serial'), 'serial device registered');
+  assert.ok(pal.listDrivers().drivers.includes('serial'), 'serial driver listed');
+  const r = pal.execute('esp32-relay-01', 'on');
+  assert.strictEqual(r.pending, true, 'serial Class A action still requires confirmation');
+  delete process.env.LIKU_SERIAL_PORT;
+  delete process.env.LIKU_SERIAL_DEVICES;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
 test('env.hostname is stored but excluded from injected fragment by default', () => {
   // Stored for local diagnostics...
   assert.strictEqual(typeof mgr.get('env.hostname'), 'string');

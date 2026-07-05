@@ -13,7 +13,8 @@ const AgentRole = {
   BUILDER: 'builder',
   VERIFIER: 'verifier',
   RESEARCHER: 'researcher',
-  PRODUCER: 'producer'
+  PRODUCER: 'producer',
+  PERIPHERAL_MONITOR: 'peripheral_monitor'
 };
 
 // Agent capabilities

@@ -1,5 +1,5 @@
 {
-  "version": "1.1.0",
+  "version": "1.2.0",
   "created": "2026-01-29T20:15:40.039Z",
   "queue": [],
   "inProgress": [],
@@ -746,6 +746,258 @@
       "lastActive": "2026-02-04T17:46:24.312Z",
       "tasksCompleted": 0,
       "tasksFailed": 0
+    },
+    "agent-1783238089330-03o7wiush": {
+      "type": "supervisor",
+      "capabilities": [
+        "search",
+        "read",
+        "web_fetch",
+        "todo",
+        "handoff"
+      ],
+      "registeredAt": "2026-07-05T07:54:49.331Z",
+      "lastActive": "2026-07-05T07:54:49.331Z",
+      "tasksCompleted": 0,
+      "tasksFailed": 0
+    },
+    "agent-1783238089330-ur805bj4u": {
+      "type": "builder",
+      "capabilities": [
+        "search",
+        "read",
+        "edit",
+        "execute",
+        "todo",
+        "handoff"
+      ],
+      "registeredAt": "2026-07-05T07:54:49.332Z",
+      "lastActive": "2026-07-05T07:54:49.332Z",
+      "tasksCompleted": 0,
+      "tasksFailed": 0
+    },
+    "agent-1783238089330-d081py0k4": {
+      "type": "verifier",
+      "capabilities": [
+        "search",
+        "read",
+        "execute",
+        "todo",
+        "handoff"
+      ],
+      "registeredAt": "2026-07-05T07:54:49.333Z",
+      "lastActive": "2026-07-05T07:54:49.333Z",
+      "tasksCompleted": 0,
+      "tasksFailed": 0
+    },
+    "agent-1783238089331-azga787le": {
+      "type": "researcher",
+      "capabilities": [
+        "search",
+        "read",
+        "web_fetch",
+        "todo",
+        "handoff"
+      ],
+      "registeredAt": "2026-07-05T07:54:49.335Z",
+      "lastActive": "2026-07-05T07:54:49.335Z",
+      "tasksCompleted": 0,
+      "tasksFailed": 0
+    },
+    "agent-1783238089331-aidey3wxk": {
+      "type": "producer",
+      "capabilities": [
+        "search",
+        "read",
+        "execute",
+        "todo",
+        "handoff"
+      ],
+      "registeredAt": "2026-07-05T07:54:49.337Z",
+      "lastActive": "2026-07-05T07:54:49.337Z",
+      "tasksCompleted": 0,
+      "tasksFailed": 0
+    },
+    "peripheral-monitor-1783238089339-r0a4kc": {
+      "type": "peripheral_monitor",
+      "capabilities": [
+        "monitor",
+        "sensor_grounding",
+        "alert",
+        "handoff"
+      ],
+      "registeredAt": "2026-07-05T07:54:49.341Z",
+      "lastActive": "2026-07-05T07:54:49.341Z",
+      "tasksCompleted": 0,
+      "tasksFailed": 0
+    },
+    "agent-1783238089348-x4qy5evdu": {
+      "type": "supervisor",
+      "capabilities": [
+        "search",
+        "read",
+        "web_fetch",
+        "todo",
+        "handoff"
+      ],
+      "registeredAt": "2026-07-05T07:54:49.348Z",
+      "lastActive": "2026-07-05T07:54:49.348Z",
+      "tasksCompleted": 0,
+      "tasksFailed": 0
+    },
+    "agent-1783238089348-l01hocepe": {
+      "type": "builder",
+      "capabilities": [
+        "search",
+        "read",
+        "edit",
+        "execute",
+        "todo",
+        "handoff"
+      ],
+      "registeredAt": "2026-07-05T07:54:49.349Z",
+      "lastActive": "2026-07-05T07:54:49.349Z",
+      "tasksCompleted": 0,
+      "tasksFailed": 0
+    },
+    "agent-1783238089348-ybaqz9emi": {
+      "type": "verifier",
+      "capabilities": [
+        "search",
+        "read",
+        "execute",
+        "todo",
+        "handoff"
+      ],
+      "registeredAt": "2026-07-05T07:54:49.352Z",
+      "lastActive": "2026-07-05T07:54:49.352Z",
+      "tasksCompleted": 0,
+      "tasksFailed": 0
+    },
+    "agent-1783238089348-nuw7fe9qd": {
+      "type": "researcher",
+      "capabilities": [
+        "search",
+        "read",
+        "web_fetch",
+        "todo",
+        "handoff"
+      ],
+      "registeredAt": "2026-07-05T07:54:49.353Z",
+      "lastActive": "2026-07-05T07:54:49.353Z",
+      "tasksCompleted": 0,
+      "tasksFailed": 0
+    },
+    "agent-1783238089348-q1vzpto4i": {
+      "type": "producer",
+      "capabilities": [
+        "search",
+        "read",
+        "execute",
+        "todo",
+        "handoff"
+      ],
+      "registeredAt": "2026-07-05T07:54:49.354Z",
+      "lastActive": "2026-07-05T07:54:49.354Z",
+      "tasksCompleted": 0,
+      "tasksFailed": 0
+    },
+    "peripheral-monitor-1783238089356-zc9moy": {
+      "type": "peripheral_monitor",
+      "capabilities": [
+        "monitor",
+        "sensor_grounding",
+        "alert",
+        "handoff"
+      ],
+      "registeredAt": "2026-07-05T07:54:49.356Z",
+      "lastActive": "2026-07-05T07:54:49.356Z",
+      "tasksCompleted": 0,
+      "tasksFailed": 0
+    },
+    "agent-1783238109466-s2b9vsoux": {
+      "type": "supervisor",
+      "capabilities": [
+        "search",
+        "read",
+        "web_fetch",
+        "todo",
+        "handoff"
+      ],
+      "registeredAt": "2026-07-05T07:55:09.466Z",
+      "lastActive": "2026-07-05T07:55:09.466Z",
+      "tasksCompleted": 0,
+      "tasksFailed": 0
+    },
+    "agent-1783238109466-kp3osmi7k": {
+      "type": "builder",
+      "capabilities": [
+        "search",
+        "read",
+        "edit",
+        "execute",
+        "todo",
+        "handoff"
+      ],
+      "registeredAt": "2026-07-05T07:55:09.467Z",
+      "lastActive": "2026-07-05T07:55:09.467Z",
+      "tasksCompleted": 0,
+      "tasksFailed": 0
+    },
+    "agent-1783238109466-12e7zklcx": {
+      "type": "verifier",
+      "capabilities": [
+        "search",
+        "read",
+        "execute",
+        "todo",
+        "handoff"
+      ],
+      "registeredAt": "2026-07-05T07:55:09.468Z",
+      "lastActive": "2026-07-05T07:55:09.468Z",
+      "tasksCompleted": 0,
+      "tasksFailed": 0
+    },
+    "agent-1783238109466-e23kdesuz": {
+      "type": "researcher",
+      "capabilities": [
+        "search",
+        "read",
+        "web_fetch",
+        "todo",
+        "handoff"
+      ],
+      "registeredAt": "2026-07-05T07:55:09.470Z",
+      "lastActive": "2026-07-05T07:55:09.470Z",
+      "tasksCompleted": 0,
+      "tasksFailed": 0
+    },
+    "agent-1783238109466-bbj858iop": {
+      "type": "producer",
+      "capabilities": [
+        "search",
+        "read",
+        "execute",
+        "todo",
+        "handoff"
+      ],
+      "registeredAt": "2026-07-05T07:55:09.471Z",
+      "lastActive": "2026-07-05T07:55:09.471Z",
+      "tasksCompleted": 0,
+      "tasksFailed": 0
+    },
+    "peripheral-monitor-1783238109473-t8e33v": {
+      "type": "peripheral_monitor",
+      "capabilities": [
+        "monitor",
+        "sensor_grounding",
+        "alert",
+        "handoff"
+      ],
+      "registeredAt": "2026-07-05T07:55:09.474Z",
+      "lastActive": "2026-07-05T07:55:09.474Z",
+      "tasksCompleted": 0,
+      "tasksFailed": 0
     }
   },
   "sessions": [
@@ -839,12 +1091,13 @@
       "tasks": []
     }
   ],
-  "lastModified": "2026-02-04T17:46:24.312Z",
+  "lastModified": "2026-07-05T07:55:09.474Z",
   "modelMetadata": {
-    "modelId": "unknown",
-    "provider": "unknown",
+    "modelId": "stub",
+    "provider": "test",
     "modelVersion": null,
-    "capabilities": []
+    "capabilities": [],
+    "lastUpdated": "2026-07-05T07:55:09.463Z"
   },
   "sessionContext": {
     "initiatedBy": null,
@@ -852,5 +1105,8 @@
     "parentSessionId": null
   },
   "checkpoints": [],
-  "schemaVersion": 2
+  "schemaVersion": 3,
+  "sessionGraph": null,
+  "generations": [],
+  "lastSync": null
 }

@@ -17,6 +17,7 @@ const { BuilderAgent } = require('./builder');
 const { VerifierAgent } = require('./verifier');
 const { ProducerAgent } = require('./producer');
 const { ResearcherAgent } = require('./researcher');
+const { PeripheralMonitorAgent, attachPeripheralMonitor } = require('./peripheral-monitor-agent');
 const { AgentStateManager } = require('./state-manager');
 const { TraceWriter } = require('./trace-writer');
 
@@ -27,6 +28,8 @@ module.exports = {
   VerifierAgent,
   ProducerAgent,
   ResearcherAgent,
+  PeripheralMonitorAgent,
+  attachPeripheralMonitor,
   AgentStateManager,
   TraceWriter,
   
@@ -51,9 +54,21 @@ module.exports = {
     
     // Attach persistent flight recorder
     const traceWriter = new TraceWriter(orchestrator);
-    
-    // Return object with both orchestrator and stateManager
-    return { orchestrator, stateManager, traceWriter };
+
+    // Pillar 3 (Phase 6): make the peripheral layer a first-class participant.
+    // Best-effort + strictly feature-flag gated (attach → start() no-ops when
+    // LIKU_ENABLE_PERIPHERALS is off). Fully decoupled: it only emits
+    // 'peripheral:alert' events on the orchestrator; it never actuates hardware.
+    let peripheralMonitor = null;
+    try {
+      const attached = attachPeripheralMonitor(orchestrator, {
+        thresholds: options.peripheralThresholds
+      });
+      peripheralMonitor = attached.agent;
+    } catch { /* peripheral integration is best-effort */ }
+
+    // Return object with orchestrator, stateManager, and peripheral monitor
+    return { orchestrator, stateManager, traceWriter, peripheralMonitor };
   },
   
   // Recovery function for checkpoint restoration

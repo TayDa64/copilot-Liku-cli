@@ -46,13 +46,14 @@ function policy() { return require('./peripheral-policy'); }
 // (e.g. mqtt) are used only when they report isAvailable() — otherwise the mock
 // remains the default. All drivers share the same interface:
 //   id, isAvailable(), discover(), perform(device, action, params), start(emit)
-const DRIVER_IDS = Object.freeze(['mock', 'mqtt']);
+const DRIVER_IDS = Object.freeze(['mock', 'mqtt', 'serial']);
 const _driverCache = {};
 function _driver(id) {
   if (!(id in _driverCache)) {
     try {
       if (id === 'mock') _driverCache[id] = require('./drivers/mock-driver');
       else if (id === 'mqtt') _driverCache[id] = require('./drivers/mqtt-driver');
+      else if (id === 'serial') _driverCache[id] = require('./drivers/serial-driver');
       else _driverCache[id] = null;
     } catch { _driverCache[id] = null; }
   }
