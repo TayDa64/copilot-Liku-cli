@@ -1166,6 +1166,174 @@
       "lastActive": "2026-07-05T08:53:03.578Z",
       "tasksCompleted": 0,
       "tasksFailed": 0
+    },
+    "agent-1783436562134-mgmq5vyl9": {
+      "type": "supervisor",
+      "capabilities": [
+        "search",
+        "read",
+        "web_fetch",
+        "todo",
+        "handoff"
+      ],
+      "registeredAt": "2026-07-07T15:02:42.136Z",
+      "lastActive": "2026-07-07T15:02:42.138Z",
+      "tasksCompleted": 0,
+      "tasksFailed": 0
+    },
+    "agent-1783436562136-zlkeh6d9w": {
+      "type": "builder",
+      "capabilities": [
+        "search",
+        "read",
+        "edit",
+        "execute",
+        "todo",
+        "handoff"
+      ],
+      "registeredAt": "2026-07-07T15:02:42.140Z",
+      "lastActive": "2026-07-07T15:02:42.140Z",
+      "tasksCompleted": 0,
+      "tasksFailed": 0
+    },
+    "agent-1783436562136-qfsxup3ut": {
+      "type": "verifier",
+      "capabilities": [
+        "search",
+        "read",
+        "execute",
+        "todo",
+        "handoff"
+      ],
+      "registeredAt": "2026-07-07T15:02:42.141Z",
+      "lastActive": "2026-07-07T15:02:42.141Z",
+      "tasksCompleted": 0,
+      "tasksFailed": 0
+    },
+    "agent-1783436562136-n81zgowy7": {
+      "type": "researcher",
+      "capabilities": [
+        "search",
+        "read",
+        "web_fetch",
+        "todo",
+        "handoff"
+      ],
+      "registeredAt": "2026-07-07T15:02:42.143Z",
+      "lastActive": "2026-07-07T15:02:42.143Z",
+      "tasksCompleted": 0,
+      "tasksFailed": 0
+    },
+    "agent-1783436562136-k4rfblj2b": {
+      "type": "producer",
+      "capabilities": [
+        "search",
+        "read",
+        "execute",
+        "todo",
+        "handoff"
+      ],
+      "registeredAt": "2026-07-07T15:02:42.144Z",
+      "lastActive": "2026-07-07T15:02:42.144Z",
+      "tasksCompleted": 0,
+      "tasksFailed": 0
+    },
+    "peripheral-monitor-1783436562146-an0kxw": {
+      "type": "peripheral_monitor",
+      "capabilities": [
+        "monitor",
+        "sensor_grounding",
+        "alert",
+        "handoff"
+      ],
+      "registeredAt": "2026-07-07T15:02:42.147Z",
+      "lastActive": "2026-07-07T15:02:42.147Z",
+      "tasksCompleted": 0,
+      "tasksFailed": 0
+    },
+    "agent-1783436563098-byojkxg51": {
+      "type": "supervisor",
+      "capabilities": [
+        "search",
+        "read",
+        "web_fetch",
+        "todo",
+        "handoff"
+      ],
+      "registeredAt": "2026-07-07T15:02:43.101Z",
+      "lastActive": "2026-07-07T15:02:43.102Z",
+      "tasksCompleted": 0,
+      "tasksFailed": 0
+    },
+    "agent-1783436563101-f2rhflxnp": {
+      "type": "builder",
+      "capabilities": [
+        "search",
+        "read",
+        "edit",
+        "execute",
+        "todo",
+        "handoff"
+      ],
+      "registeredAt": "2026-07-07T15:02:43.103Z",
+      "lastActive": "2026-07-07T15:02:43.103Z",
+      "tasksCompleted": 0,
+      "tasksFailed": 0
+    },
+    "agent-1783436563101-0gcixzfv2": {
+      "type": "verifier",
+      "capabilities": [
+        "search",
+        "read",
+        "execute",
+        "todo",
+        "handoff"
+      ],
+      "registeredAt": "2026-07-07T15:02:43.105Z",
+      "lastActive": "2026-07-07T15:02:43.105Z",
+      "tasksCompleted": 0,
+      "tasksFailed": 0
+    },
+    "agent-1783436563101-y7t9p3xjl": {
+      "type": "researcher",
+      "capabilities": [
+        "search",
+        "read",
+        "web_fetch",
+        "todo",
+        "handoff"
+      ],
+      "registeredAt": "2026-07-07T15:02:43.107Z",
+      "lastActive": "2026-07-07T15:02:43.107Z",
+      "tasksCompleted": 0,
+      "tasksFailed": 0
+    },
+    "agent-1783436563101-srqp0qifh": {
+      "type": "producer",
+      "capabilities": [
+        "search",
+        "read",
+        "execute",
+        "todo",
+        "handoff"
+      ],
+      "registeredAt": "2026-07-07T15:02:43.109Z",
+      "lastActive": "2026-07-07T15:02:43.109Z",
+      "tasksCompleted": 0,
+      "tasksFailed": 0
+    },
+    "peripheral-monitor-1783436563111-qcvyx4": {
+      "type": "peripheral_monitor",
+      "capabilities": [
+        "monitor",
+        "sensor_grounding",
+        "alert",
+        "handoff"
+      ],
+      "registeredAt": "2026-07-07T15:02:43.113Z",
+      "lastActive": "2026-07-07T15:02:43.113Z",
+      "tasksCompleted": 0,
+      "tasksFailed": 0
     }
   },
   "sessions": [
@@ -1259,7 +1427,7 @@
       "tasks": []
     }
   ],
-  "lastModified": "2026-07-05T08:53:03.578Z",
+  "lastModified": "2026-07-07T15:02:43.113Z",
   "modelMetadata": {
     "modelId": "stub",
     "provider": "test",

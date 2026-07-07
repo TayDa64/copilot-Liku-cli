@@ -34,6 +34,11 @@ function _secret(explicit) {
   return String(s).length ? String(s) : null;
 }
 
+/** True when a signing secret is configured (explicit or LIKU_DCP_SECRET). */
+function isSigningConfigured(explicitSecret) {
+  return !!_secret(explicitSecret);
+}
+
 function _b64url(input) { return Buffer.from(input).toString('base64url'); }
 function _fromB64url(s) { return Buffer.from(String(s), 'base64url'); }
 function _randId(bytes = 8) { return crypto.randomBytes(bytes).toString('hex'); }
@@ -204,6 +209,7 @@ module.exports = {
   DEFAULT_FRESHNESS_MS,
   DEFAULT_TOKEN_TTL_SEC,
   UNSIGNED_MARKER,
+  isSigningConfigured,
   issueCapabilityToken,
   verifyCapabilityToken,
   buildCommandEnvelope,

@@ -52,6 +52,9 @@ module.exports = {
       maxRecursionDepth: options.maxRecursionDepth || 3,
       maxSubCalls: options.maxSubCalls || 10,
       enableLongContext: options.enableLongContext !== false,
+      // Phase 9: persist peripheral tasks/notifications by default (durable across
+      // restarts). Flag-gated at the store level, so inert unless peripherals on.
+      persistPeripheralTasks: options.persistPeripheralTasks !== false,
       modelMetadata
     });
     

@@ -79,6 +79,54 @@ function estimateActionPowerW(device, action) {
   return ACTION_POWER_W[act] || 0;
 }
 
+/** True when a device's state indicates it is currently drawing power. */
+function isDeviceActive(device) {
+  const s = (device && device.state) || {};
+  if (s.power === 'on') return true;
+  if (Number.isFinite(Number(s.brightness)) && Number(s.brightness) > 0) return true;
+  return false;
+}
+
+/**
+ * Estimate a device's CURRENT continuous draw (watts) from its last-known state.
+ * Sensors (Class C) draw a small always-on standby (their rated powerW);
+ * actuators draw their rated power only while active (proportional for dimmables).
+ * @param {object} device
+ * @returns {number}
+ */
+function estimateDeviceLoadW(device) {
+  const p = Number.isFinite(Number(device && device.powerW)) ? Number(device.powerW) : 0;
+  if ((device && device.class) === 'C') return p; // sensors: always-on standby
+  if (!isDeviceActive(device)) return 0;
+  const s = (device && device.state) || {};
+  if (s.power === 'on' && Number.isFinite(Number(s.brightness))) {
+    return Math.max(0, Math.min(100, Number(s.brightness))) / 100 * p;
+  }
+  return p;
+}
+
+/**
+ * Estimate a device's PROJECTED continuous draw (watts) AFTER an action. Used
+ * for cumulative budgeting: 'off'→0, 'on'→rated, 'brightness'→proportional,
+ * momentary/read actions leave the current draw unchanged.
+ * @param {object} device
+ * @param {string} action
+ * @param {object} [params]
+ * @returns {number}
+ */
+function projectedDeviceLoadW(device, action, params = {}) {
+  const act = normalizeAction(action);
+  const p = Number.isFinite(Number(device && device.powerW))
+    ? Number(device.powerW) : (ACTION_POWER_W[act] || 0);
+  if (act === 'off') return 0;
+  if (act === 'on') return p;
+  if (act === 'brightness') {
+    const level = Number(params && params.level);
+    return Number.isFinite(level) ? Math.max(0, Math.min(100, level)) / 100 * p : p;
+  }
+  return estimateDeviceLoadW(device);
+}
+
 /**
  * Dry-run evaluate a command against device capabilities + policy. Performs
  * host-side rejection of malformed / out-of-scope / over-budget commands. Does
@@ -116,15 +164,27 @@ function evaluateCommand(device, action, params = {}, ctx = {}) {
     normalizedParams.level = Math.round(level);
   }
 
-  // Power budget skeleton (only for state-changing actions).
+  // Power budget (only for state-changing actions).
   if (!readOnly) {
     const budget = Number.isFinite(Number(ctx.maxTotalPowerW)) ? Number(ctx.maxTotalPowerW) : DEFAULT_MAX_TOTAL_POWER_W;
     const estimate = estimateActionPowerW(device, act);
+    // Per-device ceiling.
     if (estimate > policy.maxPowerW) {
       return { ok: false, code: 'power-exceeded', reason: `action power ${estimate}W exceeds device ceiling ${policy.maxPowerW}W`, policy };
     }
-    if (estimate > budget) {
-      return { ok: false, code: 'power-budget-exceeded', reason: `action power ${estimate}W exceeds budget ${budget}W`, policy };
+    // LIVE CUMULATIVE budget: sum of OTHER active devices' continuous draw plus
+    // this device's PROJECTED continuous draw after the action. Fails safe — an
+    // over-budget command is blocked (the PAL surfaces it as a rejection).
+    const others = Number.isFinite(Number(ctx.otherDevicesLoadW)) ? Number(ctx.otherDevicesLoadW) : 0;
+    const projected = projectedDeviceLoadW(device, act, normalizedParams);
+    const projectedTotalW = Math.round((others + projected) * 100) / 100;
+    if (projectedTotalW > budget) {
+      return {
+        ok: false, code: 'power-budget-exceeded',
+        reason: `cumulative ${projectedTotalW}W exceeds budget ${budget}W`,
+        policy,
+        power: { projectedTotalW, budgetW: budget, othersW: others, deviceW: projected }
+      };
     }
   }
 
@@ -144,12 +204,16 @@ function evaluateCommand(device, action, params = {}, ctx = {}) {
  * @returns {{ ok:boolean, code?:string, reason?:string, normalized?:object, policy?:object, readOnly?:boolean, command?:object }}
  */
 function evaluateCommandEnvelope(device, envelope, ctx = {}) {
+  // Phase 9: remote / networked drivers MUST present a signed capability token
+  // when a DCP secret is configured. Local/trusted drivers may stay unsigned.
+  const requireCapability = ctx.requireCapability
+    || (ctx.driverRemote && dcp.isSigningConfigured(ctx.secret));
   const v = dcp.verifyEnvelope(envelope, {
     secret: ctx.secret,
     now: ctx.now,
     freshnessMs: ctx.freshnessMs,
     seenNonces: ctx.seenNonces,
-    requireCapability: ctx.requireCapability
+    requireCapability
   });
   if (!v.ok) return { ok: false, code: `envelope-${v.reason}`, reason: v.reason };
 
@@ -170,6 +234,9 @@ module.exports = {
   normalizeAction,
   getDevicePolicy,
   estimateActionPowerW,
+  isDeviceActive,
+  estimateDeviceLoadW,
+  projectedDeviceLoadW,
   evaluateCommand,
   evaluateCommandEnvelope,
   dcp

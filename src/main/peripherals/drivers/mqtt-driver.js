@@ -23,6 +23,9 @@
 'use strict';
 
 const DRIVER_ID = 'mqtt';
+// MQTT is a NETWORKED / remote transport — signed capability tokens are required
+// when a DCP secret is configured (Phase 9).
+const REMOTE = true;
 
 function brokerUrl() {
   return String(process.env.LIKU_MQTT_URL || '').trim();
@@ -113,6 +116,10 @@ function perform(device, action, params = {}) {
     // explicit `unsigned` local-mode marker (backward compatible).
     const dcp = require('../dcp-protocol');
     const token = dcp.issueCapabilityToken({ deviceId: cfg.id, actions: [act], ttlSec: 60 });
+    // Phase 9: remote drivers MUST use signed tokens when a secret is configured.
+    if (REMOTE && dcp.isSigningConfigured() && String(token).endsWith(`.${dcp.UNSIGNED_MARKER}`)) {
+      return { ok: false, action: act, state: {}, reason: 'signed-token-required' };
+    }
     const envelope = dcp.buildCommandEnvelope({ device: cfg, action: act, params, token });
     client.publish(cfg.cmdTopic, JSON.stringify(envelope));
     return { ok: true, action: act, state: { lastCommand: act }, result: `mqtt:${cfg.id}:${act}`, envelope };
@@ -144,4 +151,4 @@ function start(emit) {
   return () => { try { client.end(true); } catch { /* ignore */ } _client = null; };
 }
 
-module.exports = { DRIVER_ID, isAvailable, discover, perform, start, loadDeviceConfig };
+module.exports = { DRIVER_ID, isAvailable, discover, perform, start, loadDeviceConfig, REMOTE };

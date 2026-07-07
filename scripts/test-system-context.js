@@ -802,6 +802,126 @@ test('DCP evaluateCommandEnvelope verifies wire then applies capability scoping'
   assert.strictEqual(policy.evaluateCommandEnvelope(device, badAct, { now }).code, 'unsupported-action');
 });
 
+// ── Phase 9: durable persistence + live cumulative power budgeting ──
+
+test('peripheral tasks + notifications persist across a restart', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const { SupervisorAgent } = require('../src/main/agents/supervisor');
+  const store = require('../src/main/agents/supervisor-task-store');
+  store.clear();
+  const s1 = new SupervisorAgent({ persistTasks: true });
+  s1.receiveNotification({ id: 'n1', severity: 'critical', device: { id: 'lock-1', class: 'A' }, breach: { metric: 'battery', level: 'low' } });
+  s1.createPeripheralTask({ id: 'n1', severity: 'critical', device: { id: 'lock-1', class: 'A', kind: 'lock' }, breach: { metric: 'battery', level: 'low' } });
+  // "Restart": a fresh instance reloads durable state from disk.
+  const s2 = new SupervisorAgent({ persistTasks: true });
+  assert.strictEqual(s2.getNotifications().length, 1, 'notification survived restart');
+  assert.strictEqual(s2.getPendingPeripheralTasks().length, 1, 'task survived restart');
+  assert.strictEqual(s2.getPeripheralTasks()[0].escalation, 'escalate', 'critical → escalate routing');
+  // Resolution persists too.
+  const tid = s2.getPeripheralTasks()[0].id;
+  s2.resolvePeripheralTask(tid, 'acknowledged');
+  const s3 = new SupervisorAgent({ persistTasks: true });
+  assert.strictEqual(s3.getPendingPeripheralTasks().length, 0, 'resolution survived restart');
+  store.clear();
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('supervisor task store is flag-gated (no disk when disabled)', () => {
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+  const store = require('../src/main/agents/supervisor-task-store');
+  assert.strictEqual(store.enabled(), false);
+  assert.deepStrictEqual(store.load(), { notifications: [], tasks: [] });
+  assert.strictEqual(store.save({ tasks: [{ id: 'x' }] }), false, 'save is a no-op when disabled');
+});
+
+test('resolved tasks expire on load (retention/cleanup)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const store = require('../src/main/agents/supervisor-task-store');
+  store.clear();
+  const old = Date.now() - 7 * 3600 * 1000; // 7h ago (> 6h resolved retention)
+  const payload = {
+    schemaVersion: '1.0.0', updatedAt: new Date().toISOString(), notifications: [],
+    tasks: [
+      { id: 'old', status: 'acknowledged', priority: 'low', createdAt: new Date(old).toISOString(), resolvedAt: new Date(old).toISOString() },
+      { id: 'fresh', status: 'pending-review', priority: 'high', createdAt: new Date().toISOString(), lastSeenAt: new Date().toISOString() }
+    ]
+  };
+  fs.writeFileSync(store.STORE_FILE, JSON.stringify(payload));
+  const { tasks } = store.load();
+  assert.ok(!tasks.find((t) => t.id === 'old'), 'stale resolved task pruned on load');
+  assert.ok(tasks.find((t) => t.id === 'fresh'), 'fresh open task retained');
+  store.clear();
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('cumulative power budget logic blocks over-budget actions (policy unit)', () => {
+  const policy = require('../src/main/peripherals/peripheral-policy');
+  const light = { id: 'l1', class: 'B', capabilities: ['on', 'off', 'brightness'], powerW: 10, state: { power: 'off' } };
+  // Others already drawing near the ceiling → turning on 10W pushes over budget.
+  const over = policy.evaluateCommand(light, 'on', {}, { maxTotalPowerW: 5000, otherDevicesLoadW: 4995 });
+  assert.strictEqual(over.ok, false);
+  assert.strictEqual(over.code, 'power-budget-exceeded');
+  assert.ok(over.power && over.power.projectedTotalW > over.power.budgetW);
+  // Under budget passes.
+  assert.strictEqual(policy.evaluateCommand(light, 'on', {}, { maxTotalPowerW: 5000, otherDevicesLoadW: 100 }).ok, true);
+  // 'off' projects 0W → allowed even at high load (fail-safe direction).
+  assert.strictEqual(policy.evaluateCommand(light, 'off', {}, { maxTotalPowerW: 5000, otherDevicesLoadW: 4999 }).ok, true);
+  // Device-load estimation model.
+  assert.strictEqual(policy.estimateDeviceLoadW({ class: 'C', powerW: 1, state: {} }), 1, 'sensor standby draw');
+  assert.strictEqual(policy.estimateDeviceLoadW({ class: 'B', powerW: 10, state: { power: 'off' } }), 0, 'idle actuator = 0W');
+  assert.strictEqual(policy.estimateDeviceLoadW({ class: 'B', powerW: 10, state: { power: 'on' } }), 10, 'active actuator = rated');
+});
+
+test('PAL powerStatus reports cumulative usage, budget and headroom', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  pal.scan();
+  const ps = pal.powerStatus();
+  assert.strictEqual(ps.enabled, true);
+  assert.ok(Number.isFinite(ps.currentW) && Number.isFinite(ps.budgetW));
+  assert.strictEqual(ps.headroomW, Math.round((ps.budgetW - ps.currentW) * 100) / 100);
+  assert.ok(Array.isArray(ps.devices) && ps.devices.length >= 3, 'per-device breakdown');
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('PAL enforces the cumulative power budget end-to-end and restores', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  pal.scan();
+  // Force a tiny budget (guard.* needs >=0.9 + a trusted source).
+  m.getInstance().proposeUpdate('guard.peripherals.max_total_power_w', 5, { source: 'telemetry', confidence: 0.95 });
+  const r = pal.execute('mock-light-01', 'on'); // 10W projected > 5W budget → blocked
+  assert.strictEqual(r.ok, false);
+  assert.strictEqual(r.code, 'power-budget-exceeded');
+  assert.ok(r.power && r.power.projectedTotalW > r.power.budgetW, 'reports projected vs budget');
+  // Restore a sane budget so later assertions see default headroom.
+  m.getInstance().proposeUpdate('guard.peripherals.max_total_power_w', 5000, { source: 'telemetry', confidence: 0.95 });
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('remote drivers require signed capability tokens when a secret is configured', () => {
+  const policy = require('../src/main/peripherals/peripheral-policy');
+  const dcp = require('../src/main/peripherals/dcp-protocol');
+  const device = { id: 'r1', class: 'B', capabilities: ['on', 'off'], powerW: 10, state: { power: 'off' } };
+  const now = 4_000_000_000_000;
+  const secret = 'remote-secret';
+  const ctx = { secret, now, otherDevicesLoadW: 0, maxTotalPowerW: 5000 };
+  // Remote + secret + NO capability → rejected (signed token mandatory).
+  const noTok = dcp.buildCommandEnvelope({ device, action: 'on', now });
+  assert.strictEqual(policy.evaluateCommandEnvelope(device, noTok, { ...ctx, driverRemote: true }).code, 'envelope-missing-capability');
+  // Remote + secret + signed token → passes.
+  const tok = dcp.issueCapabilityToken({ deviceId: 'r1', actions: ['on'], secret, now });
+  const signed = dcp.buildCommandEnvelope({ device, action: 'on', token: tok, now });
+  assert.strictEqual(policy.evaluateCommandEnvelope(device, signed, { ...ctx, driverRemote: true }).ok, true);
+  // Local driver + secret + no token → allowed (unsigned convenience).
+  assert.strictEqual(policy.evaluateCommandEnvelope(device, dcp.buildCommandEnvelope({ device, action: 'on', now }), { ...ctx, driverRemote: false }).ok, true);
+  // Driver remoteness flags + signing helper.
+  assert.strictEqual(require('../src/main/peripherals/drivers/mqtt-driver').REMOTE, true);
+  assert.strictEqual(require('../src/main/peripherals/drivers/serial-driver').REMOTE, false);
+  assert.strictEqual(dcp.isSigningConfigured('x'), true);
+  assert.strictEqual(dcp.isSigningConfigured(), false);
+});
+
 test('env.hostname is stored but excluded from injected fragment by default', () => {
   // Stored for local diagnostics...
   assert.strictEqual(typeof mgr.get('env.hostname'), 'string');

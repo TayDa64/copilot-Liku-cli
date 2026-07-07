@@ -134,6 +134,47 @@ function _powerBudgetW() {
 }
 
 /**
+ * Sum the CURRENT continuous draw (watts) of all registered devices except the
+ * given id. Used for live cumulative power budgeting. @private
+ */
+function _currentLoadW(excludeId) {
+  try {
+    const P = policy();
+    let sum = 0;
+    for (const d of registry().list()) {
+      if (excludeId && d.id === excludeId) continue;
+      sum += P.estimateDeviceLoadW(d);
+    }
+    return Math.round(sum * 100) / 100;
+  } catch { return 0; }
+}
+
+/**
+ * Live power budget status: total budget, current cumulative draw, headroom and
+ * a per-device breakdown. Inert when peripherals are disabled.
+ * @returns {object}
+ */
+function powerStatus() {
+  if (!isPeripheralsEnabled()) return { enabled: false };
+  const P = policy();
+  const budgetW = _powerBudgetW();
+  const effectiveBudgetW = Number.isFinite(budgetW) ? budgetW : P.DEFAULT_MAX_TOTAL_POWER_W;
+  const devices = registry().list().map((d) => ({
+    id: d.id, class: d.class, kind: d.kind,
+    loadW: P.estimateDeviceLoadW(d), active: P.isDeviceActive(d)
+  }));
+  const currentW = Math.round(devices.reduce((s, d) => s + d.loadW, 0) * 100) / 100;
+  return {
+    enabled: true,
+    budgetW: effectiveBudgetW,
+    currentW,
+    headroomW: Math.round((effectiveBudgetW - currentW) * 100) / 100,
+    overBudget: currentW > effectiveBudgetW,
+    devices
+  };
+}
+
+/**
  * Decide whether a physical action may proceed. First runs the DCP host-side
  * dry-run (capability scoping + param validation + power budget), then routes
  * through the gated proposeUpdate + pending/confirm system.
@@ -146,9 +187,12 @@ function _powerBudgetW() {
 function isPhysicalActionAllowed(device, action, params = {}) {
   const P = policy();
   // DCP host-side rejection of malformed / out-of-scope / over-budget commands.
-  const evalRes = P.evaluateCommand(device, action, params, { maxTotalPowerW: _powerBudgetW() });
+  const evalRes = P.evaluateCommand(device, action, params, {
+    maxTotalPowerW: _powerBudgetW(),
+    otherDevicesLoadW: _currentLoadW(device && device.id)
+  });
   if (!evalRes.ok) {
-    return { allowed: false, rejected: true, code: evalRes.code, reason: evalRes.reason, klass: device.class };
+    return { allowed: false, rejected: true, code: evalRes.code, reason: evalRes.reason, klass: device.class, power: evalRes.power };
   }
   const act = evalRes.normalized.action;
   const pol = evalRes.policy;
@@ -198,7 +242,8 @@ function execute(id, action, params = {}) {
     _emit({ type: 'blocked', id, action, code: decision.code, confirmKey: decision.confirmKey });
     return {
       enabled: true, ok: false, pending: !!decision.pending, rejected: !!decision.rejected,
-      code: decision.code, confirmKey: decision.confirmKey, klass: decision.klass, reason: decision.reason
+      code: decision.code, confirmKey: decision.confirmKey, klass: decision.klass, reason: decision.reason,
+      power: decision.power
     };
   }
 
@@ -230,7 +275,10 @@ function authorize(id, action) {
   if (!device) return { enabled: true, ok: false, reason: 'device-not-found' };
 
   const P = policy();
-  const evalRes = P.evaluateCommand(device, action, {}, { maxTotalPowerW: _powerBudgetW() });
+  const evalRes = P.evaluateCommand(device, action, {}, {
+    maxTotalPowerW: _powerBudgetW(),
+    otherDevicesLoadW: _currentLoadW(device && device.id)
+  });
   if (!evalRes.ok) return { enabled: true, ok: false, code: evalRes.code, reason: evalRes.reason };
 
   const act = evalRes.normalized.action;
@@ -321,6 +369,7 @@ module.exports = {
   startStreaming,
   subscribe,
   on,
-  isPhysicalActionAllowed
+  isPhysicalActionAllowed,
+  powerStatus
 };
 

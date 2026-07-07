@@ -31,6 +31,9 @@ class AgentOrchestrator extends EventEmitter {
     this.maxRecursionDepth = options.maxRecursionDepth || 3;
     this.maxSubCalls = options.maxSubCalls || 10;
     this.enableLongContext = options.enableLongContext !== false;
+    // Phase 9: durable persistence of peripheral tasks/notifications on the
+    // Supervisor. Opt-in; the factory enables it for the production system.
+    this.persistPeripheralTasks = options.persistPeripheralTasks === true;
     
     // Agent instances
     this.agents = new Map();
@@ -61,7 +64,7 @@ class AgentOrchestrator extends EventEmitter {
     };
     
     // Create one instance of each agent type
-    this.agents.set(AgentRole.SUPERVISOR, new SupervisorAgent(commonOptions));
+    this.agents.set(AgentRole.SUPERVISOR, new SupervisorAgent({ ...commonOptions, persistTasks: this.persistPeripheralTasks }));
     this.agents.set(AgentRole.BUILDER, new BuilderAgent(commonOptions));
     this.agents.set(AgentRole.VERIFIER, new VerifierAgent(commonOptions));
     this.agents.set(AgentRole.RESEARCHER, new ResearcherAgent(commonOptions));

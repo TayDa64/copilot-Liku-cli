@@ -53,7 +53,16 @@ async function run(args, flags) {
 
     case 'status': {
       const id = args[1];
-      if (!id) { error('Usage: liku peripherals status <id>'); return { success: false }; }
+      if (!id) {
+        // No id → show the live power budget summary + device count.
+        const ps = pal.powerStatus();
+        if (flags.json) return { success: true, power: ps };
+        log(highlight('Peripherals status'));
+        log(`  devices: ${ps.devices ? ps.devices.length : 0}`);
+        log(`  power: ${ps.currentW}W / ${ps.budgetW}W  (headroom ${ps.headroomW}W)`);
+        if (ps.overBudget) error('  OVER BUDGET');
+        return { success: true, power: ps };
+      }
       const dev = pal.get(id);
       if (!dev) { error(`Device not found: ${id}`); return { success: false }; }
       if (flags.json) return { success: true, device: dev };
@@ -121,9 +130,37 @@ async function run(args, flags) {
       return { success: true, ...res };
     }
 
+    case 'power': {
+      const ps = pal.powerStatus();
+      if (flags.json) return { success: true, ...ps };
+      log(highlight('Power budget'));
+      log(`  total:   ${ps.currentW}W / ${ps.budgetW}W`);
+      log(`  headroom: ${ps.headroomW}W${ps.overBudget ? '  (OVER BUDGET)' : ''}`);
+      for (const d of ps.devices || []) {
+        log(`  ${highlight(d.id)} [${d.class}] ${d.loadW}W ${dim(d.active ? 'active' : 'idle')}`);
+      }
+      return { success: true, ...ps };
+    }
+
+    case 'tasks': {
+      // Human-facing view of durable peripheral tasks + notifications.
+      const store = require('../../main/agents/supervisor-task-store');
+      const { notifications, tasks } = store.load();
+      if (flags.json) return { success: true, tasks, notifications };
+      log(highlight(`Peripheral tasks (${tasks.length}):`));
+      for (const t of tasks) {
+        const dev = (t.device && t.device.id) || '?';
+        const br = t.breach ? `${t.breach.metric}:${t.breach.level}` : '';
+        log(`  ${highlight(t.id)} [${t.priority}/${t.escalation || 'log'}] ${t.status} ${dim(`${dev} ${br} x${t.count || 1}`)}`);
+      }
+      const pending = notifications.filter((n) => !n.acknowledged).length;
+      log(dim(`  notifications: ${notifications.length} (${pending} unacknowledged)`));
+      return { success: true, taskCount: tasks.length, notificationCount: notifications.length };
+    }
+
     default:
       error(`Unknown subcommand: ${sub}`);
-      log('Usage: liku peripherals [scan|list|status <id>|execute <id> <action>|confirm <id> <action> [--execute]|drivers]');
+      log('Usage: liku peripherals [scan|list|status [id]|power|tasks|execute <id> <action>|confirm <id> <action> [--execute]|drivers]');
       return { success: false };
   }
 }

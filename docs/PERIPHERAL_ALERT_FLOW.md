@@ -64,6 +64,55 @@ without ever running themselves.
 Task creation is **optional**: disable via `attachPeripheralAlertConsumer(orch,
 { createTasks: false })` or `LIKU_PERIPHERAL_CREATE_TASKS=0`.
 
+## Durable persistence (Phase 9)
+
+Notifications and peripheral tasks survive process restarts. The Supervisor
+restores them from `~/.liku/supervisor-tasks.json` (`supervisor-task-store.js`)
+on construction and re-persists on every change.
+
+- **Atomic + corruption-tolerant** — tmp-file + rename; a bad/partial file loads
+  as empty (never throws).
+- **Flag-gated** — the store only touches disk when `LIKU_ENABLE_PERIPHERALS=1`,
+  so normal coding flows never write it. Persistence is opt-in per Supervisor
+  (`persistTasks`); the production factory enables it by default.
+- **Retention / escalation** — per-severity retention windows prune stale
+  entries on load + save: critical/high kept 7d, warning/medium 1d, low 6h;
+  resolved/acknowledged entries expire after 6h. Tasks carry an `escalation`
+  route derived from priority (`high→escalate`, `medium→notify`, `low→log`).
+- **Bounded** — capped at 50 notifications / 20 tasks.
+
+CLI: `liku peripherals tasks` lists durable tasks + notification counts.
+
+## Live cumulative power budgeting (Phase 9)
+
+The DCP evaluation now enforces a **cumulative** power budget, not just a
+per-action ceiling. Before any state-changing action:
+
+```
+ projected_total = Σ estimateDeviceLoadW(other registered devices)
+                 + projectedDeviceLoadW(target device, action)
+ if projected_total > guard.peripherals.max_total_power_w  →  BLOCK (power-budget-exceeded)
+```
+
+- `estimateDeviceLoadW` — a device's current continuous draw from its state
+  (sensors draw standby; actuators draw rated power only while active,
+  proportional for dimmables).
+- `projectedDeviceLoadW` — the draw *after* the action (`off→0`, `on→rated`,
+  `brightness→proportional`; momentary/read actions leave draw unchanged).
+- **Fails safe** — an over-budget command is blocked (surfaced as a rejection),
+  never allowed through. Budget defaults to 5000 W, overridable via the
+  `guard.peripherals.max_total_power_w` substrate key.
+
+CLI: `liku peripherals power` (and `liku peripherals status`) show current draw,
+budget, headroom and a per-device breakdown.
+
+## Remote signed-token policy (Phase 9)
+
+Drivers declare `REMOTE`. When a DCP secret is configured (`LIKU_DCP_SECRET`),
+`evaluateCommandEnvelope` requires a **signed** capability token for remote
+drivers (MQTT); local/trusted drivers (mock, serial) may stay unsigned for
+convenience.
+
 ## If a human decides to act
 
 Any physical response still travels the full PAL safety chain — the alert path
@@ -152,6 +201,9 @@ driver stays local/in-process and needs no wire format.
 - **Gated actuation only.** The only path to a physical action is
   `PAL.execute()` → DCP → class gate → pending/confirm. The alert loop is purely
   observational.
+- **Power fails safe.** Over-budget actions are blocked, never allowed through.
+- **Persistence is corruption-tolerant + flag-gated.** A bad store file loads as
+  empty; no disk is touched unless peripherals are enabled.
 - **Cognitive budget unchanged.** `sensor.*`/`hardware.*.alert` facts are
   evidence-excluded from the default fragment; the default prompt stays
   byte-identical.

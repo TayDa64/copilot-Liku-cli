@@ -21,6 +21,9 @@
 'use strict';
 
 const DRIVER_ID = 'serial';
+// Serial is a LOCAL wired link (trusted) — may run in unsigned mode for
+// convenience even when a DCP secret is configured (Phase 9).
+const REMOTE = false;
 
 function portPath() {
   return String(process.env.LIKU_SERIAL_PORT || '').trim();
@@ -146,4 +149,4 @@ function start(emit) {
   return () => { try { port.off('data', onData); port.close(); } catch { /* ignore */ } _port = null; };
 }
 
-module.exports = { DRIVER_ID, isAvailable, discover, perform, start, loadDeviceConfig };
+module.exports = { DRIVER_ID, isAvailable, discover, perform, start, loadDeviceConfig, REMOTE };

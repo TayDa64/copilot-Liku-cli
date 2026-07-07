@@ -47,6 +47,30 @@ class SupervisorAgent extends BaseAgent {
     // through PAL.execute() → DCP → class gate → pending/confirm.
     this.peripheralTasks = [];
     this.maxPeripheralTasks = options.maxPeripheralTasks || 5;
+
+    // Phase 9: durable persistence (flag-gated). Restore any tasks/notifications
+    // that survived a restart. The store is a no-op unless LIKU_ENABLE_PERIPHERALS
+    // is set, so normal coding flows never touch disk and behaviour is unchanged.
+    this._store = options.taskStore || require('./supervisor-task-store');
+    this._persistEnabled = options.persistTasks === true;
+    try {
+      if (this._persistEnabled && this._store.enabled && this._store.enabled()) {
+        const restored = this._store.load();
+        if (restored && Array.isArray(restored.notifications)) {
+          this.notifications = restored.notifications.slice(-this.maxNotifications);
+        }
+        if (restored && Array.isArray(restored.tasks)) {
+          this.peripheralTasks = restored.tasks.slice(-this.maxPeripheralTasks);
+        }
+      }
+    } catch { /* restore is best-effort */ }
+  }
+
+  /** Persist notifications + tasks (flag-gated no-op otherwise). @private */
+  _persistPeripheralState() {
+    if (!this._persistEnabled || !this._store || !this._store.save) return;
+    try { this._store.save({ notifications: this.notifications, tasks: this.peripheralTasks }); }
+    catch { /* persistence is best-effort + non-fatal */ }
   }
 
   getSystemPrompt() {
@@ -400,6 +424,7 @@ ${readResults.map(r => `--- ${r.filePath} ---\n${r.content?.slice(0, 2000)}`).jo
     if (this.notifications.length > this.maxNotifications) {
       this.notifications.splice(0, this.notifications.length - this.maxNotifications);
     }
+    this._persistPeripheralState();
     try { this.emit('notification', entry); } catch { /* non-fatal */ }
     return entry;
   }
@@ -417,13 +442,14 @@ ${readResults.map(r => `--- ${r.filePath} ---\n${r.content?.slice(0, 2000)}`).jo
   /** Acknowledge a notification by id (human-in-the-loop). */
   acknowledgeNotification(id) {
     const n = this.notifications.find((x) => x.id === id);
-    if (n) { n.acknowledged = true; return true; }
+    if (n) { n.acknowledged = true; this._persistPeripheralState(); return true; }
     return false;
   }
 
   /** Clear the notification inbox. */
   clearNotifications() {
     this.notifications = [];
+    this._persistPeripheralState();
   }
 
   // ===== Bounded Peripheral Tasks (Phase 8) =====
@@ -450,12 +476,15 @@ ${readResults.map(r => `--- ${r.filePath} ---\n${r.content?.slice(0, 2000)}`).jo
     if (open) {
       open.count += 1;
       open.lastSeenAt = new Date().toISOString();
+      this._persistPeripheralState();
       try { this.emit('peripheral-task', open); } catch { /* non-fatal */ }
       return open;
     }
 
     const severity = notification.severity || 'info';
     const priority = severity === 'critical' ? 'high' : (severity === 'warning' ? 'medium' : 'low');
+    // Per-severity routing: how a human-facing surface should treat this task.
+    const escalation = priority === 'high' ? 'escalate' : (priority === 'medium' ? 'notify' : 'log');
     const task = {
       id: `periph-task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       type: 'peripheral-response',
@@ -464,6 +493,7 @@ ${readResults.map(r => `--- ${r.filePath} ---\n${r.content?.slice(0, 2000)}`).jo
       lastSeenAt: new Date().toISOString(),
       status: 'pending-review', // human must review; a task NEVER auto-runs
       priority,
+      escalation,
       dedupeKey,
       device: { id: device.id, class: device.class, kind: device.kind, name: device.name },
       breach: { metric: breach.metric, level: breach.level, value: breach.value, threshold: breach.threshold },
@@ -484,6 +514,7 @@ ${readResults.map(r => `--- ${r.filePath} ---\n${r.content?.slice(0, 2000)}`).jo
       if (resolvedIdx >= 0) this.peripheralTasks.splice(resolvedIdx, 1);
       else this.peripheralTasks.splice(0, this.peripheralTasks.length - this.maxPeripheralTasks);
     }
+    this._persistPeripheralState();
     try { this.emit('peripheral-task', task); } catch { /* non-fatal */ }
     return task;
   }
@@ -509,12 +540,14 @@ ${readResults.map(r => `--- ${r.filePath} ---\n${r.content?.slice(0, 2000)}`).jo
     if (!t) return null;
     t.status = resolution === 'dismissed' ? 'dismissed' : 'acknowledged';
     t.resolvedAt = new Date().toISOString();
+    this._persistPeripheralState();
     return t;
   }
 
   /** Clear the peripheral task queue. */
   clearPeripheralTasks() {
     this.peripheralTasks = [];
+    this._persistPeripheralState();
   }
 
   reset() {
@@ -522,8 +555,18 @@ ${readResults.map(r => `--- ${r.filePath} ---\n${r.content?.slice(0, 2000)}`).jo
     this.currentPlan = null;
     this.decomposedTasks = [];
     this.assumptions = [];
-    this.notifications = [];
-    this.peripheralTasks = [];
+    // Peripheral notifications/tasks are DURABLE. On reset we reload them from
+    // the persistent store rather than wiping them, so a coding-session reset
+    // never discards outstanding peripheral work. When persistence is disabled
+    // (flag off) the store returns empty — preserving clear-on-reset semantics.
+    let restored = { notifications: [], tasks: [] };
+    try {
+      if (this._persistEnabled && this._store && this._store.enabled && this._store.enabled()) {
+        restored = this._store.load();
+      }
+    } catch { /* best-effort */ }
+    this.notifications = Array.isArray(restored.notifications) ? restored.notifications : [];
+    this.peripheralTasks = Array.isArray(restored.tasks) ? restored.tasks : [];
   }
 }
 

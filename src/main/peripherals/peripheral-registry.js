@@ -111,7 +111,7 @@ class PeripheralRegistry {
     const id = sanitizeId(device && device.id) || sanitizeId(fallbackId);
     const cls = sanitizeClass(device && device.class);
     if (!id || !cls) return null;
-    return {
+    const rec = {
       id,
       name: sanitizeStr(device.name) || id,
       class: cls,
@@ -122,6 +122,9 @@ class PeripheralRegistry {
       registeredAt: sanitizeStr(device.registeredAt) || nowIso(),
       lastSeen: nowIso()
     };
+    // Preserve the device's rated power draw (watts) for cumulative budgeting.
+    if (Number.isFinite(Number(device && device.powerW))) rec.powerW = Number(device.powerW);
+    return rec;
   }
 
   /**

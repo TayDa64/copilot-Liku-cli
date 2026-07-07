@@ -14,6 +14,8 @@
 'use strict';
 
 const DRIVER_ID = 'mock';
+// Mock is a LOCAL in-process driver — no wire, never remote.
+const REMOTE = false;
 
 /** Canonical device definitions (deep-copied on discover). */
 const DEVICE_DEFS = Object.freeze({
@@ -104,4 +106,4 @@ function makeReading(id, metrics) {
   return { id, metrics: { ...metrics }, at: new Date().toISOString() };
 }
 
-module.exports = { DRIVER_ID, isAvailable, discover, perform, start, makeReading, DEVICE_DEFS };
+module.exports = { DRIVER_ID, isAvailable, discover, perform, start, makeReading, DEVICE_DEFS, REMOTE };
