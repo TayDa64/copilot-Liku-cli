@@ -60,6 +60,7 @@ async function run(args, flags) {
         log(highlight('Peripherals status'));
         log(`  devices: ${ps.devices ? ps.devices.length : 0}`);
         log(`  power: ${ps.currentW}W / ${ps.budgetW}W  (headroom ${ps.headroomW}W)`);
+        log(`  locking: ${ps.locking || 'advisory-file-lock'}   HIL: ${ps.hil ? 'ON (simulation)' : 'off'}`);
         if (ps.overBudget) error('  OVER BUDGET');
         return { success: true, power: ps };
       }
@@ -136,10 +137,37 @@ async function run(args, flags) {
       log(highlight('Power budget'));
       log(`  total:   ${ps.currentW}W / ${ps.budgetW}W`);
       log(`  headroom: ${ps.headroomW}W${ps.overBudget ? '  (OVER BUDGET)' : ''}`);
+      log(`  locking: ${ps.locking || 'advisory-file-lock'}   HIL: ${ps.hil ? 'ON (simulation)' : 'off'}`);
       for (const d of ps.devices || []) {
         log(`  ${highlight(d.id)} [${d.class}] ${d.loadW}W ${dim(d.active ? 'active' : 'idle')}`);
       }
       return { success: true, ...ps };
+    }
+
+    case 'simulate': {
+      // Hardware-in-the-loop helper: inject a simulated sensor reading so the
+      // monitor/alert pipeline can be exercised without physical hardware.
+      const id = args[1];
+      if (!id) { error('Usage: liku peripherals simulate <id> <key=value> [<key=value>...]'); return { success: false }; }
+      const metrics = {};
+      for (const kv of args.slice(2)) {
+        const eq = String(kv).indexOf('=');
+        if (eq <= 0) continue;
+        const key = kv.slice(0, eq).trim();
+        const rawV = kv.slice(eq + 1).trim();
+        const num = Number(rawV);
+        metrics[key] = Number.isFinite(num) && rawV !== '' ? num : rawV;
+      }
+      if (!Object.keys(metrics).length) { error('Provide at least one key=value metric.'); return { success: false }; }
+      const res = pal.ingestSensorReading(id, metrics);
+      if (flags.json) return { success: !!res.ok, hil: pal.isHilEnabled(), ...res };
+      if (res.ok) {
+        success(`Injected simulated reading for ${id}${pal.isHilEnabled() ? ' (HIL on)' : ''}.`);
+        log(dim(`  metrics: ${JSON.stringify(metrics)}`));
+      } else {
+        error(`Simulate failed: ${res.reason || 'unknown'}`);
+      }
+      return { success: !!res.ok, ...res };
     }
 
     case 'tasks': {
@@ -160,7 +188,7 @@ async function run(args, flags) {
 
     default:
       error(`Unknown subcommand: ${sub}`);
-      log('Usage: liku peripherals [scan|list|status [id]|power|tasks|execute <id> <action>|confirm <id> <action> [--execute]|drivers]');
+      log('Usage: liku peripherals [scan|list|status [id]|power|tasks|simulate <id> <k=v>|execute <id> <action>|confirm <id> <action> [--execute]|drivers]');
       return { success: false };
   }
 }

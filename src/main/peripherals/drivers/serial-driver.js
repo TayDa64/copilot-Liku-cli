@@ -20,10 +20,16 @@
 
 'use strict';
 
+const hil = require('../hil-simulator');
+
 const DRIVER_ID = 'serial';
 // Serial is a LOCAL wired link (trusted) — may run in unsigned mode for
 // convenience even when a DCP secret is configured (Phase 9).
 const REMOTE = false;
+const SUPPORTS_HIL = true;
+// Framing guard: newline-delimited JSON with a bounded buffer so a noisy or
+// malicious device can never grow memory without bound (Phase 10).
+const MAX_LINE_BYTES = 64 * 1024;
 
 function portPath() {
   return String(process.env.LIKU_SERIAL_PORT || '').trim();
@@ -62,9 +68,11 @@ function loadSerialLib() {
   try { return require('serialport'); } catch { return null; }
 }
 
-/** Available when a port is configured AND at least one device is declared. */
+/** Available when a port is configured AND at least one device is declared — or
+ * in HIL mode (no real port required, for CI/testing). */
 function isAvailable() {
-  return !!portPath() && loadDeviceConfig().length > 0;
+  if (loadDeviceConfig().length === 0) return false;
+  return hil.isEnabled() || !!portPath();
 }
 
 /** Declared devices (no connection required). @returns {object[]} */
@@ -105,16 +113,20 @@ function perform(device, action, params = {}) {
   if (!cfg.capabilities.map((c) => c.toLowerCase()).includes(act)) {
     return { ok: false, action: act, state: {}, reason: 'unsupported-action' };
   }
+  // DCP wire format (Phase 8): build a versioned, capability-scoped envelope.
+  const dcp = require('../dcp-protocol');
+  const token = dcp.issueCapabilityToken({ deviceId: cfg.id, actions: [act], ttlSec: 60 });
+  const envelope = dcp.buildCommandEnvelope({ device: cfg, action: act, params, token });
+
+  // HIL simulation path — no real port touched (CI/testing).
+  if (hil.isEnabled()) {
+    const r = hil.perform(cfg, act, params);
+    return { ...r, result: `serial:${cfg.id}:${act}`, envelope, simulated: true };
+  }
+
   const port = _ensureOpen();
   if (!port) return { ok: false, action: act, state: {}, reason: 'not-connected' };
   try {
-    // DCP wire format (Phase 8): send a versioned, signed-capability envelope
-    // instead of an ad-hoc payload. Backward compatible — the envelope is a
-    // superset; the capability token is `unsigned` local-mode unless
-    // LIKU_DCP_SECRET is configured.
-    const dcp = require('../dcp-protocol');
-    const token = dcp.issueCapabilityToken({ deviceId: cfg.id, actions: [act], ttlSec: 60 });
-    const envelope = dcp.buildCommandEnvelope({ device: cfg, action: act, params, token });
     port.write(`${JSON.stringify(envelope)}\n`);
     return { ok: true, action: act, state: { lastCommand: act }, result: `serial:${cfg.id}:${act}`, envelope };
   } catch (err) {
@@ -129,16 +141,22 @@ function perform(device, action, params = {}) {
  * @returns {() => void}
  */
 function start(emit) {
+  if (hil.isEnabled() || typeof emit !== 'function') return () => {};
   const port = _ensureOpen();
-  if (!port || typeof emit !== 'function') return () => {};
+  if (!port) return () => {};
   let buffer = '';
   const onData = (chunk) => {
     buffer += chunk.toString();
+    // Framing guard: drop an over-long line with no delimiter (bounded memory).
+    if (buffer.length > MAX_LINE_BYTES && buffer.indexOf('\n') < 0) {
+      buffer = '';
+      return;
+    }
     let idx;
     while ((idx = buffer.indexOf('\n')) >= 0) {
       const line = buffer.slice(0, idx).trim();
       buffer = buffer.slice(idx + 1);
-      if (!line) continue;
+      if (!line || line.length > MAX_LINE_BYTES) continue;
       try {
         const msg = JSON.parse(line);
         if (msg && msg.id) emit({ id: String(msg.id), metrics: msg.metrics || {}, at: new Date().toISOString() });
@@ -149,4 +167,4 @@ function start(emit) {
   return () => { try { port.off('data', onData); port.close(); } catch { /* ignore */ } _port = null; };
 }
 
-module.exports = { DRIVER_ID, isAvailable, discover, perform, start, loadDeviceConfig, REMOTE };
+module.exports = { DRIVER_ID, REMOTE, SUPPORTS_HIL, isAvailable, discover, perform, start, loadDeviceConfig };

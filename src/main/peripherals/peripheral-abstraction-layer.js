@@ -40,13 +40,19 @@ const EventEmitter = require('events');
 function registry() { return require('./peripheral-registry').getInstance(); }
 function systemContext() { return require('../system-context-manager'); }
 function policy() { return require('./peripheral-policy'); }
+function hil() { return require('./hil-simulator'); }
+
+/** True when hardware-in-the-loop simulation mode is enabled. */
+function isHilEnabled() {
+  return hil().isEnabled();
+}
 
 // ── Driver registry ──────────────────────────────────────────
 // The mock driver is ALWAYS available (first-class test driver). Real drivers
 // (e.g. mqtt) are used only when they report isAvailable() — otherwise the mock
 // remains the default. All drivers share the same interface:
 //   id, isAvailable(), discover(), perform(device, action, params), start(emit)
-const DRIVER_IDS = Object.freeze(['mock', 'mqtt', 'serial']);
+const DRIVER_IDS = Object.freeze(['mock', 'mqtt', 'serial', 'ble']);
 const _driverCache = {};
 function _driver(id) {
   if (!(id in _driverCache)) {
@@ -54,6 +60,7 @@ function _driver(id) {
       if (id === 'mock') _driverCache[id] = require('./drivers/mock-driver');
       else if (id === 'mqtt') _driverCache[id] = require('./drivers/mqtt-driver');
       else if (id === 'serial') _driverCache[id] = require('./drivers/serial-driver');
+      else if (id === 'ble') _driverCache[id] = require('./drivers/ble-driver');
       else _driverCache[id] = null;
     } catch { _driverCache[id] = null; }
   }
@@ -170,6 +177,8 @@ function powerStatus() {
     currentW,
     headroomW: Math.round((effectiveBudgetW - currentW) * 100) / 100,
     overBudget: currentW > effectiveBudgetW,
+    hil: isHilEnabled(),
+    locking: 'advisory-file-lock',
     devices
   };
 }
@@ -370,6 +379,7 @@ module.exports = {
   subscribe,
   on,
   isPhysicalActionAllowed,
-  powerStatus
+  powerStatus,
+  isHilEnabled
 };
 

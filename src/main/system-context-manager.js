@@ -53,6 +53,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { LIKU_HOME } = require('../shared/liku-home');
+const { atomicWriteFileSync } = require('../shared/atomic-file');
 
 let countTokens;
 try {
@@ -455,11 +456,9 @@ class SystemContextManager {
       if (!fs.existsSync(LIKU_HOME)) {
         fs.mkdirSync(LIKU_HOME, { recursive: true, mode: 0o700 });
       }
-      // Atomic write: write to a unique tmp file in the SAME directory (so
-      // rename is atomic on the same filesystem), then rename over the target.
-      const tmpFile = `${CONTEXT_FILE}.${process.pid}.${Date.now()}.tmp`;
-      fs.writeFileSync(tmpFile, JSON.stringify(payload, null, 2), { encoding: 'utf-8', mode: 0o600 });
-      fs.renameSync(tmpFile, CONTEXT_FILE);
+      // Atomic write: tmp file + rename over the target, under an advisory lock
+      // so concurrent processes (CLI + Electron) never see a torn file.
+      atomicWriteFileSync(CONTEXT_FILE, JSON.stringify(payload, null, 2), { mode: 0o600 });
       verboseLog('persisted', Object.keys(this._entries).length, 'entries');
       return true;
     } catch (err) {
@@ -527,9 +526,7 @@ class SystemContextManager {
         fs.mkdirSync(LIKU_HOME, { recursive: true, mode: 0o700 });
       }
       const payload = { schemaVersion: this._schemaVersion, updatedAt: nowIso(), pending: this._pending };
-      const tmpFile = `${PENDING_FILE}.${process.pid}.${Date.now()}.tmp`;
-      fs.writeFileSync(tmpFile, JSON.stringify(payload, null, 2), { encoding: 'utf-8', mode: 0o600 });
-      fs.renameSync(tmpFile, PENDING_FILE);
+      atomicWriteFileSync(PENDING_FILE, JSON.stringify(payload, null, 2), { mode: 0o600 });
       return true;
     } catch (err) {
       console.warn('[SystemContext] Failed to persist pending queue:', err.message);
@@ -1078,9 +1075,7 @@ class SystemContextManager {
       }
       lines.push(line);
       if (lines.length > CHANGES_LOG_MAX) lines = lines.slice(-CHANGES_LOG_MAX);
-      const tmp = `${CHANGES_LOG}.${process.pid}.${Date.now()}.tmp`;
-      fs.writeFileSync(tmp, `${lines.join('\n')}\n`, { encoding: 'utf-8', mode: 0o600 });
-      fs.renameSync(tmp, CHANGES_LOG);
+      atomicWriteFileSync(CHANGES_LOG, `${lines.join('\n')}\n`, { mode: 0o600 });
 
       this._writeSnapshot();
     } catch (err) {
@@ -1096,9 +1091,7 @@ class SystemContextManager {
     try {
       const stamp = new Date().toISOString().replace(/[:.]/g, '-');
       const file = path.join(HISTORY_DIR, `snapshot-${stamp}.json`);
-      const tmp = `${file}.${process.pid}.tmp`;
-      fs.writeFileSync(tmp, JSON.stringify({ schemaVersion: this._schemaVersion, savedAt: nowIso(), entries: this._entries }, null, 2), { encoding: 'utf-8', mode: 0o600 });
-      fs.renameSync(tmp, file);
+      atomicWriteFileSync(file, JSON.stringify({ schemaVersion: this._schemaVersion, savedAt: nowIso(), entries: this._entries }, null, 2), { mode: 0o600 });
 
       const snapshots = fs.readdirSync(HISTORY_DIR)
         .filter((f) => f.startsWith('snapshot-') && f.endsWith('.json'))

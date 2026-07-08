@@ -22,6 +22,7 @@
 const fs = require('fs');
 const path = require('path');
 const { LIKU_HOME } = require('../../shared/liku-home');
+const { atomicWriteFileSync } = require('../../shared/atomic-file');
 
 const PERIPHERALS_FILE = path.join(LIKU_HOME, 'peripherals.json');
 const SCHEMA_VERSION = '1.0.0';
@@ -91,14 +92,12 @@ class PeripheralRegistry {
     }
   }
 
-  /** Atomic persist (tmp + rename). Never throws. @private */
+  /** Atomic persist (tmp + rename, advisory-locked). Never throws. @private */
   _persist() {
     try {
       if (!fs.existsSync(LIKU_HOME)) fs.mkdirSync(LIKU_HOME, { recursive: true, mode: 0o700 });
       const payload = { schemaVersion: SCHEMA_VERSION, updatedAt: nowIso(), devices: this._devices };
-      const tmp = `${PERIPHERALS_FILE}.${process.pid}.${Date.now()}.tmp`;
-      fs.writeFileSync(tmp, JSON.stringify(payload, null, 2), { encoding: 'utf-8', mode: 0o600 });
-      fs.renameSync(tmp, PERIPHERALS_FILE);
+      atomicWriteFileSync(PERIPHERALS_FILE, JSON.stringify(payload, null, 2), { mode: 0o600 });
       return true;
     } catch (err) {
       console.warn('[Peripherals] Failed to persist registry:', err.message);

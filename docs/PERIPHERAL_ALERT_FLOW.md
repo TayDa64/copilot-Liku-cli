@@ -113,6 +113,39 @@ Drivers declare `REMOTE`. When a DCP secret is configured (`LIKU_DCP_SECRET`),
 drivers (MQTT); local/trusted drivers (mock, serial) may stay unsigned for
 convenience.
 
+## Multi-process safety + HIL simulation (Phase 10)
+
+### Advisory file locking
+
+Every `~/.liku/*.json` write (`system-context.json`, `system-context.pending.json`,
+`peripherals.json`, `supervisor-tasks.json`, history snapshots/changelog) now
+goes through `src/shared/atomic-file.js` → `atomicWriteFileSync`, which holds an
+**advisory lock** (`<file>.lock` directory, atomic `mkdir`) around the tmp-file +
+rename. This lets concurrent CLI + Electron (or multiple CLIs) share `~/.liku/`
+safely.
+
+- **Best-effort + non-fatal** — bounded retries with a real (non-spinning) sleep;
+  stale locks from crashed holders are stolen; if the lock still can't be taken
+  it warns once and proceeds (last-writer-wins). Locking never blocks operation.
+
+### Hardware-in-the-loop (HIL)
+
+`LIKU_PERIPHERAL_HIL=1` enables a timer-free in-memory simulator
+(`hil-simulator.js`). Real drivers (serial, BLE) route `perform()` to the
+simulator instead of hardware, so the full DCP + class-gate + pending/confirm
+path is exercisable in CI/tests with **no physical devices** — and HIL-simulated
+state feeds back into cumulative power accounting. HIL is **off by default** and
+never touches real hardware.
+
+### New driver
+
+`ble-driver.js` (wireless, `REMOTE=true`, HIL-capable) joins mock/mqtt/serial in
+the PAL's `DRIVER_IDS`. The serial driver gained HIL support + bounded-buffer
+framing. The mock driver remains the always-available fallback.
+
+CLI: `liku peripherals status`/`power` show `locking` + `HIL` state;
+`liku peripherals simulate <id> <k=v>...` injects a simulated reading.
+
 ## If a human decides to act
 
 Any physical response still travels the full PAL safety chain — the alert path
@@ -204,6 +237,10 @@ driver stays local/in-process and needs no wire format.
 - **Power fails safe.** Over-budget actions are blocked, never allowed through.
 - **Persistence is corruption-tolerant + flag-gated.** A bad store file loads as
   empty; no disk is touched unless peripherals are enabled.
+- **Concurrency-safe.** All `~/.liku/*.json` writes are atomic (tmp + rename)
+  under a best-effort advisory lock; locking never blocks operation.
+- **HIL is isolated.** Simulation is off by default and never touches real
+  hardware; the safety chain is identical in HIL and real modes.
 - **Cognitive budget unchanged.** `sensor.*`/`hardware.*.alert` facts are
   evidence-excluded from the default fragment; the default prompt stays
   byte-identical.

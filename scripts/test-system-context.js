@@ -922,6 +922,147 @@ test('remote drivers require signed capability tokens when a secret is configure
   assert.strictEqual(dcp.isSigningConfigured(), false);
 });
 
+// ── Phase 10: multi-process locking + new driver + HIL simulation ──
+
+test('advisory lock provides mutual exclusion + stale steal', () => {
+  const lockmod = require('../src/shared/atomic-file');
+  const target = path.join(TMP_HOME, 'lock-test.json');
+  const l1 = lockmod.acquireLockSync(target, { retries: 0 });
+  assert.strictEqual(l1.locked, true);
+  const l2 = lockmod.acquireLockSync(target, { retries: 1, retryDelayMs: 5 });
+  assert.strictEqual(l2.locked, false, 'second acquire blocked while held');
+  l1.release();
+  const l3 = lockmod.acquireLockSync(target, { retries: 0 });
+  assert.strictEqual(l3.locked, true, 're-acquire after release');
+  l3.release();
+  // Stale lock (crashed holder) is stolen.
+  const lockPath = `${target}.lock`;
+  fs.mkdirSync(lockPath);
+  const past = Date.now() / 1000 - 60; // 60s ago
+  fs.utimesSync(lockPath, past, past);
+  const l4 = lockmod.acquireLockSync(target, { retries: 1, staleMs: 1000 });
+  assert.strictEqual(l4.locked, true, 'stale lock stolen');
+  l4.release();
+});
+
+test('atomicWriteFileSync writes valid JSON and leaves no lock/tmp residue', () => {
+  const { atomicWriteFileSync } = require('../src/shared/atomic-file');
+  const target = path.join(TMP_HOME, 'atomic-test.json');
+  for (let i = 0; i < 5; i++) atomicWriteFileSync(target, JSON.stringify({ i, big: 'x'.repeat(200) }));
+  JSON.parse(fs.readFileSync(target, 'utf8')); // valid
+  const residue = fs.readdirSync(TMP_HOME).filter((f) => f.startsWith('atomic-test.json.') && (f.endsWith('.tmp') || f.endsWith('.lock')));
+  assert.strictEqual(residue.length, 0, 'no leftover .tmp/.lock');
+});
+
+test('concurrent processes write the store without corruption', () => {
+  const { execFileSync } = require('child_process');
+  const target = path.join(TMP_HOME, 'concurrency-test.json');
+  const mod = path.resolve(__dirname, '../src/shared/atomic-file.js');
+  const workerSrc = `
+    const { parentPort, workerData } = require('worker_threads');
+    const { atomicWriteFileSync } = require(workerData.mod);
+    for (let i = 0; i < 40; i++) {
+      atomicWriteFileSync(workerData.target, JSON.stringify({ w: workerData.id, i, big: 'y'.repeat(400) }));
+    }
+    parentPort.postMessage('done');
+  `;
+  const main = `
+    const { Worker } = require('worker_threads');
+    const fs = require('fs'); const path = require('path');
+    const workerSrc = ${JSON.stringify(workerSrc)};
+    const target = ${JSON.stringify(target)};
+    const mod = ${JSON.stringify(mod)};
+    let done = 0; const N = 4;
+    function finish() {
+      try { JSON.parse(fs.readFileSync(target, 'utf8')); } catch (e) { console.error('CORRUPT', e.message); process.exit(1); }
+      const dir = path.dirname(target);
+      const leftovers = fs.readdirSync(dir).filter((f) => f.indexOf('concurrency-test.json.') === 0 && (f.endsWith('.tmp') || f.endsWith('.lock')));
+      if (leftovers.length) { console.error('LEFTOVERS', leftovers); process.exit(3); }
+      process.exit(0);
+    }
+    for (let id = 0; id < N; id++) {
+      const w = new Worker(workerSrc, { eval: true, workerData: { id, target, mod } });
+      w.on('message', () => { if (++done === N) finish(); });
+      w.on('error', (e) => { console.error(e); process.exit(2); });
+    }
+  `;
+  // Throws if the child exits non-zero (corruption / residue / worker error).
+  execFileSync(process.execPath, ['-e', main], { stdio: 'pipe' });
+  JSON.parse(fs.readFileSync(target, 'utf8')); // still valid in this process
+});
+
+test('serial driver runs against the HIL simulator without hardware', () => {
+  process.env.LIKU_PERIPHERAL_HIL = '1';
+  delete process.env.LIKU_SERIAL_PORT; // no real port
+  process.env.LIKU_SERIAL_DEVICES = JSON.stringify([
+    { id: 'esp-led', name: 'LED', class: 'B', kind: 'light', capabilities: ['on', 'off'], powerW: 5 }
+  ]);
+  const serial = require('../src/main/peripherals/drivers/serial-driver');
+  assert.strictEqual(serial.isAvailable(), true, 'available in HIL without a port');
+  const r = serial.perform({ id: 'esp-led' }, 'on');
+  assert.strictEqual(r.ok, true);
+  assert.strictEqual(r.simulated, true, 'routed to simulator');
+  assert.strictEqual(r.state.power, 'on');
+  assert.ok(r.envelope && r.envelope.dcp === '1.0', 'DCP envelope still built in HIL');
+  delete process.env.LIKU_PERIPHERAL_HIL;
+  delete process.env.LIKU_SERIAL_DEVICES;
+});
+
+test('BLE driver works through the full DCP + class gate + confirm path (HIL)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  process.env.LIKU_PERIPHERAL_HIL = '1';
+  process.env.LIKU_BLE_DEVICES = JSON.stringify([
+    { id: 'ble-lock-01', name: 'BLE Lock', class: 'A', kind: 'lock', capabilities: ['lock', 'unlock', 'status'], powerW: 4 },
+    { id: 'ble-light-01', name: 'BLE Light', class: 'B', kind: 'light', capabilities: ['on', 'off'], powerW: 6 }
+  ]);
+  const ble = require('../src/main/peripherals/drivers/ble-driver');
+  assert.strictEqual(ble.isAvailable(), true, 'available in HIL (no adapter)');
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  const s = pal.scan();
+  assert.ok(s.devices.some((d) => d.id === 'ble-lock-01' && d.driver === 'ble'), 'BLE device registered');
+  assert.ok(pal.listDrivers().drivers.includes('ble'), 'ble driver listed');
+  // Class B → gated + auto-approved → simulated.
+  const rB = pal.execute('ble-light-01', 'on');
+  assert.strictEqual(rB.ok, true);
+  assert.strictEqual(rB.result.simulated, true, 'HIL executed the Class B action');
+  // Class A → still requires confirmation even in HIL.
+  const rA = pal.execute('ble-lock-01', 'unlock');
+  assert.strictEqual(rA.pending, true, 'Class A still gated in HIL');
+  // Authorize (human) then execute → simulated unlock.
+  pal.authorize('ble-lock-01', 'unlock');
+  const rA2 = pal.execute('ble-lock-01', 'unlock');
+  assert.strictEqual(rA2.ok, true);
+  assert.strictEqual(rA2.result.state.locked, false, 'simulator applied the unlock');
+  delete process.env.LIKU_PERIPHERAL_HIL;
+  delete process.env.LIKU_BLE_DEVICES;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('HIL is off by default and does not make real drivers available', () => {
+  delete process.env.LIKU_PERIPHERAL_HIL;
+  const hilmod = require('../src/main/peripherals/hil-simulator');
+  assert.strictEqual(hilmod.isEnabled(), false);
+  delete process.env.LIKU_SERIAL_PORT;
+  process.env.LIKU_SERIAL_DEVICES = JSON.stringify([{ id: 'x', class: 'B', capabilities: ['on'] }]);
+  const serial = require('../src/main/peripherals/drivers/serial-driver');
+  assert.strictEqual(serial.isAvailable(), false, 'no HIL + no port → unavailable (isolated)');
+  delete process.env.LIKU_SERIAL_DEVICES;
+});
+
+test('powerStatus surfaces HIL mode and locking strategy', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  pal.scan();
+  let ps = pal.powerStatus();
+  assert.strictEqual(ps.locking, 'advisory-file-lock');
+  assert.strictEqual(ps.hil, false);
+  process.env.LIKU_PERIPHERAL_HIL = '1';
+  ps = pal.powerStatus();
+  assert.strictEqual(ps.hil, true, 'HIL surfaced when enabled');
+  delete process.env.LIKU_PERIPHERAL_HIL;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
 test('env.hostname is stored but excluded from injected fragment by default', () => {
   // Stored for local diagnostics...
   assert.strictEqual(typeof mgr.get('env.hostname'), 'string');
