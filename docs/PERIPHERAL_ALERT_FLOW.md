@@ -293,6 +293,44 @@ Still additive + restrictive-only and enforced **before** the class gate.
 `getPowerAnomalies()`; `powerStatus().anomalies` carries the count. CLI:
 `liku peripherals power --anomalies`. Tunable via `LIKU_PERIPHERAL_ANOMALY_*`.
 
+## Actionable anomalies + robotics foundation (Phase 14)
+
+### Anomaly → escalation
+
+`power-anomaly-consumer.js` bridges the advisory `power-anomaly` event into the
+SAME human-gated escalation pipeline used by sensor alerts:
+
+```
+ PAL 'power-anomaly'  →  buildAnomalyNotification()  (advisory, Class C synthetic)
+   → SupervisorAgent.receiveNotification()   (bounded inbox + channels)
+     → orchestrator.emit('supervisor:notification')
+       → SupervisorAgent.createPeripheralTask({ source:'power-anomaly' })
+         → orchestrator.emit('supervisor:task')   (reviewable, pending-review)
+```
+
+- The consumer applies its OWN **dedup + cooldown** (`LIKU_PERIPHERAL_ANOMALY_COOLDOWN_MS`,
+  default 60 s) so a flapping power signal cannot spam the queue, independent of
+  the Supervisor's task cooldown.
+- Tasks are tagged `source:'power-anomaly'` and stay `pending-review`,
+  `requiresHuman:true`, `autonomousAction:false` — **strictly advisory**. The
+  anomaly is modelled as a read-only **Class C** synthetic device so it can never
+  become an actuation path. `createAgentSystem` auto-attaches the consumer
+  (flag-gated). CLI: `liku peripherals tasks --anomaly`.
+
+### ROS2 bridge foundation
+
+`ros2-driver.js` (robotics, `REMOTE=true`, HIL-capable) joins the driver set. A
+`Ros2Bridge` wraps a `rclnodejs` node:
+
+- `perform()` (real path) **publishes** the signed DCP envelope to the device's
+  command topic; until the node is ready it returns `{ ok:false, reason:'not-connected' }`
+  — but the PAL has already enforced the class gate, so Class A still confirms.
+- Inbound messages on the state topic are parsed and forwarded to
+  `PAL.ingestSensorReading()`.
+- Available when devices are declared (`LIKU_ROS2_DEVICES`) **and** (HIL is on
+  **or** a domain is configured, `LIKU_ROS2_DOMAIN`); `rclnodejs` is required
+  lazily, with a `_setRos2LibForTest` seam for the real path.
+
 ## If a human decides to act
 
 Any physical response still travels the full PAL safety chain — the alert path
@@ -408,6 +446,13 @@ driver stays local/in-process and needs no wire format.
 - **Advanced schedules only restrict.** Per-day + sunrise/sunset rules can only
   lower a device's allowed draw (or force it off outside its window); a device
   with no rule governing "now" is unrestricted, and schedules never actuate.
+- **Anomaly-driven tasks stay advisory.** A `power-anomaly` becomes a bounded,
+  `pending-review`, `autonomousAction:false` task modelled on a read-only Class C
+  synthetic device; it never actuates, and consumer-level dedup/cooldown prevents
+  flapping-signal spam.
+- **New drivers inherit the safety chain.** The ROS2 bridge (like BLE/Zigbee)
+  publishes signed DCP envelopes and is gated by DCP → class gate →
+  pending/confirm; Class A stays confirm-gated even in HIL.
 - **Cognitive budget unchanged.** `sensor.*`/`hardware.*.alert` facts are
   evidence-excluded from the default fragment; the default prompt stays
   byte-identical.

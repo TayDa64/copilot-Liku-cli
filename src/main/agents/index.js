@@ -19,6 +19,7 @@ const { ProducerAgent } = require('./producer');
 const { ResearcherAgent } = require('./researcher');
 const { PeripheralMonitorAgent, attachPeripheralMonitor } = require('./peripheral-monitor-agent');
 const { attachPeripheralAlertConsumer, buildSupervisorNotification } = require('./peripheral-alert-consumer');
+const { attachPowerAnomalyConsumer, buildAnomalyNotification } = require('./power-anomaly-consumer');
 const { AgentStateManager } = require('./state-manager');
 const { TraceWriter } = require('./trace-writer');
 
@@ -33,6 +34,8 @@ module.exports = {
   attachPeripheralMonitor,
   attachPeripheralAlertConsumer,
   buildSupervisorNotification,
+  attachPowerAnomalyConsumer,
+  buildAnomalyNotification,
   AgentStateManager,
   TraceWriter,
   
@@ -89,8 +92,22 @@ module.exports = {
       });
     } catch { /* peripheral integration is best-effort */ }
 
+    // Pillar 3 (Phase 14): bridge advisory `power-anomaly` events (spike /
+    // sustained / over-budget from the rolling power history) into the SAME
+    // human-gated escalation pipeline, with consumer-level dedup + cooldown.
+    // Strictly advisory — never actuates; any physical response still flows
+    // through the PAL. Inert unless peripherals are enabled.
+    let powerAnomalyConsumer = null;
+    try {
+      powerAnomalyConsumer = attachPowerAnomalyConsumer(orchestrator, {
+        onAnomaly: options.onPowerAnomaly,
+        createTasks: options.createPowerAnomalyTasks,
+        cooldownMs: options.powerAnomalyCooldownMs
+      });
+    } catch { /* power-anomaly integration is best-effort */ }
+
     // Return object with orchestrator, stateManager, and peripheral integration
-    return { orchestrator, stateManager, traceWriter, peripheralMonitor, peripheralAlertConsumer };
+    return { orchestrator, stateManager, traceWriter, peripheralMonitor, peripheralAlertConsumer, powerAnomalyConsumer };
   },
   
   // Recovery function for checkpoint restoration

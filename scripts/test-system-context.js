@@ -1651,6 +1651,210 @@ test('PAL emits power-anomaly and surfaces anomalies via accessor + status (HIL)
   delete process.env.LIKU_ENABLE_PERIPHERALS;
 });
 
+// ── Phase 14: anomaly → escalation + ROS2 bridge foundation ──
+
+test('buildAnomalyNotification produces an advisory, non-actuating notification', () => {
+  const { buildAnomalyNotification } = require('../src/main/agents/power-anomaly-consumer');
+  const n = buildAnomalyNotification({ anomaly: { type: 'over-budget', valueW: 300, budgetW: 250, advisory: 'over' }, baselineW: 100 });
+  assert.strictEqual(n.kind, 'power-anomaly');
+  assert.strictEqual(n.source, 'power-anomaly');
+  assert.strictEqual(n.device.class, 'C', 'synthetic device is read-only');
+  assert.strictEqual(n.autonomousAction, false);
+  assert.strictEqual(n.breach.metric, 'power');
+  assert.strictEqual(n.breach.level, 'over-budget');
+  assert.strictEqual(n.severity, 'warning', 'advisory severity (subject to cooldown, never critical)');
+});
+
+test('power anomaly consumer creates a bounded, human-gated, deduped task', () => {
+  const EventEmitter = require('events');
+  const { SupervisorAgent } = require('../src/main/agents/supervisor');
+  const { attachPowerAnomalyConsumer } = require('../src/main/agents/power-anomaly-consumer');
+  const orch = new EventEmitter();
+  orch.agents = new Map();
+  const sup = new SupervisorAgent({});
+  orch.agents.set('supervisor', sup);
+  const tasks = [];
+  orch.on('supervisor:task', (t) => tasks.push(t));
+  let captured = null;
+  const fakePal = { on: (type, cb) => { if (type === 'power-anomaly') captured = cb; return () => {}; } };
+  let clock = 1_000_000;
+  attachPowerAnomalyConsumer(orch, { pal: fakePal, cooldownMs: 60000, now: () => clock });
+  assert.strictEqual(typeof captured, 'function', 'consumer subscribed to power-anomaly');
+
+  // First anomaly → a reviewable, human-gated task.
+  captured({ anomaly: { type: 'spike', valueW: 200, at: new Date().toISOString(), advisory: 'spike' }, baselineW: 10 });
+  assert.strictEqual(tasks.length, 1, 'task created from anomaly');
+  assert.strictEqual(tasks[0].source, 'power-anomaly');
+  assert.strictEqual(tasks[0].requiresHuman, true);
+  assert.strictEqual(tasks[0].autonomousAction, false);
+  assert.strictEqual(tasks[0].status, 'pending-review');
+
+  // Flapping within the consumer cooldown → suppressed entirely.
+  clock += 1000;
+  captured({ anomaly: { type: 'spike', valueW: 210, at: new Date().toISOString() }, baselineW: 10 });
+  assert.strictEqual(sup.getPeripheralTasks().length, 1, 'flapping anomaly suppressed by consumer cooldown');
+
+  // After the cooldown window → coalesces into the same open task (count++).
+  clock += 61000;
+  captured({ anomaly: { type: 'spike', valueW: 220, at: new Date().toISOString() }, baselineW: 10 });
+  assert.strictEqual(sup.getPeripheralTasks().length, 1, 'same condition coalesces into one task');
+  assert.strictEqual(sup.getPeripheralTasks()[0].count, 2, 'coalesce bumped the counter');
+});
+
+test('power anomaly → supervisor task end-to-end via the PAL bus (HIL)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  process.env.LIKU_PERIPHERAL_HIL = '1';
+  const ph = require('../src/main/peripherals/power-history');
+  ph.clear();
+  for (const w of [5, 6, 5, 5, 6, 5]) ph.record({ totalW: w, budgetW: 5000, devices: [] });
+  process.env.LIKU_BLE_DEVICES = JSON.stringify([
+    { id: 'anom-heater2', name: 'Heater2', class: 'B', kind: 'heater', capabilities: ['on', 'off'], powerW: 400 }
+  ]);
+  const EventEmitter = require('events');
+  const { SupervisorAgent } = require('../src/main/agents/supervisor');
+  const { attachPowerAnomalyConsumer } = require('../src/main/agents/power-anomaly-consumer');
+  const orch = new EventEmitter();
+  orch.agents = new Map();
+  orch.agents.set('supervisor', new SupervisorAgent({}));
+  const tasks = [];
+  orch.on('supervisor:task', (t) => tasks.push(t));
+  const { detach } = attachPowerAnomalyConsumer(orch, {});
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  pal.scan();
+  const r = pal.execute('anom-heater2', 'on'); // → recordPowerSample → power-anomaly → consumer → task
+  assert.strictEqual(r.ok, true, 'HIL actuation succeeded');
+  const t = tasks.find((x) => x.source === 'power-anomaly');
+  assert.ok(t, 'anomaly produced a supervisor task via the PAL bus');
+  assert.strictEqual(t.requiresHuman, true);
+  assert.strictEqual(t.autonomousAction, false);
+  assert.strictEqual(t.status, 'pending-review');
+  detach(); ph.clear();
+  delete process.env.LIKU_BLE_DEVICES;
+  delete process.env.LIKU_PERIPHERAL_HIL;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+/** Build a synchronous fake rclnodejs for testing the real ROS2 path. */
+function makeFakeRos2() {
+  const subs = {};
+  const pubs = {};
+  const node = {
+    createPublisher(_type, topic) { const p = { _last: null, publish(m) { this._last = m; } }; pubs[topic] = p; return p; },
+    createSubscription(_type, topic, cb) { subs[topic] = cb; return {}; },
+    destroy() {}
+  };
+  const lib = {
+    init: () => undefined,               // synchronous → node ready immediately
+    Node: function () { return node; },  // constructor returns the shared node
+    spin: () => {}
+  };
+  return { lib, node, pubs, subs, push: (topic, obj) => { if (subs[topic]) subs[topic]({ data: JSON.stringify(obj) }); } };
+}
+
+test('ROS2 bridge connects, publishes command envelope, and ingests inbound messages (fake)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_PERIPHERAL_HIL;               // REAL path, not HIL
+  process.env.LIKU_ROS2_DOMAIN = '0';
+  process.env.LIKU_ROS2_DEVICES = JSON.stringify([
+    { id: 'ros-arm-01', name: 'Arm', class: 'B', kind: 'actuator', capabilities: ['on', 'off'], powerW: 30, cmdTopic: '/liku/arm/cmd', stateTopic: '/liku/arm/state' }
+  ]);
+  const ros2 = require('../src/main/peripherals/drivers/ros2-driver');
+  const fake = makeFakeRos2();
+  ros2._setRos2LibForTest(fake.lib);
+
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  pal.scan();
+  assert.ok(pal.listDrivers().drivers.includes('ros2'), 'ros2 available via domain');
+
+  const readings = [];
+  const off = pal.on('reading', (r) => { if (r.id === 'ros-arm-01') readings.push(r); });
+  const stop = pal.startStreaming();
+
+  // Class B actuation → real publish of the DCP envelope to the command topic.
+  const rB = pal.execute('ros-arm-01', 'on');
+  assert.strictEqual(rB.ok, true, 'Class B real publish succeeded');
+  const pub = fake.pubs['/liku/arm/cmd'];
+  assert.ok(pub && pub._last && pub._last.data, 'a message was published to the command topic');
+  const env = JSON.parse(pub._last.data);
+  assert.strictEqual(env.dcp, '1.0', 'DCP envelope published');
+  assert.strictEqual(env.action, 'on');
+
+  // Inbound state message → parsed → ingested → 'reading' event.
+  fake.push('/liku/arm/state', { torque: 12, temperature: 35 });
+  assert.strictEqual(readings.length, 1, 'inbound ROS2 message ingested as a reading');
+  assert.strictEqual(readings[0].metrics.torque, 12);
+  assert.strictEqual(pal.get('ros-arm-01').state.temperature, 35, 'reading updated device state');
+
+  stop(); off();
+  ros2._setRos2LibForTest(null);
+  delete process.env.LIKU_ROS2_DOMAIN;
+  delete process.env.LIKU_ROS2_DEVICES;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('ROS2 real path still confirm-gates Class A even when connected', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_PERIPHERAL_HIL;
+  process.env.LIKU_ROS2_DOMAIN = '0';
+  process.env.LIKU_ROS2_DEVICES = JSON.stringify([
+    { id: 'ros-gripper-01', name: 'Gripper', class: 'A', kind: 'gripper', capabilities: ['open', 'close'], powerW: 20, cmdTopic: '/liku/grip/cmd', stateTopic: '/liku/grip/state' }
+  ]);
+  const ros2 = require('../src/main/peripherals/drivers/ros2-driver');
+  const fake = makeFakeRos2();
+  ros2._setRos2LibForTest(fake.lib);
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  pal.scan();
+  const stop = pal.startStreaming();
+  const rA = pal.execute('ros-gripper-01', 'open');
+  assert.strictEqual(rA.pending, true, 'Class A gated despite being connected');
+  assert.ok(!fake.pubs['/liku/grip/cmd'], 'no publish before confirmation');
+  pal.authorize('ros-gripper-01', 'open');
+  const rA2 = pal.execute('ros-gripper-01', 'open');
+  assert.strictEqual(rA2.ok, true, 'confirmed Class A action publishes');
+  assert.ok(fake.pubs['/liku/grip/cmd'] && fake.pubs['/liku/grip/cmd']._last, 'publish happened after confirmation');
+  stop();
+  ros2._setRos2LibForTest(null);
+  delete process.env.LIKU_ROS2_DOMAIN;
+  delete process.env.LIKU_ROS2_DEVICES;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('ROS2 driver works through the full DCP + class gate + confirm path (HIL)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  process.env.LIKU_PERIPHERAL_HIL = '1';
+  delete process.env.LIKU_ROS2_DOMAIN; // no real domain — HIL provides availability
+  process.env.LIKU_ROS2_DEVICES = JSON.stringify([
+    { id: 'ros-lock-01', name: 'Lock', class: 'A', kind: 'lock', capabilities: ['lock', 'unlock'], powerW: 5 },
+    { id: 'ros-led-01', name: 'LED', class: 'B', kind: 'light', capabilities: ['on', 'off'], powerW: 3 }
+  ]);
+  const ros2 = require('../src/main/peripherals/drivers/ros2-driver');
+  assert.strictEqual(ros2.isAvailable(), true, 'available in HIL (no domain)');
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  pal.scan();
+  assert.ok(pal.listDrivers().drivers.includes('ros2'), 'ros2 driver listed');
+  const rB = pal.execute('ros-led-01', 'on');
+  assert.strictEqual(rB.ok, true);
+  assert.strictEqual(rB.result.simulated, true, 'HIL executed the Class B action');
+  const rA = pal.execute('ros-lock-01', 'unlock');
+  assert.strictEqual(rA.pending, true, 'Class A still gated in HIL');
+  pal.authorize('ros-lock-01', 'unlock');
+  const rA2 = pal.execute('ros-lock-01', 'unlock');
+  assert.strictEqual(rA2.ok, true);
+  assert.strictEqual(rA2.result.state.locked, false, 'simulator applied the unlock');
+  delete process.env.LIKU_PERIPHERAL_HIL;
+  delete process.env.LIKU_ROS2_DEVICES;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('ROS2 driver is unavailable without HIL and without a domain (isolated)', () => {
+  delete process.env.LIKU_PERIPHERAL_HIL;
+  delete process.env.LIKU_ROS2_DOMAIN;
+  process.env.LIKU_ROS2_DEVICES = JSON.stringify([{ id: 'ros-x', class: 'B', capabilities: ['on'] }]);
+  const ros2 = require('../src/main/peripherals/drivers/ros2-driver');
+  assert.strictEqual(ros2.isAvailable(), false, 'no HIL + no domain → unavailable');
+  delete process.env.LIKU_ROS2_DEVICES;
+});
+
 console.log(`\n${pass} checks passed.`);
 if (process.exitCode) { console.error('FAILED'); }
 else { console.log('OK'); }

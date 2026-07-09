@@ -573,7 +573,10 @@ ${readResults.map(r => `--- ${r.filePath} ---\n${r.content?.slice(0, 2000)}`).jo
     const task = {
       id: `periph-task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       type: 'peripheral-response',
-      source: 'peripheral-alert',
+      // Phase 14: tag the originating source so human-facing surfaces can filter
+      // (e.g. power anomalies vs. sensor threshold alerts). Advisory metadata only.
+      source: options.source || notification.source || 'peripheral-alert',
+      kind: notification.kind || 'peripheral-alert',
       createdAt: new Date().toISOString(),
       lastSeenAt: new Date().toISOString(),
       status: 'pending-review', // human must review; a task NEVER auto-runs

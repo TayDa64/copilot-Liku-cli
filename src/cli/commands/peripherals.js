@@ -11,7 +11,7 @@
  *   liku peripherals status <id>        Show one device's state
  *   liku peripherals execute <id> <action> [--level N]
  *                                       Perform an action (Class A → confirm flow)
- *   liku peripherals tasks [--escalated|--pending|--severity <p>]
+ *   liku peripherals tasks [--escalated|--pending|--severity <p>|--anomaly]
  *                                       Human-gated peripheral tasks (filterable)
  *   liku peripherals notifications [--pending|--severity <s>]
  *   liku peripherals channels           Show escalation notification channels
@@ -67,7 +67,7 @@ async function run(args, flags) {
         log(highlight('Peripherals status'));
         log(`  devices: ${ps.devices ? ps.devices.length : 0}`);
         log(`  power: ${ps.currentW}W / ${ps.budgetW}W  (headroom ${ps.headroomW}W)`);
-        log(`  peak: ${ps.peakW}W  avg: ${ps.avgW}W  (${ps.samples} samples)${ps.anomalies ? `  anomalies: ${ps.anomalies}` : ''}`);
+        log(`  peak: ${ps.peakW}W  avg: ${ps.avgW}W  (${ps.samples} samples)${ps.anomalies ? `  anomalies: ${ps.anomalies} [${(ps.anomalyTypes || []).join(',')}]` : ''}`);
         log(`  locking: ${ps.locking || 'advisory-file-lock'}   HIL: ${ps.hil ? 'ON (simulation)' : 'off'}`);
         try {
           const lm = require('../../shared/atomic-file').getLockMetrics();
@@ -240,6 +240,7 @@ async function run(args, flags) {
       let view = tasks.slice();
       if (flags.escalated) view = view.filter((t) => t.escalation === 'escalate');
       if (flags.pending) view = view.filter((t) => t.status === 'pending-review');
+      if (flags.anomaly) view = view.filter((t) => t.source === 'power-anomaly' || (t.breach && t.breach.metric === 'power'));
       if (flags.severity) {
         const p = String(flags.severity).toLowerCase();
         view = view.filter((t) => String(t.priority || '').toLowerCase() === p);
@@ -248,6 +249,7 @@ async function run(args, flags) {
       const filterNote = [
         flags.escalated ? 'escalated' : null,
         flags.pending ? 'pending' : null,
+        flags.anomaly ? 'anomaly' : null,
         flags.severity ? `severity=${flags.severity}` : null
       ].filter(Boolean).join(', ');
       log(highlight(`Peripheral tasks (${view.length}${filterNote ? `, ${filterNote}` : ''}):`));
@@ -255,7 +257,8 @@ async function run(args, flags) {
         const dev = (t.device && t.device.id) || '?';
         const br = t.breach ? `${t.breach.metric}:${t.breach.level}` : '';
         const ack = t.autoAcknowledged ? ' auto-ack' : '';
-        log(`  ${highlight(t.id)} [${t.priority}/${t.escalation || 'log'}] ${t.status}${ack} ${dim(`${dev} ${br} x${t.count || 1}`)}`);
+        const src = t.source === 'power-anomaly' ? ' ⚡' : '';
+        log(`  ${highlight(t.id)} [${t.priority}/${t.escalation || 'log'}] ${t.status}${ack}${src} ${dim(`${dev} ${br} x${t.count || 1}`)}`);
       }
       const pending = notifications.filter((n) => !n.acknowledged).length;
       log(dim(`  notifications: ${notifications.length} (${pending} unacknowledged)`));
@@ -305,7 +308,7 @@ async function run(args, flags) {
 
     default:
       error(`Unknown subcommand: ${sub}`);
-      log('Usage: liku peripherals [scan|list|status [id]|power [--history|--trend|--anomalies]|schedules|tasks [--escalated|--pending|--severity <p>]|notifications|channels|simulate <id> <k=v>|execute <id> <action>|confirm <id> <action> [--execute]|drivers]');
+      log('Usage: liku peripherals [scan|list|status [id]|power [--history|--trend|--anomalies]|schedules|tasks [--escalated|--pending|--severity <p>|--anomaly]|notifications|channels|simulate <id> <k=v>|execute <id> <action>|confirm <id> <action> [--execute]|drivers]');
       return { success: false };
   }
 }
