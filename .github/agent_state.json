@@ -1334,6 +1334,90 @@
       "lastActive": "2026-07-07T15:02:43.113Z",
       "tasksCompleted": 0,
       "tasksFailed": 0
+    },
+    "agent-1783510992804-msrkm1wxg": {
+      "type": "supervisor",
+      "capabilities": [
+        "search",
+        "read",
+        "web_fetch",
+        "todo",
+        "handoff"
+      ],
+      "registeredAt": "2026-07-08T11:43:12.810Z",
+      "lastActive": "2026-07-08T11:43:12.812Z",
+      "tasksCompleted": 0,
+      "tasksFailed": 0
+    },
+    "agent-1783510992810-rqqsj4e89": {
+      "type": "builder",
+      "capabilities": [
+        "search",
+        "read",
+        "edit",
+        "execute",
+        "todo",
+        "handoff"
+      ],
+      "registeredAt": "2026-07-08T11:43:12.813Z",
+      "lastActive": "2026-07-08T11:43:12.813Z",
+      "tasksCompleted": 0,
+      "tasksFailed": 0
+    },
+    "agent-1783510992810-lezmkri8h": {
+      "type": "verifier",
+      "capabilities": [
+        "search",
+        "read",
+        "execute",
+        "todo",
+        "handoff"
+      ],
+      "registeredAt": "2026-07-08T11:43:12.816Z",
+      "lastActive": "2026-07-08T11:43:12.816Z",
+      "tasksCompleted": 0,
+      "tasksFailed": 0
+    },
+    "agent-1783510992810-eblkb5x9l": {
+      "type": "researcher",
+      "capabilities": [
+        "search",
+        "read",
+        "web_fetch",
+        "todo",
+        "handoff"
+      ],
+      "registeredAt": "2026-07-08T11:43:12.817Z",
+      "lastActive": "2026-07-08T11:43:12.817Z",
+      "tasksCompleted": 0,
+      "tasksFailed": 0
+    },
+    "agent-1783510992810-bl3r8b1ec": {
+      "type": "producer",
+      "capabilities": [
+        "search",
+        "read",
+        "execute",
+        "todo",
+        "handoff"
+      ],
+      "registeredAt": "2026-07-08T11:43:12.819Z",
+      "lastActive": "2026-07-08T11:43:12.819Z",
+      "tasksCompleted": 0,
+      "tasksFailed": 0
+    },
+    "peripheral-monitor-1783510992821-08o1wu": {
+      "type": "peripheral_monitor",
+      "capabilities": [
+        "monitor",
+        "sensor_grounding",
+        "alert",
+        "handoff"
+      ],
+      "registeredAt": "2026-07-08T11:43:12.824Z",
+      "lastActive": "2026-07-08T11:43:12.824Z",
+      "tasksCompleted": 0,
+      "tasksFailed": 0
     }
   },
   "sessions": [
@@ -1427,7 +1511,7 @@
       "tasks": []
     }
   ],
-  "lastModified": "2026-07-07T15:02:43.113Z",
+  "lastModified": "2026-07-08T11:43:12.824Z",
   "modelMetadata": {
     "modelId": "stub",
     "provider": "test",

@@ -55,6 +55,10 @@ module.exports = {
       // Phase 9: persist peripheral tasks/notifications by default (durable across
       // restarts). Flag-gated at the store level, so inert unless peripherals on.
       persistPeripheralTasks: options.persistPeripheralTasks !== false,
+      // Phase 11: advanced escalation (advisory + human-gated). Default to
+      // env-based config; explicit options override.
+      autoAckSeverities: options.autoAckSeverities,
+      taskCooldownMs: options.taskCooldownMs,
       modelMetadata
     });
     

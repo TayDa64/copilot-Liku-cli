@@ -1090,6 +1090,146 @@ test('message-builder loads with self-awareness injection wired', () => {
   assert.strictEqual(typeof mb.createMessageBuilder === 'function' || typeof mb.buildMessages === 'function' || typeof mb === 'object', true);
 });
 
+// ── Phase 11: advanced escalation + driver surface expansion ──
+
+test('notification channels are inert unless enabled + listed (default inbox-only)', () => {
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+  delete process.env.LIKU_PERIPHERAL_CHANNELS;
+  const channels = require('../src/main/agents/notification-channels');
+  assert.deepStrictEqual(channels.enabledChannels(), [], 'no channels when flag off');
+  const r = channels.dispatch({ severity: 'critical', advisory: 'x' });
+  assert.deepStrictEqual(r.delivered, [], 'nothing delivered when disabled');
+});
+
+test('file channel writes a bounded audit trail via the atomic writer', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  process.env.LIKU_PERIPHERAL_CHANNELS = 'file';
+  const channels = require('../src/main/agents/notification-channels');
+  const n = {
+    severity: 'warning', advisory: 'temp high', requiresHuman: false,
+    device: { id: 'z-temp-01' }, breach: { metric: 'celsius', level: 'high' }
+  };
+  const r = channels.dispatch(n);
+  assert.ok(r.delivered.includes('file'), 'file channel delivered');
+  assert.ok(fs.existsSync(channels.AUDIT_FILE), 'audit file created in isolated home');
+  const lines = fs.readFileSync(channels.AUDIT_FILE, 'utf-8').split('\n').filter(Boolean);
+  assert.ok(lines.length >= 1, 'audit line written');
+  const rec = JSON.parse(lines[lines.length - 1]);
+  assert.strictEqual(rec.autonomousAction, false, 'audit record is advisory-only');
+  // No lock/tmp residue from the atomic write.
+  const residue = fs.readdirSync(TMP_HOME).filter((f) => f.startsWith('peripheral-notifications.log.') && (f.endsWith('.tmp') || f.endsWith('.lock')));
+  assert.strictEqual(residue.length, 0, 'no leftover .tmp/.lock');
+  delete process.env.LIKU_PERIPHERAL_CHANNELS;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('channel severity threshold suppresses below-threshold notifications', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  process.env.LIKU_PERIPHERAL_CHANNELS = 'webhook';
+  // webhook default min-severity = warning → an info notification must NOT route.
+  const channels = require('../src/main/agents/notification-channels');
+  const info = channels.dispatch({ severity: 'info', advisory: 'noise', device: { id: 'x' } });
+  assert.ok(!info.delivered.includes('webhook'), 'info below webhook threshold');
+  delete process.env.LIKU_PERIPHERAL_CHANNELS;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('auto-acknowledge resolves low severity but NEVER critical / Class A', () => {
+  const { SupervisorAgent } = require('../src/main/agents/supervisor');
+  const sup = new SupervisorAgent({ autoAckSeverities: 'info' });
+  const info = sup.receiveNotification({ id: 'a1', severity: 'info', device: { id: 'c', class: 'C' } });
+  assert.strictEqual(info.autoAcknowledged, true, 'info auto-acknowledged');
+  assert.strictEqual(info.acknowledged, true);
+  // Critical is never auto-acked even if severity list somehow includes it.
+  const sup2 = new SupervisorAgent({ autoAckSeverities: 'info,critical' });
+  const crit = sup2.receiveNotification({ id: 'a2', severity: 'critical', requiresHuman: true, device: { id: 'l', class: 'A' } });
+  assert.ok(!crit.autoAcknowledged, 'critical never auto-acknowledged');
+  assert.strictEqual(crit.acknowledged, false);
+  assert.strictEqual(sup2.getPendingNotifications().length, 1, 'critical stays pending for human');
+});
+
+test('task cooldown suppresses flapping but never suppresses critical', () => {
+  const { SupervisorAgent } = require('../src/main/agents/supervisor');
+  let clock = 1_000_000;
+  const sup = new SupervisorAgent({ taskCooldownMs: 60000, now: () => clock });
+  const warnNotif = {
+    id: 'n1', severity: 'warning', advisory: 'flapping',
+    device: { id: 'z-temp-01', class: 'C', kind: 'sensor' }, breach: { metric: 'celsius', level: 'high' }
+  };
+  const t1 = sup.createPeripheralTask(warnNotif);
+  assert.ok(t1 && t1.id, 'first task created');
+  sup.resolvePeripheralTask(t1.id, 'acknowledged');
+  // Same condition bounces back immediately → suppressed by cooldown.
+  clock += 1000;
+  const t2 = sup.createPeripheralTask({ ...warnNotif, id: 'n2' });
+  assert.strictEqual(t2, null, 'flapping task suppressed within cooldown');
+  // After the cooldown window → allowed again.
+  clock += 61000;
+  const t3 = sup.createPeripheralTask({ ...warnNotif, id: 'n3' });
+  assert.ok(t3 && t3.id, 'task allowed after cooldown window');
+  // Critical / Class A is NEVER suppressed, regardless of cooldown.
+  const critNotif = {
+    id: 'c1', severity: 'critical', requiresHuman: true,
+    device: { id: 'z-lock-01', class: 'A', kind: 'lock' }, breach: { metric: 'tamper', level: 'high' }
+  };
+  const c1 = sup.createPeripheralTask(critNotif);
+  sup.resolvePeripheralTask(c1.id, 'acknowledged');
+  clock += 100;
+  const c2 = sup.createPeripheralTask({ ...critNotif, id: 'c2' });
+  assert.ok(c2 && c2.id, 'critical task never suppressed by cooldown');
+  assert.notStrictEqual(c2.id, c1.id, 'a fresh critical task is created');
+});
+
+test('escalation query helpers surface escalated + by-severity tasks', () => {
+  const { SupervisorAgent } = require('../src/main/agents/supervisor');
+  const sup = new SupervisorAgent({});
+  sup.createPeripheralTask({ id: 'n-lo', severity: 'info', device: { id: 'c1', class: 'C' }, breach: { metric: 'x', level: 'low' } });
+  const hi = sup.createPeripheralTask({ id: 'n-hi', severity: 'critical', requiresHuman: true, device: { id: 'a1', class: 'A' }, breach: { metric: 'y', level: 'high' } });
+  const esc = sup.getEscalatedPeripheralTasks();
+  assert.strictEqual(esc.length, 1, 'exactly one escalated task');
+  assert.strictEqual(esc[0].id, hi.id);
+  assert.strictEqual(sup.getPeripheralTasksBySeverity('low').length, 1, 'one low-priority task');
+});
+
+test('zigbee driver works through the full DCP + class gate + confirm path (HIL)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  process.env.LIKU_PERIPHERAL_HIL = '1';
+  delete process.env.LIKU_ZIGBEE_COORDINATOR; // no real coordinator
+  process.env.LIKU_ZIGBEE_DEVICES = JSON.stringify([
+    { id: 'zb-lock-01', name: 'Zigbee Lock', class: 'A', kind: 'lock', capabilities: ['lock', 'unlock', 'status'], powerW: 3 },
+    { id: 'zb-plug-01', name: 'Zigbee Plug', class: 'B', kind: 'switch', capabilities: ['on', 'off'], powerW: 8 }
+  ]);
+  const zb = require('../src/main/peripherals/drivers/zigbee-driver');
+  assert.strictEqual(zb.isAvailable(), true, 'available in HIL (no coordinator)');
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  const s = pal.scan();
+  assert.ok(s.devices.some((d) => d.id === 'zb-plug-01' && d.driver === 'zigbee'), 'zigbee device registered');
+  assert.ok(pal.listDrivers().drivers.includes('zigbee'), 'zigbee driver listed');
+  // Class B → gated + auto-approved → simulated.
+  const rB = pal.execute('zb-plug-01', 'on');
+  assert.strictEqual(rB.ok, true);
+  assert.strictEqual(rB.result.simulated, true, 'HIL executed the Class B action');
+  // Class A → still requires confirmation even in HIL.
+  const rA = pal.execute('zb-lock-01', 'unlock');
+  assert.strictEqual(rA.pending, true, 'Class A still gated in HIL');
+  pal.authorize('zb-lock-01', 'unlock');
+  const rA2 = pal.execute('zb-lock-01', 'unlock');
+  assert.strictEqual(rA2.ok, true);
+  assert.strictEqual(rA2.result.state.locked, false, 'simulator applied the unlock');
+  delete process.env.LIKU_PERIPHERAL_HIL;
+  delete process.env.LIKU_ZIGBEE_DEVICES;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('zigbee driver is unavailable without HIL and without a coordinator (isolated)', () => {
+  delete process.env.LIKU_PERIPHERAL_HIL;
+  delete process.env.LIKU_ZIGBEE_COORDINATOR;
+  process.env.LIKU_ZIGBEE_DEVICES = JSON.stringify([{ id: 'zb-x', class: 'B', capabilities: ['on'] }]);
+  const zb = require('../src/main/peripherals/drivers/zigbee-driver');
+  assert.strictEqual(zb.isAvailable(), false, 'no HIL + no coordinator → unavailable');
+  delete process.env.LIKU_ZIGBEE_DEVICES;
+});
+
 console.log(`\n${pass} checks passed.`);
 if (process.exitCode) { console.error('FAILED'); }
 else { console.log('OK'); }

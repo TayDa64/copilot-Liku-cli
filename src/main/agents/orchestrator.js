@@ -34,6 +34,12 @@ class AgentOrchestrator extends EventEmitter {
     // Phase 9: durable persistence of peripheral tasks/notifications on the
     // Supervisor. Opt-in; the factory enables it for the production system.
     this.persistPeripheralTasks = options.persistPeripheralTasks === true;
+    // Phase 11: advanced escalation knobs (all advisory + human-gated). Passed
+    // through to the Supervisor; default to env-based config when unset.
+    this._escalationOptions = {
+      autoAckSeverities: options.autoAckSeverities,
+      taskCooldownMs: options.taskCooldownMs
+    };
     
     // Agent instances
     this.agents = new Map();
@@ -64,7 +70,7 @@ class AgentOrchestrator extends EventEmitter {
     };
     
     // Create one instance of each agent type
-    this.agents.set(AgentRole.SUPERVISOR, new SupervisorAgent({ ...commonOptions, persistTasks: this.persistPeripheralTasks }));
+    this.agents.set(AgentRole.SUPERVISOR, new SupervisorAgent({ ...commonOptions, persistTasks: this.persistPeripheralTasks, ...this._escalationOptions }));
     this.agents.set(AgentRole.BUILDER, new BuilderAgent(commonOptions));
     this.agents.set(AgentRole.VERIFIER, new VerifierAgent(commonOptions));
     this.agents.set(AgentRole.RESEARCHER, new ResearcherAgent(commonOptions));

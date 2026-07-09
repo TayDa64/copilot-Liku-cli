@@ -11,6 +11,10 @@
  *   liku peripherals status <id>        Show one device's state
  *   liku peripherals execute <id> <action> [--level N]
  *                                       Perform an action (Class A → confirm flow)
+ *   liku peripherals tasks [--escalated|--pending|--severity <p>]
+ *                                       Human-gated peripheral tasks (filterable)
+ *   liku peripherals notifications [--pending|--severity <s>]
+ *   liku peripherals channels           Show escalation notification channels
  */
 
 const { log, success, error, dim, highlight } = require('../util/output');
@@ -61,6 +65,11 @@ async function run(args, flags) {
         log(`  devices: ${ps.devices ? ps.devices.length : 0}`);
         log(`  power: ${ps.currentW}W / ${ps.budgetW}W  (headroom ${ps.headroomW}W)`);
         log(`  locking: ${ps.locking || 'advisory-file-lock'}   HIL: ${ps.hil ? 'ON (simulation)' : 'off'}`);
+        try {
+          const channels = require('../../main/agents/notification-channels').describe();
+          const names = channels.channels.map((c) => c.channel);
+          log(`  channels: inbox${names.length ? ', ' + names.join(', ') : ' (only)'}`);
+        } catch { /* observability only */ }
         if (ps.overBudget) error('  OVER BUDGET');
         return { success: true, power: ps };
       }
@@ -174,21 +183,76 @@ async function run(args, flags) {
       // Human-facing view of durable peripheral tasks + notifications.
       const store = require('../../main/agents/supervisor-task-store');
       const { notifications, tasks } = store.load();
-      if (flags.json) return { success: true, tasks, notifications };
-      log(highlight(`Peripheral tasks (${tasks.length}):`));
-      for (const t of tasks) {
+      // Phase 11: severity / escalation / pending filtering to cut through noise.
+      let view = tasks.slice();
+      if (flags.escalated) view = view.filter((t) => t.escalation === 'escalate');
+      if (flags.pending) view = view.filter((t) => t.status === 'pending-review');
+      if (flags.severity) {
+        const p = String(flags.severity).toLowerCase();
+        view = view.filter((t) => String(t.priority || '').toLowerCase() === p);
+      }
+      if (flags.json) return { success: true, tasks: view, notifications };
+      const filterNote = [
+        flags.escalated ? 'escalated' : null,
+        flags.pending ? 'pending' : null,
+        flags.severity ? `severity=${flags.severity}` : null
+      ].filter(Boolean).join(', ');
+      log(highlight(`Peripheral tasks (${view.length}${filterNote ? `, ${filterNote}` : ''}):`));
+      for (const t of view) {
         const dev = (t.device && t.device.id) || '?';
         const br = t.breach ? `${t.breach.metric}:${t.breach.level}` : '';
-        log(`  ${highlight(t.id)} [${t.priority}/${t.escalation || 'log'}] ${t.status} ${dim(`${dev} ${br} x${t.count || 1}`)}`);
+        const ack = t.autoAcknowledged ? ' auto-ack' : '';
+        log(`  ${highlight(t.id)} [${t.priority}/${t.escalation || 'log'}] ${t.status}${ack} ${dim(`${dev} ${br} x${t.count || 1}`)}`);
       }
       const pending = notifications.filter((n) => !n.acknowledged).length;
       log(dim(`  notifications: ${notifications.length} (${pending} unacknowledged)`));
-      return { success: true, taskCount: tasks.length, notificationCount: notifications.length };
+      return { success: true, taskCount: view.length, notificationCount: notifications.length };
+    }
+
+    case 'notifications': {
+      // Durable peripheral notifications, with optional unacknowledged-only view.
+      const store = require('../../main/agents/supervisor-task-store');
+      const { notifications } = store.load();
+      let view = notifications.slice();
+      if (flags.pending) view = view.filter((n) => !n.acknowledged);
+      if (flags.severity) {
+        const s = String(flags.severity).toLowerCase();
+        view = view.filter((n) => String(n.severity || '').toLowerCase() === s);
+      }
+      if (flags.json) return { success: true, notifications: view };
+      log(highlight(`Peripheral notifications (${view.length}):`));
+      for (const n of view) {
+        const dev = (n.device && n.device.id) || '?';
+        const br = n.breach ? `${n.breach.metric}:${n.breach.level}` : '';
+        const ack = n.autoAcknowledged ? 'auto-ack' : (n.acknowledged ? 'ack' : 'unack');
+        const chans = Array.isArray(n.channels) && n.channels.length ? ` →${n.channels.join('+')}` : '';
+        log(`  ${highlight(n.severity || 'info')} ${ack} ${dim(`${dev} ${br}${chans}`)}`);
+      }
+      return { success: true, notificationCount: view.length };
+    }
+
+    case 'channels': {
+      // Show configured notification-escalation channels (observability).
+      const channels = require('../../main/agents/notification-channels');
+      const desc = channels.describe();
+      if (flags.json) return { success: true, ...desc };
+      log(highlight('Notification channels'));
+      if (!desc.channels.length) {
+        log(dim('  inbox only (set LIKU_PERIPHERAL_CHANNELS=log,file,webhook to add sinks)'));
+      } else {
+        log('  inbox (always on)');
+        for (const c of desc.channels) {
+          const warn = c.configured ? '' : dim(' (not configured)');
+          log(`  ${highlight(c.channel)} min-severity=${c.minSeverity}${warn}`);
+        }
+      }
+      log(dim(`  audit file: ${desc.auditFile}`));
+      return { success: true, ...desc };
     }
 
     default:
       error(`Unknown subcommand: ${sub}`);
-      log('Usage: liku peripherals [scan|list|status [id]|power|tasks|simulate <id> <k=v>|execute <id> <action>|confirm <id> <action> [--execute]|drivers]');
+      log('Usage: liku peripherals [scan|list|status [id]|power|tasks [--escalated|--pending|--severity <p>]|notifications|channels|simulate <id> <k=v>|execute <id> <action>|confirm <id> <action> [--execute]|drivers]');
       return { success: false };
   }
 }

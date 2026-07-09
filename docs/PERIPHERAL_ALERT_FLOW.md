@@ -146,6 +146,53 @@ framing. The mock driver remains the always-available fallback.
 CLI: `liku peripherals status`/`power` show `locking` + `HIL` state;
 `liku peripherals simulate <id> <k=v>...` injects a simulated reading.
 
+## Advanced escalation + driver surface (Phase 11)
+
+### Notification channels
+
+Beyond the always-on Supervisor **inbox**, notifications can fan out to additive,
+advisory-only SINKS via `src/main/agents/notification-channels.js`:
+
+| Channel | Sink | Default min-severity |
+| --- | --- | --- |
+| `log` | one-line console summary | `info` |
+| `file` | bounded JSONL audit trail (`~/.liku/peripheral-notifications.log`, ≤500 lines, atomic + locked) | `info` |
+| `webhook` | fire-and-forget POST to `LIKU_PERIPHERAL_WEBHOOK_URL` (timeout-bounded, never throws) | `warning` |
+
+Enable with `LIKU_PERIPHERAL_CHANNELS="log,file,webhook"` (default: **inbox only**,
+so behaviour is unchanged). Each channel has a per-severity threshold
+(`LIKU_PERIPHERAL_<CHANNEL>_MIN_SEVERITY`) so low-value noise never pages an
+external system. Channels are pure sinks: they forward an advisory notification
+and **never** actuate hardware or call the LLM. Delivery is best-effort +
+non-blocking and only fires when `LIKU_ENABLE_PERIPHERALS=1`.
+
+### Auto-acknowledge + flapping cooldown
+
+The Supervisor gained two noise-reduction controls (both **default OFF**, both with
+a hard safety floor — Class A / `requiresHuman` / critical are **never** affected):
+
+| Control | Config | Behaviour |
+| --- | --- | --- |
+| Auto-acknowledge | `LIKU_PERIPHERAL_AUTO_ACK_SEVERITIES="info,low"` (or `autoAckSeverities` option) | Routine low-severity notifications/tasks are resolved automatically (`autoAcknowledged: true`) so a human is not paged. |
+| Task cooldown | `LIKU_PERIPHERAL_TASK_COOLDOWN_MS=60000` (or `taskCooldownMs` option) | A task for the same `device:metric:level` is **suppressed** if one was active within the window — flapping-sensor spam protection. Cooldown is recorded on create/coalesce/resolve. |
+
+Per-severity routing is unchanged (`escalate`/`notify`/`log` by priority) and now
+queryable: `getEscalatedPeripheralTasks()`, `getPeripheralTasksBySeverity(p)`.
+
+### New driver — Zigbee
+
+`zigbee-driver.js` (mesh, `REMOTE=true`, HIL-capable) joins
+mock/mqtt/serial/ble in the PAL's `DRIVER_IDS`. Available when devices are
+declared (`LIKU_ZIGBEE_DEVICES`) **and** (HIL is on **or** a coordinator is
+configured, `LIKU_ZIGBEE_COORDINATOR`); the optional `zigbee-herdsman` lib is
+required lazily. It emits the same signed DCP envelope and refuses unsigned
+commands when a secret is set — identical safety to BLE/MQTT.
+
+CLI: `liku peripherals tasks [--escalated|--pending|--severity <p>]`,
+`liku peripherals notifications [--pending|--severity <s>]`,
+`liku peripherals channels` (show configured escalation sinks). `status` now also
+lists active channels.
+
 ## If a human decides to act
 
 Any physical response still travels the full PAL safety chain — the alert path
@@ -241,6 +288,12 @@ driver stays local/in-process and needs no wire format.
   under a best-effort advisory lock; locking never blocks operation.
 - **HIL is isolated.** Simulation is off by default and never touches real
   hardware; the safety chain is identical in HIL and real modes.
+- **Escalation never escalates authority.** Channels are advisory SINKS;
+  auto-acknowledge and flapping-cooldown NEVER apply to Class A / `requiresHuman`
+  / critical items; no escalation control opens an autonomous actuation path.
+- **New drivers inherit the full safety chain.** Zigbee (like BLE/MQTT/serial)
+  emits signed DCP envelopes and is gated by DCP → class gate → pending/confirm;
+  Class A stays confirm-gated even in HIL.
 - **Cognitive budget unchanged.** `sensor.*`/`hardware.*.alert` facts are
   evidence-excluded from the default fragment; the default prompt stays
   byte-identical.

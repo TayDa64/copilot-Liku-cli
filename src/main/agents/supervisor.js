@@ -14,6 +14,35 @@
 
 const { BaseAgent, AgentRole, AgentCapabilities } = require('./base-agent');
 
+/**
+ * Parse a comma-separated severity allow-list into a normalized Set. Used to
+ * decide which severities may be auto-acknowledged. Empty by default.
+ * @private
+ */
+function _parseSeverityList(raw) {
+  if (Array.isArray(raw)) return new Set(raw.map((s) => String(s).trim().toLowerCase()).filter(Boolean));
+  return new Set(
+    String(raw || '')
+      .split(',')
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean)
+  );
+}
+
+/**
+ * A notification/task is "critical" (never auto-acknowledged, never suppressed)
+ * when it targets a Class A device, explicitly requires a human, or is tagged
+ * critical/high. This is the hard safety floor for all escalation shortcuts.
+ * @private
+ */
+function _isCritical(item) {
+  if (!item) return false;
+  if (item.requiresHuman === true) return true;
+  if (item.device && item.device.class === 'A') return true;
+  const sev = String(item.severity || item.priority || '').toLowerCase();
+  return sev === 'critical' || sev === 'high';
+}
+
 class SupervisorAgent extends BaseAgent {
   constructor(options = {}) {
     super({
@@ -53,6 +82,26 @@ class SupervisorAgent extends BaseAgent {
     // is set, so normal coding flows never touch disk and behaviour is unchanged.
     this._store = options.taskStore || require('./supervisor-task-store');
     this._persistEnabled = options.persistTasks === true;
+
+    // Phase 11: advanced escalation — ALL advisory + human-gated, default OFF so
+    // behaviour and the default cognitive fragment are unchanged.
+    //  - notification channels: additive sinks (log/file/webhook) beyond the inbox.
+    //  - auto-acknowledge: automatically resolve LOW-severity notifications/tasks so
+    //    a human is not paged by routine, non-critical signals. Critical / Class A
+    //    are NEVER auto-acknowledged.
+    //  - task cooldown: suppress recreating a task for the same condition within a
+    //    window after it was last active — flapping-sensor spam protection.
+    this._channels = options.channels || require('./notification-channels');
+    this._now = typeof options.now === 'function' ? options.now : () => Date.now();
+    this._autoAckSeverities = _parseSeverityList(
+      options.autoAckSeverities != null
+        ? options.autoAckSeverities
+        : process.env.LIKU_PERIPHERAL_AUTO_ACK_SEVERITIES
+    );
+    this._taskCooldownMs = Number.isFinite(Number(options.taskCooldownMs))
+      ? Number(options.taskCooldownMs)
+      : (Number(process.env.LIKU_PERIPHERAL_TASK_COOLDOWN_MS) || 0);
+    this._taskCooldowns = new Map(); // dedupeKey → last-activity ms (flapping guard)
     try {
       if (this._persistEnabled && this._store.enabled && this._store.enabled()) {
         const restored = this._store.load();
@@ -420,11 +469,34 @@ ${readResults.map(r => `--- ${r.filePath} ---\n${r.content?.slice(0, 2000)}`).jo
       // Hard safety invariant regardless of caller input.
       autonomousAction: false
     };
+
+    // Phase 11: auto-acknowledge routine, low-severity notifications so a human
+    // is not paged by noise. Critical / Class A / requiresHuman are NEVER
+    // auto-acknowledged (hard safety floor).
+    const sev = String(entry.severity || 'info').toLowerCase();
+    if (!_isCritical(entry) && this._autoAckSeverities.has(sev)) {
+      entry.acknowledged = true;
+      entry.autoAcknowledged = true;
+      entry.acknowledgedAt = new Date().toISOString();
+    }
+
     this.notifications.push(entry);
     if (this.notifications.length > this.maxNotifications) {
       this.notifications.splice(0, this.notifications.length - this.maxNotifications);
     }
     this._persistPeripheralState();
+
+    // Phase 11: fan out to additive delivery channels (log/file/webhook). This is
+    // a pure advisory SINK — best-effort, non-blocking, never actuates hardware.
+    try {
+      if (this._channels && typeof this._channels.dispatch === 'function') {
+        const routed = this._channels.dispatch(entry);
+        if (routed && Array.isArray(routed.delivered) && routed.delivered.length) {
+          entry.channels = routed.delivered;
+        }
+      }
+    } catch { /* channel delivery is best-effort */ }
+
     try { this.emit('notification', entry); } catch { /* non-fatal */ }
     return entry;
   }
@@ -476,6 +548,7 @@ ${readResults.map(r => `--- ${r.filePath} ---\n${r.content?.slice(0, 2000)}`).jo
     if (open) {
       open.count += 1;
       open.lastSeenAt = new Date().toISOString();
+      this._taskCooldowns.set(dedupeKey, this._now());
       this._persistPeripheralState();
       try { this.emit('peripheral-task', open); } catch { /* non-fatal */ }
       return open;
@@ -483,6 +556,18 @@ ${readResults.map(r => `--- ${r.filePath} ---\n${r.content?.slice(0, 2000)}`).jo
 
     const severity = notification.severity || 'info';
     const priority = severity === 'critical' ? 'high' : (severity === 'warning' ? 'medium' : 'low');
+
+    // Phase 11: flapping guard. If a task for the SAME condition was active within
+    // the cooldown window, suppress recreating it so a bouncing sensor cannot spam
+    // the queue. Critical / Class A conditions are NEVER suppressed.
+    if (this._taskCooldownMs > 0 && !_isCritical({ ...notification, priority })) {
+      const last = this._taskCooldowns.get(dedupeKey);
+      if (last != null && (this._now() - last) < this._taskCooldownMs) {
+        this._taskCooldowns.set(dedupeKey, this._now());
+        return null; // suppressed — the consumer treats null as "no new task"
+      }
+    }
+
     // Per-severity routing: how a human-facing surface should treat this task.
     const escalation = priority === 'high' ? 'escalate' : (priority === 'medium' ? 'notify' : 'log');
     const task = {
@@ -506,7 +591,17 @@ ${readResults.map(r => `--- ${r.filePath} ---\n${r.content?.slice(0, 2000)}`).jo
       notificationId: notification.id,
       count: 1
     };
+
+    // Phase 11: auto-acknowledge routine LOW-severity tasks so they never sit in
+    // the human review queue. Critical / Class A tasks are NEVER auto-acknowledged.
+    if (!_isCritical(task) && this._autoAckSeverities.has(String(severity).toLowerCase())) {
+      task.status = 'auto-acknowledged';
+      task.resolvedAt = new Date().toISOString();
+      task.autoAcknowledged = true;
+    }
+
     this.peripheralTasks.push(task);
+    this._taskCooldowns.set(dedupeKey, this._now());
 
     // Bounded: prefer evicting an already-resolved task, else the oldest.
     if (this.peripheralTasks.length > this.maxPeripheralTasks) {
@@ -530,6 +625,20 @@ ${readResults.map(r => `--- ${r.filePath} ---\n${r.content?.slice(0, 2000)}`).jo
   }
 
   /**
+   * Tasks flagged for active escalation (per-severity routing == 'escalate',
+   * i.e. high-priority / critical) that a human has not yet resolved.
+   */
+  getEscalatedPeripheralTasks() {
+    return this.peripheralTasks.filter((t) => t.escalation === 'escalate' && t.status === 'pending-review');
+  }
+
+  /** Peripheral tasks filtered by priority (high|medium|low). */
+  getPeripheralTasksBySeverity(priority) {
+    const p = String(priority || '').toLowerCase();
+    return this.peripheralTasks.filter((t) => String(t.priority || '').toLowerCase() === p);
+  }
+
+  /**
    * Resolve a peripheral task (human-in-the-loop). Does NOT execute anything —
    * it only records the human's decision.
    * @param {string} id
@@ -540,6 +649,9 @@ ${readResults.map(r => `--- ${r.filePath} ---\n${r.content?.slice(0, 2000)}`).jo
     if (!t) return null;
     t.status = resolution === 'dismissed' ? 'dismissed' : 'acknowledged';
     t.resolvedAt = new Date().toISOString();
+    // Record activity so the flapping cooldown also covers the window right after
+    // a human resolves a task (prevents an immediate re-open on the next bounce).
+    if (t.dedupeKey) this._taskCooldowns.set(t.dedupeKey, this._now());
     this._persistPeripheralState();
     return t;
   }
@@ -567,6 +679,7 @@ ${readResults.map(r => `--- ${r.filePath} ---\n${r.content?.slice(0, 2000)}`).jo
     } catch { /* best-effort */ }
     this.notifications = Array.isArray(restored.notifications) ? restored.notifications : [];
     this.peripheralTasks = Array.isArray(restored.tasks) ? restored.tasks : [];
+    if (this._taskCooldowns && typeof this._taskCooldowns.clear === 'function') this._taskCooldowns.clear();
   }
 }
 
