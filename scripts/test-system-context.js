@@ -1230,6 +1230,226 @@ test('zigbee driver is unavailable without HIL and without a coordinator (isolat
   delete process.env.LIKU_ZIGBEE_DEVICES;
 });
 
+// ── Phase 12: real bidirectional BLE + power telemetry/history ──
+
+/** Build a synchronous fake noble adapter for testing the real BLE path. */
+function makeFakeNoble(specs) {
+  const EventEmitter = require('events');
+  const lib = new EventEmitter();
+  lib.state = 'poweredOn';
+  const peripherals = {};
+  for (const spec of specs) {
+    const writeChar = { uuid: spec.writeUuid, _lastWrite: null, write(buf, _wor, cb) { this._lastWrite = buf; if (cb) cb(); } };
+    const notifyChar = new EventEmitter();
+    notifyChar.uuid = spec.notifyUuid;
+    notifyChar.subscribe = (cb) => { if (cb) cb(); };
+    notifyChar.push = (obj) => notifyChar.emit('data', Buffer.from(JSON.stringify(obj)));
+    const peripheral = {
+      id: spec.peripheralId,
+      address: spec.peripheralId,
+      advertisement: { localName: spec.name || spec.peripheralId },
+      connect(cb) { if (cb) cb(null); },
+      discoverSomeServicesAndCharacteristics(_svc, _chs, cb) { cb(null, [{}], [writeChar, notifyChar]); },
+      disconnect(cb) { if (cb) cb(); }
+    };
+    peripherals[spec.peripheralId] = { peripheral, writeChar, notifyChar };
+  }
+  lib.startScanning = () => { for (const k of Object.keys(peripherals)) lib.emit('discover', peripherals[k].peripheral); };
+  lib.stopScanning = () => {};
+  return { lib, peripherals };
+}
+
+test('BLE real transport connects, writes DCP envelope, and ingests notifications (fake adapter)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_PERIPHERAL_HIL;        // REAL path, not HIL
+  process.env.LIKU_BLE_ADAPTER = 'hci0-fake';    // makes the driver "available"
+  process.env.LIKU_BLE_DEVICES = JSON.stringify([
+    { id: 'ble-plug-01', name: 'BLE Plug', class: 'B', kind: 'switch', capabilities: ['on', 'off'], powerW: 10,
+      peripheralId: 'p-plug', serviceUuid: 'ffe0', writeCharUuid: 'ffe1', notifyCharUuid: 'ffe2' }
+  ]);
+  const ble = require('../src/main/peripherals/drivers/ble-driver');
+  const fake = makeFakeNoble([{ peripheralId: 'p-plug', writeUuid: 'ffe1', notifyUuid: 'ffe2' }]);
+  ble._setBleLibForTest(fake.lib);
+
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  pal.scan();
+  assert.ok(pal.listDrivers().drivers.includes('ble'), 'ble available via fake adapter');
+
+  // Capture inbound readings that flow through ingestSensorReading.
+  const readings = [];
+  const off = pal.on('reading', (r) => { if (r.id === 'ble-plug-01') readings.push(r); });
+
+  // start streaming → central connects + subscribes synchronously via the fake.
+  const stop = pal.startStreaming();
+
+  // Class B actuation → real write of the DCP envelope to the write characteristic.
+  const rB = pal.execute('ble-plug-01', 'on');
+  assert.strictEqual(rB.ok, true, 'Class B real write succeeded');
+  const written = fake.peripherals['p-plug'].writeChar._lastWrite;
+  assert.ok(Buffer.isBuffer(written), 'a buffer was written to the characteristic');
+  const env = JSON.parse(written.toString());
+  assert.strictEqual(env.dcp, '1.0', 'DCP envelope written on the wire');
+  assert.strictEqual(env.action, 'on');
+
+  // Inbound notification → parsed → ingested → 'reading' event.
+  fake.peripherals['p-plug'].notifyChar.push({ celsius: 30, humidity: 44 });
+  assert.strictEqual(readings.length, 1, 'inbound notification ingested as a reading');
+  assert.strictEqual(readings[0].metrics.celsius, 30);
+  // The reading also updated last-known device state (read-only grounding).
+  assert.strictEqual(pal.get('ble-plug-01').state.celsius, 30);
+
+  stop(); off();
+  ble._setBleLibForTest(null);
+  delete process.env.LIKU_BLE_ADAPTER;
+  delete process.env.LIKU_BLE_DEVICES;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('BLE real path still confirm-gates Class A even when connected', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_PERIPHERAL_HIL;
+  process.env.LIKU_BLE_ADAPTER = 'hci0-fake';
+  process.env.LIKU_BLE_DEVICES = JSON.stringify([
+    { id: 'ble-lock-02', name: 'BLE Lock', class: 'A', kind: 'lock', capabilities: ['lock', 'unlock'], powerW: 4,
+      peripheralId: 'p-lock', writeCharUuid: 'aa01' }
+  ]);
+  const ble = require('../src/main/peripherals/drivers/ble-driver');
+  const fake = makeFakeNoble([{ peripheralId: 'p-lock', writeUuid: 'aa01', notifyUuid: 'aa02' }]);
+  ble._setBleLibForTest(fake.lib);
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  pal.scan();
+  const stop = pal.startStreaming(); // connection established
+  // Even with a live connection, Class A must route through pending/confirm.
+  const rA = pal.execute('ble-lock-02', 'unlock');
+  assert.strictEqual(rA.pending, true, 'Class A gated despite being connected');
+  assert.ok(!fake.peripherals['p-lock'].writeChar._lastWrite, 'no write happened before confirmation');
+  pal.authorize('ble-lock-02', 'unlock');
+  const rA2 = pal.execute('ble-lock-02', 'unlock');
+  assert.strictEqual(rA2.ok, true, 'confirmed Class A action writes');
+  assert.ok(fake.peripherals['p-lock'].writeChar._lastWrite, 'write happened after confirmation');
+  stop();
+  ble._setBleLibForTest(null);
+  delete process.env.LIKU_BLE_ADAPTER;
+  delete process.env.LIKU_BLE_DEVICES;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('power history records, queries, and summarizes (bounded, no residue)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const ph = require('../src/main/peripherals/power-history');
+  ph.clear();
+  ph.record({ totalW: 10, budgetW: 100, devices: [{ id: 'd1', loadW: 10, active: true }] });
+  ph.record({ totalW: 42, budgetW: 100, devices: [{ id: 'd1', loadW: 42, active: true }] });
+  ph.record({ totalW: 5, budgetW: 100, devices: [{ id: 'd1', loadW: 5, active: false }] });
+  const all = ph.query();
+  assert.strictEqual(all.length, 3, 'three samples persisted');
+  const sum = ph.summary();
+  assert.strictEqual(sum.count, 3);
+  assert.strictEqual(sum.peakW, 42, 'peak captured');
+  assert.strictEqual(sum.currentW, 5, 'latest is current');
+  assert.strictEqual(sum.perDevicePeakW.d1, 42, 'per-device peak captured');
+  // No lock/tmp residue from the atomic writer.
+  const residue = fs.readdirSync(TMP_HOME).filter((f) => f.startsWith('power-history.jsonl.') && (f.endsWith('.tmp') || f.endsWith('.lock')));
+  assert.strictEqual(residue.length, 0, 'no leftover .tmp/.lock');
+  ph.clear();
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('power history is flag-gated (no disk when disabled)', () => {
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+  const ph = require('../src/main/peripherals/power-history');
+  assert.strictEqual(ph.record({ totalW: 99 }), null, 'record is a no-op when disabled');
+  assert.deepStrictEqual(ph.query(), [], 'query empty when disabled');
+  assert.ok(!fs.existsSync(ph.HISTORY_FILE), 'no history file written when disabled');
+});
+
+test('power schedule is inert with no config (default off)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_PERIPHERAL_SCHEDULES;
+  const sched = require('../src/main/peripherals/power-schedule');
+  assert.strictEqual(sched.deviceScheduleW('anything'), null, 'no schedule → no restriction');
+  assert.strictEqual(sched.evaluate('anything', 500).ok, true, 'no schedule → allowed');
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('power schedule restricts outside its window but never grants power', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const sched = require('../src/main/peripherals/power-schedule');
+  // In-window: allowed up to the cap; over the cap: blocked.
+  const noon = new Date(2026, 6, 8, 12, 0, 0);
+  process.env.LIKU_PERIPHERAL_SCHEDULES = JSON.stringify([{ id: 'heater', fromHour: 10, toHour: 14, maxW: 500 }]);
+  assert.strictEqual(sched.evaluate('heater', 400, noon).ok, true, 'within window + under cap → ok');
+  assert.strictEqual(sched.evaluate('heater', 600, noon).ok, false, 'within window but over cap → blocked');
+  // Outside the window → must be off (cap 0).
+  const midnight = new Date(2026, 6, 8, 0, 0, 0);
+  const out = sched.evaluate('heater', 100, midnight);
+  assert.strictEqual(out.ok, false, 'outside window → blocked');
+  assert.strictEqual(out.code, 'power-schedule-exceeded');
+  // A device with NO schedule is never affected.
+  assert.strictEqual(sched.evaluate('other', 9999, midnight).ok, true, 'unscheduled device unaffected');
+  delete process.env.LIKU_PERIPHERAL_SCHEDULES;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('PAL enforces a power schedule end-to-end (blocks on outside its window)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  process.env.LIKU_PERIPHERAL_HIL = '1';
+  // Build a 1-hour window that EXCLUDES the current hour so the test is deterministic.
+  const h = new Date().getHours();
+  const from = (h + 1) % 24;
+  const to = (h + 2) % 24;
+  process.env.LIKU_BLE_DEVICES = JSON.stringify([
+    { id: 'sch-fan-01', name: 'Fan', class: 'B', kind: 'fan', capabilities: ['on', 'off'], powerW: 25 }
+  ]);
+  process.env.LIKU_PERIPHERAL_SCHEDULES = JSON.stringify([{ id: 'sch-fan-01', fromHour: from, toHour: to, maxW: 100 }]);
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  pal.scan();
+  const r = pal.execute('sch-fan-01', 'on');
+  assert.strictEqual(r.ok, false, 'blocked outside scheduled window');
+  assert.strictEqual(r.code, 'power-schedule-exceeded');
+  assert.ok(r.schedule && r.schedule.scheduleW === 0, 'schedule cap is 0 outside window');
+  delete process.env.LIKU_PERIPHERAL_SCHEDULES;
+  delete process.env.LIKU_PERIPHERAL_HIL;
+  delete process.env.LIKU_BLE_DEVICES;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('lock metrics count acquisitions and steals', () => {
+  const af = require('../src/shared/atomic-file');
+  af.resetLockMetrics();
+  const target = path.join(TMP_HOME, 'lockmetrics.json');
+  af.atomicWriteFileSync(target, JSON.stringify({ a: 1 }));
+  let m = af.getLockMetrics();
+  assert.ok(m.acquired >= 1, 'acquisition counted');
+  // Force a stale steal.
+  const lockPath = `${target}.lock`;
+  fs.mkdirSync(lockPath);
+  const past = Date.now() / 1000 - 60;
+  fs.utimesSync(lockPath, past, past);
+  const l = af.acquireLockSync(target, { retries: 1, staleMs: 1000 });
+  assert.strictEqual(l.locked, true, 'stale lock stolen');
+  l.release();
+  m = af.getLockMetrics();
+  assert.ok(m.steals >= 1, 'steal counted');
+});
+
+test('powerStatus surfaces historical peak/avg + schedule count', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const ph = require('../src/main/peripherals/power-history');
+  ph.clear();
+  ph.record({ totalW: 30, budgetW: 100, devices: [] });
+  ph.record({ totalW: 70, budgetW: 100, devices: [] });
+  process.env.LIKU_PERIPHERAL_SCHEDULES = JSON.stringify([{ id: 'x', fromHour: 0, toHour: 24, maxW: 10 }]);
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  const ps = pal.powerStatus();
+  assert.strictEqual(ps.peakW, 70, 'peak surfaced from history');
+  assert.ok(ps.samples >= 2, 'sample count surfaced');
+  assert.strictEqual(ps.schedules, 1, 'schedule count surfaced');
+  ph.clear();
+  delete process.env.LIKU_PERIPHERAL_SCHEDULES;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
 console.log(`\n${pass} checks passed.`);
 if (process.exitCode) { console.error('FAILED'); }
 else { console.log('OK'); }

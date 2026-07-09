@@ -193,6 +193,59 @@ CLI: `liku peripherals tasks [--escalated|--pending|--severity <p>]`,
 `liku peripherals channels` (show configured escalation sinks). `status` now also
 lists active channels.
 
+## Real bidirectional transport + power telemetry (Phase 12)
+
+### Real BLE connect / notify / write
+
+`ble-driver.js` now implements a real **bidirectional** transport (in addition to
+HIL). A `BleCentral` connection manager scans for declared peripherals, connects,
+resolves a **write** characteristic and subscribes to a **notify** characteristic:
+
+- `perform()` (real path) writes the signed **DCP envelope bytes** to the connected
+  write characteristic. Until a connection exists it returns
+  `{ ok:false, reason:'not-connected' }` and kicks a lazy connect — but the PAL has
+  already enforced the class gate, so a Class A action still requires confirmation.
+- Inbound notify **value-changes** are parsed (JSON) and forwarded to
+  `PAL.ingestSensorReading()`, so wireless sensor updates flow into the normal
+  grounding + monitor + escalation pipeline.
+- The optional `@abandonware/noble`/`noble` lib is required lazily; a test seam
+  (`_setBleLibForTest`) allows the real path to be exercised with a fake adapter.
+- Extra device config: `peripheralId` / `address` (match), `serviceUuid`,
+  `writeCharUuid`, `notifyCharUuid`. HIL stays fully isolated — the real transport
+  is used **only** when HIL is off.
+
+### Power telemetry history + trending
+
+`power-history.js` persists a **rolling** JSONL log
+(`~/.liku/power-history.jsonl`, ≤1000 samples, atomic + locked, flag-gated). The
+PAL records a snapshot after every successful actuation (`recordPowerSample()`),
+and exposes:
+
+| Accessor | Result |
+| --- | --- |
+| `getPowerHistory({ sinceMs, limit })` | recent timestamped samples |
+| `getPowerTrend({ sinceMs })` | `{ count, peakW, avgW, currentW, perDevicePeakW }` |
+
+`powerStatus()` now folds in `peakW` / `avgW` / `samples`. CLI:
+`liku peripherals power --history` and `--trend`.
+
+### Per-device power schedules (time-boxed budgets)
+
+`power-schedule.js` is an **additive, default-OFF** restriction layer. Declare
+`LIKU_PERIPHERAL_SCHEDULES=[{ id, fromHour, toHour, maxW }]` and the PAL enforces
+it **before** the class gate: inside the window a device may draw up to `maxW`;
+outside the window its cap is `0` (must be off). Over the cap → rejected with
+`power-schedule-exceeded`. Schedules can only ever make actuation **more**
+restrictive — they never grant power and never bypass DCP / class gate /
+pending-confirm. No schedules configured → no effect. CLI:
+`liku peripherals schedules`.
+
+### Lock contention metrics
+
+`atomic-file.js` now tracks best-effort counters
+(`acquired / contended / steals / fallbacks / retries`) via `getLockMetrics()`.
+Surfaced in `liku peripherals status`.
+
 ## If a human decides to act
 
 Any physical response still travels the full PAL safety chain — the alert path
@@ -294,6 +347,14 @@ driver stays local/in-process and needs no wire format.
 - **New drivers inherit the full safety chain.** Zigbee (like BLE/MQTT/serial)
   emits signed DCP envelopes and is gated by DCP → class gate → pending/confirm;
   Class A stays confirm-gated even in HIL.
+- **Real transport never bypasses the gate.** The real BLE write path only fires
+  AFTER `isPhysicalActionAllowed`; a live connection does not weaken Class A —
+  the write happens only once a human has confirmed.
+- **Power schedules only restrict.** A per-device schedule can lower a device's
+  allowed draw (or force it off outside its window) but can NEVER grant power or
+  bypass the class gate; with no schedules configured it has zero effect.
+- **Power history is pure observation.** Recording a power sample never actuates
+  anything; the log is bounded, atomic, flag-gated, and corruption-tolerant.
 - **Cognitive budget unchanged.** `sensor.*`/`hardware.*.alert` facts are
   evidence-excluded from the default fragment; the default prompt stays
   byte-identical.

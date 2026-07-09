@@ -15,6 +15,9 @@
  *                                       Human-gated peripheral tasks (filterable)
  *   liku peripherals notifications [--pending|--severity <s>]
  *   liku peripherals channels           Show escalation notification channels
+ *   liku peripherals power [--history|--trend]
+ *                                       Live budget + rolling power telemetry
+ *   liku peripherals schedules          Show per-device time-boxed power budgets
  */
 
 const { log, success, error, dim, highlight } = require('../util/output');
@@ -64,7 +67,12 @@ async function run(args, flags) {
         log(highlight('Peripherals status'));
         log(`  devices: ${ps.devices ? ps.devices.length : 0}`);
         log(`  power: ${ps.currentW}W / ${ps.budgetW}W  (headroom ${ps.headroomW}W)`);
+        log(`  peak: ${ps.peakW}W  avg: ${ps.avgW}W  (${ps.samples} samples)`);
         log(`  locking: ${ps.locking || 'advisory-file-lock'}   HIL: ${ps.hil ? 'ON (simulation)' : 'off'}`);
+        try {
+          const lm = require('../../shared/atomic-file').getLockMetrics();
+          log(`  locks: ${lm.acquired} acquired, ${lm.contended} contended, ${lm.steals} steals, ${lm.fallbacks} fallbacks`);
+        } catch { /* observability only */ }
         try {
           const channels = require('../../main/agents/notification-channels').describe();
           const names = channels.channels.map((c) => c.channel);
@@ -142,15 +150,47 @@ async function run(args, flags) {
 
     case 'power': {
       const ps = pal.powerStatus();
+      // Phase 12: --history shows recent samples; --trend shows the summary.
+      if (flags.history || flags.trend) {
+        const trend = pal.getPowerTrend();
+        if (flags.history) {
+          const limit = flags.limit !== undefined ? Number(flags.limit) : 10;
+          const hist = pal.getPowerHistory({ limit });
+          if (flags.json) return { success: true, trend, history: hist.samples };
+          log(highlight(`Power history (last ${hist.samples.length}):`));
+          for (const s of hist.samples) log(`  ${dim(s.at)}  ${s.totalW}W${s.overBudget ? ' (OVER)' : ''}`);
+        }
+        if (flags.json && !flags.history) return { success: true, trend };
+        log(highlight('Power trend'));
+        log(`  samples: ${trend.count}  peak: ${trend.peakW}W  avg: ${trend.avgW}W  current: ${trend.currentW}W`);
+        const perDev = Object.entries(trend.perDevicePeakW || {});
+        for (const [id, w] of perDev) log(`  ${highlight(id)} peak ${w}W`);
+        return { success: true, trend };
+      }
       if (flags.json) return { success: true, ...ps };
       log(highlight('Power budget'));
       log(`  total:   ${ps.currentW}W / ${ps.budgetW}W`);
       log(`  headroom: ${ps.headroomW}W${ps.overBudget ? '  (OVER BUDGET)' : ''}`);
-      log(`  locking: ${ps.locking || 'advisory-file-lock'}   HIL: ${ps.hil ? 'ON (simulation)' : 'off'}`);
+      log(`  peak: ${ps.peakW}W  avg: ${ps.avgW}W  (${ps.samples} samples)`);
+      log(`  locking: ${ps.locking || 'advisory-file-lock'}   HIL: ${ps.hil ? 'ON (simulation)' : 'off'}${ps.schedules ? `   schedules: ${ps.schedules}` : ''}`);
       for (const d of ps.devices || []) {
         log(`  ${highlight(d.id)} [${d.class}] ${d.loadW}W ${dim(d.active ? 'active' : 'idle')}`);
       }
       return { success: true, ...ps };
+    }
+
+    case 'schedules': {
+      // Show configured per-device power schedules (time-boxed budgets).
+      const res = pal.getPowerSchedules();
+      if (flags.json) return { success: true, ...res };
+      log(highlight(`Power schedules (${res.schedules.length}):`));
+      if (!res.schedules.length) {
+        log(dim('  none (set LIKU_PERIPHERAL_SCHEDULES=[{"id","fromHour","toHour","maxW"}])'));
+      }
+      for (const s of res.schedules) {
+        log(`  ${highlight(s.id)} ${s.fromHour}:00→${s.toHour}:00  ≤${s.maxW}W  ${dim(s.active ? 'IN WINDOW' : 'outside')}`);
+      }
+      return { success: true, ...res };
     }
 
     case 'simulate': {
@@ -252,7 +292,7 @@ async function run(args, flags) {
 
     default:
       error(`Unknown subcommand: ${sub}`);
-      log('Usage: liku peripherals [scan|list|status [id]|power|tasks [--escalated|--pending|--severity <p>]|notifications|channels|simulate <id> <k=v>|execute <id> <action>|confirm <id> <action> [--execute]|drivers]');
+      log('Usage: liku peripherals [scan|list|status [id]|power [--history|--trend]|schedules|tasks [--escalated|--pending|--severity <p>]|notifications|channels|simulate <id> <k=v>|execute <id> <action>|confirm <id> <action> [--execute]|drivers]');
       return { success: false };
   }
 }

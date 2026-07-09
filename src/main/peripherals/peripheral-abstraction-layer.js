@@ -41,6 +41,8 @@ function registry() { return require('./peripheral-registry').getInstance(); }
 function systemContext() { return require('../system-context-manager'); }
 function policy() { return require('./peripheral-policy'); }
 function hil() { return require('./hil-simulator'); }
+function powerHistory() { return require('./power-history'); }
+function powerSchedule() { return require('./power-schedule'); }
 
 /** True when hardware-in-the-loop simulation mode is enabled. */
 function isHilEnabled() {
@@ -172,6 +174,11 @@ function powerStatus() {
     loadW: P.estimateDeviceLoadW(d), active: P.isDeviceActive(d)
   }));
   const currentW = Math.round(devices.reduce((s, d) => s + d.loadW, 0) * 100) / 100;
+  // Phase 12: fold in historical peak/avg (best-effort) + active schedule count.
+  let history = null;
+  try { history = powerHistory().summary(); } catch { history = null; }
+  let schedules = 0;
+  try { schedules = powerSchedule().describe().length; } catch { schedules = 0; }
   return {
     enabled: true,
     budgetW: effectiveBudgetW,
@@ -180,8 +187,51 @@ function powerStatus() {
     overBudget: currentW > effectiveBudgetW,
     hil: isHilEnabled(),
     locking: 'advisory-file-lock',
+    peakW: history ? history.peakW : 0,
+    avgW: history ? history.avgW : 0,
+    samples: history ? history.count : 0,
+    schedules,
     devices
   };
+}
+
+/**
+ * Capture the current power snapshot into the rolling history log (best-effort,
+ * flag-gated, atomic). Returns the recorded sample or null.
+ */
+function recordPowerSample() {
+  if (!isPeripheralsEnabled()) return null;
+  try {
+    const ps = powerStatus();
+    return powerHistory().record({
+      at: new Date().toISOString(),
+      totalW: ps.currentW,
+      budgetW: ps.budgetW,
+      overBudget: ps.overBudget,
+      devices: ps.devices
+    });
+  } catch { return null; }
+}
+
+/** Query recent power-history samples. @param {{sinceMs?:number,limit?:number}} [opts] */
+function getPowerHistory(opts = {}) {
+  if (!isPeripheralsEnabled()) return { enabled: false, samples: [] };
+  try { return { enabled: true, samples: powerHistory().query(opts) }; }
+  catch { return { enabled: true, samples: [] }; }
+}
+
+/** Trend summary over the retained power-history window. */
+function getPowerTrend(opts = {}) {
+  if (!isPeripheralsEnabled()) return { enabled: false };
+  try { return { enabled: true, ...powerHistory().summary(opts) }; }
+  catch { return { enabled: true, count: 0, peakW: 0, avgW: 0, currentW: 0, budgetW: null, perDevicePeakW: {} }; }
+}
+
+/** Describe configured per-device power schedules + current window status. */
+function getPowerSchedules() {
+  if (!isPeripheralsEnabled()) return { enabled: false, schedules: [] };
+  try { return { enabled: true, schedules: powerSchedule().describe() }; }
+  catch { return { enabled: true, schedules: [] }; }
 }
 
 /**
@@ -212,6 +262,20 @@ function isPhysicalActionAllowed(device, action, params = {}) {
   if (evalRes.readOnly || klass === 'C') {
     return { allowed: true, klass, reason: 'read-only', normalized: evalRes.normalized };
   }
+
+  // Phase 12: additive per-device power SCHEDULE (time-boxed budget). Default-off
+  // and can only ever RESTRICT actuation further — it never grants power and
+  // never bypasses the class gate below. Read-only/Class C already returned above.
+  try {
+    const projectedDeviceW = policy().projectedDeviceLoadW(device, act, evalRes.normalized.params);
+    const sres = powerSchedule().evaluate(device.id, projectedDeviceW);
+    if (!sres.ok) {
+      return {
+        allowed: false, rejected: true, code: sres.code, reason: sres.reason, klass,
+        schedule: { scheduleW: sres.scheduleW, projectedW: sres.projectedW }
+      };
+    }
+  } catch { /* schedule is additive + best-effort; never blocks the safety chain */ }
 
   const sc = systemContext();
 
@@ -253,7 +317,7 @@ function execute(id, action, params = {}) {
     return {
       enabled: true, ok: false, pending: !!decision.pending, rejected: !!decision.rejected,
       code: decision.code, confirmKey: decision.confirmKey, klass: decision.klass, reason: decision.reason,
-      power: decision.power
+      power: decision.power, schedule: decision.schedule
     };
   }
 
@@ -266,6 +330,9 @@ function execute(id, action, params = {}) {
   if (decision.klass === 'A' && result.ok && decision.authKey) {
     try { systemContext().pruneKey(decision.authKey); } catch { /* non-fatal */ }
   }
+
+  // Phase 12: capture a power-history sample whenever an actuation changes state.
+  if (result.ok) { try { recordPowerSample(); } catch { /* observation only */ } }
 
   _emit({ type: 'action', id, action: decision.normalized.action, klass: decision.klass, result });
   return { enabled: true, ok: result.ok, klass: decision.klass, result, reason: result.reason };
@@ -381,6 +448,10 @@ module.exports = {
   on,
   isPhysicalActionAllowed,
   powerStatus,
+  recordPowerSample,
+  getPowerHistory,
+  getPowerTrend,
+  getPowerSchedules,
   isHilEnabled
 };
 

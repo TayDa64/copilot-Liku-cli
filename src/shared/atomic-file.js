@@ -25,6 +25,16 @@ const path = require('path');
 
 let _warnedOnce = false;
 
+// Phase 12: lightweight lock contention metrics (observability). All best-effort
+// counters — reading/updating them never affects locking behaviour.
+const _lockMetrics = { acquired: 0, contended: 0, steals: 0, fallbacks: 0, retries: 0 };
+
+/** Snapshot of lock contention counters since process start (or last reset). */
+function getLockMetrics() { return { ..._lockMetrics }; }
+
+/** Reset lock metrics (tests/observability). */
+function resetLockMetrics() { for (const k of Object.keys(_lockMetrics)) _lockMetrics[k] = 0; }
+
 /** True synchronous sleep (no busy-wait) via Atomics.wait. @private */
 function _sleepSync(ms) {
   if (!(ms > 0)) return;
@@ -53,10 +63,13 @@ function acquireLockSync(targetPath, opts = {}) {
     try {
       fs.mkdirSync(lockPath);
       try { fs.writeFileSync(path.join(lockPath, 'owner'), `${process.pid}:${Date.now()}`); } catch { /* diagnostic only */ }
+      _lockMetrics.acquired++;
+      if (i > 0) _lockMetrics.contended++;
       return { locked: true, release: () => releaseLockSync(lockPath) };
     } catch (err) {
       if (err.code !== 'EEXIST') {
         // Cannot create the lock at all (e.g. permissions) → proceed unlocked.
+        _lockMetrics.fallbacks++;
         return { locked: false, release: () => {} };
       }
       // Steal a stale lock (crashed holder).
@@ -64,15 +77,17 @@ function acquireLockSync(targetPath, opts = {}) {
         const st = fs.statSync(lockPath);
         if (Date.now() - st.mtimeMs > staleMs) {
           try { fs.rmSync(lockPath, { recursive: true, force: true }); } catch { /* ignore */ }
+          _lockMetrics.steals++;
           continue;
         }
       } catch {
         // Lock vanished between mkdir and stat → retry immediately.
         continue;
       }
-      if (i < retries) _sleepSync(retryDelayMs);
+      if (i < retries) { _lockMetrics.retries++; _sleepSync(retryDelayMs); }
     }
   }
+  _lockMetrics.fallbacks++;
   return { locked: false, release: () => {} };
 }
 
@@ -118,4 +133,4 @@ function atomicWriteFileSync(targetPath, data, opts = {}) {
   }, opts);
 }
 
-module.exports = { acquireLockSync, releaseLockSync, withFileLockSync, atomicWriteFileSync };
+module.exports = { acquireLockSync, releaseLockSync, withFileLockSync, atomicWriteFileSync, getLockMetrics, resetLockMetrics };
