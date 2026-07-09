@@ -1450,6 +1450,207 @@ test('powerStatus surfaces historical peak/avg + schedule count', () => {
   delete process.env.LIKU_ENABLE_PERIPHERALS;
 });
 
+// ── Phase 13: real bidirectional Zigbee + advanced scheduling + anomaly detection ──
+
+/** Build a synchronous fake zigbee-herdsman for testing the real Zigbee path. */
+function makeFakeHerdsman(devs) {
+  const EventEmitter = require('events');
+  const endpoints = {};
+  const devices = {};
+  for (const d of devs) {
+    const ep = { _last: null, command(cluster, command, payload) { this._last = { cluster, command, payload }; return Promise.resolve(); } };
+    endpoints[d.ieeeAddr] = ep;
+    devices[d.ieeeAddr] = { getEndpoint: () => ep };
+  }
+  const created = [];
+  class Controller extends EventEmitter {
+    constructor() { super(); created.push(this); }
+    start() { return Promise.resolve(); }
+    getDeviceByIeeeAddr(addr) { return devices[addr] || null; }
+    stop() {}
+  }
+  return {
+    lib: { Controller },
+    endpoints,
+    push: (ieeeAddr, data) => { for (const c of created) c.emit('message', { device: { ieeeAddr }, data }); }
+  };
+}
+
+test('Zigbee real transport connects, writes ZCL command, and ingests attribute reports (fake)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_PERIPHERAL_HIL;              // REAL path, not HIL
+  process.env.LIKU_ZIGBEE_COORDINATOR = '/dev/fake-zigbee';
+  process.env.LIKU_ZIGBEE_DEVICES = JSON.stringify([
+    { id: 'zb-plug-r1', name: 'Plug', class: 'B', kind: 'switch', capabilities: ['on', 'off'], powerW: 12, ieeeAddr: '0x00aa', endpoint: 1 }
+  ]);
+  const zb = require('../src/main/peripherals/drivers/zigbee-driver');
+  const fake = makeFakeHerdsman([{ ieeeAddr: '0x00aa' }]);
+  zb._setZigbeeLibForTest(fake.lib);
+
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  pal.scan();
+  assert.ok(pal.listDrivers().drivers.includes('zigbee'), 'zigbee available via coordinator');
+
+  const readings = [];
+  const off = pal.on('reading', (r) => { if (r.id === 'zb-plug-r1') readings.push(r); });
+  const stop = pal.startStreaming(); // starts coordinator + report routing
+
+  // Class B actuation → real ZCL command dispatched to the endpoint.
+  const rB = pal.execute('zb-plug-r1', 'on');
+  assert.strictEqual(rB.ok, true, 'Class B real command succeeded');
+  assert.strictEqual(fake.endpoints['0x00aa']._last.cluster, 'genOnOff', 'ZCL cluster dispatched');
+  assert.strictEqual(fake.endpoints['0x00aa']._last.command, 'on', 'ZCL command dispatched');
+
+  // Inbound attribute report → parsed → ingested → 'reading' event.
+  fake.push('0x00aa', { temperature: 24, humidity: 51 });
+  assert.strictEqual(readings.length, 1, 'inbound attribute report ingested as a reading');
+  assert.strictEqual(readings[0].metrics.temperature, 24);
+  assert.strictEqual(pal.get('zb-plug-r1').state.temperature, 24, 'reading updated device state');
+
+  stop(); off();
+  zb._setZigbeeLibForTest(null);
+  delete process.env.LIKU_ZIGBEE_COORDINATOR;
+  delete process.env.LIKU_ZIGBEE_DEVICES;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('Zigbee real path still confirm-gates Class A even when connected', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_PERIPHERAL_HIL;
+  process.env.LIKU_ZIGBEE_COORDINATOR = '/dev/fake-zigbee';
+  process.env.LIKU_ZIGBEE_DEVICES = JSON.stringify([
+    { id: 'zb-lock-r1', name: 'Lock', class: 'A', kind: 'lock', capabilities: ['lock', 'unlock'], powerW: 3, ieeeAddr: '0x00bb', endpoint: 1 }
+  ]);
+  const zb = require('../src/main/peripherals/drivers/zigbee-driver');
+  const fake = makeFakeHerdsman([{ ieeeAddr: '0x00bb' }]);
+  zb._setZigbeeLibForTest(fake.lib);
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  pal.scan();
+  const stop = pal.startStreaming();
+  const rA = pal.execute('zb-lock-r1', 'unlock');
+  assert.strictEqual(rA.pending, true, 'Class A gated despite being connected');
+  assert.ok(!fake.endpoints['0x00bb']._last, 'no command dispatched before confirmation');
+  pal.authorize('zb-lock-r1', 'unlock');
+  const rA2 = pal.execute('zb-lock-r1', 'unlock');
+  assert.strictEqual(rA2.ok, true, 'confirmed Class A action dispatches');
+  assert.strictEqual(fake.endpoints['0x00bb']._last.command, 'unlockDoor', 'ZCL unlock dispatched after confirm');
+  stop();
+  zb._setZigbeeLibForTest(null);
+  delete process.env.LIKU_ZIGBEE_COORDINATOR;
+  delete process.env.LIKU_ZIGBEE_DEVICES;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('advanced schedule: per-day rule only governs its days (other days unrestricted)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const sched = require('../src/main/peripherals/power-schedule');
+  const day = new Date(2026, 6, 8, 12, 0, 0); // a Wednesday
+  const wd = day.getDay();
+  const otherDay = (wd + 1) % 7;
+  // Rule only for a DIFFERENT weekday → today is unrestricted (null).
+  process.env.LIKU_PERIPHERAL_SCHEDULES = JSON.stringify([{ id: 'heater', fromHour: 0, toHour: 24, maxW: 100, days: [otherDay] }]);
+  assert.strictEqual(sched.deviceScheduleW('heater', day), null, 'rule for another day does not govern today');
+  // Rule for TODAY → governs (full-day window → cap 100).
+  process.env.LIKU_PERIPHERAL_SCHEDULES = JSON.stringify([{ id: 'heater', fromHour: 0, toHour: 24, maxW: 100, days: [wd] }]);
+  assert.strictEqual(sched.deviceScheduleW('heater', day), 100, "today's rule governs");
+  assert.strictEqual(sched.evaluate('heater', 150, day).ok, false, 'over cap blocked on governed day');
+  delete process.env.LIKU_PERIPHERAL_SCHEDULES;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('advanced schedule: sunrise/sunset window tokens resolve', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  process.env.LIKU_PERIPHERAL_SUNRISE_HOUR = '6';
+  process.env.LIKU_PERIPHERAL_SUNSET_HOUR = '18';
+  const sched = require('../src/main/peripherals/power-schedule');
+  // "off between sunrise and sunset" → daytime cap 0, night cap 500.
+  process.env.LIKU_PERIPHERAL_SCHEDULES = JSON.stringify([{ id: 'lamp', fromHour: 'sunset', toHour: 'sunrise', maxW: 500 }]);
+  const noon = new Date(2026, 6, 8, 12, 0, 0);
+  const night = new Date(2026, 6, 8, 22, 0, 0);
+  assert.strictEqual(sched.deviceScheduleW('lamp', noon), 0, 'daytime (outside sunset→sunrise) → off');
+  assert.strictEqual(sched.deviceScheduleW('lamp', night), 500, 'night (inside sunset→sunrise) → cap 500');
+  const d = sched.describe(night).find((r) => r.id === 'lamp');
+  assert.strictEqual(d.resolvedFrom, 18, 'sunset resolved to 18');
+  assert.strictEqual(d.resolvedTo, 6, 'sunrise resolved to 6');
+  assert.strictEqual(d.active, true, 'active at night');
+  delete process.env.LIKU_PERIPHERAL_SCHEDULES;
+  delete process.env.LIKU_PERIPHERAL_SUNRISE_HOUR;
+  delete process.env.LIKU_PERIPHERAL_SUNSET_HOUR;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('anomaly detection flags a power spike from history', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const anomaly = require('../src/main/peripherals/power-anomaly');
+  const samples = [10, 11, 9, 10, 12, 10].map((w) => ({ totalW: w, at: new Date().toISOString() }));
+  samples.push({ totalW: 200, at: new Date().toISOString() }); // clear spike
+  const res = anomaly.detect({ samples });
+  assert.ok(res.anomalies.some((a) => a.type === 'spike'), 'spike detected');
+  assert.ok(res.baselineW < 20, 'baseline computed from history');
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('anomaly detection is quiet on stable power + respects min samples', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const anomaly = require('../src/main/peripherals/power-anomaly');
+  const stable = [50, 51, 49, 50, 52, 50, 51].map((w) => ({ totalW: w, at: new Date().toISOString() }));
+  assert.strictEqual(anomaly.detect({ samples: stable }).anomalies.length, 0, 'no anomaly on stable power');
+  // Too few samples → cannot judge.
+  const few = [10, 200].map((w) => ({ totalW: w, at: new Date().toISOString() }));
+  assert.strictEqual(anomaly.detect({ samples: few }).anomalies.length, 0, 'min-samples guard holds');
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('anomaly detection is flag-gated', () => {
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+  const anomaly = require('../src/main/peripherals/power-anomaly');
+  const samples = [10, 10, 10, 10, 10, 200].map((w) => ({ totalW: w, at: new Date().toISOString() }));
+  assert.strictEqual(anomaly.detect({ samples }).anomalies.length, 0, 'no detection when disabled');
+});
+
+test('anomaly detection flags sustained deviation + over-budget', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const anomaly = require('../src/main/peripherals/power-anomaly');
+  // Prior baseline ~20W, then last 3 samples sustained ~80W.
+  const sustained = [20, 21, 19, 20, 22, 80, 82, 81].map((w) => ({ totalW: w, at: new Date().toISOString() }));
+  const r1 = anomaly.detect({ samples: sustained });
+  assert.ok(r1.anomalies.some((a) => a.type === 'sustained'), 'sustained deviation detected');
+  // Over-budget on the latest sample.
+  const ob = [10, 11, 10, 12, 10, 10].map((w) => ({ totalW: w, budgetW: 100, at: new Date().toISOString() }));
+  ob.push({ totalW: 30, budgetW: 25, overBudget: true, at: new Date().toISOString() });
+  const r2 = anomaly.detect({ samples: ob });
+  assert.ok(r2.anomalies.some((a) => a.type === 'over-budget'), 'over-budget anomaly detected');
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('PAL emits power-anomaly and surfaces anomalies via accessor + status (HIL)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  process.env.LIKU_PERIPHERAL_HIL = '1';
+  const ph = require('../src/main/peripherals/power-history');
+  ph.clear();
+  // Seed a low, stable baseline.
+  for (const w of [5, 6, 5, 5, 6, 5]) ph.record({ totalW: w, budgetW: 5000, devices: [] });
+  process.env.LIKU_BLE_DEVICES = JSON.stringify([
+    { id: 'anom-heater', name: 'Heater', class: 'B', kind: 'heater', capabilities: ['on', 'off'], powerW: 400 }
+  ]);
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  pal.scan();
+  const events = [];
+  const off = pal.on('power-anomaly', (e) => events.push(e));
+  // Turning on a 400W device makes the freshly-recorded sample a spike vs baseline.
+  const r = pal.execute('anom-heater', 'on');
+  assert.strictEqual(r.ok, true, 'HIL actuation succeeded');
+  assert.ok(events.length >= 1, 'power-anomaly event emitted on spike');
+  assert.strictEqual(events[0].anomaly.type, 'spike');
+  const acc = pal.getPowerAnomalies();
+  assert.ok(acc.anomalies.length >= 1, 'accessor surfaces the anomaly');
+  assert.ok(pal.powerStatus().anomalies >= 1, 'powerStatus surfaces anomaly count');
+  off(); ph.clear();
+  delete process.env.LIKU_BLE_DEVICES;
+  delete process.env.LIKU_PERIPHERAL_HIL;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
 console.log(`\n${pass} checks passed.`);
 if (process.exitCode) { console.error('FAILED'); }
 else { console.log('OK'); }

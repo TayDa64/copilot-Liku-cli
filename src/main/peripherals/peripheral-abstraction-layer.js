@@ -43,6 +43,7 @@ function policy() { return require('./peripheral-policy'); }
 function hil() { return require('./hil-simulator'); }
 function powerHistory() { return require('./power-history'); }
 function powerSchedule() { return require('./power-schedule'); }
+function powerAnomaly() { return require('./power-anomaly'); }
 
 /** True when hardware-in-the-loop simulation mode is enabled. */
 function isHilEnabled() {
@@ -179,6 +180,9 @@ function powerStatus() {
   try { history = powerHistory().summary(); } catch { history = null; }
   let schedules = 0;
   try { schedules = powerSchedule().describe().length; } catch { schedules = 0; }
+  // Phase 13: surface a live anomaly count (advisory).
+  let anomalies = 0;
+  try { const a = powerAnomaly().detect(); anomalies = a && a.anomalies ? a.anomalies.length : 0; } catch { anomalies = 0; }
   return {
     enabled: true,
     budgetW: effectiveBudgetW,
@@ -191,6 +195,7 @@ function powerStatus() {
     avgW: history ? history.avgW : 0,
     samples: history ? history.count : 0,
     schedules,
+    anomalies,
     devices
   };
 }
@@ -203,13 +208,22 @@ function recordPowerSample() {
   if (!isPeripheralsEnabled()) return null;
   try {
     const ps = powerStatus();
-    return powerHistory().record({
+    const rec = powerHistory().record({
       at: new Date().toISOString(),
       totalW: ps.currentW,
       budgetW: ps.budgetW,
       overBudget: ps.overBudget,
       devices: ps.devices
     });
+    // Phase 13: advisory anomaly detection — surface (never actuate). Emitting a
+    // decoupled 'power-anomaly' event lets the CLI / an escalation consumer react.
+    try {
+      const res = powerAnomaly().detect();
+      if (res && res.anomalies && res.anomalies.length) {
+        for (const a of res.anomalies) _emit({ type: 'power-anomaly', anomaly: a, baselineW: res.baselineW, at: a.at });
+      }
+    } catch { /* anomaly detection is advisory + best-effort */ }
+    return rec;
   } catch { return null; }
 }
 
@@ -232,6 +246,13 @@ function getPowerSchedules() {
   if (!isPeripheralsEnabled()) return { enabled: false, schedules: [] };
   try { return { enabled: true, schedules: powerSchedule().describe() }; }
   catch { return { enabled: true, schedules: [] }; }
+}
+
+/** Detect advisory power anomalies from the rolling history. */
+function getPowerAnomalies(opts = {}) {
+  if (!isPeripheralsEnabled()) return { enabled: false, anomalies: [] };
+  try { return { enabled: true, ...powerAnomaly().detect(opts) }; }
+  catch { return { enabled: true, anomalies: [], baselineW: 0, currentW: 0, samples: 0 }; }
 }
 
 /**
@@ -452,6 +473,7 @@ module.exports = {
   getPowerHistory,
   getPowerTrend,
   getPowerSchedules,
+  getPowerAnomalies,
   isHilEnabled
 };
 

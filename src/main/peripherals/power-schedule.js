@@ -41,13 +41,58 @@ function loadSchedules() {
       .filter((s) => s && typeof s === 'object' && s.id)
       .map((s) => ({
         id: String(s.id),
-        fromHour: _clampHour(s.fromHour, 0),
-        toHour: _clampHour(s.toHour, 24),
-        maxW: Number.isFinite(Number(s.maxW)) ? Math.max(0, Number(s.maxW)) : 0
+        // fromHour/toHour may be a number (0..24) OR the tokens 'sunrise'/'sunset',
+        // resolved lazily so a moving sunrise/sunset can be provided at query time.
+        fromHour: _normHourSpec(s.fromHour, 0),
+        toHour: _normHourSpec(s.toHour, 24),
+        maxW: Number.isFinite(Number(s.maxW)) ? Math.max(0, Number(s.maxW)) : 0,
+        // Optional per-day restriction: array of weekday numbers (0=Sun..6=Sat)
+        // or names (sun,mon,...). Absent → the rule applies every day.
+        days: _parseDays(s.days),
+        // Optional per-rule sunrise/sunset overrides (hours 0..24).
+        sunriseHour: Number.isFinite(Number(s.sunriseHour)) ? _clampHour(s.sunriseHour, 6) : undefined,
+        sunsetHour: Number.isFinite(Number(s.sunsetHour)) ? _clampHour(s.sunsetHour, 18) : undefined
       }));
   } catch {
     return [];
   }
+}
+
+/** Keep a numeric hour clamped, or pass through the sunrise/sunset tokens. @private */
+function _normHourSpec(v, dflt) {
+  if (typeof v === 'string') {
+    const t = v.trim().toLowerCase();
+    if (t === 'sunrise' || t === 'sunset') return t;
+  }
+  return _clampHour(v, dflt);
+}
+
+const _DAY_NAMES = { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6 };
+
+/** Parse a days list (numbers or names) into a Set of weekday numbers, or null. @private */
+function _parseDays(days) {
+  if (!Array.isArray(days) || !days.length) return null;
+  const out = [];
+  for (const d of days) {
+    if (typeof d === 'number' && Number.isFinite(d)) { const n = ((Math.floor(d) % 7) + 7) % 7; out.push(n); }
+    else if (typeof d === 'string') { const n = _DAY_NAMES[d.trim().slice(0, 3).toLowerCase()]; if (n != null) out.push(n); }
+  }
+  return out.length ? out : null;
+}
+
+/** Resolve a from/to hour spec (number or sunrise/sunset token) to a number. @private */
+function _resolveHour(spec, rule) {
+  if (spec === 'sunrise') {
+    return rule && rule.sunriseHour != null
+      ? rule.sunriseHour
+      : _clampHour(process.env.LIKU_PERIPHERAL_SUNRISE_HOUR, 6);
+  }
+  if (spec === 'sunset') {
+    return rule && rule.sunsetHour != null
+      ? rule.sunsetHour
+      : _clampHour(process.env.LIKU_PERIPHERAL_SUNSET_HOUR, 18);
+  }
+  return _clampHour(spec, 0);
 }
 
 function _clampHour(v, dflt) {
@@ -65,8 +110,13 @@ function _inWindow(hour, fromHour, toHour) {
 
 /**
  * The scheduled max watts for a device at a given time. Returns null when no
- * schedule applies (→ no additional restriction). Inside the window → maxW;
- * outside → 0 (device must be off).
+ * schedule GOVERNS the device right now (→ no additional restriction). When one
+ * or more rules govern today: inside a window → the highest maxW; outside every
+ * window → 0 (device must be off).
+ *
+ * Rules restricted to specific `days` only govern on those days; if a device has
+ * only day-restricted rules and none match today, the device is UNRESTRICTED
+ * today (returns null) rather than forced off — schedules only ever restrict.
  * @param {string} deviceId
  * @param {Date} [now]
  * @returns {number|null}
@@ -75,14 +125,15 @@ function deviceScheduleW(deviceId, now = new Date()) {
   if (!enabled()) return null;
   const rules = loadSchedules().filter((s) => s.id === deviceId);
   if (!rules.length) return null;
-  const hour = now.getHours();
-  let cap = 0; // outside every window → must be off
-  let matched = false;
-  for (const r of rules) {
-    matched = true;
-    if (_inWindow(hour, r.fromHour, r.toHour)) cap = Math.max(cap, r.maxW);
+  const day = now.getDay();
+  const applicable = rules.filter((r) => !r.days || r.days.includes(day));
+  if (!applicable.length) return null; // no rule governs today → unrestricted
+  const hour = now.getHours() + now.getMinutes() / 60;
+  let cap = 0; // governed today but outside every window → must be off
+  for (const r of applicable) {
+    if (_inWindow(hour, _resolveHour(r.fromHour, r), _resolveHour(r.toHour, r))) cap = Math.max(cap, r.maxW);
   }
-  return matched ? cap : null;
+  return cap;
 }
 
 /**
@@ -114,11 +165,23 @@ function evaluate(deviceId, projectedDeviceLoadW, now = new Date()) {
 /** Describe configured schedules + their current (in-window) status (CLI). */
 function describe(now = new Date()) {
   const rules = loadSchedules();
-  const hour = now.getHours();
-  return rules.map((r) => ({
-    ...r,
-    active: _inWindow(hour, r.fromHour, r.toHour)
-  }));
+  const hour = now.getHours() + now.getMinutes() / 60;
+  const day = now.getDay();
+  return rules.map((r) => {
+    const from = _resolveHour(r.fromHour, r);
+    const to = _resolveHour(r.toHour, r);
+    const governsToday = !r.days || r.days.includes(day);
+    return {
+      id: r.id,
+      fromHour: r.fromHour,
+      toHour: r.toHour,
+      resolvedFrom: from,
+      resolvedTo: to,
+      maxW: r.maxW,
+      days: r.days,
+      active: governsToday && _inWindow(hour, from, to)
+    };
+  });
 }
 
 module.exports = { FLAG, enabled, loadSchedules, deviceScheduleW, evaluate, describe };

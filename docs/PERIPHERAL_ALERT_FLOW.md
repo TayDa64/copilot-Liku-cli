@@ -246,6 +246,53 @@ pending-confirm. No schedules configured → no effect. CLI:
 (`acquired / contended / steals / fallbacks / retries`) via `getLockMetrics()`.
 Surfaced in `liku peripherals status`.
 
+## Real Zigbee + smarter power (Phase 13)
+
+### Real bidirectional Zigbee
+
+`zigbee-driver.js` now implements a real **bidirectional** mesh transport (in
+addition to HIL). A `ZigbeeCoordinator` wraps a `zigbee-herdsman` Controller:
+
+- `perform()` (real path) resolves the device endpoint
+  (`getDeviceByIeeeAddr` → `getEndpoint`) and issues a **ZCL command** mapped from
+  the action (`on/off`→`genOnOff`, `lock/unlock`→`closuresDoorLock`,
+  `open/close`→`closuresWindowCovering`, `brightness`→`genLevelCtrl`). Until the
+  endpoint resolves it returns `{ ok:false, reason:'not-connected' }` — but the
+  PAL has already enforced the class gate, so Class A still requires confirmation.
+- Inbound **attribute reports** (`message` events) are parsed and forwarded to
+  `PAL.ingestSensorReading()`, so mesh sensor updates flow into the normal
+  grounding + monitor + escalation pipeline.
+- The `zigbee-herdsman` lib is required lazily; a test seam
+  (`_setZigbeeLibForTest`) exercises the real path with a fake controller.
+
+### Advanced power schedules
+
+`power-schedule.js` gained:
+
+- **Per-day** rules — `days: [0..6]` or names (`["mon","tue"]`). A rule only
+  governs on its days; if a device has only day-restricted rules and none match
+  today, it is **unrestricted** today (schedules only ever restrict).
+- **Sunrise/sunset** window tokens — `fromHour`/`toHour` may be `"sunrise"` /
+  `"sunset"`, resolved from `LIKU_PERIPHERAL_SUNRISE_HOUR` / `_SUNSET_HOUR`
+  (defaults 6/18) or per-rule `sunriseHour` / `sunsetHour`.
+
+Still additive + restrictive-only and enforced **before** the class gate.
+
+### Power anomaly detection
+
+`power-anomaly.js` reads the rolling power history and flags advisory anomalies:
+
+| Type | Trigger |
+| --- | --- |
+| `spike` | latest > `baselineMean × spikeFactor` **and** > `mean + σ·stddev`, with a min absolute delta |
+| `sustained` | last N samples all above `baselineMean × sustainedFactor` |
+| `over-budget` | latest sample exceeded its recorded budget |
+
+`recordPowerSample()` runs detection after each actuation and emits a decoupled
+**`power-anomaly`** event (pure observation — never actuates). Accessor:
+`getPowerAnomalies()`; `powerStatus().anomalies` carries the count. CLI:
+`liku peripherals power --anomalies`. Tunable via `LIKU_PERIPHERAL_ANOMALY_*`.
+
 ## If a human decides to act
 
 Any physical response still travels the full PAL safety chain — the alert path
@@ -355,6 +402,12 @@ driver stays local/in-process and needs no wire format.
   bypass the class gate; with no schedules configured it has zero effect.
 - **Power history is pure observation.** Recording a power sample never actuates
   anything; the log is bounded, atomic, flag-gated, and corruption-tolerant.
+- **Anomaly detection only observes.** Spike/sustained/over-budget detection
+  reads history and emits an advisory `power-anomaly` event; it never actuates,
+  never gates, and is flag-gated + additive (quiet with insufficient history).
+- **Advanced schedules only restrict.** Per-day + sunrise/sunset rules can only
+  lower a device's allowed draw (or force it off outside its window); a device
+  with no rule governing "now" is unrestricted, and schedules never actuate.
 - **Cognitive budget unchanged.** `sensor.*`/`hardware.*.alert` facts are
   evidence-excluded from the default fragment; the default prompt stays
   byte-identical.

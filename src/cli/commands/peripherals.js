@@ -15,7 +15,7 @@
  *                                       Human-gated peripheral tasks (filterable)
  *   liku peripherals notifications [--pending|--severity <s>]
  *   liku peripherals channels           Show escalation notification channels
- *   liku peripherals power [--history|--trend]
+ *   liku peripherals power [--history|--trend|--anomalies]
  *                                       Live budget + rolling power telemetry
  *   liku peripherals schedules          Show per-device time-boxed power budgets
  */
@@ -67,7 +67,7 @@ async function run(args, flags) {
         log(highlight('Peripherals status'));
         log(`  devices: ${ps.devices ? ps.devices.length : 0}`);
         log(`  power: ${ps.currentW}W / ${ps.budgetW}W  (headroom ${ps.headroomW}W)`);
-        log(`  peak: ${ps.peakW}W  avg: ${ps.avgW}W  (${ps.samples} samples)`);
+        log(`  peak: ${ps.peakW}W  avg: ${ps.avgW}W  (${ps.samples} samples)${ps.anomalies ? `  anomalies: ${ps.anomalies}` : ''}`);
         log(`  locking: ${ps.locking || 'advisory-file-lock'}   HIL: ${ps.hil ? 'ON (simulation)' : 'off'}`);
         try {
           const lm = require('../../shared/atomic-file').getLockMetrics();
@@ -150,6 +150,17 @@ async function run(args, flags) {
 
     case 'power': {
       const ps = pal.powerStatus();
+      // Phase 13: --anomalies surfaces detected power anomalies.
+      if (flags.anomalies) {
+        const res = pal.getPowerAnomalies();
+        if (flags.json) return { success: true, ...res };
+        log(highlight(`Power anomalies (${res.anomalies.length}):`));
+        if (!res.anomalies.length) log(dim(`  none (baseline ${res.baselineW}W, ${res.samples} samples)`));
+        for (const a of res.anomalies) {
+          log(`  ${highlight(a.type)}  ${a.valueW}W vs baseline ${a.baselineW}W  ${dim(a.advisory || '')}`);
+        }
+        return { success: true, ...res };
+      }
       // Phase 12: --history shows recent samples; --trend shows the summary.
       if (flags.history || flags.trend) {
         const trend = pal.getPowerTrend();
@@ -172,7 +183,7 @@ async function run(args, flags) {
       log(`  total:   ${ps.currentW}W / ${ps.budgetW}W`);
       log(`  headroom: ${ps.headroomW}W${ps.overBudget ? '  (OVER BUDGET)' : ''}`);
       log(`  peak: ${ps.peakW}W  avg: ${ps.avgW}W  (${ps.samples} samples)`);
-      log(`  locking: ${ps.locking || 'advisory-file-lock'}   HIL: ${ps.hil ? 'ON (simulation)' : 'off'}${ps.schedules ? `   schedules: ${ps.schedules}` : ''}`);
+      log(`  locking: ${ps.locking || 'advisory-file-lock'}   HIL: ${ps.hil ? 'ON (simulation)' : 'off'}${ps.schedules ? `   schedules: ${ps.schedules}` : ''}${ps.anomalies ? `   anomalies: ${ps.anomalies}` : ''}`);
       for (const d of ps.devices || []) {
         log(`  ${highlight(d.id)} [${d.class}] ${d.loadW}W ${dim(d.active ? 'active' : 'idle')}`);
       }
@@ -185,10 +196,12 @@ async function run(args, flags) {
       if (flags.json) return { success: true, ...res };
       log(highlight(`Power schedules (${res.schedules.length}):`));
       if (!res.schedules.length) {
-        log(dim('  none (set LIKU_PERIPHERAL_SCHEDULES=[{"id","fromHour","toHour","maxW"}])'));
+        log(dim('  none (set LIKU_PERIPHERAL_SCHEDULES=[{"id","fromHour","toHour","maxW","days?"}])'));
       }
       for (const s of res.schedules) {
-        log(`  ${highlight(s.id)} ${s.fromHour}:00→${s.toHour}:00  ≤${s.maxW}W  ${dim(s.active ? 'IN WINDOW' : 'outside')}`);
+        const win = `${s.fromHour}→${s.toHour}` + (s.fromHour !== s.resolvedFrom || s.toHour !== s.resolvedTo ? ` (${s.resolvedFrom}:00→${s.resolvedTo}:00)` : ':00');
+        const days = Array.isArray(s.days) && s.days.length ? ` days:[${s.days.join(',')}]` : '';
+        log(`  ${highlight(s.id)} ${win}  ≤${s.maxW}W${days}  ${dim(s.active ? 'IN WINDOW' : 'outside')}`);
       }
       return { success: true, ...res };
     }
@@ -292,7 +305,7 @@ async function run(args, flags) {
 
     default:
       error(`Unknown subcommand: ${sub}`);
-      log('Usage: liku peripherals [scan|list|status [id]|power [--history|--trend]|schedules|tasks [--escalated|--pending|--severity <p>]|notifications|channels|simulate <id> <k=v>|execute <id> <action>|confirm <id> <action> [--execute]|drivers]');
+      log('Usage: liku peripherals [scan|list|status [id]|power [--history|--trend|--anomalies]|schedules|tasks [--escalated|--pending|--severity <p>]|notifications|channels|simulate <id> <k=v>|execute <id> <action>|confirm <id> <action> [--execute]|drivers]');
       return { success: false };
   }
 }
