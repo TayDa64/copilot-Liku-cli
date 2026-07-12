@@ -331,6 +331,45 @@ SAME human-gated escalation pipeline used by sensor alerts:
   **or** a domain is configured, `LIKU_ROS2_DOMAIN`); `rclnodejs` is required
   lazily, with a `_setRos2LibForTest` seam for the real path.
 
+## Matter/Thread + anomaly tiers (Phase 15)
+
+### Matter/Thread bridge foundation
+
+`matter-driver.js` (smart-home, `REMOTE=true`, HIL-capable) joins the driver
+set. A `MatterController` wraps a matter.js commissioning controller:
+
+- `perform()` (real path) **invokes** a Matter cluster command mapped from the
+  action (`on/off`→`OnOff`, `lock/unlock`→`DoorLock`,
+  `open/close`→`WindowCovering`, `brightness`→`LevelControl`) on the node
+  endpoint (`getNode` → `getEndpoint` → `invoke`). Until the node resolves it
+  returns `{ ok:false, reason:'not-connected' }` — but the PAL has already
+  enforced the class gate, so Class A still confirms.
+- Inbound **attribute reports** are parsed and forwarded to
+  `PAL.ingestSensorReading()`.
+- Available when devices are declared (`LIKU_MATTER_DEVICES`) **and** (HIL is on
+  **or** a fabric is configured, `LIKU_MATTER_FABRIC`); the matter.js lib is
+  required lazily, with a `_setMatterLibForTest` seam for the real path.
+
+### Anomaly severity tiers
+
+`power-anomaly-consumer.js` now maps anomaly **type → advisory tier**
+(`ANOMALY_TIERS`), driving differentiated task priority, escalation routing and
+dedup window — while staying strictly advisory:
+
+| Type | Severity → task | Escalation | Cooldown |
+| --- | --- | --- | --- |
+| `over-budget` | `critical` → **high** | `escalate` | 15 s (surfaces fastest, never auto-acked) |
+| `sustained` | `warning` → medium | `notify` | 90 s (persistent → dedups longer) |
+| `spike` | `warning` → medium | `notify` | 60 s |
+| _(other)_ | `info` → low | `log` | 120 s |
+
+An explicit `cooldownMs` option / `LIKU_PERIPHERAL_ANOMALY_COOLDOWN_MS` overrides
+all tiers. Higher severity only means **more visibility/priority** — every
+anomaly task remains `pending-review`, `autonomousAction:false`, and modelled on
+a read-only Class C synthetic device (never an actuation path). CLI:
+`liku peripherals power --anomalies` shows the tier; `tasks --anomaly` shows the
+resulting priority.
+
 ## If a human decides to act
 
 Any physical response still travels the full PAL safety chain — the alert path
@@ -453,6 +492,13 @@ driver stays local/in-process and needs no wire format.
 - **New drivers inherit the safety chain.** The ROS2 bridge (like BLE/Zigbee)
   publishes signed DCP envelopes and is gated by DCP → class gate →
   pending/confirm; Class A stays confirm-gated even in HIL.
+- **Matter stays gated.** The Matter bridge invokes cluster commands only after
+  `isPhysicalActionAllowed`; a live fabric never weakens Class A (invoke happens
+  only post-confirmation), and discover/gating work without the matter.js lib.
+- **Anomaly tiers only re-prioritise.** Higher tiers (e.g. over-budget→critical)
+  raise visibility/priority and shorten the dedup window but never actuate, never
+  bypass the human gate, and keep `autonomousAction:false` on a read-only Class C
+  synthetic device.
 - **Cognitive budget unchanged.** `sensor.*`/`hardware.*.alert` facts are
   evidence-excluded from the default fragment; the default prompt stays
   byte-identical.

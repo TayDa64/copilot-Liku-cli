@@ -55,7 +55,7 @@ function isHilEnabled() {
 // (e.g. mqtt) are used only when they report isAvailable() — otherwise the mock
 // remains the default. All drivers share the same interface:
 //   id, isAvailable(), discover(), perform(device, action, params), start(emit)
-const DRIVER_IDS = Object.freeze(['mock', 'mqtt', 'serial', 'ble', 'zigbee', 'ros2']);
+const DRIVER_IDS = Object.freeze(['mock', 'mqtt', 'serial', 'ble', 'zigbee', 'ros2', 'matter']);
 const _driverCache = {};
 function _driver(id) {
   if (!(id in _driverCache)) {
@@ -66,6 +66,7 @@ function _driver(id) {
       else if (id === 'ble') _driverCache[id] = require('./drivers/ble-driver');
       else if (id === 'zigbee') _driverCache[id] = require('./drivers/zigbee-driver');
       else if (id === 'ros2') _driverCache[id] = require('./drivers/ros2-driver');
+      else if (id === 'matter') _driverCache[id] = require('./drivers/matter-driver');
       else _driverCache[id] = null;
     } catch { _driverCache[id] = null; }
   }

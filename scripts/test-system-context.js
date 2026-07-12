@@ -1662,7 +1662,9 @@ test('buildAnomalyNotification produces an advisory, non-actuating notification'
   assert.strictEqual(n.autonomousAction, false);
   assert.strictEqual(n.breach.metric, 'power');
   assert.strictEqual(n.breach.level, 'over-budget');
-  assert.strictEqual(n.severity, 'warning', 'advisory severity (subject to cooldown, never critical)');
+  // Phase 15: over-budget is the highest advisory tier (critical severity → high
+  // priority/escalate) but remains strictly advisory (autonomousAction:false).
+  assert.strictEqual(n.severity, 'critical', 'over-budget maps to the critical advisory tier');
 });
 
 test('power anomaly consumer creates a bounded, human-gated, deduped task', () => {
@@ -1853,6 +1855,205 @@ test('ROS2 driver is unavailable without HIL and without a domain (isolated)', (
   const ros2 = require('../src/main/peripherals/drivers/ros2-driver');
   assert.strictEqual(ros2.isAvailable(), false, 'no HIL + no domain → unavailable');
   delete process.env.LIKU_ROS2_DEVICES;
+});
+
+// ── Phase 15: Matter/Thread foundation + anomaly severity tiers ──
+
+/** Build a synchronous fake matter.js for testing the real Matter path. */
+function makeFakeMatter(nodes) {
+  const EventEmitter = require('events');
+  const endpoints = {};
+  const nodeObjs = {};
+  for (const n of nodes) {
+    const ep = { _last: null, invoke(cluster, command, payload) { this._last = { cluster, command, payload }; return Promise.resolve(); } };
+    endpoints[String(n.nodeId)] = ep;
+    nodeObjs[String(n.nodeId)] = { getEndpoint: () => ep };
+  }
+  const created = [];
+  class CommissioningController extends EventEmitter {
+    constructor() { super(); created.push(this); }
+    start() { return undefined; }   // synchronous → started immediately
+    getNode(id) { return nodeObjs[String(id)] || null; }
+    stop() {}
+  }
+  return {
+    lib: { CommissioningController },
+    endpoints,
+    push: (nodeId, data) => { for (const c of created) c.emit('attributeReport', { nodeId, data }); }
+  };
+}
+
+test('Matter bridge connects, invokes a cluster command, and ingests attribute reports (fake)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_PERIPHERAL_HIL;             // REAL path, not HIL
+  process.env.LIKU_MATTER_FABRIC = 'fabric-1';
+  process.env.LIKU_MATTER_DEVICES = JSON.stringify([
+    { id: 'mt-plug-01', name: 'Plug', class: 'B', kind: 'switch', capabilities: ['on', 'off'], powerW: 15, nodeId: '1001', endpoint: 1 }
+  ]);
+  const matter = require('../src/main/peripherals/drivers/matter-driver');
+  const fake = makeFakeMatter([{ nodeId: '1001' }]);
+  matter._setMatterLibForTest(fake.lib);
+
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  pal.scan();
+  assert.ok(pal.listDrivers().drivers.includes('matter'), 'matter available via fabric');
+
+  const readings = [];
+  const off = pal.on('reading', (r) => { if (r.id === 'mt-plug-01') readings.push(r); });
+  const stop = pal.startStreaming();
+
+  // Class B actuation → real Matter cluster command invoked.
+  const rB = pal.execute('mt-plug-01', 'on');
+  assert.strictEqual(rB.ok, true, 'Class B real invoke succeeded');
+  assert.strictEqual(fake.endpoints['1001']._last.cluster, 'OnOff', 'Matter cluster invoked');
+  assert.strictEqual(fake.endpoints['1001']._last.command, 'on', 'Matter command invoked');
+
+  // Inbound attribute report → parsed → ingested → 'reading' event.
+  fake.push('1001', { temperature: 21, humidity: 47 });
+  assert.strictEqual(readings.length, 1, 'inbound attribute report ingested as a reading');
+  assert.strictEqual(readings[0].metrics.temperature, 21);
+  assert.strictEqual(pal.get('mt-plug-01').state.temperature, 21, 'reading updated device state');
+
+  stop(); off();
+  matter._setMatterLibForTest(null);
+  delete process.env.LIKU_MATTER_FABRIC;
+  delete process.env.LIKU_MATTER_DEVICES;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('Matter real path still confirm-gates Class A even when connected', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_PERIPHERAL_HIL;
+  process.env.LIKU_MATTER_FABRIC = 'fabric-1';
+  process.env.LIKU_MATTER_DEVICES = JSON.stringify([
+    { id: 'mt-lock-01', name: 'Lock', class: 'A', kind: 'lock', capabilities: ['lock', 'unlock'], powerW: 4, nodeId: '2002', endpoint: 1 }
+  ]);
+  const matter = require('../src/main/peripherals/drivers/matter-driver');
+  const fake = makeFakeMatter([{ nodeId: '2002' }]);
+  matter._setMatterLibForTest(fake.lib);
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  pal.scan();
+  const stop = pal.startStreaming();
+  const rA = pal.execute('mt-lock-01', 'unlock');
+  assert.strictEqual(rA.pending, true, 'Class A gated despite being connected');
+  assert.ok(!fake.endpoints['2002']._last, 'no command invoked before confirmation');
+  pal.authorize('mt-lock-01', 'unlock');
+  const rA2 = pal.execute('mt-lock-01', 'unlock');
+  assert.strictEqual(rA2.ok, true, 'confirmed Class A action invokes');
+  assert.strictEqual(fake.endpoints['2002']._last.command, 'unlockDoor', 'Matter unlock invoked after confirm');
+  stop();
+  matter._setMatterLibForTest(null);
+  delete process.env.LIKU_MATTER_FABRIC;
+  delete process.env.LIKU_MATTER_DEVICES;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('Matter driver works through the full DCP + class gate + confirm path (HIL)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  process.env.LIKU_PERIPHERAL_HIL = '1';
+  delete process.env.LIKU_MATTER_FABRIC; // no real fabric — HIL provides availability
+  process.env.LIKU_MATTER_DEVICES = JSON.stringify([
+    { id: 'mt-lock-hil', name: 'Lock', class: 'A', kind: 'lock', capabilities: ['lock', 'unlock'], powerW: 5 },
+    { id: 'mt-led-hil', name: 'LED', class: 'B', kind: 'light', capabilities: ['on', 'off'], powerW: 4 }
+  ]);
+  const matter = require('../src/main/peripherals/drivers/matter-driver');
+  assert.strictEqual(matter.isAvailable(), true, 'available in HIL (no fabric)');
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  pal.scan();
+  assert.ok(pal.listDrivers().drivers.includes('matter'), 'matter driver listed');
+  const rB = pal.execute('mt-led-hil', 'on');
+  assert.strictEqual(rB.ok, true);
+  assert.strictEqual(rB.result.simulated, true, 'HIL executed the Class B action');
+  const rA = pal.execute('mt-lock-hil', 'unlock');
+  assert.strictEqual(rA.pending, true, 'Class A still gated in HIL');
+  pal.authorize('mt-lock-hil', 'unlock');
+  const rA2 = pal.execute('mt-lock-hil', 'unlock');
+  assert.strictEqual(rA2.ok, true);
+  assert.strictEqual(rA2.result.state.locked, false, 'simulator applied the unlock');
+  delete process.env.LIKU_PERIPHERAL_HIL;
+  delete process.env.LIKU_MATTER_DEVICES;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('Matter driver is unavailable without HIL and without a fabric (isolated)', () => {
+  delete process.env.LIKU_PERIPHERAL_HIL;
+  delete process.env.LIKU_MATTER_FABRIC;
+  process.env.LIKU_MATTER_DEVICES = JSON.stringify([{ id: 'mt-x', class: 'B', capabilities: ['on'] }]);
+  const matter = require('../src/main/peripherals/drivers/matter-driver');
+  assert.strictEqual(matter.isAvailable(), false, 'no HIL + no fabric → unavailable');
+  delete process.env.LIKU_MATTER_DEVICES;
+});
+
+test('anomaly severity tiers map type → severity + cooldown', () => {
+  const { buildAnomalyNotification, ANOMALY_TIERS } = require('../src/main/agents/power-anomaly-consumer');
+  assert.strictEqual(buildAnomalyNotification({ anomaly: { type: 'over-budget', valueW: 300, budgetW: 250 } }).severity, 'critical');
+  assert.strictEqual(buildAnomalyNotification({ anomaly: { type: 'spike', valueW: 200 } }).severity, 'warning');
+  assert.strictEqual(buildAnomalyNotification({ anomaly: { type: 'sustained', valueW: 150 } }).severity, 'warning');
+  assert.strictEqual(buildAnomalyNotification({ anomaly: { type: 'mystery', valueW: 1 } }).severity, 'info');
+  // over-budget surfaces faster (shorter cooldown) than a routine spike.
+  assert.ok(ANOMALY_TIERS['over-budget'].cooldownMs < ANOMALY_TIERS['spike'].cooldownMs, 'over-budget has the shortest window');
+  assert.ok(ANOMALY_TIERS['sustained'].cooldownMs >= ANOMALY_TIERS['spike'].cooldownMs, 'sustained dedups longer');
+});
+
+test('anomaly tiers drive differentiated task priority + escalation (advisory)', () => {
+  const EventEmitter = require('events');
+  const { SupervisorAgent } = require('../src/main/agents/supervisor');
+  const { attachPowerAnomalyConsumer } = require('../src/main/agents/power-anomaly-consumer');
+  const orch = new EventEmitter();
+  orch.agents = new Map();
+  // Auto-ack info+warning to PROVE over-budget (critical) is never auto-acked.
+  const sup = new SupervisorAgent({ autoAckSeverities: 'info,warning' });
+  orch.agents.set('supervisor', sup);
+  let captured = null;
+  const fakePal = { on: (type, cb) => { if (type === 'power-anomaly') captured = cb; return () => {}; } };
+  attachPowerAnomalyConsumer(orch, { pal: fakePal, now: () => 1_000_000 });
+
+  // over-budget → critical → high priority + escalate + NEVER auto-acknowledged.
+  captured({ anomaly: { type: 'over-budget', valueW: 300, budgetW: 250, at: new Date().toISOString(), advisory: 'ob' }, baselineW: 100 });
+  const ob = sup.getPeripheralTasks().find((t) => t.breach.level === 'over-budget');
+  assert.ok(ob, 'over-budget task created');
+  assert.strictEqual(ob.priority, 'high', 'over-budget → high priority');
+  assert.strictEqual(ob.escalation, 'escalate', 'over-budget → escalate routing');
+  assert.strictEqual(ob.status, 'pending-review', 'over-budget never auto-acknowledged');
+  assert.strictEqual(ob.autonomousAction, false, 'still advisory');
+
+  // spike → warning → medium priority + notify routing (different tier).
+  captured({ anomaly: { type: 'spike', valueW: 500, at: new Date().toISOString(), advisory: 'sp' }, baselineW: 100 });
+  const sp = sup.getPeripheralTasks().find((t) => t.breach.level === 'spike');
+  assert.ok(sp, 'spike task created');
+  assert.strictEqual(sp.priority, 'medium', 'spike → medium priority');
+  assert.strictEqual(sp.escalation, 'notify', 'spike → notify routing');
+  assert.strictEqual(sp.autonomousAction, false, 'still advisory');
+});
+
+test('anomaly tier cooldowns differ by type (over-budget surfaces faster than spike)', () => {
+  const EventEmitter = require('events');
+  const { SupervisorAgent } = require('../src/main/agents/supervisor');
+  const { attachPowerAnomalyConsumer } = require('../src/main/agents/power-anomaly-consumer');
+  const orch = new EventEmitter();
+  orch.agents = new Map();
+  orch.agents.set('supervisor', new SupervisorAgent({}));
+  const tasks = [];
+  orch.on('supervisor:task', (t) => tasks.push(t));
+  let captured = null;
+  const fakePal = { on: (type, cb) => { if (type === 'power-anomaly') captured = cb; return () => {}; } };
+  let clock = 1_000_000;
+  attachPowerAnomalyConsumer(orch, { pal: fakePal, now: () => clock });
+
+  // over-budget cooldown = 15s: at +20s the second over-budget is allowed again.
+  captured({ anomaly: { type: 'over-budget', valueW: 300, budgetW: 250, at: new Date().toISOString() }, baselineW: 100 });
+  clock += 20000;
+  captured({ anomaly: { type: 'over-budget', valueW: 310, budgetW: 250, at: new Date().toISOString() }, baselineW: 100 });
+  const obTask = tasks.filter((t) => t.breach.level === 'over-budget');
+  assert.ok(obTask.length >= 1 && obTask[0].count >= 2, 'over-budget re-fired after its short cooldown (coalesced)');
+
+  // spike cooldown = 60s: at +20s from first the second spike is STILL suppressed.
+  clock = 2_000_000;
+  captured({ anomaly: { type: 'spike', valueW: 500, at: new Date().toISOString() }, baselineW: 100 });
+  clock += 20000;
+  captured({ anomaly: { type: 'spike', valueW: 520, at: new Date().toISOString() }, baselineW: 100 });
+  const spTask = tasks.filter((t) => t.breach.level === 'spike');
+  assert.strictEqual(spTask.length, 1, 'spike suppressed within its longer cooldown (single emit)');
 });
 
 console.log(`\n${pass} checks passed.`);

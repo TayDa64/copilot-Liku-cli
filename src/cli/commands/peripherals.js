@@ -153,11 +153,14 @@ async function run(args, flags) {
       // Phase 13: --anomalies surfaces detected power anomalies.
       if (flags.anomalies) {
         const res = pal.getPowerAnomalies();
+        let tiers = {};
+        try { tiers = require('../../main/agents/power-anomaly-consumer').ANOMALY_TIERS || {}; } catch { tiers = {}; }
         if (flags.json) return { success: true, ...res };
         log(highlight(`Power anomalies (${res.anomalies.length}):`));
         if (!res.anomalies.length) log(dim(`  none (baseline ${res.baselineW}W, ${res.samples} samples)`));
         for (const a of res.anomalies) {
-          log(`  ${highlight(a.type)}  ${a.valueW}W vs baseline ${a.baselineW}W  ${dim(a.advisory || '')}`);
+          const sev = (tiers[a.type] && tiers[a.type].severity) || 'info';
+          log(`  ${highlight(a.type)} [${sev}]  ${a.valueW}W vs baseline ${a.baselineW}W  ${dim(a.advisory || '')}`);
         }
         return { success: true, ...res };
       }

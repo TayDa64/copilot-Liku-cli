@@ -28,11 +28,34 @@
 
 const { AgentRole } = require('./base-agent');
 
-/** Map an anomaly type to a coarse severity. Advisory only. @private */
+/**
+ * Phase 15 — anomaly SEVERITY TIERS. Different anomaly types map to different
+ * task behaviour: severity (→ Supervisor priority/escalation routing) and a
+ * per-tier dedup/cooldown window. This is STRICTLY ADVISORY prioritisation —
+ * no tier ever actuates hardware or bypasses the human gate.
+ *
+ *   over-budget → 'critical' : most visible (high priority, escalate), never
+ *                              auto-acknowledged, shortest cooldown (surface fast).
+ *   sustained   → 'warning'  : medium priority, longer cooldown (persistent →
+ *                              don't re-page as often).
+ *   spike       → 'warning'  : medium priority, standard cooldown.
+ *   (other)     → 'info'     : low priority, longest cooldown.
+ */
+const ANOMALY_TIERS = Object.freeze({
+  'over-budget': { severity: 'critical', cooldownMs: 15000 },
+  'sustained': { severity: 'warning', cooldownMs: 90000 },
+  'spike': { severity: 'warning', cooldownMs: 60000 }
+});
+const DEFAULT_TIER = Object.freeze({ severity: 'info', cooldownMs: 120000 });
+
+/** Resolve the tier (severity + cooldown) for an anomaly type. @private */
+function _tierFor(type) {
+  return ANOMALY_TIERS[String(type || '').toLowerCase()] || DEFAULT_TIER;
+}
+
+/** Map an anomaly type to its tiered severity. Advisory only. @private */
 function _severityFor(anomaly) {
-  // Kept at 'warning' so the Supervisor's cooldown/dedup + medium routing apply
-  // (anomalies are advisory — never critical/Class A, never auto-actuated).
-  return 'warning';
+  return _tierFor(anomaly && anomaly.type).severity;
 }
 
 /**
@@ -99,19 +122,24 @@ function attachPowerAnomalyConsumer(orchestrator, options = {}) {
         : null);
 
   const now = typeof options.now === 'function' ? options.now : () => Date.now();
-  const cooldownMs = Number.isFinite(Number(options.cooldownMs))
+  // An explicit cooldown (option or env) overrides the per-tier defaults for ALL
+  // tiers; otherwise each anomaly type uses its own tier cooldown window.
+  const explicitCooldownMs = Number.isFinite(Number(options.cooldownMs))
     ? Number(options.cooldownMs)
-    : (Number(process.env.LIKU_PERIPHERAL_ANOMALY_COOLDOWN_MS) || 60000);
+    : (Number(process.env.LIKU_PERIPHERAL_ANOMALY_COOLDOWN_MS) || null);
+  const cooldownForType = (type) => (explicitCooldownMs != null ? explicitCooldownMs : _tierFor(type).cooldownMs);
   const lastSeen = new Map(); // dedupeKey → last-emitted ms (flapping guard)
 
   const listener = (event) => {
     try {
       const notification = buildAnomalyNotification(event || {});
       // Consumer-level dedup/cooldown so a bouncing power signal cannot flood the
-      // pipeline, independent of the Supervisor's own task cooldown.
+      // pipeline, independent of the Supervisor's own task cooldown. The window is
+      // tier-specific (over-budget surfaces faster than a routine spike).
       const dedupeKey = `${notification.anomalyType}:${notification.device.id}`;
+      const cd = cooldownForType(notification.anomalyType);
       const prev = lastSeen.get(dedupeKey);
-      if (cooldownMs > 0 && prev != null && (now() - prev) < cooldownMs) return;
+      if (cd > 0 && prev != null && (now() - prev) < cd) return;
       lastSeen.set(dedupeKey, now());
 
       let delivered = null;
@@ -139,4 +167,4 @@ function attachPowerAnomalyConsumer(orchestrator, options = {}) {
   return { detach: () => { try { if (typeof off === 'function') off(); } catch { /* ignore */ } } };
 }
 
-module.exports = { attachPowerAnomalyConsumer, buildAnomalyNotification };
+module.exports = { attachPowerAnomalyConsumer, buildAnomalyNotification, ANOMALY_TIERS };

@@ -108,7 +108,7 @@ function detect(opts = {}) {
   // OVER_BUDGET — latest exceeded its recorded budget.
   if (latest && latest.overBudget) {
     anomalies.push({
-      type: 'over-budget', at: latest.at, valueW: _round(latestW),
+      type: 'over-budget', at: latest.at, valueW: _round(latestW), baselineW: _round(mean),
       budgetW: latest.budgetW != null ? Number(latest.budgetW) : null,
       advisory: `over budget: ${_round(latestW)}W > ${latest.budgetW}W`
     });
