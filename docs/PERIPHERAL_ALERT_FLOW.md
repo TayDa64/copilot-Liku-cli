@@ -370,6 +370,37 @@ a read-only Class C synthetic device (never an actuation path). CLI:
 `liku peripherals power --anomalies` shows the tier; `tasks --anomaly` shows the
 resulting priority.
 
+## Commissioning / pairing + tier task metadata (Phase 16)
+
+### Pairing / commissioning state machine
+
+`pairing.js` provides a reusable, testable state machine
+(`unpaired → pairing → paired`, with backed-off retries → `failed` once attempts
+exhaust). The **Matter** (fabric commissioning) and **BLE** (connect) drivers use
+it:
+
+- **Retry + backoff** — `canAttempt()` gates on an exponential-backoff
+  `nextRetryAt`; after `maxAttempts` the device is `failed`. Tunable via
+  `LIKU_MATTER_PAIR_MAX_ATTEMPTS` / `LIKU_MATTER_PAIR_BACKOFF_MS` (and the BLE
+  equivalents).
+- **HIL is isolated** — in HIL mode pairing is *virtual* (`{ state:'paired',
+  simulated:true }`); no real fabric/adapter is touched.
+- **Never bypasses safety** — pairing is transport bookkeeping only; a paired
+  device still flows through DCP → class gate → pending/confirm for every action.
+
+Drivers expose `pair(deviceId)` + `pairingStatus()`; the PAL aggregates them via
+`pairDevice(id)` + `getPairingStatus()`. CLI: `liku peripherals pair <id>`,
+`liku peripherals drivers` (per-device pairing state), and `status` (paired/failed
+summary).
+
+### Tier metadata on tasks
+
+Anomaly tasks now carry `anomalyType` + `severityTier` so a human-facing surface
+can differentiate at a glance. Combined with the tiered priority/escalation and
+per-tier cooldown, over-budget anomalies are high-priority / `escalate` / fastest
+to surface, while spikes are medium / `notify`. `tasks --anomaly --severity <p>`
+filters anomaly tasks by tier priority. All still strictly advisory.
+
 ## If a human decides to act
 
 Any physical response still travels the full PAL safety chain — the alert path
@@ -499,6 +530,9 @@ driver stays local/in-process and needs no wire format.
   raise visibility/priority and shorten the dedup window but never actuate, never
   bypass the human gate, and keep `autonomousAction:false` on a read-only Class C
   synthetic device.
+- **Pairing never actuates.** Commissioning/pairing is transport bookkeeping with
+  bounded retry + backoff; a paired device still flows through DCP → class gate →
+  pending/confirm, and HIL pairing is virtual (no real fabric/adapter touched).
 - **Cognitive budget unchanged.** `sensor.*`/`hardware.*.alert` facts are
   evidence-excluded from the default fragment; the default prompt stays
   byte-identical.

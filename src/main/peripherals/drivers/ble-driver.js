@@ -34,6 +34,7 @@
 
 const dcp = require('../dcp-protocol');
 const hil = require('../hil-simulator');
+const { createPairingState } = require('../pairing');
 
 const DRIVER_ID = 'ble';
 // BLE is a wireless/remote transport — signed tokens required when a secret set.
@@ -111,6 +112,11 @@ class BleCentral {
     this.conns = new Map();   // deviceId → { peripheral, writeChar, notifyChar }
     this.wanted = new Map();  // deviceId → cfg (devices we want connected)
     this.emit = null;         // reading sink (set by start())
+    // Phase 16: pairing state machine (retry + backoff) for the connect flow.
+    this.pairing = createPairingState({
+      maxAttempts: Number(process.env.LIKU_BLE_PAIR_MAX_ATTEMPTS),
+      baseBackoffMs: Number(process.env.LIKU_BLE_PAIR_BACKOFF_MS)
+    });
     this._wire();
   }
 
@@ -157,25 +163,29 @@ class BleCentral {
   _onDiscover(peripheral) {
     const cfg = this._matchCfg(peripheral);
     if (!cfg || this.conns.has(cfg.id)) return;
+    // Phase 16: only attempt to pair when the backoff window allows.
+    if (!this.pairing.canAttempt(cfg.id)) return;
+    this.pairing.begin(cfg.id);
     try {
       peripheral.connect((err) => {
-        if (err) return;
+        if (err) { this.pairing.fail(cfg.id, err.message || 'connect-failed'); return; }
         const svc = cfg.serviceUuid ? [cfg.serviceUuid] : [];
         const chs = [cfg.writeCharUuid, cfg.notifyCharUuid].filter(Boolean);
         try {
           peripheral.discoverSomeServicesAndCharacteristics(svc, chs, (e2, _services, characteristics) => {
-            if (e2) return;
+            if (e2) { this.pairing.fail(cfg.id, e2.message || 'discover-failed'); return; }
             const chars = characteristics || [];
             const writeChar = chars.find((ch) => _uuidEq(ch.uuid, cfg.writeCharUuid)) || chars[0] || null;
             const notifyChar = cfg.notifyCharUuid
               ? (chars.find((ch) => _uuidEq(ch.uuid, cfg.notifyCharUuid)) || null)
               : null;
             this.conns.set(cfg.id, { peripheral, writeChar, notifyChar });
+            this.pairing.succeed(cfg.id);
             if (notifyChar) this._subscribe(cfg, notifyChar);
           });
-        } catch { /* non-fatal */ }
+        } catch (e3) { this.pairing.fail(cfg.id, e3.message || 'discover-threw'); }
       });
-    } catch { /* non-fatal */ }
+    } catch (err) { this.pairing.fail(cfg.id, err.message || 'connect-threw'); }
   }
 
   _subscribe(cfg, ch) {
@@ -299,9 +309,37 @@ function start(emit) {
   return () => { try { central.stop(); } catch { /* ignore */ } _central = null; };
 }
 
+/**
+ * Attempt (or re-attempt) pairing for a device. In HIL the device is virtually
+ * paired (no real adapter). Otherwise it registers the device + triggers a scan,
+ * which drives the connect → pairing state machine. Returns a state record.
+ * @param {string} deviceId
+ */
+function pair(deviceId) {
+  if (hil.isEnabled()) return { id: deviceId, state: 'paired', simulated: true, hil: true };
+  const cfg = loadDeviceConfig().find((d) => d.id === deviceId);
+  if (!cfg) return { id: deviceId, state: 'unpaired', error: 'unknown-device' };
+  const central = _ensureCentral();
+  if (!central) return { id: deviceId, state: 'unpaired', error: 'no-adapter' };
+  central.ensureConnect(cfg); // triggers a scan → discover → connect (state machine)
+  return { id: deviceId, ...central.pairing.get(deviceId) };
+}
+
+/** Per-device pairing state for all declared devices. */
+function pairingStatus() {
+  const cfgs = loadDeviceConfig();
+  if (hil.isEnabled()) {
+    const out = {};
+    for (const c of cfgs) out[c.id] = { state: 'paired', simulated: true, hil: true };
+    return out;
+  }
+  return _central ? _central.pairing.all() : {};
+}
+
 module.exports = {
   DRIVER_ID, REMOTE, SUPPORTS_HIL,
   isAvailable, discover, perform, start, loadDeviceConfig,
+  pair, pairingStatus,
   // test seam only
   _setBleLibForTest
 };

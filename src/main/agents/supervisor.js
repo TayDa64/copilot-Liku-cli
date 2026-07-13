@@ -592,6 +592,10 @@ ${readResults.map(r => `--- ${r.filePath} ---\n${r.content?.slice(0, 2000)}`).jo
       autonomousAction: false,
       safety: 'physical-actions-require-pal-gating',
       notificationId: notification.id,
+      // Phase 16: carry the anomaly type + tier so human-facing surfaces can
+      // differentiate (advisory metadata only — never an actuation input).
+      anomalyType: notification.anomalyType || null,
+      severityTier: severity,
       count: 1
     };
 

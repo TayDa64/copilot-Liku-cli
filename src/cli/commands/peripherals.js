@@ -18,6 +18,7 @@
  *   liku peripherals power [--history|--trend|--anomalies]
  *                                       Live budget + rolling power telemetry
  *   liku peripherals schedules          Show per-device time-boxed power budgets
+ *   liku peripherals pair <id>          Pair / commission a device (real when HIL off)
  */
 
 const { log, success, error, dim, highlight } = require('../util/output');
@@ -77,6 +78,15 @@ async function run(args, flags) {
           const channels = require('../../main/agents/notification-channels').describe();
           const names = channels.channels.map((c) => c.channel);
           log(`  channels: inbox${names.length ? ', ' + names.join(', ') : ' (only)'}`);
+        } catch { /* observability only */ }
+        try {
+          const pairing = pal.getPairingStatus();
+          const states = Object.values(pairing.devices || {});
+          if (states.length) {
+            const paired = states.filter((s) => s.state === 'paired').length;
+            const failed = states.filter((s) => s.state === 'failed').length;
+            log(`  pairing: ${paired}/${states.length} paired${failed ? `, ${failed} failed` : ''}`);
+          }
         } catch { /* observability only */ }
         if (ps.overBudget) error('  OVER BUDGET');
         return { success: true, power: ps };
@@ -143,9 +153,33 @@ async function run(args, flags) {
 
     case 'drivers': {
       const res = pal.listDrivers();
-      if (flags.json) return { success: true, ...res };
+      const pairing = pal.getPairingStatus();
+      if (flags.json) return { success: true, ...res, pairing: pairing.devices };
       log(highlight(`Available drivers: ${res.drivers.join(', ') || 'none'}`));
+      const entries = Object.entries(pairing.devices || {});
+      if (entries.length) {
+        log(dim('  pairing:'));
+        for (const [id, st] of entries) {
+          const sim = st.simulated ? ' (HIL)' : '';
+          const err = st.lastError ? dim(` — ${st.lastError}`) : '';
+          log(`    ${highlight(id)} [${st.driver}] ${st.state}${sim}${err}`);
+        }
+      }
       return { success: true, ...res };
+    }
+
+    case 'pair': {
+      // Trigger a pairing / commissioning attempt for a device (real only when
+      // HIL is off). Never actuates — this is transport bookkeeping.
+      const id = args[1];
+      if (!id) { error('Usage: liku peripherals pair <id>'); return { success: false }; }
+      const res = pal.pairDevice(id);
+      if (flags.json) return { success: !!res.ok, ...res };
+      if (res.ok) success(`${id} paired${res.simulated ? ' (HIL simulation)' : ''}.`);
+      else if (res.state === 'pairing') log(highlight(`${id} pairing in progress…`));
+      else if (res.state === 'failed') error(`${id} pairing failed: ${res.lastError || res.reason || 'unknown'}`);
+      else log(dim(`${id} state: ${res.state || 'unknown'}${res.reason ? ` (${res.reason})` : ''}${res.lastError ? ` — ${res.lastError}` : ''}`));
+      return { success: !!res.ok, ...res };
     }
 
     case 'power': {
@@ -311,7 +345,7 @@ async function run(args, flags) {
 
     default:
       error(`Unknown subcommand: ${sub}`);
-      log('Usage: liku peripherals [scan|list|status [id]|power [--history|--trend|--anomalies]|schedules|tasks [--escalated|--pending|--severity <p>|--anomaly]|notifications|channels|simulate <id> <k=v>|execute <id> <action>|confirm <id> <action> [--execute]|drivers]');
+      log('Usage: liku peripherals [scan|list|status [id]|power [--history|--trend|--anomalies]|schedules|pair <id>|tasks [--escalated|--pending|--severity <p>|--anomaly]|notifications|channels|simulate <id> <k=v>|execute <id> <action>|confirm <id> <action> [--execute]|drivers]');
       return { success: false };
   }
 }

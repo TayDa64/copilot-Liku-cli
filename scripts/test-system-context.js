@@ -2056,6 +2056,157 @@ test('anomaly tier cooldowns differ by type (over-budget surfaces faster than sp
   assert.strictEqual(spTask.length, 1, 'spike suppressed within its longer cooldown (single emit)');
 });
 
+// ── Phase 16: commissioning/pairing state machine + tier task metadata ──
+
+test('pairing state machine: retry with backoff then FAILED after max attempts', () => {
+  const { createPairingState, PAIR_STATES } = require('../src/main/peripherals/pairing');
+  let clock = 1000;
+  const p = createPairingState({ maxAttempts: 2, baseBackoffMs: 100, now: () => clock });
+  assert.strictEqual(p.state('d1'), PAIR_STATES.UNPAIRED);
+  assert.ok(p.canAttempt('d1'), 'initially attemptable');
+  p.begin('d1');                 // attempt 1
+  assert.strictEqual(p.state('d1'), PAIR_STATES.PAIRING);
+  p.fail('d1', 'boom');          // attempts 1 < 2 → retryable after backoff
+  assert.strictEqual(p.state('d1'), PAIR_STATES.UNPAIRED);
+  assert.ok(!p.canAttempt('d1'), 'within backoff → cannot attempt');
+  clock += 100;                  // backoff elapses
+  assert.ok(p.canAttempt('d1'), 'after backoff → can attempt');
+  p.begin('d1');                 // attempt 2
+  p.fail('d1', 'boom2');         // attempts 2 >= 2 → FAILED
+  assert.strictEqual(p.state('d1'), PAIR_STATES.FAILED);
+  assert.ok(!p.canAttempt('d1'), 'FAILED → no more attempts');
+  p.requeue('d1');               // manual re-pair resets
+  assert.ok(p.canAttempt('d1'), 'requeue re-enables attempts');
+});
+
+test('pairing state machine: success reports paired + clears backoff', () => {
+  const { createPairingState } = require('../src/main/peripherals/pairing');
+  const p = createPairingState({ maxAttempts: 3 });
+  p.begin('d2'); p.succeed('d2');
+  assert.strictEqual(p.isPaired('d2'), true);
+  assert.ok(p.get('d2').pairedAt, 'records pairedAt');
+  assert.strictEqual(p.get('d2').lastError, null);
+});
+
+test('Matter commissioning pairs a device via the state machine (fake)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_PERIPHERAL_HIL;
+  process.env.LIKU_MATTER_FABRIC = 'fab-p';
+  process.env.LIKU_MATTER_DEVICES = JSON.stringify([
+    { id: 'mt-pair-01', class: 'B', kind: 'switch', capabilities: ['on', 'off'], nodeId: '55', endpoint: 1 }
+  ]);
+  const matter = require('../src/main/peripherals/drivers/matter-driver');
+  const fake = makeFakeMatter([{ nodeId: '55' }]);
+  matter._setMatterLibForTest(fake.lib);
+  const rec = matter.pair('mt-pair-01');
+  assert.strictEqual(rec.state, 'paired', 'commissioning succeeds when the node resolves');
+  assert.strictEqual(matter.pairingStatus()['mt-pair-01'].state, 'paired');
+  matter._setMatterLibForTest(null);
+  delete process.env.LIKU_MATTER_FABRIC;
+  delete process.env.LIKU_MATTER_DEVICES;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('Matter commissioning retries then FAILS when the node never resolves', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_PERIPHERAL_HIL;
+  process.env.LIKU_MATTER_FABRIC = 'fab-f';
+  process.env.LIKU_MATTER_PAIR_MAX_ATTEMPTS = '2';
+  process.env.LIKU_MATTER_PAIR_BACKOFF_MS = '0';
+  process.env.LIKU_MATTER_DEVICES = JSON.stringify([
+    { id: 'mt-fail-01', class: 'B', kind: 'switch', capabilities: ['on', 'off'], nodeId: '999', endpoint: 1 }
+  ]);
+  const matter = require('../src/main/peripherals/drivers/matter-driver');
+  const fake = makeFakeMatter([]); // no nodes → getNode() returns null
+  matter._setMatterLibForTest(fake.lib);
+  const r1 = matter.pair('mt-fail-01'); // attempt 1 → fail → retryable (backoff 0)
+  assert.strictEqual(r1.state, 'unpaired');
+  assert.ok(r1.lastError, 'records the failure reason');
+  const r2 = matter.pair('mt-fail-01'); // attempt 2 → attempts exhausted → FAILED
+  assert.strictEqual(r2.state, 'failed', 'transitions to FAILED after max attempts');
+  matter._setMatterLibForTest(null);
+  delete process.env.LIKU_MATTER_PAIR_MAX_ATTEMPTS;
+  delete process.env.LIKU_MATTER_PAIR_BACKOFF_MS;
+  delete process.env.LIKU_MATTER_FABRIC;
+  delete process.env.LIKU_MATTER_DEVICES;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('BLE pairing pairs a device via the connect state machine (fake)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_PERIPHERAL_HIL;
+  process.env.LIKU_BLE_ADAPTER = 'hci0-fake';
+  process.env.LIKU_BLE_DEVICES = JSON.stringify([
+    { id: 'ble-pair-01', class: 'B', kind: 'switch', capabilities: ['on', 'off'], peripheralId: 'pp1', writeCharUuid: 'ff01', notifyCharUuid: 'ff02' }
+  ]);
+  const ble = require('../src/main/peripherals/drivers/ble-driver');
+  const fake = makeFakeNoble([{ peripheralId: 'pp1', writeUuid: 'ff01', notifyUuid: 'ff02' }]);
+  ble._setBleLibForTest(fake.lib);
+  const rec = ble.pair('ble-pair-01');
+  assert.strictEqual(rec.state, 'paired', 'BLE connect completes pairing');
+  assert.strictEqual(ble.pairingStatus()['ble-pair-01'].state, 'paired');
+  ble._setBleLibForTest(null);
+  delete process.env.LIKU_BLE_ADAPTER;
+  delete process.env.LIKU_BLE_DEVICES;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('pairing is virtual (no real transport) in HIL mode', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  process.env.LIKU_PERIPHERAL_HIL = '1';
+  process.env.LIKU_MATTER_DEVICES = JSON.stringify([
+    { id: 'mt-hil-p', class: 'B', kind: 'switch', capabilities: ['on', 'off'] }
+  ]);
+  const matter = require('../src/main/peripherals/drivers/matter-driver');
+  const rec = matter.pair('mt-hil-p');
+  assert.strictEqual(rec.state, 'paired');
+  assert.strictEqual(rec.simulated, true, 'HIL pairing is virtual');
+  assert.strictEqual(matter.pairingStatus()['mt-hil-p'].simulated, true);
+  delete process.env.LIKU_PERIPHERAL_HIL;
+  delete process.env.LIKU_MATTER_DEVICES;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('PAL exposes pairing status + triggers pairing via the driver (HIL)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  process.env.LIKU_PERIPHERAL_HIL = '1';
+  process.env.LIKU_MATTER_DEVICES = JSON.stringify([
+    { id: 'mt-pal-p', class: 'B', kind: 'switch', capabilities: ['on', 'off'], powerW: 5 }
+  ]);
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  pal.scan();
+  const r = pal.pairDevice('mt-pal-p');
+  assert.strictEqual(r.ok, true, 'pairDevice succeeds in HIL');
+  assert.strictEqual(r.simulated, true);
+  const st = pal.getPairingStatus();
+  assert.ok(st.devices['mt-pal-p'], 'pairing status surfaced');
+  assert.strictEqual(st.devices['mt-pal-p'].state, 'paired');
+  assert.strictEqual(st.devices['mt-pal-p'].driver, 'matter');
+  delete process.env.LIKU_PERIPHERAL_HIL;
+  delete process.env.LIKU_MATTER_DEVICES;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('anomaly tasks carry anomalyType + severityTier for differentiated visibility', () => {
+  const EventEmitter = require('events');
+  const { SupervisorAgent } = require('../src/main/agents/supervisor');
+  const { attachPowerAnomalyConsumer } = require('../src/main/agents/power-anomaly-consumer');
+  const orch = new EventEmitter();
+  orch.agents = new Map();
+  orch.agents.set('supervisor', new SupervisorAgent({}));
+  let captured = null;
+  const fakePal = { on: (type, cb) => { if (type === 'power-anomaly') captured = cb; return () => {}; } };
+  attachPowerAnomalyConsumer(orch, { pal: fakePal, now: () => 5_000_000 });
+
+  captured({ anomaly: { type: 'over-budget', valueW: 300, budgetW: 250, at: new Date().toISOString() }, baselineW: 100 });
+  const ob = orch.agents.get('supervisor').getPeripheralTasks().find((t) => t.breach.level === 'over-budget');
+  assert.strictEqual(ob.anomalyType, 'over-budget', 'task carries the anomaly type');
+  assert.strictEqual(ob.severityTier, 'critical', 'task carries the critical tier');
+  assert.strictEqual(ob.priority, 'high');
+  assert.strictEqual(ob.escalation, 'escalate');
+  assert.strictEqual(ob.autonomousAction, false, 'still strictly advisory');
+});
+
 console.log(`\n${pass} checks passed.`);
 if (process.exitCode) { console.error('FAILED'); }
 else { console.log('OK'); }

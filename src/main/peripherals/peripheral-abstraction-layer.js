@@ -262,6 +262,50 @@ function getPowerAnomalies(opts = {}) {
   catch { return { enabled: true, anomalies: [], baselineW: 0, currentW: 0, samples: 0 }; }
 }
 
+/** Tag a driver's pairing state map with the driver id. @private */
+function _tagDriver(driverId, states) {
+  const out = {};
+  for (const [k, v] of Object.entries(states || {})) out[k] = { driver: driverId, ...v };
+  return out;
+}
+
+/**
+ * Trigger a pairing / commissioning attempt for a device via its driver.
+ * Real pairing only happens when HIL is off; drivers that don't support pairing
+ * report it. Never actuates — pairing is transport bookkeeping only.
+ * @param {string} id
+ */
+function pairDevice(id) {
+  if (!isPeripheralsEnabled()) return { enabled: false };
+  const device = registry().get(id);
+  let drv = device ? driverFor(device) : null;
+  // Fall back: locate a driver that DECLARES this device even before a scan, so
+  // `liku peripherals pair <id>` works without a prior `scan`.
+  if (!drv || typeof drv.pair !== 'function') {
+    for (const d of availableDrivers()) {
+      if (typeof d.pair !== 'function' || typeof d.discover !== 'function') continue;
+      try { if (d.discover().some((dev) => dev.id === id)) { drv = d; break; } } catch { /* ignore */ }
+    }
+  }
+  if (!drv || typeof drv.pair !== 'function') return { enabled: true, ok: false, reason: 'pairing-not-supported' };
+  try {
+    const rec = drv.pair(id);
+    return { enabled: true, ok: !!(rec && rec.state === 'paired'), ...rec };
+  } catch (err) { return { enabled: true, ok: false, reason: `pair-failed: ${err.message}` }; }
+}
+
+/** Aggregate pairing / commissioning status across all available drivers. */
+function getPairingStatus() {
+  if (!isPeripheralsEnabled()) return { enabled: false, devices: {} };
+  const devices = {};
+  for (const d of availableDrivers()) {
+    if (typeof d.pairingStatus === 'function') {
+      try { Object.assign(devices, _tagDriver(d.DRIVER_ID, d.pairingStatus())); } catch { /* non-fatal */ }
+    }
+  }
+  return { enabled: true, devices };
+}
+
 /**
  * Decide whether a physical action may proceed. First runs the DCP host-side
  * dry-run (capability scoping + param validation + power budget), then routes
@@ -481,6 +525,8 @@ module.exports = {
   getPowerTrend,
   getPowerSchedules,
   getPowerAnomalies,
+  pairDevice,
+  getPairingStatus,
   isHilEnabled
 };
 

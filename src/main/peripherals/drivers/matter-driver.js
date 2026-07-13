@@ -31,6 +31,7 @@
 
 const dcp = require('../dcp-protocol');
 const hil = require('../hil-simulator');
+const { createPairingState } = require('../pairing');
 
 const DRIVER_ID = 'matter';
 // Matter is a networked transport — signed tokens required when a secret set.
@@ -106,6 +107,11 @@ class MatterController {
     this.emit = null;         // reading sink (set by start())
     this.wanted = new Map();  // deviceId → cfg (for inbound report routing)
     this.endpoints = new Map(); // deviceId → resolved endpoint (cache)
+    // Phase 16: fabric commissioning state machine (retry + backoff).
+    this.pairing = createPairingState({
+      maxAttempts: Number(process.env.LIKU_MATTER_PAIR_MAX_ATTEMPTS),
+      baseBackoffMs: Number(process.env.LIKU_MATTER_PAIR_BACKOFF_MS)
+    });
     this._init();
   }
 
@@ -133,14 +139,32 @@ class MatterController {
 
   _resolveEndpoint(cfg) {
     if (this.endpoints.has(cfg.id)) return this.endpoints.get(cfg.id);
+    // Phase 16: drive the commissioning state machine. Only attempt when the
+    // backoff window allows; a resolved endpoint marks the device PAIRED, a
+    // failure schedules a backed-off retry (→ FAILED once attempts exhaust).
+    if (!this.pairing.canAttempt(cfg.id)) return null;
+    this.pairing.begin(cfg.id);
     try {
-      if (!this.controller || typeof this.controller.getNode !== 'function') return null;
+      if (!this.controller || typeof this.controller.getNode !== 'function') {
+        this.pairing.fail(cfg.id, 'no-controller');
+        return null;
+      }
       const node = this.controller.getNode(cfg.nodeId);
-      if (!node || typeof node.getEndpoint !== 'function') return null;
+      if (!node || typeof node.getEndpoint !== 'function') { this.pairing.fail(cfg.id, 'node-unresolved'); return null; }
       const ep = node.getEndpoint(cfg.endpoint || 1);
-      if (ep) this.endpoints.set(cfg.id, ep);
-      return ep || null;
-    } catch { return null; }
+      if (!ep) { this.pairing.fail(cfg.id, 'endpoint-unresolved'); return null; }
+      this.pairing.succeed(cfg.id);
+      this.endpoints.set(cfg.id, ep);
+      return ep;
+    } catch (err) { this.pairing.fail(cfg.id, err.message); return null; }
+  }
+
+  /** Attempt (or re-attempt) commissioning for one device; returns its state. */
+  commission(cfg) {
+    if (!cfg) return null;
+    this.ensureWanted(cfg);
+    this._resolveEndpoint(cfg);
+    return this.pairing.get(cfg.id);
   }
 
   /** Invoke a Matter cluster command on a node endpoint. Returns true on dispatch. */
@@ -264,9 +288,36 @@ function start(emit) {
   return () => { try { ctrl.stop(); } catch { /* ignore */ } _controller = null; };
 }
 
+/**
+ * Attempt (or re-attempt) commissioning for a device. In HIL the device is
+ * virtually paired (no real fabric). Returns a pairing state record.
+ * @param {string} deviceId
+ */
+function pair(deviceId) {
+  if (hil.isEnabled()) return { id: deviceId, state: 'paired', simulated: true, hil: true };
+  const cfg = loadDeviceConfig().find((d) => d.id === deviceId);
+  if (!cfg) return { id: deviceId, state: 'unpaired', error: 'unknown-device' };
+  const ctrl = _ensureController();
+  if (!ctrl) return { id: deviceId, state: 'unpaired', error: 'no-controller' };
+  const rec = ctrl.commission(cfg);
+  return { id: deviceId, ...rec };
+}
+
+/** Per-device commissioning state for all declared devices. */
+function pairingStatus() {
+  const cfgs = loadDeviceConfig();
+  if (hil.isEnabled()) {
+    const out = {};
+    for (const c of cfgs) out[c.id] = { state: 'paired', simulated: true, hil: true };
+    return out;
+  }
+  return _controller ? _controller.pairing.all() : {};
+}
+
 module.exports = {
   DRIVER_ID, REMOTE, SUPPORTS_HIL,
   isAvailable, discover, perform, start, loadDeviceConfig,
+  pair, pairingStatus,
   // test seam only
   _setMatterLibForTest
 };
