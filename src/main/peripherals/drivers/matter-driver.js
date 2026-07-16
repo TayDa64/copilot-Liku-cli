@@ -32,6 +32,7 @@
 const dcp = require('../dcp-protocol');
 const hil = require('../hil-simulator');
 const { createPairingState } = require('../pairing');
+const { createDriverPairing } = require('../driver-pairing');
 
 const DRIVER_ID = 'matter';
 // Matter is a networked transport — signed tokens required when a secret set.
@@ -167,6 +168,12 @@ class MatterController {
     return this.pairing.get(cfg.id);
   }
 
+  /** Tear down a device's commissioning + requeue it for re-pairing. */
+  unpair(id) {
+    this.endpoints.delete(id);
+    if (this.pairing) this.pairing.requeue(id);
+  }
+
   /** Invoke a Matter cluster command on a node endpoint. Returns true on dispatch. */
   command(cfg, act, params = {}) {
     const map = CLUSTER_MAP[act];
@@ -289,35 +296,23 @@ function start(emit) {
 }
 
 /**
- * Attempt (or re-attempt) commissioning for a device. In HIL the device is
- * virtually paired (no real fabric). Returns a pairing state record.
- * @param {string} deviceId
+ * Consistent pairing surface (pair / unpair / pairingStatus) shared with the
+ * other real drivers. HIL pairing is virtual + isolated.
  */
-function pair(deviceId) {
-  if (hil.isEnabled()) return { id: deviceId, state: 'paired', simulated: true, hil: true };
-  const cfg = loadDeviceConfig().find((d) => d.id === deviceId);
-  if (!cfg) return { id: deviceId, state: 'unpaired', error: 'unknown-device' };
-  const ctrl = _ensureController();
-  if (!ctrl) return { id: deviceId, state: 'unpaired', error: 'no-controller' };
-  const rec = ctrl.commission(cfg);
-  return { id: deviceId, ...rec };
-}
-
-/** Per-device commissioning state for all declared devices. */
-function pairingStatus() {
-  const cfgs = loadDeviceConfig();
-  if (hil.isEnabled()) {
-    const out = {};
-    for (const c of cfgs) out[c.id] = { state: 'paired', simulated: true, hil: true };
-    return out;
-  }
-  return _controller ? _controller.pairing.all() : {};
-}
+const _pairing = createDriverPairing({
+  loadDeviceConfig,
+  ensureManager: _ensureController,
+  getManager: () => _controller,
+  commission: (mgr, cfg) => mgr.commission(cfg)
+});
+function pair(deviceId) { return _pairing.pair(deviceId); }
+function unpair(deviceId) { return _pairing.unpair(deviceId); }
+function pairingStatus() { return _pairing.pairingStatus(); }
 
 module.exports = {
   DRIVER_ID, REMOTE, SUPPORTS_HIL,
   isAvailable, discover, perform, start, loadDeviceConfig,
-  pair, pairingStatus,
+  pair, unpair, pairingStatus,
   // test seam only
   _setMatterLibForTest
 };

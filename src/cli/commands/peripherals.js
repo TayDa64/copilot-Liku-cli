@@ -19,6 +19,7 @@
  *                                       Live budget + rolling power telemetry
  *   liku peripherals schedules          Show per-device time-boxed power budgets
  *   liku peripherals pair <id>          Pair / commission a device (real when HIL off)
+ *   liku peripherals unpair <id>        Tear down a device's pairing (re-pairable)
  */
 
 const { log, success, error, dim, highlight } = require('../util/output');
@@ -182,6 +183,17 @@ async function run(args, flags) {
       return { success: !!res.ok, ...res };
     }
 
+    case 'unpair': {
+      // Tear down a device's pairing / commissioning (re-pairable). Never actuates.
+      const id = args[1];
+      if (!id) { error('Usage: liku peripherals unpair <id>'); return { success: false }; }
+      const res = pal.unpairDevice(id);
+      if (flags.json) return { success: !!res.ok, ...res };
+      if (res.ok) success(`${id} unpaired${res.simulated ? ' (HIL simulation)' : ''} (state: ${res.state || 'unpaired'}).`);
+      else error(`${id} unpair failed: ${res.reason || 'unknown'}`);
+      return { success: !!res.ok, ...res };
+    }
+
     case 'power': {
       const ps = pal.powerStatus();
       // Phase 13: --anomalies surfaces detected power anomalies.
@@ -294,7 +306,7 @@ async function run(args, flags) {
         const dev = (t.device && t.device.id) || '?';
         const br = t.breach ? `${t.breach.metric}:${t.breach.level}` : '';
         const ack = t.autoAcknowledged ? ' auto-ack' : '';
-        const src = t.source === 'power-anomaly' ? ' ⚡' : '';
+        const src = t.source === 'power-anomaly' ? ` ⚡${t.severityTier || t.priority}` : '';
         log(`  ${highlight(t.id)} [${t.priority}/${t.escalation || 'log'}] ${t.status}${ack}${src} ${dim(`${dev} ${br} x${t.count || 1}`)}`);
       }
       const pending = notifications.filter((n) => !n.acknowledged).length;
@@ -345,7 +357,7 @@ async function run(args, flags) {
 
     default:
       error(`Unknown subcommand: ${sub}`);
-      log('Usage: liku peripherals [scan|list|status [id]|power [--history|--trend|--anomalies]|schedules|pair <id>|tasks [--escalated|--pending|--severity <p>|--anomaly]|notifications|channels|simulate <id> <k=v>|execute <id> <action>|confirm <id> <action> [--execute]|drivers]');
+      log('Usage: liku peripherals [scan|list|status [id]|power [--history|--trend|--anomalies]|schedules|pair <id>|unpair <id>|tasks [--escalated|--pending|--severity <p>|--anomaly]|notifications|channels|simulate <id> <k=v>|execute <id> <action>|confirm <id> <action> [--execute]|drivers]');
       return { success: false };
   }
 }

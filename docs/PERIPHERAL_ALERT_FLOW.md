@@ -376,30 +376,45 @@ resulting priority.
 
 `pairing.js` provides a reusable, testable state machine
 (`unpaired → pairing → paired`, with backed-off retries → `failed` once attempts
-exhaust). The **Matter** (fabric commissioning) and **BLE** (connect) drivers use
-it:
+exhaust). **Every connection-oriented real driver — BLE, Zigbee, ROS2 and
+Matter — uses it through the shared `driver-pairing.js` surface**, so pairing is
+consistent across the whole fleet (Phase 17):
 
 - **Retry + backoff** — `canAttempt()` gates on an exponential-backoff
-  `nextRetryAt`; after `maxAttempts` the device is `failed`. Tunable via
-  `LIKU_MATTER_PAIR_MAX_ATTEMPTS` / `LIKU_MATTER_PAIR_BACKOFF_MS` (and the BLE
-  equivalents).
+  `nextRetryAt`; after `maxAttempts` the device is `failed`. Tunable per driver
+  via `LIKU_<DRIVER>_PAIR_MAX_ATTEMPTS` / `LIKU_<DRIVER>_PAIR_BACKOFF_MS`
+  (`MATTER` / `BLE` / `ZIGBEE` / `ROS2`).
 - **HIL is isolated** — in HIL mode pairing is *virtual* (`{ state:'paired',
-  simulated:true }`); no real fabric/adapter is touched.
+  simulated:true }`); no real fabric/adapter/coordinator/graph is touched.
 - **Never bypasses safety** — pairing is transport bookkeeping only; a paired
   device still flows through DCP → class gate → pending/confirm for every action.
 
-Drivers expose `pair(deviceId)` + `pairingStatus()`; the PAL aggregates them via
-`pairDevice(id)` + `getPairingStatus()`. CLI: `liku peripherals pair <id>`,
-`liku peripherals drivers` (per-device pairing state), and `status` (paired/failed
-summary).
+Each driver exposes `pair(id)` / `unpair(id)` / `pairingStatus()`. The PAL
+aggregates them uniformly via `pairDevice(id)`, `unpairDevice(id)` and
+`getPairingStatus()` — and reports **connectionless** drivers (mock / MQTT /
+serial) as `ready` so the surface is uniform. CLI:
+`liku peripherals pair <id>`, `liku peripherals unpair <id>`,
+`liku peripherals drivers` (per-device pairing state), and `status`
+(paired/failed summary).
 
-### Tier metadata on tasks
+### Tier metadata on tasks + differentiated behaviour
 
-Anomaly tasks now carry `anomalyType` + `severityTier` so a human-facing surface
-can differentiate at a glance. Combined with the tiered priority/escalation and
-per-tier cooldown, over-budget anomalies are high-priority / `escalate` / fastest
-to surface, while spikes are medium / `notify`. `tasks --anomaly --severity <p>`
-filters anomaly tasks by tier priority. All still strictly advisory.
+Anomaly tasks carry `anomalyType` + `severityTier`. The tier drives **real,
+visible differences** (Phase 15–17):
+
+- **Priority / visibility** — over-budget → `critical` → **high** priority /
+  `escalate`; spike/sustained → `warning` → medium / `notify`; other → `info` /
+  low. `Supervisor.getNotificationsBySeverity()` lets a surface prioritise the
+  inbox by tier.
+- **Escalation channel routing** — the notification's tier severity gates which
+  additive channels (`log`/`file`/`webhook`) it reaches (each channel has a
+  min-severity), so critical anomalies fan out further than routine ones.
+- **Dedup / cooldown** — over-budget surfaces fastest (15 s), sustained dedups
+  longest (90 s).
+- **CLI** — `tasks --anomaly` shows a `⚡<tier>` badge; `tasks --anomaly --severity
+  <p>` filters by tier priority.
+
+All tier behaviour is strictly advisory + human-gated; no tier ever actuates.
 
 ## If a human decides to act
 

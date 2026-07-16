@@ -301,9 +301,36 @@ function getPairingStatus() {
   for (const d of availableDrivers()) {
     if (typeof d.pairingStatus === 'function') {
       try { Object.assign(devices, _tagDriver(d.DRIVER_ID, d.pairingStatus())); } catch { /* non-fatal */ }
+    } else if (typeof d.discover === 'function') {
+      // Connectionless drivers (mock / mqtt / serial) have no pairing lifecycle —
+      // report their declared devices as 'ready' so the CLI surface is uniform.
+      try { for (const dev of d.discover()) devices[dev.id] = { driver: d.DRIVER_ID, state: 'ready', connectionless: true }; }
+      catch { /* non-fatal */ }
     }
   }
   return { enabled: true, devices };
+}
+
+/**
+ * Tear down a device's pairing / commissioning via its driver (re-pairable).
+ * Real only when HIL is off; connectionless drivers report it. Never actuates.
+ * @param {string} id
+ */
+function unpairDevice(id) {
+  if (!isPeripheralsEnabled()) return { enabled: false };
+  const device = registry().get(id);
+  let drv = device ? driverFor(device) : null;
+  if (!drv || typeof drv.unpair !== 'function') {
+    for (const d of availableDrivers()) {
+      if (typeof d.unpair !== 'function' || typeof d.discover !== 'function') continue;
+      try { if (d.discover().some((dev) => dev.id === id)) { drv = d; break; } } catch { /* ignore */ }
+    }
+  }
+  if (!drv || typeof drv.unpair !== 'function') return { enabled: true, ok: false, reason: 'pairing-not-supported' };
+  try {
+    const rec = drv.unpair(id);
+    return { enabled: true, ok: true, ...rec };
+  } catch (err) { return { enabled: true, ok: false, reason: `unpair-failed: ${err.message}` }; }
 }
 
 /**
@@ -526,6 +553,7 @@ module.exports = {
   getPowerSchedules,
   getPowerAnomalies,
   pairDevice,
+  unpairDevice,
   getPairingStatus,
   isHilEnabled
 };

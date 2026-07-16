@@ -35,6 +35,7 @@
 const dcp = require('../dcp-protocol');
 const hil = require('../hil-simulator');
 const { createPairingState } = require('../pairing');
+const { createDriverPairing } = require('../driver-pairing');
 
 const DRIVER_ID = 'ble';
 // BLE is a wireless/remote transport — signed tokens required when a secret set.
@@ -204,6 +205,23 @@ class BleCentral {
 
   connectionFor(id) { return this.conns.get(id) || null; }
 
+  /** Attempt (or re-attempt) pairing for one device; returns its state. */
+  commission(cfg) {
+    if (!cfg) return null;
+    this.ensureConnect(cfg); // triggers a scan → discover → connect (state machine)
+    return this.pairing.get(cfg.id);
+  }
+
+  /** Tear down a device's connection + requeue it for re-pairing. */
+  unpair(id) {
+    const conn = this.conns.get(id);
+    if (conn && conn.peripheral && typeof conn.peripheral.disconnect === 'function') {
+      try { conn.peripheral.disconnect(() => {}); } catch { /* ignore */ }
+    }
+    this.conns.delete(id);
+    if (this.pairing) this.pairing.requeue(id);
+  }
+
   /** Write bytes to a device's write characteristic. Returns true on dispatch. */
   write(id, buffer) {
     const conn = this.conns.get(id);
@@ -310,36 +328,23 @@ function start(emit) {
 }
 
 /**
- * Attempt (or re-attempt) pairing for a device. In HIL the device is virtually
- * paired (no real adapter). Otherwise it registers the device + triggers a scan,
- * which drives the connect → pairing state machine. Returns a state record.
- * @param {string} deviceId
+ * Consistent pairing surface (pair / unpair / pairingStatus) shared with the
+ * other real drivers. HIL pairing is virtual + isolated.
  */
-function pair(deviceId) {
-  if (hil.isEnabled()) return { id: deviceId, state: 'paired', simulated: true, hil: true };
-  const cfg = loadDeviceConfig().find((d) => d.id === deviceId);
-  if (!cfg) return { id: deviceId, state: 'unpaired', error: 'unknown-device' };
-  const central = _ensureCentral();
-  if (!central) return { id: deviceId, state: 'unpaired', error: 'no-adapter' };
-  central.ensureConnect(cfg); // triggers a scan → discover → connect (state machine)
-  return { id: deviceId, ...central.pairing.get(deviceId) };
-}
-
-/** Per-device pairing state for all declared devices. */
-function pairingStatus() {
-  const cfgs = loadDeviceConfig();
-  if (hil.isEnabled()) {
-    const out = {};
-    for (const c of cfgs) out[c.id] = { state: 'paired', simulated: true, hil: true };
-    return out;
-  }
-  return _central ? _central.pairing.all() : {};
-}
+const _pairing = createDriverPairing({
+  loadDeviceConfig,
+  ensureManager: _ensureCentral,
+  getManager: () => _central,
+  commission: (mgr, cfg) => mgr.commission(cfg)
+});
+function pair(deviceId) { return _pairing.pair(deviceId); }
+function unpair(deviceId) { return _pairing.unpair(deviceId); }
+function pairingStatus() { return _pairing.pairingStatus(); }
 
 module.exports = {
   DRIVER_ID, REMOTE, SUPPORTS_HIL,
   isAvailable, discover, perform, start, loadDeviceConfig,
-  pair, pairingStatus,
+  pair, unpair, pairingStatus,
   // test seam only
   _setBleLibForTest
 };

@@ -2207,6 +2207,140 @@ test('anomaly tasks carry anomalyType + severityTier for differentiated visibili
   assert.strictEqual(ob.autonomousAction, false, 'still strictly advisory');
 });
 
+// ── Phase 17: pairing parity (Zigbee + ROS2) + complete tier differentiation ──
+
+test('Zigbee pairing (mesh join) parity: pair success + unpair + status (fake)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_PERIPHERAL_HIL;
+  process.env.LIKU_ZIGBEE_COORDINATOR = '/dev/fake-zb';
+  process.env.LIKU_ZIGBEE_DEVICES = JSON.stringify([
+    { id: 'zb-pair-01', class: 'B', kind: 'switch', capabilities: ['on', 'off'], ieeeAddr: '0xAA01', endpoint: 1 }
+  ]);
+  const zb = require('../src/main/peripherals/drivers/zigbee-driver');
+  const fake = makeFakeHerdsman([{ ieeeAddr: '0xAA01' }]);
+  zb._setZigbeeLibForTest(fake.lib);
+  const rec = zb.pair('zb-pair-01');
+  assert.strictEqual(rec.state, 'paired', 'zigbee mesh join succeeds when the device resolves');
+  assert.strictEqual(zb.pairingStatus()['zb-pair-01'].state, 'paired');
+  const un = zb.unpair('zb-pair-01');
+  assert.strictEqual(un.state, 'unpaired', 'unpair requeues the device');
+  assert.ok(zb.pairingStatus()['zb-pair-01'].state !== 'paired', 'no longer paired after unpair');
+  zb._setZigbeeLibForTest(null);
+  delete process.env.LIKU_ZIGBEE_COORDINATOR;
+  delete process.env.LIKU_ZIGBEE_DEVICES;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('Zigbee pairing retries then FAILS when the device never resolves', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_PERIPHERAL_HIL;
+  process.env.LIKU_ZIGBEE_COORDINATOR = '/dev/fake-zb';
+  process.env.LIKU_ZIGBEE_PAIR_MAX_ATTEMPTS = '2';
+  process.env.LIKU_ZIGBEE_PAIR_BACKOFF_MS = '0';
+  process.env.LIKU_ZIGBEE_DEVICES = JSON.stringify([
+    { id: 'zb-fail-01', class: 'B', kind: 'switch', capabilities: ['on', 'off'], ieeeAddr: '0xZZZZ', endpoint: 1 }
+  ]);
+  const zb = require('../src/main/peripherals/drivers/zigbee-driver');
+  const fake = makeFakeHerdsman([]); // getDeviceByIeeeAddr → undefined
+  zb._setZigbeeLibForTest(fake.lib);
+  assert.strictEqual(zb.pair('zb-fail-01').state, 'unpaired', 'attempt 1 retryable');
+  assert.strictEqual(zb.pair('zb-fail-01').state, 'failed', 'FAILED after max attempts');
+  zb._setZigbeeLibForTest(null);
+  delete process.env.LIKU_ZIGBEE_PAIR_MAX_ATTEMPTS;
+  delete process.env.LIKU_ZIGBEE_PAIR_BACKOFF_MS;
+  delete process.env.LIKU_ZIGBEE_COORDINATOR;
+  delete process.env.LIKU_ZIGBEE_DEVICES;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('ROS2 pairing parity: pair success (node+publisher) + unpair + status (fake)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_PERIPHERAL_HIL;
+  process.env.LIKU_ROS2_DOMAIN = '0';
+  process.env.LIKU_ROS2_DEVICES = JSON.stringify([
+    { id: 'ros-pair-01', class: 'B', kind: 'actuator', capabilities: ['on', 'off'], cmdTopic: '/liku/p/cmd', stateTopic: '/liku/p/state' }
+  ]);
+  const ros2 = require('../src/main/peripherals/drivers/ros2-driver');
+  const fake = makeFakeRos2();
+  ros2._setRos2LibForTest(fake.lib);
+  const rec = ros2.pair('ros-pair-01');
+  assert.strictEqual(rec.state, 'paired', 'ros2 pairing succeeds when node + publisher exist');
+  assert.strictEqual(ros2.pairingStatus()['ros-pair-01'].state, 'paired');
+  const un = ros2.unpair('ros-pair-01');
+  assert.strictEqual(un.state, 'unpaired', 'unpair requeues the device');
+  ros2._setRos2LibForTest(null);
+  delete process.env.LIKU_ROS2_DOMAIN;
+  delete process.env.LIKU_ROS2_DEVICES;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('all real drivers expose a consistent pair/unpair/pairingStatus surface', () => {
+  const drivers = ['ble', 'zigbee', 'ros2', 'matter'].map((d) => require(`../src/main/peripherals/drivers/${d}-driver`));
+  for (const drv of drivers) {
+    assert.strictEqual(typeof drv.pair, 'function', `${drv.DRIVER_ID} has pair()`);
+    assert.strictEqual(typeof drv.unpair, 'function', `${drv.DRIVER_ID} has unpair()`);
+    assert.strictEqual(typeof drv.pairingStatus, 'function', `${drv.DRIVER_ID} has pairingStatus()`);
+  }
+});
+
+test('PAL pairing surface is uniform across drivers incl. connectionless (HIL)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  process.env.LIKU_PERIPHERAL_HIL = '1';
+  process.env.LIKU_ZIGBEE_DEVICES = JSON.stringify([{ id: 'zb-pal-1', class: 'B', kind: 'switch', capabilities: ['on', 'off'], powerW: 5 }]);
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  pal.scan();
+  // Real driver (zigbee) reports virtual paired in HIL.
+  const pr = pal.pairDevice('zb-pal-1');
+  assert.strictEqual(pr.ok, true);
+  assert.strictEqual(pr.simulated, true, 'HIL pairing is virtual');
+  const st = pal.getPairingStatus();
+  assert.strictEqual(st.devices['zb-pal-1'].state, 'paired');
+  assert.strictEqual(st.devices['zb-pal-1'].driver, 'zigbee');
+  // Connectionless driver (mock) devices surface as 'ready'.
+  const mockReady = Object.values(st.devices).find((d) => d.driver === 'mock');
+  assert.ok(mockReady && mockReady.state === 'ready', 'connectionless mock devices reported as ready');
+  // Unpair via the PAL.
+  const un = pal.unpairDevice('zb-pal-1');
+  assert.strictEqual(un.ok, true);
+  delete process.env.LIKU_PERIPHERAL_HIL;
+  delete process.env.LIKU_ZIGBEE_DEVICES;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('anomaly tiers drive differentiated escalation CHANNEL routing (advisory)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  process.env.LIKU_PERIPHERAL_CHANNELS = 'file'; // file channel, default min-severity 'info'
+  process.env.LIKU_PERIPHERAL_WEBHOOK_MIN_SEVERITY = 'warning';
+  const channels = require('../src/main/agents/notification-channels');
+  const { buildAnomalyNotification } = require('../src/main/agents/power-anomaly-consumer');
+  // over-budget (critical) reaches a warning-threshold channel; low-tier 'info' does not.
+  process.env.LIKU_PERIPHERAL_CHANNELS = 'webhook';
+  process.env.LIKU_PERIPHERAL_WEBHOOK_URL = ''; // unconfigured → delivery is a no-op but routing decision still testable
+  const crit = buildAnomalyNotification({ anomaly: { type: 'over-budget', valueW: 300, budgetW: 250 }, baselineW: 100 });
+  const info = buildAnomalyNotification({ anomaly: { type: 'mystery', valueW: 5 }, baselineW: 4 });
+  assert.strictEqual(crit.severity, 'critical', 'over-budget is critical tier');
+  assert.strictEqual(info.severity, 'info', 'unknown type is info tier');
+  // The channel routing decision is severity-driven: critical >= warning threshold, info < warning.
+  const rankOf = (n) => channels.SEVERITY_RANK[n.severity];
+  assert.ok(rankOf(crit) >= channels.SEVERITY_RANK.warning, 'critical routes to warning-threshold channels');
+  assert.ok(rankOf(info) < channels.SEVERITY_RANK.warning, 'info stays below the warning threshold');
+  delete process.env.LIKU_PERIPHERAL_WEBHOOK_URL;
+  delete process.env.LIKU_PERIPHERAL_WEBHOOK_MIN_SEVERITY;
+  delete process.env.LIKU_PERIPHERAL_CHANNELS;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('Supervisor exposes notifications by severity for inbox prioritisation', () => {
+  const { SupervisorAgent } = require('../src/main/agents/supervisor');
+  const sup = new SupervisorAgent({});
+  sup.receiveNotification({ id: 'c1', severity: 'critical', device: { id: 'p', class: 'C' } });
+  sup.receiveNotification({ id: 'w1', severity: 'warning', device: { id: 'p', class: 'C' } });
+  sup.receiveNotification({ id: 'w2', severity: 'warning', device: { id: 'p', class: 'C' } });
+  assert.strictEqual(sup.getNotificationsBySeverity('critical').length, 1);
+  assert.strictEqual(sup.getNotificationsBySeverity('warning').length, 2);
+  assert.strictEqual(sup.getNotificationsBySeverity('info').length, 0);
+});
+
 console.log(`\n${pass} checks passed.`);
 if (process.exitCode) { console.error('FAILED'); }
 else { console.log('OK'); }

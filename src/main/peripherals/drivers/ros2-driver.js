@@ -31,6 +31,8 @@
 
 const dcp = require('../dcp-protocol');
 const hil = require('../hil-simulator');
+const { createPairingState } = require('../pairing');
+const { createDriverPairing } = require('../driver-pairing');
 
 const DRIVER_ID = 'ros2';
 // ROS2 is a networked transport — signed tokens required when a secret set.
@@ -95,6 +97,11 @@ class Ros2Bridge {
     this.emit = null;             // reading sink (set by start())
     this.publishers = new Map();  // deviceId → publisher
     this.wanted = new Map();      // deviceId → cfg
+    // Phase 17: pairing (node + publisher/subscription readiness) state machine.
+    this.pairing = createPairingState({
+      maxAttempts: Number(process.env.LIKU_ROS2_PAIR_MAX_ATTEMPTS),
+      baseBackoffMs: Number(process.env.LIKU_ROS2_PAIR_BACKOFF_MS)
+    });
     this._init();
   }
 
@@ -157,6 +164,32 @@ class Ros2Bridge {
     if (!p || typeof p.publish !== 'function') return false;
     try { p.publish({ data: JSON.stringify(envelope) }); return true; }
     catch { return false; }
+  }
+
+  /**
+   * Attempt (or re-attempt) "pairing": ensure the node exists and a
+   * publisher/subscription can be created for the device. Returns its state.
+   */
+  commission(cfg) {
+    if (!cfg) return null;
+    this.wanted.set(cfg.id, cfg);
+    if (this.pairing.isPaired(cfg.id)) return this.pairing.get(cfg.id);
+    if (!this.pairing.canAttempt(cfg.id)) return this.pairing.get(cfg.id);
+    this.pairing.begin(cfg.id);
+    try {
+      if (!this.node) { this.pairing.fail(cfg.id, 'no-node'); return this.pairing.get(cfg.id); }
+      const p = this._publisher(cfg);
+      if (!p) { this.pairing.fail(cfg.id, 'no-publisher'); return this.pairing.get(cfg.id); }
+      this._subscribe(cfg);
+      this.pairing.succeed(cfg.id);
+    } catch (err) { this.pairing.fail(cfg.id, err.message); }
+    return this.pairing.get(cfg.id);
+  }
+
+  /** Tear down a device's publisher + requeue it for re-pairing. */
+  unpair(id) {
+    this.publishers.delete(id);
+    if (this.pairing) this.pairing.requeue(id);
   }
 
   stop() {
@@ -246,9 +279,24 @@ function start(emit) {
   return () => { try { bridge.stop(); } catch { /* ignore */ } _bridge = null; };
 }
 
+/**
+ * Consistent pairing surface (pair / unpair / pairingStatus) shared with the
+ * other real drivers. HIL pairing is virtual + isolated.
+ */
+const _pairing = createDriverPairing({
+  loadDeviceConfig,
+  ensureManager: _ensureBridge,
+  getManager: () => _bridge,
+  commission: (mgr, cfg) => mgr.commission(cfg)
+});
+function pair(deviceId) { return _pairing.pair(deviceId); }
+function unpair(deviceId) { return _pairing.unpair(deviceId); }
+function pairingStatus() { return _pairing.pairingStatus(); }
+
 module.exports = {
   DRIVER_ID, REMOTE, SUPPORTS_HIL,
   isAvailable, discover, perform, start, loadDeviceConfig,
+  pair, unpair, pairingStatus,
   // test seam only
   _setRos2LibForTest
 };

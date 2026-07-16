@@ -34,6 +34,8 @@
 
 const dcp = require('../dcp-protocol');
 const hil = require('../hil-simulator');
+const { createPairingState } = require('../pairing');
+const { createDriverPairing } = require('../driver-pairing');
 
 const DRIVER_ID = 'zigbee';
 // Zigbee is a networked/mesh transport — signed tokens required when a secret set.
@@ -110,6 +112,11 @@ class ZigbeeCoordinator {
     this.emit = null;          // reading sink (set by start())
     this.wanted = new Map();   // deviceId → cfg (for inbound report routing)
     this.endpoints = new Map(); // deviceId → resolved endpoint (cache)
+    // Phase 17: pairing state machine (retry + backoff) for mesh join.
+    this.pairing = createPairingState({
+      maxAttempts: Number(process.env.LIKU_ZIGBEE_PAIR_MAX_ATTEMPTS),
+      baseBackoffMs: Number(process.env.LIKU_ZIGBEE_PAIR_BACKOFF_MS)
+    });
     this._init();
   }
 
@@ -139,14 +146,38 @@ class ZigbeeCoordinator {
 
   _resolveEndpoint(cfg) {
     if (this.endpoints.has(cfg.id)) return this.endpoints.get(cfg.id);
+    // Phase 17: drive the pairing (mesh join) state machine. Only attempt within
+    // the backoff window; a resolved endpoint marks PAIRED, a failure schedules a
+    // backed-off retry (→ FAILED once attempts exhaust).
+    if (!this.pairing.canAttempt(cfg.id)) return null;
+    this.pairing.begin(cfg.id);
     try {
-      if (!this.controller || typeof this.controller.getDeviceByIeeeAddr !== 'function') return null;
+      if (!this.controller || typeof this.controller.getDeviceByIeeeAddr !== 'function') {
+        this.pairing.fail(cfg.id, 'no-controller');
+        return null;
+      }
       const dev = this.controller.getDeviceByIeeeAddr(cfg.ieeeAddr);
-      if (!dev || typeof dev.getEndpoint !== 'function') return null;
+      if (!dev || typeof dev.getEndpoint !== 'function') { this.pairing.fail(cfg.id, 'device-unresolved'); return null; }
       const ep = dev.getEndpoint(cfg.endpoint || 1);
-      if (ep) this.endpoints.set(cfg.id, ep);
-      return ep || null;
-    } catch { return null; }
+      if (!ep) { this.pairing.fail(cfg.id, 'endpoint-unresolved'); return null; }
+      this.pairing.succeed(cfg.id);
+      this.endpoints.set(cfg.id, ep);
+      return ep;
+    } catch (err) { this.pairing.fail(cfg.id, err.message); return null; }
+  }
+
+  /** Attempt (or re-attempt) mesh join for one device; returns its state. */
+  commission(cfg) {
+    if (!cfg) return null;
+    this.ensureWanted(cfg);
+    this._resolveEndpoint(cfg);
+    return this.pairing.get(cfg.id);
+  }
+
+  /** Tear down a device's mesh binding + requeue it for re-pairing. */
+  unpair(id) {
+    this.endpoints.delete(id);
+    if (this.pairing) this.pairing.requeue(id);
   }
 
   /** Issue a ZCL command to a device endpoint. Returns true on dispatch. */
@@ -270,9 +301,24 @@ function start(emit) {
   return () => { try { coord.stop(); } catch { /* ignore */ } _coordinator = null; };
 }
 
+/**
+ * Consistent pairing surface (pair / unpair / pairingStatus) shared with the
+ * other real drivers. HIL pairing is virtual + isolated.
+ */
+const _pairing = createDriverPairing({
+  loadDeviceConfig,
+  ensureManager: _ensureCoordinator,
+  getManager: () => _coordinator,
+  commission: (mgr, cfg) => mgr.commission(cfg)
+});
+function pair(deviceId) { return _pairing.pair(deviceId); }
+function unpair(deviceId) { return _pairing.unpair(deviceId); }
+function pairingStatus() { return _pairing.pairingStatus(); }
+
 module.exports = {
   DRIVER_ID, REMOTE, SUPPORTS_HIL,
   isAvailable, discover, perform, start, loadDeviceConfig,
+  pair, unpair, pairingStatus,
   // test seam only
   _setZigbeeLibForTest
 };

@@ -506,6 +506,15 @@ ${readResults.map(r => `--- ${r.filePath} ---\n${r.content?.slice(0, 2000)}`).jo
     return this.notifications.filter((n) => !n.acknowledged);
   }
 
+  /**
+   * Notifications filtered by severity (e.g. 'critical' | 'warning' | 'info'),
+   * newest last. Lets a human-facing surface prioritise the inbox by tier.
+   */
+  getNotificationsBySeverity(severity) {
+    const s = String(severity || '').toLowerCase();
+    return this.notifications.filter((n) => String(n.severity || '').toLowerCase() === s);
+  }
+
   /** All notifications (acknowledged + pending), newest last. */
   getNotifications() {
     return this.notifications.slice();
