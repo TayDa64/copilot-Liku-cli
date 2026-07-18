@@ -567,6 +567,69 @@ it never executes the action** (no autonomous actuation path). The synthetic
   suggestion (including `unpair`/`rotate-token`) is auto-executed, and none
   actuates the physical device.
 
+## Lock observability + cross-host coordination + cron scheduling (Phase 21)
+
+### Lock observability over time
+
+`src/shared/atomic-file.js` now tracks **per-file** contention (not just global
+counters): `getPerFileLockMetrics()` maps each store's basename → `{ acquired,
+contended, steals, fallbacks, retries }`. `src/main/peripherals/lock-history.js`
+**persists** periodic snapshots to `~/.liku/lock-history.jsonl` (rolling, atomic,
+flag-gated) and computes **trends** — the delta between the first and last
+snapshot, the current contention rate, and the hottest files. Snapshots accrue
+naturally (a best-effort `record()` fires after each power sample) or on demand.
+PAL: `getLockHistory()`, `recordLockSnapshot()`, `getLockTrends()`. CLI:
+`liku peripherals locks [--record]` and an enriched `status` (hottest lock).
+
+### Cross-host coordination foundation
+
+`src/main/peripherals/coordination.js` adds a dependency-free **TTL-lease** layer
+for multi-node fleets. A node identity (`LIKU_NODE_ID` or `hostname:pid`) takes a
+lease on a resource (`device:<id>`, a task, a token) by atomically creating a
+directory under a **shared** `LIKU_CLUSTER_DIR/leases/`. mkdir is atomic across
+hosts on a shared filesystem, giving mutual exclusion; an **expired** lease
+(crashed holder) is stolen; only the owner can release early.
+
+- **Single-machine is the default** — with `LIKU_CLUSTER_DIR` unset, cluster mode
+  is OFF and every lease is granted locally, so the single-machine path is
+  completely unchanged (no new files, no new behaviour).
+- The PAL `execute()` gate consults `coordination.canAct('device:<id>')` for
+  REMOTE drivers only when cluster mode is on: a device leased by another node is
+  rejected with `device-leased-elsewhere`. Best-effort + non-fatal.
+- Resource ids are strictly allow-list sanitized (`..` collapsed, `/`/`\`
+  stripped) — no path traversal, no new attack surface.
+- PAL: `getCoordinationStatus()`, `acquireDeviceLease()`, `releaseDeviceLease()`.
+  CLI: `liku peripherals coordination [status|lease <id>|release <id>]`.
+
+### Cron-based device scheduling (stretch)
+
+`src/main/peripherals/device-schedule.js` adds optional **5-field cron** rules
+(`LIKU_DEVICE_CRON`) for recurring device actions. A due cron rule NEVER
+actuates — it produces an **advisory, human-gated proposed task** (`status:
+'pending-review'`, `autonomousAction:false`); Class A devices are flagged
+`requiresHuman` and remain confirm-gated at `execute` time regardless.
+
+- **Sandboxed parser** — split → bounded numeric ranges only (`*`, `a`, `a-b`,
+  `a-b/n`, `*/n`, comma lists). No eval, no dynamic code, no catastrophic-
+  backtracking regex; every field is strictly range-checked and malformed rules
+  are dropped. Actions are restricted to a conservative allow-list
+  (`on/off/toggle/lock/unlock/open/close/check/status`).
+- Vixie-cron day-of-month/day-of-week OR semantics when both are restricted.
+- Additive + backward-compatible: existing time-boxed power schedules are
+  untouched. PAL: `getCronSchedules()`, `getDueCronTasks(now)`. CLI:
+  `liku peripherals cron [--at <ISO>]`.
+
+### Phase 21 safety invariants
+
+- **lock-observability-is-pure** — persisting metrics/trends never changes locking
+  behaviour or actuates anything; recording is on-demand (no background timer).
+- **cross-host-preserves-single-machine** — cluster mode is opt-in; with no
+  `LIKU_CLUSTER_DIR` the single-machine path is byte-for-byte unchanged. Leases
+  are advisory coordination bookkeeping and never bypass the PAL safety chain.
+- **cron-triggers-are-advisory** — a cron match yields a reviewable proposed task,
+  never an actuation. Class A stays human-gated, and the parser adds no new
+  attack surface.
+
 ## If a human decides to act
 
 Any physical response still travels the full PAL safety chain — the alert path

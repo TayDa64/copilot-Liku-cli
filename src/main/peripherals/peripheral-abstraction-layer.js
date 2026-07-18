@@ -45,6 +45,9 @@ function powerHistory() { return require('./power-history'); }
 function powerSchedule() { return require('./power-schedule'); }
 function powerAnomaly() { return require('./power-anomaly'); }
 function tokenStore() { return require('./token-store'); }
+function lockHistory() { return require('./lock-history'); }
+function coordination() { return require('./coordination'); }
+function deviceSchedule() { return require('./device-schedule'); }
 
 /** True when hardware-in-the-loop simulation mode is enabled. */
 function isHilEnabled() {
@@ -198,6 +201,7 @@ function powerStatus() {
     overBudget: currentW > effectiveBudgetW,
     hil: isHilEnabled(),
     locking: 'advisory-file-lock',
+    cluster: (() => { try { return coordination().status().mode; } catch { return 'single-machine'; } })(),
     peakW: history ? history.peakW : 0,
     avgW: history ? history.avgW : 0,
     samples: history ? history.count : 0,
@@ -231,8 +235,66 @@ function recordPowerSample() {
         for (const a of res.anomalies) _emit({ type: 'power-anomaly', anomaly: a, baselineW: res.baselineW, at: a.at });
       }
     } catch { /* anomaly detection is advisory + best-effort */ }
+    // Phase 21: capture a lock-metrics snapshot so contention is observable over
+    // time (best-effort, flag-gated, atomic). Pure observability.
+    try { lockHistory().record(); } catch { /* observability only */ }
     return rec;
   } catch { return null; }
+}
+
+/** Query recent lock-metrics snapshots (contention over time). */
+function getLockHistory(opts = {}) {
+  if (!isPeripheralsEnabled()) return { enabled: false, snapshots: [] };
+  try { return { enabled: true, snapshots: lockHistory().query(opts) }; }
+  catch { return { enabled: true, snapshots: [] }; }
+}
+
+/** Record a lock-metrics snapshot on demand. */
+function recordLockSnapshot() {
+  if (!isPeripheralsEnabled()) return { enabled: false };
+  try { return { enabled: true, snapshot: lockHistory().record() }; }
+  catch { return { enabled: true, snapshot: null }; }
+}
+
+/** Lock contention trends + hottest files (observability). */
+function getLockTrends(opts = {}) {
+  if (!isPeripheralsEnabled()) return { enabled: false };
+  try { return { enabled: true, ...lockHistory().trends(opts) }; }
+  catch { return { enabled: true, snapshots: 0, hotFiles: [] }; }
+}
+
+/** Cross-host coordination status (single-machine vs cluster). */
+function getCoordinationStatus() {
+  try { return { enabled: isPeripheralsEnabled(), ...coordination().status() }; }
+  catch { return { enabled: isPeripheralsEnabled(), mode: 'single-machine' }; }
+}
+
+/** Acquire a cross-host device lease (inert/local when cluster mode is off). */
+function acquireDeviceLease(id, opts = {}) {
+  if (!isPeripheralsEnabled()) return { enabled: false };
+  try { return { enabled: true, ...coordination().acquireLease(`device:${id}`, opts) }; }
+  catch (err) { return { enabled: true, granted: false, reason: err.message }; }
+}
+
+/** Release a cross-host device lease held by this node. */
+function releaseDeviceLease(id) {
+  if (!isPeripheralsEnabled()) return { enabled: false };
+  try { return { enabled: true, ...coordination().releaseLease(`device:${id}`) }; }
+  catch (err) { return { enabled: true, released: false, reason: err.message }; }
+}
+
+/** Describe configured cron device-schedule rules. */
+function getCronSchedules() {
+  if (!isPeripheralsEnabled()) return { enabled: false, rules: [] };
+  try { return { enabled: true, rules: deviceSchedule().describe() }; }
+  catch { return { enabled: true, rules: [] }; }
+}
+
+/** Advisory cron-proposed tasks due at `now` (human-gated; never executed). */
+function getDueCronTasks(now) {
+  if (!isPeripheralsEnabled()) return { enabled: false, tasks: [] };
+  try { return { enabled: true, tasks: deviceSchedule().proposeCronTasks(now ? new Date(now) : new Date()) }; }
+  catch { return { enabled: true, tasks: [] }; }
 }
 
 /** Query recent power-history samples. @param {{sinceMs?:number,limit?:number}} [opts] */
@@ -515,6 +577,21 @@ function execute(id, action, params = {}) {
 
   const drv = driverFor(device);
 
+  // Phase 21: cross-host coordination gate. In CLUSTER mode (LIKU_CLUSTER_DIR
+  // set) a REMOTE device may only be driven by the node that holds its lease —
+  // this prevents two fleet nodes from actuating the same device concurrently.
+  // Single-machine (default) → clusterEnabled() is false → completely inert.
+  if (drv && drv.REMOTE && !isHilEnabled()) {
+    try {
+      const coord = coordination();
+      if (coord.clusterEnabled() && !coord.canAct(`device:${id}`)) {
+        const holder = coord.whoHolds(`device:${id}`);
+        _emit({ type: 'blocked', id, action, code: 'device-leased-elsewhere' });
+        return { enabled: true, ok: false, rejected: true, code: 'device-leased-elsewhere', klass: decision.klass, reason: `device leased by another node${holder ? ` (${holder.nodeId})` : ''}` };
+      }
+    } catch { /* coordination is best-effort + non-fatal */ }
+  }
+
   // Phase 18: token revocation gate. A REMOTE driver must REFUSE to send a
   // command for a device whose capability token has been revoked (via unpair or
   // explicit revocation) — the human must re-pair to restore it. HIL is isolated
@@ -677,6 +754,14 @@ module.exports = {
   getAnomalyActions,
   confirmAnomalyAction,
   dismissAnomalyAction,
+  getLockHistory,
+  recordLockSnapshot,
+  getLockTrends,
+  getCoordinationStatus,
+  acquireDeviceLease,
+  releaseDeviceLease,
+  getCronSchedules,
+  getDueCronTasks,
   isHilEnabled
 };
 

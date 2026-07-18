@@ -2795,6 +2795,213 @@ test('consumer surfaces an advisory anomaly→action for a persistently anomalou
   delete process.env.LIKU_ENABLE_PERIPHERALS;
 });
 
+// ── Phase 21: lock observability + cross-host coordination + cron scheduling ──
+
+test('per-file lock metrics attribute contention to the right store', () => {
+  const atomic = require('../src/shared/atomic-file');
+  atomic.resetLockMetrics();
+  const a = require('path').join(TMP_HOME, 'lock-metric-a.json');
+  const b = require('path').join(TMP_HOME, 'lock-metric-b.json');
+  atomic.atomicWriteFileSync(a, '{"x":1}');
+  atomic.atomicWriteFileSync(a, '{"x":2}');
+  atomic.atomicWriteFileSync(b, '{"y":1}');
+  const perFile = atomic.getPerFileLockMetrics();
+  assert.ok(perFile['lock-metric-a.json'] && perFile['lock-metric-a.json'].acquired >= 2, 'file a tracked twice');
+  assert.ok(perFile['lock-metric-b.json'] && perFile['lock-metric-b.json'].acquired >= 1, 'file b tracked');
+  assert.ok(atomic.getLockMetrics().acquired >= 3, 'global counters still aggregate');
+  atomic.resetLockMetrics();
+  try { fs.rmSync(a); fs.rmSync(b); } catch { /* ignore */ }
+});
+
+test('lock history persists snapshots + trends (flag-gated, no disk when off)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const lh = require('../src/main/peripherals/lock-history');
+  lh.clear();
+  const atomic = require('../src/shared/atomic-file');
+  atomic.atomicWriteFileSync(require('path').join(TMP_HOME, 'lh-seed.json'), '{"a":1}');
+  lh.record();
+  lh.record();
+  const snaps = lh.query({ limit: 10 });
+  assert.ok(snaps.length >= 2, 'snapshots recorded');
+  assert.ok('metrics' in snaps[0] && 'perFile' in snaps[0], 'snapshot carries metrics + per-file');
+  const t = lh.trends({ limit: 10 });
+  assert.ok(t.snapshots >= 2, 'trends computed');
+  assert.ok('contentionRate' in t && Array.isArray(t.hotFiles), 'trend exposes contention rate + hot files');
+  lh.clear();
+  // Flag OFF → inert, no disk.
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+  assert.strictEqual(lh.record(), null, 'no snapshot when disabled');
+  assert.strictEqual(fs.existsSync(lh.HISTORY_FILE), false, 'no lock-history.jsonl when disabled');
+  try { fs.rmSync(require('path').join(TMP_HOME, 'lh-seed.json')); } catch { /* ignore */ }
+});
+
+test('coordination is single-machine by default (backward compatible)', () => {
+  delete process.env.LIKU_CLUSTER_DIR;
+  const coord = require('../src/main/peripherals/coordination');
+  assert.strictEqual(coord.clusterEnabled(), false, 'cluster off without LIKU_CLUSTER_DIR');
+  const g = coord.acquireLease('device:x');
+  assert.strictEqual(g.granted, true, 'lease granted locally');
+  assert.strictEqual(g.local, true, 'granted in single-machine mode');
+  assert.strictEqual(coord.canAct('device:x'), true, 'always may act on a single machine');
+  assert.strictEqual(coord.status().mode, 'single-machine');
+});
+
+test('cross-host leases mutually exclude nodes + steal on expiry (cluster mode)', () => {
+  const clusterDir = require('path').join(TMP_HOME, 'cluster');
+  process.env.LIKU_CLUSTER_DIR = clusterDir;
+  const coord = require('../src/main/peripherals/coordination');
+  assert.strictEqual(coord.clusterEnabled(), true, 'cluster mode on');
+  const t0 = 1_000_000;
+  process.env.LIKU_NODE_ID = 'nodeA';
+  const a = coord.acquireLease('device:shared', { ttlMs: 1000, now: t0 });
+  assert.strictEqual(a.granted, true, 'nodeA acquires');
+  // nodeB is denied while nodeA's lease is live.
+  process.env.LIKU_NODE_ID = 'nodeB';
+  const b = coord.acquireLease('device:shared', { ttlMs: 1000, now: t0 + 100 });
+  assert.strictEqual(b.granted, false, 'nodeB denied while held');
+  assert.strictEqual(b.holder.nodeId, 'nodeA');
+  assert.strictEqual(coord.canAct('device:shared', t0 + 100), false, 'nodeB may not act');
+  // nodeB cannot release nodeA's lease.
+  assert.strictEqual(coord.releaseLease('device:shared').released, false, 'non-owner cannot release');
+  // After expiry, nodeB steals it.
+  const b2 = coord.acquireLease('device:shared', { ttlMs: 1000, now: t0 + 2000 });
+  assert.strictEqual(b2.granted, true, 'expired lease stolen by nodeB');
+  coord.releaseLease('device:shared');
+  delete process.env.LIKU_NODE_ID;
+  delete process.env.LIKU_CLUSTER_DIR;
+  try { fs.rmSync(clusterDir, { recursive: true, force: true }); } catch { /* ignore */ }
+});
+
+test('coordination sanitizes resource ids (no path traversal)', () => {
+  const clusterDir = require('path').join(TMP_HOME, 'cluster2');
+  process.env.LIKU_CLUSTER_DIR = clusterDir;
+  const coord = require('../src/main/peripherals/coordination');
+  // A traversal attempt is sanitized to a safe filename inside the leases dir.
+  const g = coord.acquireLease('device:../../etc/passwd', { ttlMs: 1000, now: 5000 });
+  assert.strictEqual(g.granted, true, 'sanitized id still leases safely');
+  const leasesDir = require('path').join(clusterDir, 'leases');
+  const entries = fs.existsSync(leasesDir) ? fs.readdirSync(leasesDir) : [];
+  assert.ok(entries.every((n) => !n.includes('..') && !n.includes('/') && !n.includes('\\')), 'no traversal in lease filenames');
+  coord.releaseLease('device:../../etc/passwd');
+  delete process.env.LIKU_CLUSTER_DIR;
+  try { fs.rmSync(clusterDir, { recursive: true, force: true }); } catch { /* ignore */ }
+});
+
+test('PAL execute blocks a device leased by another node (cluster mode); single-machine unaffected', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const coord = require('../src/main/peripherals/coordination');
+  // Single-machine: the gate is inert.
+  delete process.env.LIKU_CLUSTER_DIR;
+  assert.strictEqual(coord.canAct('device:pump-42'), true, 'single-machine may always act');
+  // Cluster mode: a foreign node holds the device lease → canAct false (the exact
+  // predicate the PAL execute gate uses to reject with device-leased-elsewhere).
+  const clusterDir = require('path').join(TMP_HOME, 'cluster3');
+  process.env.LIKU_CLUSTER_DIR = clusterDir;
+  process.env.LIKU_NODE_ID = 'other-node';
+  coord.acquireLease('device:pump-42', { ttlMs: 5000, now: 9000 });
+  process.env.LIKU_NODE_ID = 'this-node';
+  assert.strictEqual(coord.canAct('device:pump-42', 9500), false, 'held by other node → execute gate would block');
+  const holder = coord.whoHolds('device:pump-42', 9500);
+  assert.strictEqual(holder.nodeId, 'other-node');
+  delete process.env.LIKU_NODE_ID;
+  delete process.env.LIKU_CLUSTER_DIR;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+  try { fs.rmSync(clusterDir, { recursive: true, force: true }); } catch { /* ignore */ }
+});
+
+test('cron parser validates + rejects malformed expressions (sandboxed)', () => {
+  const cron = require('../src/main/peripherals/device-schedule');
+  assert.strictEqual(cron.validate('*/15 * * * *'), true, 'step syntax valid');
+  assert.strictEqual(cron.validate('0 9-17 * * 1-5'), true, 'range + list valid');
+  assert.strictEqual(cron.validate('0 0 1 1 0'), true, 'all-numeric valid');
+  assert.strictEqual(cron.validate('60 * * * *'), false, 'minute out of range rejected');
+  assert.strictEqual(cron.validate('* * * *'), false, 'wrong field count rejected');
+  assert.strictEqual(cron.validate('*/0 * * * *'), false, 'zero step rejected');
+  assert.strictEqual(cron.validate('a b c d e'), false, 'non-numeric rejected');
+  assert.strictEqual(cron.validate('* * * * * ; rm -rf /'), false, 'injection-style input rejected');
+});
+
+test('cron matcher fires on the right minute (Vixie dom/dow semantics)', () => {
+  const cron = require('../src/main/peripherals/device-schedule');
+  const d = new Date(2026, 6, 20, 9, 30, 0); // Mon 2026-07-20 09:30 (getDay()=1)
+  assert.strictEqual(cron.matches('30 9 * * *', d), true, 'exact minute/hour match');
+  assert.strictEqual(cron.matches('31 9 * * *', d), false, 'off-by-one minute no match');
+  assert.strictEqual(cron.matches('30 9 * * 1', d), true, 'weekday match');
+  // dom + dow both restricted → OR semantics (matches if EITHER matches).
+  assert.strictEqual(cron.matches('30 9 1 * 1', d), true, 'dom mismatch but dow matches → fires (OR)');
+});
+
+test('cron produces advisory, human-gated proposed tasks (Class A gated, never executed)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const registry = require('../src/main/peripherals/peripheral-registry').getInstance();
+  registry.register({ id: 'cron-lock', class: 'A', kind: 'lock', name: 'Cron Lock', capabilities: ['lock', 'unlock'], driver: 'mock' });
+  const now = new Date(2026, 6, 20, 7, 0, 0);
+  process.env.LIKU_DEVICE_CRON = JSON.stringify([
+    { id: 'r1', deviceId: 'cron-lock', action: 'lock', cron: `${now.getMinutes()} ${now.getHours()} * * *` },
+    { id: 'bad', deviceId: 'cron-lock', action: 'DROP TABLE', cron: '* * * * *' } // disallowed action → dropped
+  ]);
+  const cron = require('../src/main/peripherals/device-schedule');
+  const rules = cron.loadRules();
+  assert.strictEqual(rules.length, 1, 'disallowed-action rule rejected by the allow-list');
+  const tasks = cron.proposeCronTasks(now);
+  assert.strictEqual(tasks.length, 1, 'one cron task due');
+  const t = tasks[0];
+  assert.strictEqual(t.deviceId, 'cron-lock');
+  assert.strictEqual(t.status, 'pending-review', 'advisory proposed task');
+  assert.strictEqual(t.autonomousAction, false, 'never autonomous');
+  assert.strictEqual(t.requiresHuman, true, 'Class A device → human-gated');
+  registry.clear();
+  delete process.env.LIKU_DEVICE_CRON;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('cron scheduling is flag-gated + additive (existing power schedules untouched)', () => {
+  const cron = require('../src/main/peripherals/device-schedule');
+  // Flag OFF → no rules regardless of env.
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+  process.env.LIKU_DEVICE_CRON = JSON.stringify([{ deviceId: 'x', action: 'on', cron: '* * * * *' }]);
+  assert.strictEqual(cron.loadRules().length, 0, 'inert when disabled');
+  assert.strictEqual(cron.proposeCronTasks(new Date()).length, 0, 'no tasks when disabled');
+  // Existing power-schedule module still behaves independently (no cron coupling).
+  const schedule = require('../src/main/peripherals/power-schedule');
+  assert.strictEqual(schedule.deviceScheduleW('x', new Date()), null, 'power schedules unaffected by cron');
+  delete process.env.LIKU_DEVICE_CRON;
+});
+
+test('PAL surfaces lock/coordination/cron observability accessors', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_CLUSTER_DIR;
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  // Coordination status defaults to single-machine + device-lease is local.
+  const cs = pal.getCoordinationStatus();
+  assert.strictEqual(cs.mode, 'single-machine');
+  const lease = pal.acquireDeviceLease('pal-dev');
+  assert.strictEqual(lease.granted, true, 'single-machine device lease granted locally');
+  assert.strictEqual(pal.releaseDeviceLease('pal-dev').released, true);
+  // Lock trends accessor is safe even with little/no history.
+  const trends = pal.getLockTrends({ limit: 5 });
+  assert.strictEqual(trends.enabled, true);
+  assert.ok(Array.isArray(trends.hotFiles), 'trends expose hot files array');
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('PAL cron accessors return advisory schedules + due tasks (flag-gated)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const now = new Date(2026, 6, 21, 8, 15, 0);
+  process.env.LIKU_DEVICE_CRON = JSON.stringify([{ id: 'pc', deviceId: 'lamp', action: 'on', cron: `${now.getMinutes()} ${now.getHours()} * * *` }]);
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  const rules = pal.getCronSchedules();
+  assert.strictEqual(rules.rules.length, 1, 'cron rule surfaced');
+  assert.strictEqual(rules.rules[0].valid, true);
+  const due = pal.getDueCronTasks(now.getTime());
+  assert.strictEqual(due.tasks.length, 1, 'due task produced');
+  assert.strictEqual(due.tasks[0].autonomousAction, false, 'advisory only');
+  // Flag OFF → inert.
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+  assert.strictEqual(pal.getCronSchedules().enabled, false, 'inert when disabled');
+  delete process.env.LIKU_DEVICE_CRON;
+});
+
 console.log(`\n${pass} checks passed.`);
 if (process.exitCode) { console.error('FAILED'); }
 else { console.log('OK'); }

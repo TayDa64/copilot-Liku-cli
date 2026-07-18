@@ -23,6 +23,10 @@
  *   liku peripherals anomaly-action [list|confirm <id>|dismiss <id>]
  *                                       Advisory anomaly→action suggestions (human-gated)
  *   liku peripherals schedules          Show per-device time-boxed power budgets
+ *   liku peripherals locks [--record]   Lock observability: metrics, per-file, trends
+ *   liku peripherals coordination [status|lease <id>|release <id>]
+ *                                       Cross-host lease coordination (cluster mode)
+ *   liku peripherals cron [--at <ISO>]  Cron device schedules → advisory human-gated tasks
  *   liku peripherals pair <id>          Pair / commission a device (real when HIL off)
  *   liku peripherals unpair <id>        Tear down a device's pairing (re-pairable)
  *   liku peripherals token [status|rotate <id>|revoke <id>]
@@ -78,10 +82,14 @@ async function run(args, flags) {
         log(`  devices: ${ps.devices ? ps.devices.length : 0}`);
         log(`  power: ${ps.currentW}W / ${ps.budgetW}W  (headroom ${ps.headroomW}W)`);
         log(`  peak: ${ps.peakW}W  avg: ${ps.avgW}W  (${ps.samples} samples)${ps.anomalies ? `  anomalies: ${ps.anomalies} [${(ps.anomalyTypes || []).join(',')}]` : ''}`);
-        log(`  locking: ${ps.locking || 'advisory-file-lock'}   HIL: ${ps.hil ? 'ON (simulation)' : 'off'}`);
+        log(`  locking: ${ps.locking || 'advisory-file-lock'}   HIL: ${ps.hil ? 'ON (simulation)' : 'off'}   cluster: ${ps.cluster || 'single-machine'}`);
         try {
-          const lm = require('../../shared/atomic-file').getLockMetrics();
+          const atomic = require('../../shared/atomic-file');
+          const lm = atomic.getLockMetrics();
           log(`  locks: ${lm.acquired} acquired, ${lm.contended} contended, ${lm.steals} steals, ${lm.fallbacks} fallbacks`);
+          const perFile = atomic.getPerFileLockMetrics();
+          const hot = Object.entries(perFile).sort((a, b) => b[1].contended - a[1].contended || b[1].acquired - a[1].acquired)[0];
+          if (hot) log(dim(`  hottest lock: ${hot[0]} (${hot[1].acquired} acq, ${hot[1].contended} cont)`));
         } catch { /* observability only */ }
         try {
           const channels = require('../../main/agents/notification-channels').describe();
@@ -393,12 +401,83 @@ async function run(args, flags) {
       for (const s of res.schedules) {
         const win = `${s.fromHour}→${s.toHour}` + (s.fromHour !== s.resolvedFrom || s.toHour !== s.resolvedTo ? ` (${s.resolvedFrom}:00→${s.resolvedTo}:00)` : ':00');
         const days = Array.isArray(s.days) && s.days.length ? ` days:[${s.days.join(',')}]` : '';
-        log(`  ${highlight(s.id)} ${win}  ≤${s.maxW}W${days}  ${dim(s.active ? 'IN WINDOW' : 'outside')}`);
-      }
       return { success: true, ...res };
     }
 
-    case 'simulate': {
+    case 'locks': {
+      // Phase 21: lock observability — live counters, per-file breakdown, and
+      // contention trends over time (from the persisted lock-history log).
+      const atomic = require('../../shared/atomic-file');
+      const live = atomic.getLockMetrics();
+      const perFile = atomic.getPerFileLockMetrics();
+      const trends = pal.getLockTrends({ limit: 50 });
+      if (flags.record) pal.recordLockSnapshot();
+      if (flags.json) return { success: true, live, perFile, trends };
+      log(highlight('Lock observability'));
+      log(`  live: ${live.acquired} acquired, ${live.contended} contended, ${live.steals} steals, ${live.fallbacks} fallbacks, ${live.retries} retries`);
+      const rate = live.acquired > 0 ? Math.round(live.contended / live.acquired * 1000) / 10 : 0;
+      log(`  contention rate: ${rate}%`);
+      const files = Object.entries(perFile).sort((a, b) => b[1].contended - a[1].contended || b[1].acquired - a[1].acquired).slice(0, 8);
+      if (files.length) {
+        log(highlight('  per-file:'));
+        for (const [f, m] of files) log(`    ${f}  ${m.acquired} acq, ${m.contended} cont, ${m.steals} steal`);
+      }
+      if (trends && trends.snapshots) {
+        log(highlight(`  trend (${trends.snapshots} snapshots):`));
+        const d = trends.deltas || {};
+        log(`    Δ contended ${d.contended || 0}, Δ steals ${d.steals || 0}, Δ fallbacks ${d.fallbacks || 0}`);
+        for (const h of trends.hotFiles || []) log(dim(`    hot: ${h.file} (${h.contended} contended)`));
+      } else {
+        log(dim('  no history yet (snapshots accrue as stores are written; force one with --record)'));
+      }
+      return { success: true, live, perFile, trends };
+    }
+
+    case 'coordination':
+    case 'cluster': {
+      // Phase 21: cross-host coordination status + optional lease management.
+      const op = (args[1] || 'status').toLowerCase();
+      if (op === 'lease' || op === 'release') {
+        const id = args[2];
+        if (!id) { error(`Usage: liku peripherals coordination ${op} <device-id>`); return { success: false }; }
+        const res = op === 'lease' ? pal.acquireDeviceLease(id) : pal.releaseDeviceLease(id);
+        if (flags.json) return { success: true, ...res };
+        if (op === 'lease') success(`Lease for ${id}: ${res.granted ? 'GRANTED' : 'denied'}${res.local ? ' (single-machine/local)' : ''}${res.holder && !res.granted ? ` held by ${res.holder.nodeId}` : ''}`);
+        else success(`Lease for ${id}: ${res.released ? 'released' : `not released (${res.reason})`}`);
+        return { success: true, ...res };
+      }
+      const res = pal.getCoordinationStatus();
+      if (flags.json) return { success: true, ...res };
+      log(highlight('Cross-host coordination'));
+      log(`  mode: ${res.mode}`);
+      log(`  node: ${res.nodeId}`);
+      log(`  clusterDir: ${res.clusterDir || dim('(unset — single-machine)')}`);
+      if (res.enabled && res.mode === 'cluster') log(`  active leases: ${res.leases}`);
+      else log(dim('  set LIKU_CLUSTER_DIR=<shared-path> to enable multi-node coordination'));
+      return { success: true, ...res };
+    }
+
+    case 'cron': {
+      // Phase 21 (stretch): cron-based recurring device schedules → advisory,
+      // human-gated proposed tasks. Never actuates; Class A stays confirm-gated.
+      const rules = pal.getCronSchedules();
+      const at = flags.at ? new Date(flags.at) : new Date();
+      const due = pal.getDueCronTasks(at.getTime());
+      if (flags.json) return { success: true, rules: rules.rules, dueAt: at.toISOString(), tasks: due.tasks };
+      log(highlight(`Cron device schedules (${rules.rules.length}):`));
+      if (!rules.rules.length) log(dim('  none (set LIKU_DEVICE_CRON=[{"deviceId","action","cron"}])'));
+      for (const r of rules.rules) log(`  ${highlight(r.id)} ${dim(r.deviceId)} ${r.action}  ${dim(`"${r.cron}"`)}${r.valid ? '' : ' INVALID'} ${dim(r.source)}`);
+      log(highlight(`\nDue at ${at.toISOString().slice(0, 16)} (${due.tasks.length} advisory task(s)):`));
+      if (!due.tasks.length) log(dim('  none due this minute (advisory tasks are human-gated, never auto-run)'));
+      for (const t of due.tasks) {
+        const gate = t.requiresHuman ? highlight(' [Class A → human-gated]') : '';
+        log(`  ${highlight(t.action)} ${t.deviceId}${gate}  ${dim(t.advisory)}`);
+        log(dim(`     review then: liku peripherals execute ${t.deviceId} ${t.action}`));
+      }
+      return { success: true, rules: rules.rules, tasks: due.tasks };
+    }
+
+
       // Hardware-in-the-loop helper: inject a simulated sensor reading so the
       // monitor/alert pipeline can be exercised without physical hardware.
       const id = args[1];
@@ -500,7 +579,7 @@ async function run(args, flags) {
 
     default:
       error(`Unknown subcommand: ${sub}`);
-      log('Usage: liku peripherals [scan|list|status [id]|power [--history|--trend|--anomalies|--forecast]|anomalies [--attributed]|anomaly-action [confirm|dismiss <id>]|schedules|suggestions|apply-schedule <id>|pair <id>|unpair <id>|token [rotate|revoke <id>]|tasks [--escalated|--pending|--severity <p>|--anomaly]|notifications|channels|simulate <id> <k=v>|execute <id> <action>|confirm <id> <action> [--execute]|drivers]');
+      log('Usage: liku peripherals [scan|list|status [id]|power [--history|--trend|--anomalies|--forecast]|anomalies [--attributed]|anomaly-action [confirm|dismiss <id>]|schedules|locks [--record]|coordination [lease|release <id>]|cron [--at <ISO>]|suggestions|apply-schedule <id>|pair <id>|unpair <id>|token [rotate|revoke <id>]|tasks [--escalated|--pending|--severity <p>|--anomaly]|notifications|channels|simulate <id> <k=v>|execute <id> <action>|confirm <id> <action> [--execute]|drivers]');
       return { success: false };
   }
 }
