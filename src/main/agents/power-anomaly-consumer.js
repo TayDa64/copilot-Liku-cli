@@ -67,7 +67,9 @@ function buildAnomalyNotification(event) {
   const ev = event || {};
   const anomaly = ev.anomaly || {};
   const type = String(anomaly.type || 'anomaly');
-  const deviceId = anomaly.device || 'power-budget';
+  // Phase 19: prefer the ATTRIBUTED device (the likely driver) so tasks +
+  // schedule suggestions target a real device rather than the aggregate budget.
+  const deviceId = anomaly.attributedDevice || anomaly.device || 'power-budget';
   return {
     id: `power-anom-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     at: anomaly.at || ev.at || new Date().toISOString(),

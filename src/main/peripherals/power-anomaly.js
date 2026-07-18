@@ -55,6 +55,48 @@ function _std(xs, mean) {
 }
 function _round(n) { return Math.round(n * 100) / 100; }
 
+/** Mean per-device loadW over the baseline (all samples except the latest). @private */
+function _deviceBaseline(samples) {
+  const base = samples.slice(0, -1);
+  const sums = {};
+  const counts = {};
+  for (const s of base) {
+    for (const d of (s.devices || [])) {
+      sums[d.id] = (sums[d.id] || 0) + (Number(d.loadW) || 0);
+      counts[d.id] = (counts[d.id] || 0) + 1;
+    }
+  }
+  const mean = {};
+  for (const id of Object.keys(sums)) mean[id] = sums[id] / (counts[id] || 1);
+  return mean;
+}
+
+/**
+ * Attribute an anomaly to the DRIVING device — the one whose current draw rose
+ * most above its own baseline (falls back to the highest current load). Pure
+ * observation; used to target suggestions/tasks at a real device.
+ * @private
+ */
+function _attribute(samples) {
+  const latest = samples[samples.length - 1];
+  const devs = (latest && latest.devices) || [];
+  if (!devs.length) return null;
+  const baseMean = _deviceBaseline(samples);
+  let best = null;
+  let bestDelta = -Infinity;
+  let topLoad = null;
+  let topLoadW = -Infinity;
+  for (const d of devs) {
+    const loadW = Number(d.loadW) || 0;
+    const delta = loadW - (baseMean[d.id] || 0);
+    if (delta > bestDelta) { bestDelta = delta; best = { id: d.id, loadW, deltaW: delta }; }
+    if (loadW > topLoadW) { topLoadW = loadW; topLoad = { id: d.id, loadW, deltaW: delta }; }
+  }
+  // If nothing meaningfully increased, attribute to the biggest current consumer.
+  if (best && best.deltaW > 0.5) return best;
+  return topLoad || best;
+}
+
 /**
  * Detect power anomalies from history. Accepts an optional pre-fetched sample
  * array (tests) — otherwise it lazily reads power-history.
@@ -79,6 +121,11 @@ function detect(opts = {}) {
   const baseline = totals.slice(0, -1);
   const mean = _mean(baseline);
   const std = _std(baseline, mean);
+  // Phase 19: attribute the anomaly to the likely driving device.
+  const attribution = _attribute(samples);
+  const attrFields = attribution
+    ? { attributedDevice: attribution.id, attributedLoadW: _round(attribution.loadW), attributedDeltaW: _round(attribution.deltaW) }
+    : {};
   const anomalies = [];
 
   // SPIKE — latest jumps far above baseline.
@@ -86,8 +133,8 @@ function detect(opts = {}) {
   if (latestW > spikeThreshold && (latestW - mean) >= cfg.minDeltaW) {
     anomalies.push({
       type: 'spike', at: latest.at, valueW: _round(latestW), baselineW: _round(mean),
-      thresholdW: _round(spikeThreshold), deltaW: _round(latestW - mean),
-      advisory: `power spike: ${_round(latestW)}W vs baseline ${_round(mean)}W`
+      thresholdW: _round(spikeThreshold), deltaW: _round(latestW - mean), ...attrFields,
+      advisory: `power spike: ${_round(latestW)}W vs baseline ${_round(mean)}W${attribution ? ` (likely ${attribution.id})` : ''}`
     });
   }
 
@@ -99,8 +146,8 @@ function detect(opts = {}) {
     if (priorMean > 0 && tail.every((w) => w > sustainedThreshold) && (Math.min(...tail) - priorMean) >= cfg.minDeltaW) {
       anomalies.push({
         type: 'sustained', at: latest.at, valueW: _round(latestW), baselineW: _round(priorMean),
-        thresholdW: _round(sustainedThreshold), samples: cfg.sustainedN,
-        advisory: `sustained high power: ${cfg.sustainedN} samples above ${_round(sustainedThreshold)}W`
+        thresholdW: _round(sustainedThreshold), samples: cfg.sustainedN, ...attrFields,
+        advisory: `sustained high power: ${cfg.sustainedN} samples above ${_round(sustainedThreshold)}W${attribution ? ` (likely ${attribution.id})` : ''}`
       });
     }
   }
@@ -109,12 +156,12 @@ function detect(opts = {}) {
   if (latest && latest.overBudget) {
     anomalies.push({
       type: 'over-budget', at: latest.at, valueW: _round(latestW), baselineW: _round(mean),
-      budgetW: latest.budgetW != null ? Number(latest.budgetW) : null,
-      advisory: `over budget: ${_round(latestW)}W > ${latest.budgetW}W`
+      budgetW: latest.budgetW != null ? Number(latest.budgetW) : null, ...attrFields,
+      advisory: `over budget: ${_round(latestW)}W > ${latest.budgetW}W${attribution ? ` (likely ${attribution.id})` : ''}`
     });
   }
 
-  return { anomalies, baselineW: _round(mean), currentW: _round(latestW), samples: totals.length };
+  return { anomalies, baselineW: _round(mean), currentW: _round(latestW), samples: totals.length, attributedDevice: attribution ? attribution.id : null };
 }
 
 module.exports = { FLAG, enabled, detect };

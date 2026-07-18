@@ -2526,6 +2526,106 @@ test('anomaly consumer surfaces a proposed schedule after recurring anomalies (a
   delete process.env.LIKU_ENABLE_PERIPHERALS;
 });
 
+// ── Phase 19: power forecasting + per-device attribution + token rotation/grace ──
+
+test('power forecast builds per-hour baselines + short-horizon prediction', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const forecast = require('../src/main/peripherals/power-forecast');
+  // Two samples at hour 10 (~100W), two at hour 22 (~500W).
+  const mk = (h, w) => ({ at: new Date(2026, 6, 17, h, 0, 0).toISOString(), totalW: w, devices: [{ id: 'd1', loadW: w, active: true }] });
+  const samples = [mk(10, 100), mk(10, 110), mk(22, 500), mk(22, 520), mk(10, 90), mk(22, 480)];
+  const baselines = forecast.hourlyBaselines({ samples });
+  assert.ok(baselines[10] && baselines[22], 'per-hour baselines computed');
+  assert.ok(baselines[22].mean > baselines[10].mean, 'hour 22 baseline higher than hour 10');
+  // Forecast from just before hour 22 predicts the high hour-22 draw.
+  const f = forecast.forecast({ samples, horizonHours: 1, now: new Date(2026, 6, 17, 21, 30, 0).getTime() });
+  assert.strictEqual(f.ok, true);
+  assert.strictEqual(f.horizon[0].hour, 22);
+  assert.ok(f.horizon[0].predictedW >= 480, 'forecast reflects the hour-22 baseline');
+  // Early warning when the forecast exceeds a budget.
+  const warns = forecast.forecastExceedsBudget({ samples, budgetW: 300, horizonHours: 1, now: new Date(2026, 6, 17, 21, 30, 0).getTime() });
+  assert.ok(warns.length >= 1 && warns[0].hour === 22, 'forecast raises an early over-budget warning');
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('power forecast needs sufficient history (advisory, not premature)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const forecast = require('../src/main/peripherals/power-forecast');
+  const few = [{ at: new Date().toISOString(), totalW: 100, devices: [] }];
+  assert.strictEqual(forecast.forecast({ samples: few }).ok, false, 'no forecast without enough history');
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('anomaly detection attributes the spike to the driving device', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const anomaly = require('../src/main/peripherals/power-anomaly');
+  const at = () => new Date().toISOString();
+  // Baseline: fridge steady ~30W, heater off. Latest: heater jumps to 400W.
+  const samples = [
+    { at: at(), totalW: 32, devices: [{ id: 'fridge', loadW: 30 }, { id: 'heater', loadW: 2 }] },
+    { at: at(), totalW: 31, devices: [{ id: 'fridge', loadW: 30 }, { id: 'heater', loadW: 1 }] },
+    { at: at(), totalW: 33, devices: [{ id: 'fridge', loadW: 31 }, { id: 'heater', loadW: 2 }] },
+    { at: at(), totalW: 30, devices: [{ id: 'fridge', loadW: 29 }, { id: 'heater', loadW: 1 }] },
+    { at: at(), totalW: 32, devices: [{ id: 'fridge', loadW: 30 }, { id: 'heater', loadW: 2 }] },
+    { at: at(), totalW: 430, devices: [{ id: 'fridge', loadW: 30 }, { id: 'heater', loadW: 400 }] }
+  ];
+  const res = anomaly.detect({ samples });
+  const spike = res.anomalies.find((a) => a.type === 'spike');
+  assert.ok(spike, 'spike detected');
+  assert.strictEqual(spike.attributedDevice, 'heater', 'attributed to the heater (largest increase)');
+  assert.strictEqual(res.attributedDevice, 'heater');
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('attributed anomaly targets the real device in notifications + tasks', () => {
+  const { buildAnomalyNotification } = require('../src/main/agents/power-anomaly-consumer');
+  const n = buildAnomalyNotification({ anomaly: { type: 'spike', device: 'power-budget', attributedDevice: 'heater', valueW: 430, at: new Date().toISOString() }, baselineW: 32 });
+  assert.strictEqual(n.device.id, 'heater', 'notification targets the attributed device, not the aggregate');
+});
+
+test('token scheduled rotation keeps the previous generation valid during the grace window', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  process.env.LIKU_DCP_TOKEN_GRACE_MS = '1000';
+  const ts = require('../src/main/peripherals/token-store');
+  ts.clear();
+  const p = ts.onPair('rot-dev', { actions: ['on'] });
+  assert.strictEqual(p.gen, 1);
+  const now = 5_000_000;
+  const r = ts.rotate('rot-dev', { now });
+  assert.strictEqual(r.gen, 2, 'rotation bumps the generation');
+  assert.strictEqual(r.prevGen, 1, 'previous generation retained for grace');
+  // New generation valid; previous generation valid DURING grace; invalid after.
+  assert.strictEqual(ts.isTokenValid('rot-dev', 2, now + 100), true, 'current gen valid');
+  assert.strictEqual(ts.isTokenValid('rot-dev', 1, now + 100), true, 'prev gen valid within grace');
+  assert.strictEqual(ts.isTokenValid('rot-dev', 1, now + 2000), false, 'prev gen invalid after grace');
+  // Revoked → nothing is valid.
+  ts.revoke('rot-dev');
+  assert.strictEqual(ts.isTokenValid('rot-dev', 3, now + 100), false, 'revoked device rejects all');
+  ts.clear();
+  delete process.env.LIKU_DCP_TOKEN_GRACE_MS;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('scheduled rotation triggers when due (rotateIfDue) + respects pairing', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  process.env.LIKU_DCP_TOKEN_ROTATE_MS = '1000';
+  const ts = require('../src/main/peripherals/token-store');
+  ts.clear();
+  ts.onPair('sched-dev', { actions: ['on'] }); // sets rotateDueAt = now + 1000
+  const before = ts.status('sched-dev');
+  assert.strictEqual(before.gen, 1);
+  assert.ok(before.rotateDueAt > 0, 'scheduled rotation armed on pair');
+  // Not yet due → no rotation.
+  ts.rotateIfDue('sched-dev', Date.now());
+  assert.strictEqual(ts.status('sched-dev').gen, 1, 'not rotated before the interval');
+  // Past due → rotates.
+  ts.rotateIfDue('sched-dev', before.rotateDueAt + 1);
+  assert.strictEqual(ts.status('sched-dev').gen, 2, 'rotated once due');
+  ts.clear();
+  delete process.env.LIKU_DCP_TOKEN_ROTATE_MS;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
 console.log(`\n${pass} checks passed.`);
 if (process.exitCode) { console.error('FAILED'); }
 else { console.log('OK'); }

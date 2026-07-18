@@ -464,6 +464,47 @@ The anomaly consumer feeds the advisor and re-emits new proposals as
 `dismissScheduleSuggestion(id)`. CLI: `liku peripherals suggestions`,
 `liku peripherals apply-schedule <id>`, `liku peripherals dismiss-schedule <id>`.
 
+## Forecasting + attribution + token rotation (Phase 19)
+
+### Power forecasting
+
+`power-forecast.js` turns the rolling history into **per-hour-of-day baselines**
+(total + per device) and a **short-horizon forecast**:
+
+- `hourlyBaselines()` / `deviceHourlyBaselines()` — mean / peak / count per hour.
+- `forecast({ horizonHours })` — predicted draw for upcoming hours (falls back to
+  the overall mean for hours with no history; needs `≥ FORECAST_MIN_SAMPLES`).
+- `forecastExceedsBudget({ budgetW })` — **early warning** list of upcoming hours
+  whose predicted/peak draw would exceed the budget (predictive, before it
+  happens). PAL: `getPowerForecast()`, `getForecastWarnings()`. CLI:
+  `liku peripherals power --forecast`.
+
+The advisor uses the device's per-hour baseline **peak** to set a smarter cap
+(`basis:'forecast-baseline'`) — letting normal operation continue while capping
+the anomalous excess.
+
+### Per-device anomaly attribution
+
+`power-anomaly.detect()` now attributes each anomaly to the **driving device** —
+the one whose current draw rose most above its own baseline (falling back to the
+biggest current consumer). Anomalies carry `attributedDevice` / `attributedDeltaW`,
+and the consumer targets that real device (instead of the aggregate
+`power-budget`) in notifications, tasks and schedule suggestions. CLI:
+`power --anomalies` shows `→ <device> (Δ<W>)`.
+
+### Scheduled token rotation + grace window
+
+`token-store.js` completes the lifecycle:
+
+- **Scheduled rotation** — `LIKU_DCP_TOKEN_ROTATE_MS` arms a `rotateDueAt` on
+  pair; the PAL calls `rotateIfDue()` lazily on use, so tokens rotate on a
+  schedule without a background timer.
+- **Grace window** — on rotation the immediately-previous generation stays valid
+  for `LIKU_DCP_TOKEN_GRACE_MS` (default 60 s) so a command signed just before
+  rotation is not abruptly rejected. `isTokenValid(id, gen, now)` encodes this
+  (current gen always valid; previous gen valid only within grace; revoked →
+  nothing valid). Revocation still overrides everything.
+
 ## If a human decides to act
 
 Any physical response still travels the full PAL safety chain — the alert path
@@ -602,6 +643,12 @@ driver stays local/in-process and needs no wire format.
 - **Auto-schedules never self-activate.** Recurring anomalies only *propose*
   schedules (`autonomousAction:false`); a proposal is enforced ONLY after an
   explicit human `confirm`, and even then can only ever restrict power.
+- **Forecasts + attribution only observe.** Per-hour forecasting and per-device
+  attribution read history to sharpen advisory suggestions/warnings; they never
+  actuate and never bypass the human gate.
+- **Token rotation preserves safety.** Scheduled rotation + grace window keep
+  in-flight commands valid without weakening revocation (a revoked device rejects
+  every generation); rotation never actuates and HIL stays virtual.
 - **Cognitive budget unchanged.** `sensor.*`/`hardware.*.alert` facts are
   evidence-excluded from the default fragment; the default prompt stays
   byte-identical.

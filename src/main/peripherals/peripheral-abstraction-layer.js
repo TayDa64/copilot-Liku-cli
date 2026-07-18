@@ -263,6 +263,25 @@ function getPowerAnomalies(opts = {}) {
   catch { return { enabled: true, anomalies: [], baselineW: 0, currentW: 0, samples: 0 }; }
 }
 
+function powerForecast() { return require('./power-forecast'); }
+
+/** Short-horizon power forecast from per-hour-of-day baselines (advisory). */
+function getPowerForecast(opts = {}) {
+  if (!isPeripheralsEnabled()) return { enabled: false, ok: false, horizon: [] };
+  try { return { enabled: true, ...powerForecast().forecast(opts) }; }
+  catch { return { enabled: true, ok: false, horizon: [] }; }
+}
+
+/** Early-warning: upcoming hours whose forecast draw would exceed the budget. */
+function getForecastWarnings(opts = {}) {
+  if (!isPeripheralsEnabled()) return { enabled: false, warnings: [] };
+  try {
+    const budgetW = Number.isFinite(opts.budgetW) ? opts.budgetW : _powerBudgetW();
+    const warnings = powerForecast().forecastExceedsBudget({ ...opts, budgetW });
+    return { enabled: true, warnings };
+  } catch { return { enabled: true, warnings: [] }; }
+}
+
 /** Tag a driver's pairing state map with the driver id. @private */
 function _tagDriver(driverId, states) {
   const out = {};
@@ -478,7 +497,11 @@ function execute(id, action, params = {}) {
   // (virtual pairing never revokes), and connectionless/local drivers are exempt.
   if (drv && drv.REMOTE && !isHilEnabled()) {
     try {
-      if (tokenStore().isRevoked(id)) {
+      const ts = tokenStore();
+      // Lazy scheduled rotation: rotate the device's token if its interval elapsed
+      // (bounded, best-effort). The grace window keeps just-signed commands valid.
+      try { ts.rotateIfDue(id); } catch { /* non-fatal */ }
+      if (ts.isRevoked(id)) {
         _emit({ type: 'blocked', id, action, code: 'token-revoked' });
         return { enabled: true, ok: false, rejected: true, code: 'token-revoked', klass: decision.klass, reason: 'device token revoked — re-pair to restore' };
       }
@@ -616,6 +639,8 @@ module.exports = {
   getPowerTrend,
   getPowerSchedules,
   getPowerAnomalies,
+  getPowerForecast,
+  getForecastWarnings,
   pairDevice,
   unpairDevice,
   getPairingStatus,

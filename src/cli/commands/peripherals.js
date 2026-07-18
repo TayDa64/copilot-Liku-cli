@@ -15,7 +15,7 @@
  *                                       Human-gated peripheral tasks (filterable)
  *   liku peripherals notifications [--pending|--severity <s>]
  *   liku peripherals channels           Show escalation notification channels
- *   liku peripherals power [--history|--trend|--anomalies]
+ *   liku peripherals power [--history|--trend|--anomalies|--forecast]
  *                                       Live budget + rolling power telemetry
  *   liku peripherals schedules          Show per-device time-boxed power budgets
  *   liku peripherals pair <id>          Pair / commission a device (real when HIL off)
@@ -219,7 +219,9 @@ async function run(args, flags) {
       if (!entries.length) log(dim('  none (issued on pair)'));
       for (const [id, t] of entries) {
         const state = t.revoked ? 'REVOKED' : (t.gen > 0 ? 'active' : 'none');
-        log(`  ${highlight(id)} gen ${t.gen} ${state} ${dim(`id:${t.identityFp || '?'}`)}`);
+        const grace = (t.prevGen > 0 && t.prevGenUntil > Date.now()) ? dim(` +grace(gen${t.prevGen})`) : '';
+        const rot = t.rotateDueAt > 0 ? dim(` rotates:${new Date(t.rotateDueAt).toISOString().slice(11, 19)}`) : '';
+        log(`  ${highlight(id)} gen ${t.gen} ${state}${grace}${rot} ${dim(`id:${t.identityFp || '?'}`)}`);
       }
       return { success: true, ...res };
     }
@@ -260,7 +262,18 @@ async function run(args, flags) {
 
     case 'power': {
       const ps = pal.powerStatus();
-      // Phase 13: --anomalies surfaces detected power anomalies.
+      // Phase 19: --forecast shows the short-horizon per-hour forecast + warnings.
+      if (flags.forecast) {
+        const f = pal.getPowerForecast();
+        const warn = pal.getForecastWarnings();
+        if (flags.json) return { success: true, forecast: f, warnings: warn.warnings };
+        log(highlight('Power forecast'));
+        if (!f.ok) log(dim(`  ${f.basis || 'unavailable'} (${f.samples || 0} samples)`));
+        for (const h of f.horizon || []) log(`  hour ${h.hour}:00  ~${h.predictedW}W (peak ${h.peakW}W) ${dim(h.basis)}`);
+        for (const w of warn.warnings || []) error(`  ⚠ ${w.advisory}`);
+        return { success: true, forecast: f };
+      }
+      // Phase 19: --anomalies surfaces detected power anomalies (+ attribution).
       if (flags.anomalies) {
         const res = pal.getPowerAnomalies();
         let tiers = {};
@@ -270,7 +283,8 @@ async function run(args, flags) {
         if (!res.anomalies.length) log(dim(`  none (baseline ${res.baselineW}W, ${res.samples} samples)`));
         for (const a of res.anomalies) {
           const sev = (tiers[a.type] && tiers[a.type].severity) || 'info';
-          log(`  ${highlight(a.type)} [${sev}]  ${a.valueW}W vs baseline ${a.baselineW}W  ${dim(a.advisory || '')}`);
+          const attr = a.attributedDevice ? dim(` → ${a.attributedDevice} (Δ${a.attributedDeltaW}W)`) : '';
+          log(`  ${highlight(a.type)} [${sev}]  ${a.valueW}W vs baseline ${a.baselineW}W${attr}  ${dim(a.advisory || '')}`);
         }
         return { success: true, ...res };
       }
@@ -421,7 +435,7 @@ async function run(args, flags) {
 
     default:
       error(`Unknown subcommand: ${sub}`);
-      log('Usage: liku peripherals [scan|list|status [id]|power [--history|--trend|--anomalies]|schedules|suggestions|apply-schedule <id>|pair <id>|unpair <id>|token [rotate|revoke <id>]|tasks [--escalated|--pending|--severity <p>|--anomaly]|notifications|channels|simulate <id> <k=v>|execute <id> <action>|confirm <id> <action> [--execute]|drivers]');
+      log('Usage: liku peripherals [scan|list|status [id]|power [--history|--trend|--anomalies|--forecast]|schedules|suggestions|apply-schedule <id>|pair <id>|unpair <id>|token [rotate|revoke <id>]|tasks [--escalated|--pending|--severity <p>|--anomaly]|notifications|channels|simulate <id> <k=v>|execute <id> <action>|confirm <id> <action> [--execute]|drivers]');
       return { success: false };
   }
 }

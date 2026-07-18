@@ -130,13 +130,24 @@ function proposeSchedules(opts = {}, now = Date.now()) {
     if (existing && (existing.status === 'confirmed' || existing.status === 'dismissed')) continue;
     const [deviceId, type] = key.split(':');
     const hour = _modeHour(recent.map((o) => o.hour));
+    // Phase 19: use the device's per-hour-of-day baseline (forecast) to set a
+    // SMARTER cap — the device's typical peak at that hour lets normal operation
+    // continue while capping the anomalous excess. Falls back to a budget/value cap.
+    let maxW = _suggestCapW(recent);
+    let basis = 'anomaly-history';
+    try {
+      const devBase = require('./power-forecast').deviceHourlyBaselines();
+      const b = devBase && devBase[deviceId] && devBase[deviceId][hour];
+      if (b && Number.isFinite(b.peak) && b.peak > 0) { maxW = Math.round(b.peak); basis = 'forecast-baseline'; }
+    } catch { /* forecast is best-effort */ }
     const suggestion = {
       id: `sched-sug-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
       deviceId,
       anomalyType: type,
       fromHour: hour,
       toHour: (hour + 1) % 24,
-      maxW: _suggestCapW(recent),
+      maxW,
+      basis,
       occurrences: recent.length,
       reason: `recurring ${type} for ${deviceId} around ${hour}:00 (${recent.length}x)`,
       status: 'proposed',
