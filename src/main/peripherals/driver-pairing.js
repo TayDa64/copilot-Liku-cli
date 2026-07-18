@@ -20,6 +20,7 @@
 'use strict';
 
 const hil = require('./hil-simulator');
+const tokenStore = require('./token-store');
 
 /**
  * @param {object} deps
@@ -36,7 +37,13 @@ function createDriverPairing({ loadDeviceConfig, ensureManager, getManager, comm
     const mgr = ensureManager();
     if (!mgr) return { id: deviceId, state: 'unpaired', error: 'no-transport' };
     try { commission(mgr, cfg); } catch { /* the state machine records the failure */ }
-    return { id: deviceId, ...(mgr.pairing ? mgr.pairing.get(deviceId) : { state: 'unpaired' }) };
+    const rec = mgr.pairing ? mgr.pairing.get(deviceId) : { state: 'unpaired' };
+    // Phase 18: issue a capability token on successful pairing (revoked→re-issue,
+    // i.e. token rotation on re-pair). Best-effort + flag-gated.
+    if (rec && rec.state === 'paired') {
+      try { tokenStore.onPair(deviceId, { actions: cfg.capabilities }); } catch { /* non-fatal */ }
+    }
+    return { id: deviceId, ...rec, token: _tokenSummary(deviceId) };
   }
 
   function unpair(deviceId) {
@@ -44,7 +51,9 @@ function createDriverPairing({ loadDeviceConfig, ensureManager, getManager, comm
     const mgr = getManager();
     if (mgr && typeof mgr.unpair === 'function') { try { mgr.unpair(deviceId); } catch { /* non-fatal */ } }
     else if (mgr && mgr.pairing) mgr.pairing.requeue(deviceId);
-    return { id: deviceId, ...((mgr && mgr.pairing) ? mgr.pairing.get(deviceId) : { state: 'unpaired' }) };
+    // Phase 18: revoke the device's capability token on unpair.
+    try { tokenStore.revoke(deviceId); } catch { /* non-fatal */ }
+    return { id: deviceId, ...((mgr && mgr.pairing) ? mgr.pairing.get(deviceId) : { state: 'unpaired' }), token: _tokenSummary(deviceId) };
   }
 
   function pairingStatus() {
@@ -59,6 +68,15 @@ function createDriverPairing({ loadDeviceConfig, ensureManager, getManager, comm
   }
 
   return { pair, unpair, pairingStatus };
+}
+
+/** Compact token lifecycle summary for a device (safe when flag off). @private */
+function _tokenSummary(deviceId) {
+  try {
+    const s = tokenStore.status(deviceId);
+    if (!s) return null;
+    return { gen: s.gen, revoked: !!s.revoked, identityFp: s.identityFp };
+  } catch { return null; }
 }
 
 module.exports = { createDriverPairing };

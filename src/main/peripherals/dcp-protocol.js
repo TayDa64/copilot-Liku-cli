@@ -73,6 +73,11 @@ function issueCapabilityToken(opts = {}) {
     iat: Math.floor(now / 1000),
     exp: Math.floor(now / 1000) + ttlSec
   };
+  // Phase 18: token lifecycle binding. `gen` is the device's token generation
+  // (bumped on rotate/revoke so stale tokens can be rejected); `idfp` is a stable
+  // per-device identity fingerprint. Both are optional + backward compatible.
+  if (Number.isFinite(opts.gen)) payload.gen = opts.gen;
+  if (opts.identity) payload.idfp = String(opts.identity);
   const payloadStr = _b64url(JSON.stringify(payload));
   const sig = secret ? _sign(payloadStr, secret) : UNSIGNED_MARKER;
   return `${payloadStr}.${sig}`;
@@ -112,6 +117,16 @@ function verifyCapabilityToken(token, opts = {}) {
   if (opts.action != null && Array.isArray(payload.act) && payload.act.length
       && !payload.act.includes(String(opts.action).toLowerCase())) {
     return { ok: false, reason: 'action-scope-mismatch', payload };
+  }
+  // Phase 18: lifecycle checks (only when the caller supplies the expected value).
+  // A rotated/revoked device bumps its generation, so a stale token's `gen` no
+  // longer matches → rejected. Identity binding rejects a token minted for a
+  // different device identity.
+  if (opts.gen != null && payload.gen != null && Number(payload.gen) !== Number(opts.gen)) {
+    return { ok: false, reason: 'generation-mismatch', payload };
+  }
+  if (opts.identity != null && payload.idfp != null && String(payload.idfp) !== String(opts.identity)) {
+    return { ok: false, reason: 'identity-mismatch', payload };
   }
   return { ok: true, payload };
 }

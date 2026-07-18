@@ -416,6 +416,54 @@ visible differences** (Phase 15–17):
 
 All tier behaviour is strictly advisory + human-gated; no tier ever actuates.
 
+## Token lifecycle + advisory auto-scheduling (Phase 18)
+
+### Capability-token lifecycle bound to pairing
+
+Capability tokens (`dcp-protocol.js`) are stateless HMAC artifacts, so
+`token-store.js` adds the lifecycle state that makes revocation possible, bound
+to the pairing lifecycle:
+
+- **Issue on pair** — a successful `pair()` mints generation 1 with a stable
+  per-device **identity fingerprint** (HMAC over the deviceId; works signed OR
+  unsigned/local).
+- **Rotate on re-pair** — re-pairing after revoke bumps the generation; a stale
+  token's `gen` no longer verifies (`generation-mismatch`).
+- **Revoke on unpair** — `unpair()` marks the device revoked + bumps the
+  generation, invalidating any outstanding token.
+- **Enforcement** — the PAL's `execute()` refuses a command for any **REMOTE**
+  driver whose token is revoked (`code:'token-revoked'`, "re-pair to restore").
+  HIL is isolated (virtual pairing never revokes); connectionless/local drivers
+  are exempt.
+
+DCP additions: `issueCapabilityToken({ gen, identity })` and
+`verifyCapabilityToken({ gen, identity })` (both optional + backward compatible).
+PAL: `getTokenStatus()`, `rotateToken(id)`, `revokeToken(id)`. CLI:
+`liku peripherals token [status|rotate <id>|revoke <id>]`; `drivers` shows
+`token:gen<N>`.
+
+### Advisory auto-schedule suggestions
+
+`power-schedule-advisor.js` turns **recurring** anomalies into human-reviewable
+proposed schedules — never auto-applied:
+
+- **Detect** — `recordAnomaly()` buckets occurrences by `device:type` within a
+  window (`LIKU_PERIPHERAL_ADVISOR_WINDOW_MS`, default 24 h). Once the count
+  crosses `LIKU_PERIPHERAL_ADVISOR_MIN_OCCURRENCES` (default 3), `proposeSchedules()`
+  emits a proposal (recurring hour → a time-boxed cap).
+- **Deduplicate** — one open proposal per `device:type` until confirmed/dismissed.
+- **Confirm (pending/confirm rail)** — a proposal is `status:'proposed'`,
+  `autonomousAction:false`, and is **only** activated by an explicit
+  `confirm(id)`, which writes it to the confirmed schedule store
+  (`peripheral-schedules.json`) that `power-schedule.js` reads *in addition to*
+  env. Nothing is enforced before confirmation.
+
+The anomaly consumer feeds the advisor and re-emits new proposals as
+`supervisor:schedule-suggestion` events (advisory). PAL:
+`getScheduleSuggestions()`, `confirmScheduleSuggestion(id)`,
+`dismissScheduleSuggestion(id)`. CLI: `liku peripherals suggestions`,
+`liku peripherals apply-schedule <id>`, `liku peripherals dismiss-schedule <id>`.
+
 ## If a human decides to act
 
 Any physical response still travels the full PAL safety chain — the alert path
@@ -548,6 +596,12 @@ driver stays local/in-process and needs no wire format.
 - **Pairing never actuates.** Commissioning/pairing is transport bookkeeping with
   bounded retry + backoff; a paired device still flows through DCP → class gate →
   pending/confirm, and HIL pairing is virtual (no real fabric/adapter touched).
+- **Tokens are lifecycle-bound + revocable.** A capability token is issued on
+  pair, rotated on re-pair and revoked on unpair; a REMOTE driver refuses to send
+  for a revoked device. Token operations never actuate and HIL stays virtual.
+- **Auto-schedules never self-activate.** Recurring anomalies only *propose*
+  schedules (`autonomousAction:false`); a proposal is enforced ONLY after an
+  explicit human `confirm`, and even then can only ever restrict power.
 - **Cognitive budget unchanged.** `sensor.*`/`hardware.*.alert` facts are
   evidence-excluded from the default fragment; the default prompt stays
   byte-identical.

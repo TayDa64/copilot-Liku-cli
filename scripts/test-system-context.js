@@ -2341,6 +2341,191 @@ test('Supervisor exposes notifications by severity for inbox prioritisation', ()
   assert.strictEqual(sup.getNotificationsBySeverity('info').length, 0);
 });
 
+// ── Phase 18: token lifecycle + advisory auto-schedule suggestions ──
+
+test('DCP token generation + identity binding reject stale / wrong-identity tokens', () => {
+  const dcp = require('../src/main/peripherals/dcp-protocol');
+  const tok = dcp.issueCapabilityToken({ deviceId: 'd1', actions: ['on'], gen: 2, identity: 'abc123' });
+  // Correct gen + identity → ok.
+  assert.strictEqual(dcp.verifyCapabilityToken(tok, { deviceId: 'd1', action: 'on', gen: 2, identity: 'abc123' }).ok, true);
+  // Stale generation (device rotated) → rejected.
+  assert.strictEqual(dcp.verifyCapabilityToken(tok, { deviceId: 'd1', action: 'on', gen: 3 }).reason, 'generation-mismatch');
+  // Wrong identity → rejected.
+  assert.strictEqual(dcp.verifyCapabilityToken(tok, { deviceId: 'd1', action: 'on', identity: 'zzz' }).reason, 'identity-mismatch');
+  // Backward compat: a token without gen/identity still verifies when none requested.
+  const plain = dcp.issueCapabilityToken({ deviceId: 'd1', actions: ['on'] });
+  assert.strictEqual(dcp.verifyCapabilityToken(plain, { deviceId: 'd1', action: 'on' }).ok, true);
+});
+
+test('token store: issue on pair, rotate on re-pair, revoke on unpair (flag-gated)', () => {
+  const ts = require('../src/main/peripherals/token-store');
+  // Clear any file left by earlier pairing tests, then prove disabled = no write.
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  ts.clear();
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+  assert.strictEqual(ts.onPair('t-dev'), null, 'no-op when disabled');
+  assert.ok(!fs.existsSync(ts.STORE_FILE), 'no disk when disabled');
+
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  ts.clear();
+  const p1 = ts.onPair('t-dev', { actions: ['on', 'off'] });
+  assert.strictEqual(p1.gen, 1, 'first pair issues generation 1');
+  assert.strictEqual(p1.revoked, false);
+  assert.ok(p1.identityFp, 'per-device identity fingerprint bound');
+  // Idempotent while active — pairing again keeps the same generation.
+  assert.strictEqual(ts.onPair('t-dev').gen, 1, 'idempotent while active');
+  // Revoke on unpair bumps generation + marks revoked.
+  const r = ts.revoke('t-dev');
+  assert.strictEqual(r.revoked, true);
+  assert.ok(ts.isRevoked('t-dev'));
+  assert.ok(!ts.isActive('t-dev'));
+  // Re-pair after revoke rotates to a fresh generation.
+  const p2 = ts.onPair('t-dev', { actions: ['on'] });
+  assert.ok(p2.gen > p1.gen, 're-pair rotates the generation');
+  assert.strictEqual(p2.revoked, false);
+  ts.clear();
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('token lifecycle is bound to pairing: pair issues, unpair revokes (BLE fake)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_PERIPHERAL_HIL;
+  process.env.LIKU_BLE_ADAPTER = 'hci0-fake';
+  process.env.LIKU_BLE_DEVICES = JSON.stringify([
+    { id: 'ble-tok-01', class: 'B', kind: 'switch', capabilities: ['on', 'off'], peripheralId: 'ptok', writeCharUuid: 'ff01', notifyCharUuid: 'ff02' }
+  ]);
+  const ts = require('../src/main/peripherals/token-store');
+  ts.clear();
+  const ble = require('../src/main/peripherals/drivers/ble-driver');
+  const fake = makeFakeNoble([{ peripheralId: 'ptok', writeUuid: 'ff01', notifyUuid: 'ff02' }]);
+  ble._setBleLibForTest(fake.lib);
+  const pr = ble.pair('ble-tok-01');
+  assert.strictEqual(pr.state, 'paired');
+  assert.ok(ts.isActive('ble-tok-01'), 'token issued on pair');
+  const un = ble.unpair('ble-tok-01');
+  assert.ok(ts.isRevoked('ble-tok-01'), 'token revoked on unpair');
+  ble._setBleLibForTest(null);
+  ts.clear();
+  delete process.env.LIKU_BLE_ADAPTER;
+  delete process.env.LIKU_BLE_DEVICES;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('PAL blocks a REMOTE command when the device token is revoked (re-pair to restore)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_PERIPHERAL_HIL;
+  process.env.LIKU_ZIGBEE_COORDINATOR = '/dev/fake-zb';
+  process.env.LIKU_ZIGBEE_DEVICES = JSON.stringify([
+    { id: 'zb-rev-01', class: 'B', kind: 'switch', capabilities: ['on', 'off'], ieeeAddr: '0xREV1', endpoint: 1, powerW: 5 }
+  ]);
+  const ts = require('../src/main/peripherals/token-store');
+  ts.clear();
+  const zb = require('../src/main/peripherals/drivers/zigbee-driver');
+  const fake = makeFakeHerdsman([{ ieeeAddr: '0xREV1' }]);
+  zb._setZigbeeLibForTest(fake.lib);
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  pal.scan();
+  // Paired → command allowed.
+  zb.pair('zb-rev-01');
+  const ok = pal.execute('zb-rev-01', 'on');
+  assert.strictEqual(ok.ok, true, 'command allowed while token active');
+  // Revoke (unpair) → REMOTE command refused.
+  pal.revokeToken('zb-rev-01');
+  const blocked = pal.execute('zb-rev-01', 'on');
+  assert.strictEqual(blocked.ok, false);
+  assert.strictEqual(blocked.code, 'token-revoked', 'remote driver refuses on revoked token');
+  // Re-pair rotates a fresh token → command allowed again.
+  zb.pair('zb-rev-01');
+  assert.strictEqual(pal.execute('zb-rev-01', 'on').ok, true, 're-pair restores the command path');
+  zb._setZigbeeLibForTest(null);
+  ts.clear();
+  delete process.env.LIKU_ZIGBEE_COORDINATOR;
+  delete process.env.LIKU_ZIGBEE_DEVICES;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('token lifecycle stays virtual + isolated in HIL (no revocation blocking)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  process.env.LIKU_PERIPHERAL_HIL = '1';
+  process.env.LIKU_ZIGBEE_DEVICES = JSON.stringify([
+    { id: 'zb-hil-tok', class: 'B', kind: 'switch', capabilities: ['on', 'off'], powerW: 5 }
+  ]);
+  const ts = require('../src/main/peripherals/token-store');
+  ts.clear();
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  pal.scan();
+  pal.pairDevice('zb-hil-tok');   // HIL → virtual, no token store write
+  pal.unpairDevice('zb-hil-tok'); // HIL → virtual, no revocation
+  assert.strictEqual(ts.isRevoked('zb-hil-tok'), false, 'HIL never revokes');
+  assert.strictEqual(pal.execute('zb-hil-tok', 'on').ok, true, 'HIL command always allowed');
+  delete process.env.LIKU_PERIPHERAL_HIL;
+  delete process.env.LIKU_ZIGBEE_DEVICES;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('schedule advisor: recurring anomaly → deduped proposal → confirm activates it', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  process.env.LIKU_PERIPHERAL_ADVISOR_MIN_OCCURRENCES = '3';
+  const advisor = require('../src/main/peripherals/power-schedule-advisor');
+  const schedule = require('../src/main/peripherals/power-schedule');
+  advisor.clear();
+  // Below threshold → no proposal.
+  advisor.recordAnomaly({ device: 'heater-1', type: 'over-budget', valueW: 400, budgetW: 300 });
+  advisor.recordAnomaly({ device: 'heater-1', type: 'over-budget', valueW: 410, budgetW: 300 });
+  assert.strictEqual(advisor.proposeSchedules().length, 0, 'no proposal below threshold');
+  // Third occurrence crosses the threshold → one proposal.
+  advisor.recordAnomaly({ device: 'heater-1', type: 'over-budget', valueW: 420, budgetW: 300 });
+  const proposals = advisor.proposeSchedules();
+  assert.strictEqual(proposals.length, 1, 'recurring anomaly proposes a schedule');
+  const sug = proposals[0];
+  assert.strictEqual(sug.status, 'proposed');
+  assert.strictEqual(sug.autonomousAction, false, 'proposal is strictly advisory');
+  assert.strictEqual(sug.deviceId, 'heater-1');
+  // Dedup: proposing again does not create a second proposal.
+  assert.strictEqual(advisor.proposeSchedules().length, 1, 'deduped — same recurring anomaly = one proposal');
+  // NOT active until confirmed.
+  assert.strictEqual(schedule.deviceScheduleW('heater-1', new Date(2026, 6, 16, sug.fromHour, 0, 0)), null, 'proposal not enforced pre-confirmation');
+  // Explicit human confirmation activates it.
+  const c = advisor.confirm(sug.id);
+  assert.strictEqual(c.ok, true);
+  const cap = schedule.deviceScheduleW('heater-1', new Date(2026, 6, 16, sug.fromHour, 0, 0));
+  assert.strictEqual(cap, sug.maxW, 'confirmed schedule is now enforced by power-schedule');
+  advisor.clear();
+  // Clean up the confirmed schedule store.
+  try { fs.rmSync(require('../src/main/peripherals/power-schedule').CONFIRMED_FILE); } catch { /* ignore */ }
+  delete process.env.LIKU_PERIPHERAL_ADVISOR_MIN_OCCURRENCES;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('anomaly consumer surfaces a proposed schedule after recurring anomalies (advisory)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  process.env.LIKU_PERIPHERAL_ADVISOR_MIN_OCCURRENCES = '2';
+  const advisor = require('../src/main/peripherals/power-schedule-advisor');
+  advisor.clear();
+  const EventEmitter = require('events');
+  const { SupervisorAgent } = require('../src/main/agents/supervisor');
+  const { attachPowerAnomalyConsumer } = require('../src/main/agents/power-anomaly-consumer');
+  const orch = new EventEmitter();
+  orch.agents = new Map();
+  orch.agents.set('supervisor', new SupervisorAgent({}));
+  const suggestions = [];
+  orch.on('supervisor:schedule-suggestion', (s) => suggestions.push(s));
+  let captured = null;
+  const fakePal = { on: (type, cb) => { if (type === 'power-anomaly') captured = cb; return () => {}; } };
+  let clock = 9_000_000;
+  attachPowerAnomalyConsumer(orch, { pal: fakePal, now: () => clock });
+  // Two recurring over-budget anomalies (min-occurrences 2) → one proposal surfaced.
+  captured({ anomaly: { type: 'over-budget', device: 'fan-9', valueW: 300, budgetW: 250, at: new Date().toISOString() }, baselineW: 100 });
+  clock += 100000;
+  captured({ anomaly: { type: 'over-budget', device: 'fan-9', valueW: 305, budgetW: 250, at: new Date().toISOString() }, baselineW: 100 });
+  assert.ok(suggestions.length >= 1, 'a proposed schedule was surfaced');
+  assert.strictEqual(suggestions[0].status, 'proposed');
+  assert.strictEqual(suggestions[0].autonomousAction, false, 'suggestion is advisory');
+  advisor.clear();
+  delete process.env.LIKU_PERIPHERAL_ADVISOR_MIN_OCCURRENCES;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
 console.log(`\n${pass} checks passed.`);
 if (process.exitCode) { console.error('FAILED'); }
 else { console.log('OK'); }

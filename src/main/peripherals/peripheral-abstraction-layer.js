@@ -44,6 +44,7 @@ function hil() { return require('./hil-simulator'); }
 function powerHistory() { return require('./power-history'); }
 function powerSchedule() { return require('./power-schedule'); }
 function powerAnomaly() { return require('./power-anomaly'); }
+function tokenStore() { return require('./token-store'); }
 
 /** True when hardware-in-the-loop simulation mode is enabled. */
 function isHilEnabled() {
@@ -333,6 +334,55 @@ function unpairDevice(id) {
   } catch (err) { return { enabled: true, ok: false, reason: `unpair-failed: ${err.message}` }; }
 }
 
+/** Per-device capability-token lifecycle status (gen / revoked / identity). */
+function getTokenStatus() {
+  if (!isPeripheralsEnabled()) return { enabled: false, devices: {} };
+  try { return { enabled: true, devices: tokenStore().all() }; }
+  catch { return { enabled: true, devices: {} }; }
+}
+
+/** Rotate a device's capability token generation (invalidates stale tokens). */
+function rotateToken(id) {
+  if (!isPeripheralsEnabled()) return { enabled: false };
+  try {
+    const dev = registry().get(id);
+    const rec = tokenStore().rotate(id, dev ? { actions: dev.capabilities } : {});
+    return { enabled: true, ok: !!rec, ...(rec || {}) };
+  } catch (err) { return { enabled: true, ok: false, reason: err.message }; }
+}
+
+/** Explicitly revoke a device's capability token (remote drivers will refuse). */
+function revokeToken(id) {
+  if (!isPeripheralsEnabled()) return { enabled: false };
+  try {
+    const rec = tokenStore().revoke(id);
+    return { enabled: true, ok: !!rec, ...(rec || {}) };
+  } catch (err) { return { enabled: true, ok: false, reason: err.message }; }
+}
+
+function scheduleAdvisor() { return require('./power-schedule-advisor'); }
+
+/** Advisory power-schedule suggestions from recurring anomalies (proposed only). */
+function getScheduleSuggestions() {
+  if (!isPeripheralsEnabled()) return { enabled: false, suggestions: [] };
+  try { return { enabled: true, suggestions: scheduleAdvisor().listProposed() }; }
+  catch { return { enabled: true, suggestions: [] }; }
+}
+
+/** EXPLICIT human confirmation of a proposed schedule (activates it). */
+function confirmScheduleSuggestion(id) {
+  if (!isPeripheralsEnabled()) return { enabled: false };
+  try { return { enabled: true, ...scheduleAdvisor().confirm(id) }; }
+  catch (err) { return { enabled: true, ok: false, reason: err.message }; }
+}
+
+/** Dismiss a proposed schedule (human declined). */
+function dismissScheduleSuggestion(id) {
+  if (!isPeripheralsEnabled()) return { enabled: false };
+  try { return { enabled: true, ...scheduleAdvisor().dismiss(id) }; }
+  catch (err) { return { enabled: true, ok: false, reason: err.message }; }
+}
+
 /**
  * Decide whether a physical action may proceed. First runs the DCP host-side
  * dry-run (capability scoping + param validation + power budget), then routes
@@ -421,6 +471,20 @@ function execute(id, action, params = {}) {
   }
 
   const drv = driverFor(device);
+
+  // Phase 18: token revocation gate. A REMOTE driver must REFUSE to send a
+  // command for a device whose capability token has been revoked (via unpair or
+  // explicit revocation) — the human must re-pair to restore it. HIL is isolated
+  // (virtual pairing never revokes), and connectionless/local drivers are exempt.
+  if (drv && drv.REMOTE && !isHilEnabled()) {
+    try {
+      if (tokenStore().isRevoked(id)) {
+        _emit({ type: 'blocked', id, action, code: 'token-revoked' });
+        return { enabled: true, ok: false, rejected: true, code: 'token-revoked', klass: decision.klass, reason: 'device token revoked — re-pair to restore' };
+      }
+    } catch { /* revocation check is best-effort */ }
+  }
+
   const result = drv.perform(device, decision.normalized.action, decision.normalized.params);
   if (result.ok && result.state) registry().updateState(id, result.state);
 
@@ -555,6 +619,12 @@ module.exports = {
   pairDevice,
   unpairDevice,
   getPairingStatus,
+  getTokenStatus,
+  rotateToken,
+  revokeToken,
+  getScheduleSuggestions,
+  confirmScheduleSuggestion,
+  dismissScheduleSuggestion,
   isHilEnabled
 };
 

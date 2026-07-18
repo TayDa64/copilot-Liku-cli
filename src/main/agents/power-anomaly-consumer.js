@@ -129,6 +129,8 @@ function attachPowerAnomalyConsumer(orchestrator, options = {}) {
     : (Number(process.env.LIKU_PERIPHERAL_ANOMALY_COOLDOWN_MS) || null);
   const cooldownForType = (type) => (explicitCooldownMs != null ? explicitCooldownMs : _tierFor(type).cooldownMs);
   const lastSeen = new Map(); // dedupeKey → last-emitted ms (flapping guard)
+  const emittedProposals = new Set(); // proposed-schedule ids already surfaced
+  const advisor = options.advisor || (() => { try { return require('../peripherals/power-schedule-advisor'); } catch { return null; } })();
 
   const listener = (event) => {
     try {
@@ -159,6 +161,28 @@ function attachPowerAnomalyConsumer(orchestrator, options = {}) {
 
       if (typeof options.onAnomaly === 'function') {
         try { options.onAnomaly(finalNotification); } catch { /* non-fatal */ }
+      }
+
+      // Phase 18: feed the schedule advisor. When an anomaly RECURS enough times
+      // the advisor PROPOSES a power schedule — surfaced here as an advisory,
+      // human-gated suggestion. It is NEVER auto-applied; a human must confirm it
+      // (via `power-schedule-advisor.confirm`) before it becomes an active rule.
+      if (advisor && typeof advisor.recordAnomaly === 'function') {
+        try {
+          advisor.recordAnomaly({
+            device: finalNotification.device.id,
+            type: finalNotification.anomalyType,
+            valueW: finalNotification.breach.value,
+            budgetW: finalNotification.breach.threshold
+          });
+          const proposals = advisor.proposeSchedules();
+          for (const p of proposals) {
+            if (p && p.status === 'proposed' && !emittedProposals.has(p.id)) {
+              emittedProposals.add(p.id);
+              try { orchestrator.emit('supervisor:schedule-suggestion', p); } catch { /* non-fatal */ }
+            }
+          }
+        } catch { /* advisory pipeline is best-effort */ }
       }
     } catch { /* consumption is best-effort + non-blocking */ }
   };

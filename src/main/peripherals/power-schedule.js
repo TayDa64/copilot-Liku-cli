@@ -23,39 +23,67 @@
 
 'use strict';
 
+const fs = require('fs');
+const path = require('path');
+const { LIKU_HOME } = require('../../shared/liku-home');
+
 const FLAG = 'LIKU_ENABLE_PERIPHERALS';
+// Confirmed (human-activated) schedules — written by the advisor's confirm flow,
+// read (in addition to env) here. Advisory suggestions are NEVER auto-applied.
+const CONFIRMED_FILE = path.join(LIKU_HOME, 'peripheral-schedules.json');
 
 function enabled() {
   return String(process.env[FLAG] || '').trim() === '1';
 }
 
-/** Parse declared schedules from env (safe, never throws). */
-function loadSchedules() {
-  if (!enabled()) return [];
+/** Normalize one raw schedule rule (env or confirmed). @private */
+function _normalizeRule(s) {
+  return {
+    id: String(s.id),
+    fromHour: _normHourSpec(s.fromHour, 0),
+    toHour: _normHourSpec(s.toHour, 24),
+    maxW: Number.isFinite(Number(s.maxW)) ? Math.max(0, Number(s.maxW)) : 0,
+    days: _parseDays(s.days),
+    sunriseHour: Number.isFinite(Number(s.sunriseHour)) ? _clampHour(s.sunriseHour, 6) : undefined,
+    sunsetHour: Number.isFinite(Number(s.sunsetHour)) ? _clampHour(s.sunsetHour, 18) : undefined,
+    source: s.source || 'env'
+  };
+}
+
+/** Parse env-declared schedules (LIKU_PERIPHERAL_SCHEDULES). @private */
+function _envSchedules() {
   try {
     const raw = process.env.LIKU_PERIPHERAL_SCHEDULES;
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    return parsed
-      .filter((s) => s && typeof s === 'object' && s.id)
-      .map((s) => ({
-        id: String(s.id),
-        // fromHour/toHour may be a number (0..24) OR the tokens 'sunrise'/'sunset',
-        // resolved lazily so a moving sunrise/sunset can be provided at query time.
-        fromHour: _normHourSpec(s.fromHour, 0),
-        toHour: _normHourSpec(s.toHour, 24),
-        maxW: Number.isFinite(Number(s.maxW)) ? Math.max(0, Number(s.maxW)) : 0,
-        // Optional per-day restriction: array of weekday numbers (0=Sun..6=Sat)
-        // or names (sun,mon,...). Absent → the rule applies every day.
-        days: _parseDays(s.days),
-        // Optional per-rule sunrise/sunset overrides (hours 0..24).
-        sunriseHour: Number.isFinite(Number(s.sunriseHour)) ? _clampHour(s.sunriseHour, 6) : undefined,
-        sunsetHour: Number.isFinite(Number(s.sunsetHour)) ? _clampHour(s.sunsetHour, 18) : undefined
-      }));
+    return parsed.filter((s) => s && typeof s === 'object' && s.id).map(_normalizeRule);
   } catch {
     return [];
   }
+}
+
+/** Read human-confirmed schedules from disk (corruption-tolerant). @private */
+function _confirmedSchedules() {
+  try {
+    if (!fs.existsSync(CONFIRMED_FILE)) return [];
+    const raw = JSON.parse(fs.readFileSync(CONFIRMED_FILE, 'utf-8'));
+    const list = Array.isArray(raw && raw.schedules) ? raw.schedules : [];
+    return list
+      .filter((s) => s && typeof s === 'object' && s.id)
+      .map((s) => _normalizeRule({ ...s, source: 'advisor-confirmed' }));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * All active schedule rules = env-declared + human-confirmed (advisor). Advisory
+ * suggestions are NEVER included until explicitly confirmed.
+ */
+function loadSchedules() {
+  if (!enabled()) return [];
+  return [..._envSchedules(), ..._confirmedSchedules()];
 }
 
 /** Keep a numeric hour clamped, or pass through the sunrise/sunset tokens. @private */
@@ -184,4 +212,4 @@ function describe(now = new Date()) {
   });
 }
 
-module.exports = { FLAG, enabled, loadSchedules, deviceScheduleW, evaluate, describe };
+module.exports = { FLAG, CONFIRMED_FILE, enabled, loadSchedules, deviceScheduleW, evaluate, describe };

@@ -20,6 +20,9 @@
  *   liku peripherals schedules          Show per-device time-boxed power budgets
  *   liku peripherals pair <id>          Pair / commission a device (real when HIL off)
  *   liku peripherals unpair <id>        Tear down a device's pairing (re-pairable)
+ *   liku peripherals token [status|rotate <id>|revoke <id>]
+ *   liku peripherals suggestions        Advisory schedule proposals (recurring anomalies)
+ *   liku peripherals apply-schedule <id> Confirm + activate a proposed schedule
  */
 
 const { log, success, error, dim, highlight } = require('../util/output');
@@ -155,7 +158,8 @@ async function run(args, flags) {
     case 'drivers': {
       const res = pal.listDrivers();
       const pairing = pal.getPairingStatus();
-      if (flags.json) return { success: true, ...res, pairing: pairing.devices };
+      const tokens = pal.getTokenStatus();
+      if (flags.json) return { success: true, ...res, pairing: pairing.devices, tokens: tokens.devices };
       log(highlight(`Available drivers: ${res.drivers.join(', ') || 'none'}`));
       const entries = Object.entries(pairing.devices || {});
       if (entries.length) {
@@ -163,7 +167,9 @@ async function run(args, flags) {
         for (const [id, st] of entries) {
           const sim = st.simulated ? ' (HIL)' : '';
           const err = st.lastError ? dim(` — ${st.lastError}`) : '';
-          log(`    ${highlight(id)} [${st.driver}] ${st.state}${sim}${err}`);
+          const tok = (tokens.devices || {})[id];
+          const tokStr = tok ? dim(` token:gen${tok.gen}${tok.revoked ? '/revoked' : ''}`) : '';
+          log(`    ${highlight(id)} [${st.driver}] ${st.state}${sim}${tokStr}${err}`);
         }
       }
       return { success: true, ...res };
@@ -191,6 +197,64 @@ async function run(args, flags) {
       if (flags.json) return { success: !!res.ok, ...res };
       if (res.ok) success(`${id} unpaired${res.simulated ? ' (HIL simulation)' : ''} (state: ${res.state || 'unpaired'}).`);
       else error(`${id} unpair failed: ${res.reason || 'unknown'}`);
+      return { success: !!res.ok, ...res };
+    }
+
+    case 'token': {
+      // Show or manage per-device capability-token lifecycle.
+      const op = (args[1] || 'status').toLowerCase();
+      if (op === 'rotate' || op === 'revoke') {
+        const id = args[2];
+        if (!id) { error(`Usage: liku peripherals token ${op} <id>`); return { success: false }; }
+        const res = op === 'rotate' ? pal.rotateToken(id) : pal.revokeToken(id);
+        if (flags.json) return { success: !!res.ok, ...res };
+        if (res.ok) success(`Token ${op}d for ${id} (gen ${res.gen}${res.revoked ? ', revoked' : ''}).`);
+        else error(`Token ${op} failed for ${id}: ${res.reason || 'unknown'}`);
+        return { success: !!res.ok, ...res };
+      }
+      const res = pal.getTokenStatus();
+      if (flags.json) return { success: true, ...res };
+      const entries = Object.entries(res.devices || {});
+      log(highlight(`Capability tokens (${entries.length}):`));
+      if (!entries.length) log(dim('  none (issued on pair)'));
+      for (const [id, t] of entries) {
+        const state = t.revoked ? 'REVOKED' : (t.gen > 0 ? 'active' : 'none');
+        log(`  ${highlight(id)} gen ${t.gen} ${state} ${dim(`id:${t.identityFp || '?'}`)}`);
+      }
+      return { success: true, ...res };
+    }
+
+    case 'suggestions': {
+      // Advisory power-schedule suggestions from recurring anomalies (proposed).
+      const res = pal.getScheduleSuggestions();
+      if (flags.json) return { success: true, ...res };
+      log(highlight(`Proposed schedules (${res.suggestions.length}):`));
+      if (!res.suggestions.length) log(dim('  none (recurring anomalies generate proposals)'));
+      for (const s of res.suggestions) {
+        log(`  ${highlight(s.id)} ${dim(s.deviceId)} ${s.fromHour}:00→${s.toHour}:00 ≤${s.maxW}W  ${dim(`(${s.reason})`)}`);
+        log(dim(`     apply: liku peripherals apply-schedule ${s.id}`));
+      }
+      return { success: true, ...res };
+    }
+
+    case 'apply-schedule': {
+      // EXPLICIT human confirmation → activates a proposed schedule.
+      const id = args[1];
+      if (!id) { error('Usage: liku peripherals apply-schedule <suggestion-id>'); return { success: false }; }
+      const res = pal.confirmScheduleSuggestion(id);
+      if (flags.json) return { success: !!res.ok, ...res };
+      if (res.ok) success(`Schedule ${id} confirmed + activated (now enforced by power schedules).`);
+      else error(`Could not apply ${id}: ${res.reason || 'unknown'}`);
+      return { success: !!res.ok, ...res };
+    }
+
+    case 'dismiss-schedule': {
+      const id = args[1];
+      if (!id) { error('Usage: liku peripherals dismiss-schedule <suggestion-id>'); return { success: false }; }
+      const res = pal.dismissScheduleSuggestion(id);
+      if (flags.json) return { success: !!res.ok, ...res };
+      if (res.ok) success(`Schedule suggestion ${id} dismissed.`);
+      else error(`Could not dismiss ${id}: ${res.reason || 'unknown'}`);
       return { success: !!res.ok, ...res };
     }
 
@@ -357,7 +421,7 @@ async function run(args, flags) {
 
     default:
       error(`Unknown subcommand: ${sub}`);
-      log('Usage: liku peripherals [scan|list|status [id]|power [--history|--trend|--anomalies]|schedules|pair <id>|unpair <id>|tasks [--escalated|--pending|--severity <p>|--anomaly]|notifications|channels|simulate <id> <k=v>|execute <id> <action>|confirm <id> <action> [--execute]|drivers]');
+      log('Usage: liku peripherals [scan|list|status [id]|power [--history|--trend|--anomalies]|schedules|suggestions|apply-schedule <id>|pair <id>|unpair <id>|token [rotate|revoke <id>]|tasks [--escalated|--pending|--severity <p>|--anomaly]|notifications|channels|simulate <id> <k=v>|execute <id> <action>|confirm <id> <action> [--execute]|drivers]');
       return { success: false };
   }
 }
