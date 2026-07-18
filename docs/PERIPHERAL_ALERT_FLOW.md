@@ -505,6 +505,68 @@ and the consumer targets that real device (instead of the aggregate
   (current gen always valid; previous gen valid only within grace; revoked →
   nothing valid). Revocation still overrides everything.
 
+## Confident forecasts + multi-device coordination + anomaly→action (Phase 20)
+
+### Forecast confidence + longer horizons
+
+`power-forecast.js` now attaches a **confidence interval** and a qualitative
+**confidence label** to every forecast hour, and supports **day-ahead horizons**:
+
+- Each `hourlyBaselines()` bucket carries a `std` (per-hour standard deviation).
+- Each `forecast()` horizon entry adds `lowW` / `highW` (`mean ± 1.28·std`),
+  `stdW`, `confidence` (`high`/`medium`/`low` from sample count + coefficient of
+  variation, decayed for far-ahead hours) and `stepsAhead`.
+- `horizonHours` is clamped to `MAX_HORIZON_HOURS` (24) — the per-hour-of-day
+  baselines wrap, so a full day ahead is a natural extension, never a runaway.
+- Early warnings (`forecastExceedsBudget`) now include the band + confidence.
+  CLI: `power --forecast` prints `~<W> [low–high] <conf> conf`.
+
+### Multi-device coordinated schedule proposals
+
+`power-forecast.contributorsAtHour({ hour, budgetW })` ranks the devices by their
+per-hour baseline **peak** and reports whether their **combined** typical draw
+exceeds the budget. When it does *and* **2+ devices** jointly drive it,
+`power-schedule-advisor.proposeMultiDeviceSchedule()` proposes a **coordinated**
+set of per-device caps, allocated proportionally to each device's share so the
+caps **sum within the budget**. `confirm()` writes **one restrict-only rule per
+device** (`source:'advisor-confirmed-multi'`). Strictly advisory + human-gated,
+deduped one open proposal per hour. The consumer fires this on over-budget
+anomalies and emits `supervisor:schedule-suggestion`.
+
+### Advisory anomaly→action patterns (proactive self-healing)
+
+`anomaly-action-advisor.js` watches for **persistently anomalous devices** and
+escalates an advisory action up a fixed ladder (all **non-actuating** and already
+human-gated CLI operations):
+
+| Occurrences (window) | Advisory action | Severity | Directive |
+| --- | --- | --- | --- |
+| 3× | `reduce-schedule` | warning | cap power via a confirmed schedule |
+| 6× | `rotate-token` | warning | `liku peripherals token rotate <id>` |
+| 10× | `unpair` | critical | `liku peripherals unpair <id>` |
+
+`proposeActions()` surfaces the **highest** rung met (monotonic supersede);
+`confirm()` **records the human's approval and returns the exact command to run —
+it never executes the action** (no autonomous actuation path). The synthetic
+`power-budget` aggregate is skipped (no single device to act on). PAL:
+`getAnomalyActions()`, `confirmAnomalyAction()`, `dismissAnomalyAction()`. CLI:
+`liku peripherals anomalies [--attributed]` and
+`liku peripherals anomaly-action [confirm|dismiss <id>]`. The consumer emits
+`supervisor:anomaly-action` for new proposals.
+
+### Phase 20 safety invariants
+
+- **forecast-confidence-only-informs** — confidence intervals / longer horizons /
+  contributor analysis are pure observation. They inform smarter (still
+  human-confirmed) suggestions and never actuate.
+- **multi-device-caps-only-restrict** — a coordinated proposal only ever writes
+  restrict-only schedule rules that sum within the budget, and only after an
+  explicit `confirm()`. It never turns a device on/off or raises any cap.
+- **anomaly-actions-are-advisory** — every anomaly→action suggestion is a
+  reviewable proposal; confirmation returns a command for a human to run. No
+  suggestion (including `unpair`/`rotate-token`) is auto-executed, and none
+  actuates the physical device.
+
 ## If a human decides to act
 
 Any physical response still travels the full PAL safety chain — the alert path

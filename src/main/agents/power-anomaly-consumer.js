@@ -132,7 +132,9 @@ function attachPowerAnomalyConsumer(orchestrator, options = {}) {
   const cooldownForType = (type) => (explicitCooldownMs != null ? explicitCooldownMs : _tierFor(type).cooldownMs);
   const lastSeen = new Map(); // dedupeKey → last-emitted ms (flapping guard)
   const emittedProposals = new Set(); // proposed-schedule ids already surfaced
+  const emittedActions = new Set(); // proposed anomaly-action ids already surfaced
   const advisor = options.advisor || (() => { try { return require('../peripherals/power-schedule-advisor'); } catch { return null; } })();
+  const actionAdvisor = options.actionAdvisor || (() => { try { return require('../peripherals/anomaly-action-advisor'); } catch { return null; } })();
 
   const listener = (event) => {
     try {
@@ -184,7 +186,41 @@ function attachPowerAnomalyConsumer(orchestrator, options = {}) {
               try { orchestrator.emit('supervisor:schedule-suggestion', p); } catch { /* non-fatal */ }
             }
           }
+          // Phase 20: when an OVER-BUDGET breach at this hour is jointly driven by
+          // MULTIPLE devices, propose a coordinated multi-device cap (advisory,
+          // human-gated). Only fires when 2+ contributors exceed the budget.
+          if (finalNotification.anomalyType === 'over-budget' && typeof advisor.proposeMultiDeviceSchedule === 'function') {
+            const budgetW = Number(finalNotification.breach && finalNotification.breach.threshold);
+            if (Number.isFinite(budgetW) && budgetW > 0) {
+              const hour = new Date(finalNotification.at || Date.now()).getHours();
+              const multi = advisor.proposeMultiDeviceSchedule({ budgetW, hour });
+              if (multi && multi.status === 'proposed' && !emittedProposals.has(multi.id)) {
+                emittedProposals.add(multi.id);
+                try { orchestrator.emit('supervisor:schedule-suggestion', multi); } catch { /* non-fatal */ }
+              }
+            }
+          }
         } catch { /* advisory pipeline is best-effort */ }
+      }
+
+      // Phase 20: advisory anomaly→action patterns for proactive self-healing.
+      // When a REAL device keeps tripping anomalies, escalate an advisory action
+      // suggestion (reduce-schedule → rotate-token → unpair). STRICTLY ADVISORY:
+      // confirmation returns a command for a human to run — never auto-executed.
+      if (actionAdvisor && typeof actionAdvisor.recordAnomaly === 'function') {
+        try {
+          actionAdvisor.recordAnomaly({
+            device: finalNotification.device.id,
+            type: finalNotification.anomalyType
+          });
+          const actions = actionAdvisor.proposeActions();
+          for (const a of actions) {
+            if (a && a.status === 'proposed' && !emittedActions.has(a.id)) {
+              emittedActions.add(a.id);
+              try { orchestrator.emit('supervisor:anomaly-action', a); } catch { /* non-fatal */ }
+            }
+          }
+        } catch { /* action advisory pipeline is best-effort */ }
       }
     } catch { /* consumption is best-effort + non-blocking */ }
   };

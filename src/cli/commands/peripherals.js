@@ -17,6 +17,11 @@
  *   liku peripherals channels           Show escalation notification channels
  *   liku peripherals power [--history|--trend|--anomalies|--forecast]
  *                                       Live budget + rolling power telemetry
+ *   liku peripherals anomalies [--attributed]
+ *                                       Detected anomalies (per-device attribution)
+ *                                       + advisory self-healing actions
+ *   liku peripherals anomaly-action [list|confirm <id>|dismiss <id>]
+ *                                       Advisory anomaly→action suggestions (human-gated)
  *   liku peripherals schedules          Show per-device time-boxed power budgets
  *   liku peripherals pair <id>          Pair / commission a device (real when HIL off)
  *   liku peripherals unpair <id>        Tear down a device's pairing (re-pairable)
@@ -233,7 +238,12 @@ async function run(args, flags) {
       log(highlight(`Proposed schedules (${res.suggestions.length}):`));
       if (!res.suggestions.length) log(dim('  none (recurring anomalies generate proposals)'));
       for (const s of res.suggestions) {
-        log(`  ${highlight(s.id)} ${dim(s.deviceId)} ${s.fromHour}:00→${s.toHour}:00 ≤${s.maxW}W  ${dim(`(${s.reason})`)}`);
+        if (s.type === 'multi-device') {
+          const devs = (s.devices || []).map((d) => `${d.deviceId}≤${d.proposedMaxW}W`).join(', ');
+          log(`  ${highlight(s.id)} ${dim('multi-device')} ${s.fromHour}:00→${s.toHour}:00 budget ${s.budgetW}W  ${dim(devs)}`);
+        } else {
+          log(`  ${highlight(s.id)} ${dim(s.deviceId)} ${s.fromHour}:00→${s.toHour}:00 ≤${s.maxW}W  ${dim(`(${s.reason})`)}`);
+        }
         log(dim(`     apply: liku peripherals apply-schedule ${s.id}`));
       }
       return { success: true, ...res };
@@ -260,6 +270,61 @@ async function run(args, flags) {
       return { success: !!res.ok, ...res };
     }
 
+    case 'anomalies': {
+      // Phase 20: detected power anomalies with per-device ATTRIBUTION + the
+      // advisory self-healing actions proposed for persistently anomalous devices.
+      const res = pal.getPowerAnomalies();
+      let tiers = {};
+      try { tiers = require('../../main/agents/power-anomaly-consumer').ANOMALY_TIERS || {}; } catch { tiers = {}; }
+      const actionsRes = pal.getAnomalyActions();
+      if (flags.json) return { success: true, ...res, actions: actionsRes.actions };
+      log(highlight(`Power anomalies (${res.anomalies.length}):`));
+      if (!res.anomalies.length) log(dim(`  none (baseline ${res.baselineW}W, ${res.samples} samples)`));
+      for (const a of res.anomalies) {
+        const sev = (tiers[a.type] && tiers[a.type].severity) || 'info';
+        const attr = a.attributedDevice ? highlight(` → ${a.attributedDevice}`) + dim(` (Δ${a.attributedDeltaW}W, ${a.attributedLoadW}W)`) : dim(' → unattributed');
+        log(`  ${highlight(a.type)} [${sev}]  ${a.valueW}W vs baseline ${a.baselineW}W${attr}`);
+      }
+      const acts = actionsRes.actions || [];
+      log(highlight(`\nAdvisory actions (${acts.length}):`));
+      if (!acts.length) log(dim('  none (persistent anomalies escalate reduce-schedule → rotate-token → unpair)'));
+      for (const a of acts) {
+        log(`  ${highlight(a.id)} ${dim(a.deviceId)} [${a.severity}] ${highlight(a.action)}  ${dim(a.reason)}`);
+        log(dim(`     confirm: liku peripherals anomaly-action confirm ${a.id}  →  ${a.directive}`));
+      }
+      return { success: true, ...res, actions: acts };
+    }
+
+    case 'anomaly-action': {
+      // Advisory anomaly→action suggestions: list | confirm <id> | dismiss <id>.
+      const op = (args[1] || 'list').toLowerCase();
+      if (op === 'confirm' || op === 'dismiss') {
+        const id = args[2];
+        if (!id) { error(`Usage: liku peripherals anomaly-action ${op} <id>`); return { success: false }; }
+        const res = op === 'confirm' ? pal.confirmAnomalyAction(id) : pal.dismissAnomalyAction(id);
+        if (flags.json) return { success: !!res.ok, ...res };
+        if (res.ok && op === 'confirm') {
+          success(`Action ${res.action} for ${res.deviceId} confirmed (advisory).`);
+          log(dim(`  Run this to apply: ${res.directive}`));
+        } else if (res.ok) {
+          success(`Action suggestion ${id} dismissed.`);
+        } else {
+          error(`Could not ${op} ${id}: ${res.reason || 'unknown'}`);
+        }
+        return { success: !!res.ok, ...res };
+      }
+      const res = pal.getAnomalyActions();
+      if (flags.json) return { success: true, ...res };
+      const acts = res.actions || [];
+      log(highlight(`Advisory actions (${acts.length}):`));
+      if (!acts.length) log(dim('  none (persistent anomalies escalate reduce-schedule → rotate-token → unpair)'));
+      for (const a of acts) {
+        log(`  ${highlight(a.id)} ${dim(a.deviceId)} [${a.severity}] ${highlight(a.action)}  ${dim(a.reason)}`);
+        log(dim(`     confirm: liku peripherals anomaly-action confirm ${a.id}  →  ${a.directive}`));
+      }
+      return { success: true, ...res };
+    }
+
     case 'power': {
       const ps = pal.powerStatus();
       // Phase 19: --forecast shows the short-horizon per-hour forecast + warnings.
@@ -269,7 +334,7 @@ async function run(args, flags) {
         if (flags.json) return { success: true, forecast: f, warnings: warn.warnings };
         log(highlight('Power forecast'));
         if (!f.ok) log(dim(`  ${f.basis || 'unavailable'} (${f.samples || 0} samples)`));
-        for (const h of f.horizon || []) log(`  hour ${h.hour}:00  ~${h.predictedW}W (peak ${h.peakW}W) ${dim(h.basis)}`);
+        for (const h of f.horizon || []) log(`  hour ${h.hour}:00  ~${h.predictedW}W [${h.lowW}–${h.highW}W] ${dim(`${h.confidence} conf`)} ${dim(h.basis)}`);
         for (const w of warn.warnings || []) error(`  ⚠ ${w.advisory}`);
         return { success: true, forecast: f };
       }
@@ -435,7 +500,7 @@ async function run(args, flags) {
 
     default:
       error(`Unknown subcommand: ${sub}`);
-      log('Usage: liku peripherals [scan|list|status [id]|power [--history|--trend|--anomalies|--forecast]|schedules|suggestions|apply-schedule <id>|pair <id>|unpair <id>|token [rotate|revoke <id>]|tasks [--escalated|--pending|--severity <p>|--anomaly]|notifications|channels|simulate <id> <k=v>|execute <id> <action>|confirm <id> <action> [--execute]|drivers]');
+      log('Usage: liku peripherals [scan|list|status [id]|power [--history|--trend|--anomalies|--forecast]|anomalies [--attributed]|anomaly-action [confirm|dismiss <id>]|schedules|suggestions|apply-schedule <id>|pair <id>|unpair <id>|token [rotate|revoke <id>]|tasks [--escalated|--pending|--severity <p>|--anomaly]|notifications|channels|simulate <id> <k=v>|execute <id> <action>|confirm <id> <action> [--execute]|drivers]');
       return { success: false };
   }
 }

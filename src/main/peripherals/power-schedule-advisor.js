@@ -169,6 +169,62 @@ function listProposed() {
   return Object.values(_load().proposed).filter((s) => s.status === 'proposed');
 }
 
+/**
+ * MULTI-DEVICE coordinated proposal (Phase 20). When a budget breach at a given
+ * hour is jointly driven by MORE THAN ONE device, propose a coordinated set of
+ * per-device caps that scale each contributor's baseline peak down so their SUM
+ * fits under the budget. STRICTLY ADVISORY + human-gated: nothing activates until
+ * `confirm()` writes the confirmed (restrict-only) rules. Deduplicated: one open
+ * multi-device proposal per hour.
+ * @param {{ budgetW:number, hour:number, samples?:object[] }} opts
+ * @param {number} [now]
+ * @returns {object|null} the proposal (or null when not multi-device / not exceeding)
+ */
+function proposeMultiDeviceSchedule(opts = {}, now = Date.now()) {
+  if (!enabled()) return null;
+  const budgetW = Number(opts.budgetW);
+  const hour = Number(opts.hour);
+  if (!Number.isFinite(budgetW) || budgetW <= 0 || !Number.isFinite(hour)) return null;
+  let contrib;
+  try { contrib = require('./power-forecast').contributorsAtHour({ hour, budgetW, samples: opts.samples }); }
+  catch { return null; }
+  // Multi-device coordination only applies when 2+ devices JOINTLY exceed budget.
+  if (!contrib || !contrib.exceeds || !Array.isArray(contrib.contributors) || contrib.contributors.length < 2) return null;
+  const st = _load();
+  const key = `multi:${hour}`;
+  const existing = st.proposed[key];
+  if (existing && existing.status === 'proposed') return existing;
+  if (existing && (existing.status === 'confirmed' || existing.status === 'dismissed')) return null;
+  const total = contrib.totalPeakW || contrib.contributors.reduce((s, c) => s + c.peakW, 0);
+  // Allocate each device a cap proportional to its share of the combined peak,
+  // scaled so the caps SUM to (at most) the budget. Only ever RESTRICTS.
+  const devices = contrib.contributors.map((c) => {
+    const share = total > 0 ? c.peakW / total : 1 / contrib.contributors.length;
+    const proposedMaxW = Math.max(1, Math.round(budgetW * share));
+    return { deviceId: c.deviceId, currentPeakW: c.peakW, proposedMaxW };
+  });
+  const suggestion = {
+    id: `multi-sched-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
+    type: 'multi-device',
+    hour,
+    fromHour: hour,
+    toHour: (hour + 1) % 24,
+    budgetW,
+    totalPeakW: total,
+    devices,
+    occurrences: devices.length,
+    reason: `coordinated cap for ${devices.length} devices at ${hour}:00 (combined ${total}W > budget ${budgetW}W)`,
+    status: 'proposed',
+    proposed: true,
+    requiresHuman: true,
+    autonomousAction: false,
+    createdAt: new Date().toISOString()
+  };
+  st.proposed[key] = suggestion;
+  _save(st);
+  return suggestion;
+}
+
 /** Append a confirmed schedule to the store power-schedule.js reads. @private */
 function _appendConfirmed(rule) {
   let existing = { schedules: [] };
@@ -192,11 +248,21 @@ function confirm(suggestionId) {
   if (!key) return { ok: false, reason: 'not-found' };
   const entry = st.proposed[key];
   if (entry.status !== 'proposed') return { ok: false, reason: `already-${entry.status}` };
-  // The confirmed rule governs the suggestion's target device (rule.id = deviceId).
-  _appendConfirmed({
-    id: entry.deviceId, fromHour: entry.fromHour, toHour: entry.toHour, maxW: entry.maxW,
-    source: 'advisor-confirmed', suggestionId: entry.id, confirmedAt: new Date().toISOString()
-  });
+  if (entry.type === 'multi-device' && Array.isArray(entry.devices)) {
+    // Coordinated confirmation: write ONE restrict-only rule per contributor.
+    for (const d of entry.devices) {
+      _appendConfirmed({
+        id: d.deviceId, fromHour: entry.fromHour, toHour: entry.toHour, maxW: d.proposedMaxW,
+        source: 'advisor-confirmed-multi', suggestionId: entry.id, confirmedAt: new Date().toISOString()
+      });
+    }
+  } else {
+    // The confirmed rule governs the suggestion's target device (rule.id = deviceId).
+    _appendConfirmed({
+      id: entry.deviceId, fromHour: entry.fromHour, toHour: entry.toHour, maxW: entry.maxW,
+      source: 'advisor-confirmed', suggestionId: entry.id, confirmedAt: new Date().toISOString()
+    });
+  }
   entry.status = 'confirmed';
   entry.confirmedAt = new Date().toISOString();
   _save(st);
@@ -224,5 +290,5 @@ function clear() {
 
 module.exports = {
   FLAG, SUGGEST_FILE,
-  enabled, recordAnomaly, proposeSchedules, listProposed, confirm, dismiss, clear
+  enabled, recordAnomaly, proposeSchedules, proposeMultiDeviceSchedule, listProposed, confirm, dismiss, clear
 };

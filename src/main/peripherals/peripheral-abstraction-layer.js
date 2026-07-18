@@ -402,6 +402,30 @@ function dismissScheduleSuggestion(id) {
   catch (err) { return { enabled: true, ok: false, reason: err.message }; }
 }
 
+function anomalyActionAdvisor() { return require('./anomaly-action-advisor'); }
+
+/** Advisory proactive-action suggestions for persistently anomalous devices. */
+function getAnomalyActions() {
+  if (!isPeripheralsEnabled()) return { enabled: false, actions: [] };
+  try { return { enabled: true, actions: anomalyActionAdvisor().listProposed() }; }
+  catch { return { enabled: true, actions: [] }; }
+}
+
+/** EXPLICIT human confirmation of an advisory action. Returns the command to
+ * run — NEVER executes the action (no autonomous actuation path). */
+function confirmAnomalyAction(id) {
+  if (!isPeripheralsEnabled()) return { enabled: false };
+  try { return { enabled: true, ...anomalyActionAdvisor().confirm(id) }; }
+  catch (err) { return { enabled: true, ok: false, reason: err.message }; }
+}
+
+/** Dismiss a proposed advisory action (human declined). */
+function dismissAnomalyAction(id) {
+  if (!isPeripheralsEnabled()) return { enabled: false };
+  try { return { enabled: true, ...anomalyActionAdvisor().dismiss(id) }; }
+  catch (err) { return { enabled: true, ok: false, reason: err.message }; }
+}
+
 /**
  * Decide whether a physical action may proceed. First runs the DCP host-side
  * dry-run (capability scoping + param validation + power budget), then routes
@@ -650,6 +674,9 @@ module.exports = {
   getScheduleSuggestions,
   confirmScheduleSuggestion,
   dismissScheduleSuggestion,
+  getAnomalyActions,
+  confirmAnomalyAction,
+  dismissAnomalyAction,
   isHilEnabled
 };
 

@@ -2626,6 +2626,175 @@ test('scheduled rotation triggers when due (rotateIfDue) + respects pairing', ()
   delete process.env.LIKU_ENABLE_PERIPHERALS;
 });
 
+// ── Phase 20: forecast confidence + longer horizons + multi-device proposals +
+//    advisory anomaly→action patterns ──
+
+test('power forecast reports confidence intervals + supports longer horizons', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const forecast = require('../src/main/peripherals/power-forecast');
+  // Six stable samples at hour 14 (~200W) → tight band, high confidence.
+  const mk = (h, w) => ({ at: new Date(2026, 6, 17, h, 0, 0).toISOString(), totalW: w, devices: [{ id: 'd1', loadW: w, active: true }] });
+  const samples = [mk(14, 198), mk(14, 200), mk(14, 202), mk(14, 199), mk(14, 201), mk(14, 200)];
+  const now = new Date(2026, 6, 17, 13, 30, 0).getTime();
+  const f = forecast.forecast({ samples, horizonHours: 6, now });
+  assert.strictEqual(f.ok, true);
+  assert.strictEqual(f.horizon.length, 6, 'longer horizon (6h) supported');
+  const h14 = f.horizon[0];
+  assert.strictEqual(h14.hour, 14);
+  assert.ok('lowW' in h14 && 'highW' in h14 && 'confidence' in h14, 'confidence interval fields present');
+  assert.ok(h14.lowW <= h14.predictedW && h14.predictedW <= h14.highW, 'band brackets the prediction');
+  assert.strictEqual(h14.confidence, 'high', 'stable, well-sampled hour → high confidence');
+  // Horizon is clamped to a day-ahead ceiling (no runaway).
+  const long = forecast.forecast({ samples, horizonHours: 999, now });
+  assert.strictEqual(long.horizon.length, forecast.MAX_HORIZON_HOURS, 'horizon clamped to day-ahead ceiling');
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('multi-device contributor analysis flags joint budget breaches', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const forecast = require('../src/main/peripherals/power-forecast');
+  const at = new Date(2026, 6, 17, 20, 0, 0).toISOString();
+  const samples = [
+    { at, totalW: 550, devices: [{ id: 'heater', loadW: 300 }, { id: 'oven', loadW: 250 }] },
+    { at, totalW: 540, devices: [{ id: 'heater', loadW: 295 }, { id: 'oven', loadW: 245 }] }
+  ];
+  const c = forecast.contributorsAtHour({ hour: 20, budgetW: 400, samples });
+  assert.strictEqual(c.exceeds, true, 'combined draw exceeds budget');
+  assert.strictEqual(c.contributors.length, 2, 'two contributing devices');
+  assert.strictEqual(c.contributors[0].deviceId, 'heater', 'sorted by peak (heater first)');
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('multi-device coordinated proposal caps several devices under budget (human-gated)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const advisor = require('../src/main/peripherals/power-schedule-advisor');
+  const schedule = require('../src/main/peripherals/power-schedule');
+  advisor.clear();
+  const at = new Date(2026, 6, 17, 20, 0, 0).toISOString();
+  const samples = [
+    { at, totalW: 550, devices: [{ id: 'heater', loadW: 300 }, { id: 'oven', loadW: 250 }] },
+    { at, totalW: 540, devices: [{ id: 'heater', loadW: 295 }, { id: 'oven', loadW: 245 }] }
+  ];
+  const sug = advisor.proposeMultiDeviceSchedule({ budgetW: 400, hour: 20, samples });
+  assert.ok(sug && sug.type === 'multi-device', 'multi-device proposal created');
+  assert.strictEqual(sug.devices.length, 2, 'coordinates both contributors');
+  assert.strictEqual(sug.autonomousAction, false, 'proposal is strictly advisory');
+  const sumCaps = sug.devices.reduce((s, d) => s + d.proposedMaxW, 0);
+  assert.ok(sumCaps <= sug.budgetW, 'coordinated caps sum within budget');
+  // Not enforced until confirmed.
+  assert.strictEqual(schedule.deviceScheduleW('heater', new Date(2026, 6, 17, 20, 0, 0)), null, 'not enforced pre-confirmation');
+  const c = advisor.confirm(sug.id);
+  assert.strictEqual(c.ok, true);
+  // Confirmation activates a per-device rule for BOTH contributors.
+  const heaterCap = sug.devices.find((d) => d.deviceId === 'heater').proposedMaxW;
+  const ovenCap = sug.devices.find((d) => d.deviceId === 'oven').proposedMaxW;
+  assert.strictEqual(schedule.deviceScheduleW('heater', new Date(2026, 6, 17, 20, 0, 0)), heaterCap, 'heater rule enforced');
+  assert.strictEqual(schedule.deviceScheduleW('oven', new Date(2026, 6, 17, 20, 0, 0)), ovenCap, 'oven rule enforced');
+  advisor.clear();
+  try { fs.rmSync(require('../src/main/peripherals/power-schedule').CONFIRMED_FILE); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('anomaly→action advisor escalates reduce-schedule → rotate-token → unpair', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const actions = require('../src/main/peripherals/anomaly-action-advisor');
+  actions.clear();
+  const rec = (n) => { for (let i = 0; i < n; i++) actions.recordAnomaly({ device: 'dev-x', type: 'spike' }); };
+  rec(3);
+  let p = actions.proposeActions();
+  assert.strictEqual(p.length, 1);
+  assert.strictEqual(p[0].action, 'reduce-schedule', '3 occurrences → reduce-schedule');
+  rec(3); // 6 total
+  p = actions.proposeActions();
+  assert.strictEqual(p.find((a) => a.deviceId === 'dev-x').action, 'rotate-token', '6 occurrences → rotate-token');
+  rec(4); // 10 total
+  p = actions.proposeActions();
+  assert.strictEqual(p.find((a) => a.deviceId === 'dev-x').action, 'unpair', '10 occurrences → unpair');
+  actions.clear();
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('anomaly→action confirmation is advisory (returns a command, never executes)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const actions = require('../src/main/peripherals/anomaly-action-advisor');
+  actions.clear();
+  for (let i = 0; i < 3; i++) actions.recordAnomaly({ device: 'lamp-2', type: 'sustained' });
+  const [sug] = actions.proposeActions();
+  assert.ok(sug && sug.requiresHuman === true, 'proposal requires human review');
+  const c = actions.confirm(sug.id);
+  assert.strictEqual(c.ok, true);
+  assert.strictEqual(c.action, 'reduce-schedule');
+  assert.strictEqual(typeof c.directive, 'string', 'confirmation returns a command for a human to run');
+  assert.ok(/liku peripherals/.test(c.directive), 'directive is an explicit CLI command');
+  // Confirmed → no longer an open proposal (recorded, not executed).
+  assert.strictEqual(actions.listProposed().length, 0, 'confirmed proposal is closed');
+  actions.clear();
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('anomaly→action advisor ignores the synthetic power-budget aggregate + is flag-gated', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const actions = require('../src/main/peripherals/anomaly-action-advisor');
+  actions.clear();
+  for (let i = 0; i < 5; i++) actions.recordAnomaly({ device: 'power-budget', type: 'over-budget' });
+  assert.strictEqual(actions.proposeActions().length, 0, 'no action suggestion for the aggregate');
+  actions.clear();
+  // Flag OFF → no disk touched, no proposals.
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+  actions.recordAnomaly({ device: 'dev-y', type: 'spike' });
+  assert.strictEqual(actions.proposeActions().length, 0, 'inert when disabled');
+  assert.strictEqual(fs.existsSync(actions.STORE_FILE), false, 'no anomaly-actions.json when disabled');
+});
+
+test('multi-device proposal requires 2+ contributors + is deduped per hour', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const advisor = require('../src/main/peripherals/power-schedule-advisor');
+  advisor.clear();
+  const at = new Date(2026, 6, 17, 20, 0, 0).toISOString();
+  // Single contributor over budget → NOT a multi-device proposal.
+  const solo = [{ at, totalW: 600, devices: [{ id: 'heater', loadW: 600 }] }];
+  assert.strictEqual(advisor.proposeMultiDeviceSchedule({ budgetW: 400, hour: 20, samples: solo }), null, 'single contributor → no multi-device proposal');
+  // Two contributors → a proposal; a second call returns the SAME open proposal.
+  const both = [{ at, totalW: 550, devices: [{ id: 'heater', loadW: 300 }, { id: 'oven', loadW: 250 }] }];
+  const first = advisor.proposeMultiDeviceSchedule({ budgetW: 400, hour: 20, samples: both });
+  assert.ok(first && first.type === 'multi-device');
+  const second = advisor.proposeMultiDeviceSchedule({ budgetW: 400, hour: 20, samples: both });
+  assert.strictEqual(second.id, first.id, 'deduped — one open multi-device proposal per hour');
+  advisor.clear();
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('consumer surfaces an advisory anomaly→action for a persistently anomalous device', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const actions = require('../src/main/peripherals/anomaly-action-advisor');
+  const advisor = require('../src/main/peripherals/power-schedule-advisor');
+  actions.clear();
+  advisor.clear();
+  const EventEmitter = require('events');
+  const { SupervisorAgent } = require('../src/main/agents/supervisor');
+  const { attachPowerAnomalyConsumer } = require('../src/main/agents/power-anomaly-consumer');
+  const orch = new EventEmitter();
+  orch.agents = new Map();
+  orch.agents.set('supervisor', new SupervisorAgent({}));
+  const actionEvents = [];
+  orch.on('supervisor:anomaly-action', (a) => actionEvents.push(a));
+  let captured = null;
+  const fakePal = { on: (type, cb) => { if (type === 'power-anomaly') captured = cb; return () => {}; } };
+  let clock = 12_000_000;
+  attachPowerAnomalyConsumer(orch, { pal: fakePal, now: () => clock });
+  // Three over-budget anomalies for a REAL device (past the 15s tier cooldown).
+  for (let i = 0; i < 3; i++) {
+    captured({ anomaly: { type: 'over-budget', device: 'pump-3', valueW: 900, budgetW: 500, at: new Date().toISOString() }, baselineW: 200 });
+    clock += 20000;
+  }
+  assert.ok(actionEvents.length >= 1, 'an advisory action was surfaced');
+  assert.strictEqual(actionEvents[0].deviceId, 'pump-3', 'action targets the real device');
+  assert.strictEqual(actionEvents[0].autonomousAction, false, 'action is strictly advisory');
+  actions.clear();
+  advisor.clear();
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
 console.log(`\n${pass} checks passed.`);
 if (process.exitCode) { console.error('FAILED'); }
 else { console.log('OK'); }
