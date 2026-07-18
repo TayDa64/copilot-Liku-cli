@@ -27,9 +27,10 @@
  *   liku peripherals coordination [status|lease <id>|release <id>]
  *                                       Cross-host lease coordination (cluster mode)
  *   liku peripherals cron [--at <ISO>]  Cron device schedules → advisory human-gated tasks
+ *   liku peripherals cron [propose <dev> <act> "<cron>"|confirm <id>|dismiss <id>|rules|tick|remove <id>]
  *   liku peripherals pair <id>          Pair / commission a device (real when HIL off)
  *   liku peripherals unpair <id>        Tear down a device's pairing (re-pairable)
- *   liku peripherals token [status|rotate <id>|revoke <id>]
+ *   liku peripherals token [status|rotate <id>|revoke <id>|action <id> <action>]
  *   liku peripherals suggestions        Advisory schedule proposals (recurring anomalies)
  *   liku peripherals apply-schedule <id> Confirm + activate a proposed schedule
  */
@@ -225,6 +226,17 @@ async function run(args, flags) {
         else error(`Token ${op} failed for ${id}: ${res.reason || 'unknown'}`);
         return { success: !!res.ok, ...res };
       }
+      if (op === 'action') {
+        // Mint a PER-ACTION (least-privilege) capability token.
+        const id = args[2];
+        const action = args[3];
+        if (!id || !action) { error('Usage: liku peripherals token action <id> <action>'); return { success: false }; }
+        const res = pal.issueActionToken(id, action);
+        if (flags.json) return { success: !!res.ok, ...res };
+        if (res.ok) { success(`Per-action token for ${id}:${action} (gen ${res.gen}).`); log(dim(`  ${res.token}`)); }
+        else error(`Could not issue token for ${id}:${action}: ${res.reason || 'unknown'}`);
+        return { success: !!res.ok, ...res };
+      }
       const res = pal.getTokenStatus();
       if (flags.json) return { success: true, ...res };
       const entries = Object.entries(res.devices || {});
@@ -234,7 +246,8 @@ async function run(args, flags) {
         const state = t.revoked ? 'REVOKED' : (t.gen > 0 ? 'active' : 'none');
         const grace = (t.prevGen > 0 && t.prevGenUntil > Date.now()) ? dim(` +grace(gen${t.prevGen})`) : '';
         const rot = t.rotateDueAt > 0 ? dim(` rotates:${new Date(t.rotateDueAt).toISOString().slice(11, 19)}`) : '';
-        log(`  ${highlight(id)} gen ${t.gen} ${state}${grace}${rot} ${dim(`id:${t.identityFp || '?'}`)}`);
+        const acts = Array.isArray(t.actions) && t.actions.length ? dim(` [${t.actions.join(',')}]`) : '';
+        log(`  ${highlight(id)} gen ${t.gen} ${state}${grace}${rot}${acts} ${dim(`id:${t.identityFp || '?'}`)}`);
       }
       return { success: true, ...res };
     }
@@ -312,8 +325,15 @@ async function run(args, flags) {
         const res = op === 'confirm' ? pal.confirmAnomalyAction(id) : pal.dismissAnomalyAction(id);
         if (flags.json) return { success: !!res.ok, ...res };
         if (res.ok && op === 'confirm') {
-          success(`Action ${res.action} for ${res.deviceId} confirmed (advisory).`);
-          log(dim(`  Run this to apply: ${res.directive}`));
+          if (res.executed && res.executed.ok !== false) {
+            // Security action (rotate-token / unpair) was performed on confirmation.
+            success(`Action ${res.action} for ${res.deviceId} confirmed + applied (human-gated).`);
+            if (res.action === 'rotate-token') log(dim(`  token rotated → gen ${res.executed.gen}`));
+            if (res.action === 'unpair') log(dim('  device unpaired → capability token revoked'));
+          } else {
+            success(`Action ${res.action} for ${res.deviceId} confirmed (advisory).`);
+            if (res.directive) log(dim(`  Run this to apply: ${res.directive}`));
+          }
         } else if (res.ok) {
           success(`Action suggestion ${id} dismissed.`);
         } else {
@@ -401,6 +421,8 @@ async function run(args, flags) {
       for (const s of res.schedules) {
         const win = `${s.fromHour}→${s.toHour}` + (s.fromHour !== s.resolvedFrom || s.toHour !== s.resolvedTo ? ` (${s.resolvedFrom}:00→${s.resolvedTo}:00)` : ':00');
         const days = Array.isArray(s.days) && s.days.length ? ` days:[${s.days.join(',')}]` : '';
+        log(`  ${highlight(s.id)} ${win}  ≤${s.maxW}W${days}  ${dim(s.active ? 'IN WINDOW' : 'outside')}`);
+      }
       return { success: true, ...res };
     }
 
@@ -430,7 +452,15 @@ async function run(args, flags) {
       } else {
         log(dim('  no history yet (snapshots accrue as stores are written; force one with --record)'));
       }
-      return { success: true, live, perFile, trends };
+      // Phase 22: cluster-wide aggregation when a shared cluster dir is configured.
+      const cluster = pal.getClusterLockMetrics();
+      if (cluster && cluster.mode === 'cluster') {
+        log(highlight(`  cluster (${cluster.nodes} node${cluster.nodes === 1 ? '' : 's'}):`));
+        const ct = cluster.totals || {};
+        log(`    total: ${ct.acquired || 0} acquired, ${ct.contended || 0} contended, ${ct.steals || 0} steals  (rate ${Math.round((cluster.contentionRate || 0) * 1000) / 10}%)`);
+        for (const n of cluster.perNode || []) log(dim(`    ${n.nodeId}${n.live ? ' (live)' : ''}: ${n.metrics.acquired} acq, ${n.metrics.contended} cont`));
+      }
+      return { success: true, live, perFile, trends, cluster };
     }
 
     case 'coordination':
@@ -458,14 +488,75 @@ async function run(args, flags) {
     }
 
     case 'cron': {
-      // Phase 21 (stretch): cron-based recurring device schedules → advisory,
-      // human-gated proposed tasks. Never actuates; Class A stays confirm-gated.
+      // Phase 21/22: cron-based recurring device schedules. Sub-ops:
+      //   (default)                 show rules + due advisory tasks
+      //   propose <dev> <act> <cron>  propose a rule (not active until confirmed)
+      //   confirm <proposalId>        persist a proposed rule (human gate)
+      //   dismiss <proposalId>        decline a proposed rule
+      //   rules                       list open proposals
+      //   remove <ruleId>             remove a confirmed rule
+      //   tick [--at <ISO>]           run the scheduler once → human-gated tasks
+      const op = (args[1] || 'show').toLowerCase();
+      if (op === 'propose') {
+        const [, , deviceId, action, ...cronParts] = args;
+        const cron = cronParts.join(' ');
+        if (!deviceId || !action || !cron) { error('Usage: liku peripherals cron propose <deviceId> <action> "<cron>"'); return { success: false }; }
+        const res = pal.proposeCronRule({ deviceId, action, cron });
+        if (flags.json) return { success: !!res.ok, ...res };
+        if (res.ok) { success(`Cron rule proposed for ${deviceId}:${action} "${cron}".`); log(dim(`  confirm: liku peripherals cron confirm ${res.proposal.id}`)); }
+        else error(`Could not propose: ${res.reason || 'unknown'}`);
+        return { success: !!res.ok, ...res };
+      }
+      if (op === 'confirm' || op === 'dismiss') {
+        const id = args[2];
+        if (!id) { error(`Usage: liku peripherals cron ${op} <proposal-id>`); return { success: false }; }
+        const res = op === 'confirm' ? pal.confirmCronRule(id) : pal.dismissCronRule(id);
+        if (flags.json) return { success: !!res.ok, ...res };
+        if (res.ok && op === 'confirm') success(`Cron rule ${id} confirmed + persisted (now recurring, human-gated).`);
+        else if (res.ok) success(`Cron proposal ${id} dismissed.`);
+        else error(`Could not ${op} ${id}: ${res.reason || 'unknown'}`);
+        return { success: !!res.ok, ...res };
+      }
+      if (op === 'remove') {
+        const id = args[2];
+        if (!id) { error('Usage: liku peripherals cron remove <rule-id>'); return { success: false }; }
+        const res = pal.removeCronRule(id);
+        if (flags.json) return { success: !!res.ok, ...res };
+        if (res.ok) success(`Cron rule ${id} removed.`);
+        else error(`Could not remove ${id}: ${res.reason || 'unknown'}`);
+        return { success: !!res.ok, ...res };
+      }
+      if (op === 'rules') {
+        const res = pal.getProposedCronRules();
+        if (flags.json) return { success: true, ...res };
+        log(highlight(`Proposed cron rules (${res.proposals.length}):`));
+        if (!res.proposals.length) log(dim('  none (propose with: liku peripherals cron propose <dev> <act> "<cron>")'));
+        for (const p of res.proposals) log(`  ${highlight(p.id)} ${dim(p.deviceId)} ${p.action}  ${dim(`"${p.cron}"`)}`);
+        return { success: true, ...res };
+      }
+      if (op === 'tick') {
+        // Run the real cron scheduler consumer once against a fresh Supervisor.
+        const EventEmitter = require('events');
+        const { SupervisorAgent, attachCronScheduler } = require('../../main/agents');
+        const orch = new EventEmitter();
+        orch.agents = new Map();
+        orch.agents.set('supervisor', new SupervisorAgent({}));
+        const sched = attachCronScheduler(orch, {});
+        const at = flags.at ? new Date(flags.at) : new Date();
+        const { created } = sched.tick(at);
+        sched.detach();
+        if (flags.json) return { success: true, created };
+        success(`Cron tick @ ${at.toISOString().slice(0, 16)} → ${created.length} human-gated task(s) created.`);
+        for (const t of created) log(`  ${highlight(t.id)} ${dim((t.device && t.device.id) || '?')} ${t.status} ${dim(t.priority)}`);
+        return { success: true, created };
+      }
+      // Default view: configured rules + due advisory tasks.
       const rules = pal.getCronSchedules();
       const at = flags.at ? new Date(flags.at) : new Date();
       const due = pal.getDueCronTasks(at.getTime());
       if (flags.json) return { success: true, rules: rules.rules, dueAt: at.toISOString(), tasks: due.tasks };
       log(highlight(`Cron device schedules (${rules.rules.length}):`));
-      if (!rules.rules.length) log(dim('  none (set LIKU_DEVICE_CRON=[{"deviceId","action","cron"}])'));
+      if (!rules.rules.length) log(dim('  none (propose: liku peripherals cron propose <dev> <act> "<cron>"; or LIKU_DEVICE_CRON)'));
       for (const r of rules.rules) log(`  ${highlight(r.id)} ${dim(r.deviceId)} ${r.action}  ${dim(`"${r.cron}"`)}${r.valid ? '' : ' INVALID'} ${dim(r.source)}`);
       log(highlight(`\nDue at ${at.toISOString().slice(0, 16)} (${due.tasks.length} advisory task(s)):`));
       if (!due.tasks.length) log(dim('  none due this minute (advisory tasks are human-gated, never auto-run)'));
@@ -477,7 +568,7 @@ async function run(args, flags) {
       return { success: true, rules: rules.rules, tasks: due.tasks };
     }
 
-
+    case 'simulate': {
       // Hardware-in-the-loop helper: inject a simulated sensor reading so the
       // monitor/alert pipeline can be exercised without physical hardware.
       const id = args[1];
@@ -579,7 +670,7 @@ async function run(args, flags) {
 
     default:
       error(`Unknown subcommand: ${sub}`);
-      log('Usage: liku peripherals [scan|list|status [id]|power [--history|--trend|--anomalies|--forecast]|anomalies [--attributed]|anomaly-action [confirm|dismiss <id>]|schedules|locks [--record]|coordination [lease|release <id>]|cron [--at <ISO>]|suggestions|apply-schedule <id>|pair <id>|unpair <id>|token [rotate|revoke <id>]|tasks [--escalated|--pending|--severity <p>|--anomaly]|notifications|channels|simulate <id> <k=v>|execute <id> <action>|confirm <id> <action> [--execute]|drivers]');
+      log('Usage: liku peripherals [scan|list|status [id]|power [--history|--trend|--anomalies|--forecast]|anomalies [--attributed]|anomaly-action [confirm|dismiss <id>]|schedules|locks [--record]|coordination [lease|release <id>]|cron [propose|confirm|dismiss|rules|tick|remove]|suggestions|apply-schedule <id>|pair <id>|unpair <id>|token [rotate|revoke|action <id> <action>]|tasks [--escalated|--pending|--severity <p>|--anomaly]|notifications|channels|simulate <id> <k=v>|execute <id> <action>|confirm <id> <action> [--execute]|drivers]');
       return { success: false };
   }
 }

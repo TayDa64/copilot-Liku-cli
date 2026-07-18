@@ -22,6 +22,7 @@ const fs = require('fs');
 const path = require('path');
 const { LIKU_HOME } = require('../../shared/liku-home');
 const { atomicWriteFileSync, getLockMetrics, getPerFileLockMetrics } = require('../../shared/atomic-file');
+const coordination = require('./coordination');
 
 const FLAG = 'LIKU_ENABLE_PERIPHERALS';
 const HISTORY_FILE = path.join(LIKU_HOME, 'lock-history.jsonl');
@@ -61,8 +62,82 @@ function record(opts = {}) {
     const capped = lines.slice(-_max());
     if (!fs.existsSync(LIKU_HOME)) fs.mkdirSync(LIKU_HOME, { recursive: true, mode: 0o700 });
     atomicWriteFileSync(HISTORY_FILE, capped.join('\n') + '\n', { mode: 0o600 });
+    // Phase 22: mirror this node's latest snapshot to the shared cluster store so
+    // contention can be aggregated fleet-wide. Cluster off → no-op.
+    if (coordination.clusterEnabled()) _mirrorCluster(snapshot);
     return snapshot;
   } catch { return null; }
+}
+
+/** Path to this node's shared lock-metrics file (or null when cluster off). @private */
+function _clusterNodePath(nodeId) {
+  const dir = coordination.clusterDir();
+  if (!dir) return null;
+  const safe = String(nodeId || coordination.nodeId()).replace(/[^A-Za-z0-9._-]/g, '_').replace(/\.{2,}/g, '_').slice(0, 128);
+  return path.join(dir, 'lock-metrics', `${safe}.json`);
+}
+
+/** Write this node's latest snapshot to the shared cluster store. @private */
+function _mirrorCluster(snapshot) {
+  const p = _clusterNodePath(coordination.nodeId());
+  if (!p) return;
+  try {
+    atomicWriteFileSync(p, JSON.stringify({ nodeId: coordination.nodeId(), ...snapshot }, null, 2), { mode: 0o600 });
+  } catch { /* best-effort */ }
+}
+
+/**
+ * Phase 22 — CLUSTER-WIDE lock-metrics aggregation. Rolls up every node's latest
+ * shared snapshot into fleet totals + a per-node breakdown + combined per-file
+ * hotspots. Single-machine (cluster off) → this node's live view only.
+ */
+function clusterAggregate() {
+  const nodeIds = [];
+  const perNode = [];
+  const totals = { acquired: 0, contended: 0, steals: 0, fallbacks: 0, retries: 0 };
+  const perFile = {};
+  const dir = coordination.clusterDir();
+  if (coordination.clusterEnabled() && dir) {
+    const mdir = path.join(dir, 'lock-metrics');
+    try {
+      if (fs.existsSync(mdir)) {
+        for (const f of fs.readdirSync(mdir)) {
+          if (!f.endsWith('.json')) continue;
+          let snap;
+          try { snap = JSON.parse(fs.readFileSync(path.join(mdir, f), 'utf-8')); } catch { snap = null; }
+          if (!snap || !snap.metrics) continue;
+          nodeIds.push(snap.nodeId);
+          perNode.push({ nodeId: snap.nodeId, at: snap.at, metrics: snap.metrics });
+          for (const k of Object.keys(totals)) totals[k] += Number(snap.metrics[k]) || 0;
+          for (const [file, m] of Object.entries(snap.perFile || {})) {
+            const acc = perFile[file] || (perFile[file] = { acquired: 0, contended: 0, steals: 0 });
+            acc.acquired += Number(m.acquired) || 0;
+            acc.contended += Number(m.contended) || 0;
+            acc.steals += Number(m.steals) || 0;
+          }
+        }
+      }
+    } catch { /* best-effort */ }
+  }
+  // Fold in this node's LIVE counters (may be ahead of its last mirrored snapshot).
+  const live = getLockMetrics();
+  if (!nodeIds.includes(coordination.nodeId())) {
+    for (const k of Object.keys(totals)) totals[k] += Number(live[k]) || 0;
+    perNode.push({ nodeId: coordination.nodeId(), at: new Date().toISOString(), metrics: live, live: true });
+  }
+  const acquired = totals.acquired || 0;
+  const hotFiles = Object.entries(perFile)
+    .map(([file, m]) => ({ file, ...m }))
+    .sort((a, b) => b.contended - a.contended || b.acquired - a.acquired)
+    .slice(0, 5);
+  return {
+    mode: coordination.clusterEnabled() ? 'cluster' : 'single-machine',
+    nodes: perNode.length,
+    totals,
+    contentionRate: acquired > 0 ? Math.round(totals.contended / acquired * 1000) / 1000 : 0,
+    perNode,
+    hotFiles
+  };
 }
 
 /**
@@ -125,4 +200,4 @@ function clear() {
   catch { return false; }
 }
 
-module.exports = { FLAG, HISTORY_FILE, enabled, record, query, trends, clear };
+module.exports = { FLAG, HISTORY_FILE, enabled, record, query, trends, clusterAggregate, clear };

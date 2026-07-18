@@ -3002,6 +3002,203 @@ test('PAL cron accessors return advisory schedules + due tasks (flag-gated)', ()
   delete process.env.LIKU_DEVICE_CRON;
 });
 
+// ── Phase 22: token refinements + cron productionization + cluster lock aggregation ──
+
+test('per-action token mints least-privilege scope + verifies correctly', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_CLUSTER_DIR;
+  const ts = require('../src/main/peripherals/token-store');
+  ts.clear();
+  ts.onPair('pa-dev', { actions: ['on', 'off'] });
+  const res = ts.issueActionToken('pa-dev', 'on');
+  assert.strictEqual(res.ok, true, 'per-action token issued');
+  assert.strictEqual(ts.verifyDeviceToken('pa-dev', 'on', res.token).ok, true, 'valid for its action');
+  assert.strictEqual(ts.verifyDeviceToken('pa-dev', 'off', res.token).ok, false, 'rejected for a different action');
+  // Cannot mint a token for an action the device was not granted.
+  assert.strictEqual(ts.issueActionToken('pa-dev', 'explode').ok, false, 'ungranted action refused');
+  ts.clear();
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('token verification honours revocation + generation via the store', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_CLUSTER_DIR;
+  const ts = require('../src/main/peripherals/token-store');
+  ts.clear();
+  ts.onPair('rv-dev', { actions: ['unlock'] });
+  const tok = ts.issueActionToken('rv-dev', 'unlock').token;
+  assert.strictEqual(ts.verifyDeviceToken('rv-dev', 'unlock', tok).ok, true, 'valid before revoke');
+  ts.revoke('rv-dev');
+  assert.strictEqual(ts.verifyDeviceToken('rv-dev', 'unlock', tok).ok, false, 'rejected after revoke');
+  assert.strictEqual(ts.verifyDeviceToken('rv-dev', 'unlock', tok).reason, 'revoked');
+  ts.clear();
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('token revocation + rotation propagate across hosts (cluster mirror)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const clusterDir = require('path').join(TMP_HOME, 'tcluster');
+  const ts = require('../src/main/peripherals/token-store');
+  ts.clear();
+  // Local device paired at gen 1 (cluster off so no mirror yet).
+  delete process.env.LIKU_CLUSTER_DIR;
+  ts.onPair('xh-dev', { actions: ['on'] });
+  assert.strictEqual(ts.status('xh-dev').gen, 1);
+  // Turn on cluster mode; simulate another node having ROTATED to gen 3.
+  process.env.LIKU_CLUSTER_DIR = clusterDir;
+  const tdir = require('path').join(clusterDir, 'tokens');
+  fs.mkdirSync(tdir, { recursive: true });
+  fs.writeFileSync(require('path').join(tdir, 'xh-dev.json'), JSON.stringify({ deviceId: 'xh-dev', gen: 3, revoked: false, identityFp: ts.identity('xh-dev') }));
+  assert.strictEqual(ts.status('xh-dev').gen, 3, 'effective gen is the fleet max (rotation propagated)');
+  assert.strictEqual(ts.isTokenValid('xh-dev', 3, Date.now()), true, 'gen-3 token minted elsewhere validates here');
+  // Another node REVOKES → propagates as revoked everywhere.
+  fs.writeFileSync(require('path').join(tdir, 'xh-dev.json'), JSON.stringify({ deviceId: 'xh-dev', gen: 4, revoked: true, identityFp: ts.identity('xh-dev') }));
+  assert.strictEqual(ts.isRevoked('xh-dev'), true, 'revocation propagated across hosts');
+  ts.clear();
+  delete process.env.LIKU_CLUSTER_DIR;
+  try { fs.rmSync(clusterDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('confirming an anomaly→action auto-rotates the token (human-gated, executed)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_CLUSTER_DIR;
+  const ts = require('../src/main/peripherals/token-store');
+  const actions = require('../src/main/peripherals/anomaly-action-advisor');
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  ts.clear();
+  actions.clear();
+  ts.onPair('sec-dev', { actions: ['on'] });
+  assert.strictEqual(ts.status('sec-dev').gen, 1);
+  // 6 anomalies → the advisor escalates to a rotate-token suggestion.
+  for (let i = 0; i < 6; i++) actions.recordAnomaly({ device: 'sec-dev', type: 'spike' });
+  const proposal = actions.proposeActions().find((a) => a.deviceId === 'sec-dev');
+  assert.strictEqual(proposal.action, 'rotate-token');
+  // Human confirmation performs the approved security op (auto-rotate).
+  const res = pal.confirmAnomalyAction(proposal.id);
+  assert.strictEqual(res.ok, true);
+  assert.ok(res.executed && res.executed.ok, 'security op executed on confirmation');
+  assert.strictEqual(ts.status('sec-dev').gen, 2, 'token rotated (gen bumped) after human confirm');
+  ts.clear();
+  actions.clear();
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('cron confirm flow persists a proposed rule (not active until confirmed)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const cron = require('../src/main/peripherals/device-schedule');
+  cron.clearProposals();
+  try { fs.rmSync(cron.CRON_FILE); } catch { /* ignore */ }
+  const p = cron.proposeRule({ deviceId: 'cr-dev', action: 'on', cron: '0 8 * * *' });
+  assert.strictEqual(p.ok, true, 'rule proposed');
+  assert.strictEqual(cron.loadRules().length, 0, 'proposed rule is NOT active');
+  assert.strictEqual(cron.listProposedRules().length, 1, 'one open proposal');
+  const c = cron.confirmRule(p.proposal.id);
+  assert.strictEqual(c.ok, true, 'confirmed');
+  const active = cron.loadRules().filter((r) => r.deviceId === 'cr-dev');
+  assert.strictEqual(active.length, 1, 'confirmed rule now active + persisted');
+  assert.strictEqual(active[0].source, 'confirmed');
+  // Remove it again.
+  assert.strictEqual(cron.removeConfirmedRule(p.proposal.id).ok, true, 'confirmed rule removable');
+  assert.strictEqual(cron.loadRules().filter((r) => r.deviceId === 'cr-dev').length, 0, 'removed');
+  cron.clearProposals();
+  try { fs.rmSync(cron.CRON_FILE); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('cron scheduler tick creates human-gated Supervisor tasks (dedup + cooldown)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const registry = require('../src/main/peripherals/peripheral-registry').getInstance();
+  registry.register({ id: 'cron-lockx', class: 'A', kind: 'lock', name: 'Cron Lock X', capabilities: ['lock'], driver: 'mock' });
+  const now = new Date(2026, 6, 22, 6, 30, 0);
+  process.env.LIKU_DEVICE_CRON = JSON.stringify([{ id: 'ct1', deviceId: 'cron-lockx', action: 'lock', cron: `${now.getMinutes()} ${now.getHours()} * * *` }]);
+  const EventEmitter = require('events');
+  const { SupervisorAgent, attachCronScheduler } = require('../src/main/agents');
+  const orch = new EventEmitter();
+  orch.agents = new Map();
+  orch.agents.set('supervisor', new SupervisorAgent({}));
+  const emitted = [];
+  orch.on('supervisor:cron-task', (t) => emitted.push(t));
+  let clock = now.getTime();
+  const sched = attachCronScheduler(orch, { now: () => clock, cooldownMs: 300000 });
+  const first = sched.tick(now);
+  assert.strictEqual(first.created.length, 1, 'a cron task was created');
+  const task = first.created[0];
+  assert.strictEqual(task.status, 'pending-review', 'human-gated task');
+  assert.strictEqual(task.requiresHuman, true, 'Class A → requires human');
+  assert.strictEqual(task.autonomousAction, false, 'never autonomous');
+  assert.ok(emitted.length >= 1, 'supervisor:cron-task emitted');
+  // Second tick within the cooldown → no duplicate.
+  clock += 1000;
+  assert.strictEqual(sched.tick(now).created.length, 0, 'deduped within cooldown');
+  sched.detach();
+  registry.clear();
+  delete process.env.LIKU_DEVICE_CRON;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('cluster lock metrics aggregate across nodes', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const clusterDir = require('path').join(TMP_HOME, 'lmcluster');
+  process.env.LIKU_CLUSTER_DIR = clusterDir;
+  process.env.LIKU_NODE_ID = 'nodeC';
+  const mdir = require('path').join(clusterDir, 'lock-metrics');
+  fs.mkdirSync(mdir, { recursive: true });
+  fs.writeFileSync(require('path').join(mdir, 'nodeA.json'), JSON.stringify({ nodeId: 'nodeA', at: new Date().toISOString(), metrics: { acquired: 10, contended: 2, steals: 0, fallbacks: 0, retries: 1 }, perFile: { 'a.json': { acquired: 10, contended: 2, steals: 0 } } }));
+  fs.writeFileSync(require('path').join(mdir, 'nodeB.json'), JSON.stringify({ nodeId: 'nodeB', at: new Date().toISOString(), metrics: { acquired: 15, contended: 5, steals: 1, fallbacks: 0, retries: 3 }, perFile: { 'a.json': { acquired: 15, contended: 5, steals: 1 } } }));
+  const agg = require('../src/main/peripherals/lock-history').clusterAggregate();
+  assert.strictEqual(agg.mode, 'cluster');
+  assert.ok(agg.nodes >= 2, 'aggregates multiple nodes');
+  assert.ok(agg.totals.acquired >= 25, 'sums acquired across nodes');
+  assert.ok(agg.hotFiles.length >= 1 && agg.hotFiles[0].file === 'a.json', 'combined per-file hotspot');
+  delete process.env.LIKU_NODE_ID;
+  delete process.env.LIKU_CLUSTER_DIR;
+  try { fs.rmSync(clusterDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('Phase 22 stores are flag-gated (no disk when disabled)', () => {
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+  const cron = require('../src/main/peripherals/device-schedule');
+  const ts = require('../src/main/peripherals/token-store');
+  assert.strictEqual(cron.proposeRule({ deviceId: 'x', action: 'on', cron: '* * * * *' }).ok, false, 'cron propose inert when disabled');
+  assert.strictEqual(cron.listProposedRules().length, 0, 'no proposals when disabled');
+  assert.strictEqual(ts.issueActionToken('x', 'on').ok, false, 'per-action token inert when disabled');
+  assert.strictEqual(fs.existsSync(cron.PROPOSALS_FILE), false, 'no device-cron-proposals.json when disabled');
+});
+
+test('PAL exposes per-action token + verification accessors', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_CLUSTER_DIR;
+  const ts = require('../src/main/peripherals/token-store');
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  ts.clear();
+  ts.onPair('pal-tok', { actions: ['on', 'off'] });
+  const minted = pal.issueActionToken('pal-tok', 'on');
+  assert.strictEqual(minted.ok, true, 'PAL mints a per-action token');
+  assert.strictEqual(pal.verifyDeviceToken('pal-tok', 'on', minted.token).ok, true, 'PAL verifies the scoped token');
+  assert.strictEqual(pal.verifyDeviceToken('pal-tok', 'off', minted.token).ok, false, 'PAL rejects a different action');
+  ts.clear();
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('PAL cron confirm-flow accessors propose + persist + dismiss', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const cron = require('../src/main/peripherals/device-schedule');
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  cron.clearProposals();
+  try { fs.rmSync(cron.CRON_FILE); } catch { /* ignore */ }
+  const p = pal.proposeCronRule({ deviceId: 'pal-cr', action: 'off', cron: '30 22 * * *' });
+  assert.strictEqual(p.ok, true, 'PAL proposes a cron rule');
+  assert.strictEqual(pal.getProposedCronRules().proposals.length, 1, 'PAL lists proposals');
+  const c = pal.confirmCronRule(p.proposal.id);
+  assert.strictEqual(c.ok, true, 'PAL confirms + persists');
+  assert.strictEqual(cron.loadRules().filter((r) => r.deviceId === 'pal-cr').length, 1, 'rule now active');
+  cron.clearProposals();
+  try { fs.rmSync(cron.CRON_FILE); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
 console.log(`\n${pass} checks passed.`);
 if (process.exitCode) { console.error('FAILED'); }
 else { console.log('OK'); }

@@ -20,6 +20,7 @@ const { ResearcherAgent } = require('./researcher');
 const { PeripheralMonitorAgent, attachPeripheralMonitor } = require('./peripheral-monitor-agent');
 const { attachPeripheralAlertConsumer, buildSupervisorNotification } = require('./peripheral-alert-consumer');
 const { attachPowerAnomalyConsumer, buildAnomalyNotification } = require('./power-anomaly-consumer');
+const { attachCronScheduler } = require('./cron-scheduler');
 const { AgentStateManager } = require('./state-manager');
 const { TraceWriter } = require('./trace-writer');
 
@@ -36,6 +37,7 @@ module.exports = {
   buildSupervisorNotification,
   attachPowerAnomalyConsumer,
   buildAnomalyNotification,
+  attachCronScheduler,
   AgentStateManager,
   TraceWriter,
   
@@ -106,8 +108,20 @@ module.exports = {
       });
     } catch { /* power-anomaly integration is best-effort */ }
 
+    // Pillar 3 (Phase 22): cron scheduler consumer. Turns DUE cron device rules
+    // into bounded, human-gated Supervisor tasks (dedupe + per-device cooldown).
+    // TIMER-FREE by default — a caller invokes cronScheduler.tick(now). Strictly
+    // advisory: a cron task never actuates; Class A stays confirm-gated.
+    let cronScheduler = null;
+    try {
+      cronScheduler = attachCronScheduler(orchestrator, {
+        cooldownMs: options.cronCooldownMs,
+        intervalMs: options.cronIntervalMs // OFF unless explicitly provided
+      });
+    } catch { /* cron integration is best-effort */ }
+
     // Return object with orchestrator, stateManager, and peripheral integration
-    return { orchestrator, stateManager, traceWriter, peripheralMonitor, peripheralAlertConsumer, powerAnomalyConsumer };
+    return { orchestrator, stateManager, traceWriter, peripheralMonitor, peripheralAlertConsumer, powerAnomalyConsumer, cronScheduler };
   },
   
   // Recovery function for checkpoint restoration

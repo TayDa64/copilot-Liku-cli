@@ -473,18 +473,89 @@ function getAnomalyActions() {
   catch { return { enabled: true, actions: [] }; }
 }
 
-/** EXPLICIT human confirmation of an advisory action. Returns the command to
- * run — NEVER executes the action (no autonomous actuation path). */
-function confirmAnomalyAction(id) {
+/** EXPLICIT human confirmation of an advisory action. The confirmation IS the
+ * human gate: for security actions (rotate-token / unpair) the approved operation
+ * is then performed (these are non-actuating lifecycle/security ops). A
+ * reduce-schedule action returns a directive to run the schedule confirm flow.
+ * Pass { execute:false } to only record approval without performing. */
+function confirmAnomalyAction(id, opts = {}) {
   if (!isPeripheralsEnabled()) return { enabled: false };
-  try { return { enabled: true, ...anomalyActionAdvisor().confirm(id) }; }
-  catch (err) { return { enabled: true, ok: false, reason: err.message }; }
+  try {
+    const res = anomalyActionAdvisor().confirm(id);
+    if (!res.ok) return { enabled: true, ...res };
+    const execute = opts.execute !== false;
+    let executed = null;
+    if (execute && res.action === 'rotate-token') {
+      executed = rotateToken(res.deviceId);
+    } else if (execute && res.action === 'unpair') {
+      // Unpair tears down pairing AND revokes the device's capability token
+      // (via driver-pairing → tokenStore.revoke) — a human-approved auto-revoke.
+      executed = unpairDevice(res.deviceId);
+    }
+    return { enabled: true, ...res, executed };
+  } catch (err) { return { enabled: true, ok: false, reason: err.message }; }
 }
 
 /** Dismiss a proposed advisory action (human declined). */
 function dismissAnomalyAction(id) {
   if (!isPeripheralsEnabled()) return { enabled: false };
   try { return { enabled: true, ...anomalyActionAdvisor().dismiss(id) }; }
+  catch (err) { return { enabled: true, ok: false, reason: err.message }; }
+}
+
+/** Phase 22 — mint a PER-ACTION (least-privilege) capability token for a device. */
+function issueActionToken(id, action, opts = {}) {
+  if (!isPeripheralsEnabled()) return { enabled: false };
+  try { return { enabled: true, ...tokenStore().issueActionToken(id, action, opts) }; }
+  catch (err) { return { enabled: true, ok: false, reason: err.message }; }
+}
+
+/** Phase 22 — verify a device+action token against current (cluster-aware) state. */
+function verifyDeviceToken(id, action, token, opts = {}) {
+  if (!isPeripheralsEnabled()) return { enabled: false };
+  try { return { enabled: true, ...tokenStore().verifyDeviceToken(id, action, token, opts) }; }
+  catch (err) { return { enabled: true, ok: false, reason: err.message }; }
+}
+
+/** Phase 22 — cluster-wide lock-metrics aggregation (single-machine → live view). */
+function getClusterLockMetrics() {
+  if (!isPeripheralsEnabled()) return { enabled: false };
+  try { return { enabled: true, ...lockHistory().clusterAggregate() }; }
+  catch { return { enabled: true, mode: 'single-machine', nodes: 0, totals: {}, perNode: [], hotFiles: [] }; }
+}
+
+/** Phase 22 — propose a cron rule (validated; not active until confirmed). */
+function proposeCronRule(rule) {
+  if (!isPeripheralsEnabled()) return { enabled: false };
+  try { return { enabled: true, ...deviceSchedule().proposeRule(rule) }; }
+  catch (err) { return { enabled: true, ok: false, reason: err.message }; }
+}
+
+/** Phase 22 — list open (proposed) cron rules awaiting confirmation. */
+function getProposedCronRules() {
+  if (!isPeripheralsEnabled()) return { enabled: false, proposals: [] };
+  try { return { enabled: true, proposals: deviceSchedule().listProposedRules() }; }
+  catch { return { enabled: true, proposals: [] }; }
+}
+
+/** Phase 22 — EXPLICIT human confirmation: persist a proposed cron rule. */
+function confirmCronRule(id) {
+  if (!isPeripheralsEnabled()) return { enabled: false };
+  try { return { enabled: true, ...deviceSchedule().confirmRule(id) }; }
+  catch (err) { return { enabled: true, ok: false, reason: err.message }; }
+}
+
+/** Phase 22 — dismiss a proposed cron rule. */
+function dismissCronRule(id) {
+  if (!isPeripheralsEnabled()) return { enabled: false };
+  try { return { enabled: true, ...deviceSchedule().dismissRule(id) }; }
+  catch (err) { return { enabled: true, ok: false, reason: err.message }; }
+}
+
+/** Phase 22 — remove a confirmed (persisted) cron rule. */
+function removeCronRule(id) {
+  if (!isPeripheralsEnabled()) return { enabled: false };
+  try { return { enabled: true, ...deviceSchedule().removeConfirmedRule(id) }; }
   catch (err) { return { enabled: true, ok: false, reason: err.message }; }
 }
 
@@ -754,14 +825,22 @@ module.exports = {
   getAnomalyActions,
   confirmAnomalyAction,
   dismissAnomalyAction,
+  issueActionToken,
+  verifyDeviceToken,
   getLockHistory,
   recordLockSnapshot,
   getLockTrends,
+  getClusterLockMetrics,
   getCoordinationStatus,
   acquireDeviceLease,
   releaseDeviceLease,
   getCronSchedules,
   getDueCronTasks,
+  proposeCronRule,
+  getProposedCronRules,
+  confirmCronRule,
+  dismissCronRule,
+  removeCronRule,
   isHilEnabled
 };
 

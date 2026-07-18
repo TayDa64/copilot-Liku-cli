@@ -630,6 +630,65 @@ actuates — it produces an **advisory, human-gated proposed task** (`status:
   never an actuation. Class A stays human-gated, and the parser adds no new
   attack surface.
 
+## Token hardening + cron productionization + cluster lock aggregation (Phase 22)
+
+### Token lifecycle refinements
+
+`token-store.js` gains two security refinements plus cross-host propagation:
+
+- **Per-action (least-privilege) tokens** — `issueActionToken(deviceId, action)`
+  mints a capability token scoped to EXACTLY ONE action (refused if the action is
+  not in the device's granted capability set). `verifyDeviceToken(deviceId,
+  action, token)` validates against the current lifecycle state (revocation,
+  effective generation, identity binding, action scope) with grace-window support.
+- **Human-gated auto-revoke on persistent anomalies** — when the anomaly→action
+  advisor escalates to `rotate-token` / `unpair` and a human CONFIRMS,
+  `PAL.confirmAnomalyAction()` PERFORMS the approved security operation
+  (`rotateToken` / `unpairDevice`→token revoke). These are non-actuating security
+  ops; the confirmation is the human gate. `{ execute:false }` records approval
+  without performing.
+- **Cross-host propagation** — in cluster mode a device's lifecycle record (gen /
+  revoked / identity) is MIRRORED to `LIKU_CLUSTER_DIR/tokens/<id>.json`. The
+  effective state merges local + shared (REVOCATION-WINS, generation = max), so a
+  revocation or rotation on one node is honoured fleet-wide. Single-machine
+  (cluster off) → unchanged.
+
+### Cron productionization
+
+- **Real tick/consumer** — `src/main/agents/cron-scheduler.js` `attachCronScheduler(orch)`
+  exposes a `tick(now)` that turns DUE cron rules into bounded, human-gated
+  Supervisor tasks (via `createPeripheralTask` → `supervisor:task` +
+  `supervisor:cron-task`), with per-`device:action` **dedup + cooldown**
+  (`LIKU_PERIPHERAL_CRON_COOLDOWN_MS`, default 5 min). TIMER-FREE by default; an
+  optional `intervalMs` timer is off unless requested and is `unref`'d.
+- **Confirm flow (persist rules)** — `device-schedule.js` adds
+  `proposeRule` → `confirmRule` (writes to `device-cron.json`, read by
+  `loadRules`) / `dismissRule` / `removeConfirmedRule`. A proposed rule is NEVER
+  active until confirmed. CLI: `liku peripherals cron [propose|confirm|dismiss|rules|tick|remove]`.
+- A cron task is still ADVISORY: actuating it requires `PAL.execute` (Class A
+  stays confirm-gated); `autonomousAction` is always false.
+
+### Distributed lock/metrics aggregation
+
+`lock-history.js` mirrors each node's latest snapshot to
+`LIKU_CLUSTER_DIR/lock-metrics/<nodeId>.json`. `clusterAggregate()` rolls up
+fleet totals + per-node breakdown + combined per-file hotspots (folding in this
+node's live counters). PAL: `getClusterLockMetrics()`. CLI `locks` shows the
+cluster view when a shared cluster dir is configured.
+
+### Phase 22 safety invariants
+
+- **least-privilege-tokens** — per-action tokens narrow (never widen) a device's
+  capability; verification honours revocation + generation + identity + scope.
+- **auto-revoke-is-human-gated** — a token rotation / unpair only happens after an
+  explicit human confirmation of the escalated anomaly→action; it is a security
+  operation (no physical actuation) and never bypasses the PAL chain.
+- **cron-tasks-stay-advisory** — a productionized cron tick creates reviewable
+  `pending-review` tasks only; Class A stays confirm-gated, nothing auto-runs.
+- **cluster-propagation-is-additive** — token / lock cluster mirroring only runs
+  when `LIKU_CLUSTER_DIR` is set; single-machine behaviour is byte-for-byte
+  unchanged.
+
 ## If a human decides to act
 
 Any physical response still travels the full PAL safety chain — the alert path

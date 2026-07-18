@@ -31,6 +31,7 @@ const crypto = require('crypto');
 const { LIKU_HOME } = require('../../shared/liku-home');
 const { atomicWriteFileSync } = require('../../shared/atomic-file');
 const dcp = require('./dcp-protocol');
+const coordination = require('./coordination');
 
 const FLAG = 'LIKU_ENABLE_PERIPHERALS';
 const STORE_FILE = path.join(LIKU_HOME, 'peripheral-tokens.json');
@@ -97,6 +98,67 @@ function _rec(state, id) {
 
 function _newTokenId() { return crypto.randomBytes(6).toString('hex'); }
 
+// ── Phase 22: cross-host token propagation ──────────────────────────────────
+// When cluster mode is on (LIKU_CLUSTER_DIR), a device's lifecycle state (gen /
+// revoked / identity) is MIRRORED to a shared file so a revocation or rotation
+// on one node propagates to the whole fleet. Single-machine (cluster off) →
+// none of this runs and behaviour is byte-for-byte unchanged.
+
+function _safeId(id) {
+  return String(id || '').replace(/[^A-Za-z0-9._-]/g, '_').replace(/\.{2,}/g, '_').slice(0, 128);
+}
+
+function _clusterTokenPath(deviceId) {
+  const dir = coordination.clusterDir();
+  return dir ? path.join(dir, 'tokens', `${_safeId(deviceId)}.json`) : null;
+}
+
+function _readClusterRec(deviceId) {
+  const p = _clusterTokenPath(deviceId);
+  if (!p) return null;
+  try { if (!fs.existsSync(p)) return null; return JSON.parse(fs.readFileSync(p, 'utf-8')); }
+  catch { return null; }
+}
+
+/** Mirror a device's lifecycle record to the shared cluster store (best-effort). */
+function _mirrorCluster(deviceId, r) {
+  const p = _clusterTokenPath(deviceId);
+  if (!p) return;
+  try {
+    atomicWriteFileSync(p, JSON.stringify({
+      deviceId, gen: r.gen, revoked: r.revoked, revokedAt: r.revokedAt,
+      rotatedAt: r.rotatedAt, prevGen: r.prevGen, prevGenUntil: r.prevGenUntil,
+      identityFp: r.identityFp, nodeId: coordination.nodeId(), updatedAt: new Date().toISOString()
+    }, null, 2), { mode: 0o600 });
+  } catch { /* best-effort; cluster propagation must never block */ }
+}
+
+/**
+ * EFFECTIVE lifecycle state = local record merged with the shared cluster record
+ * (REVOCATION-WINS, generation = max). Cluster off → the local record unchanged.
+ * @private
+ */
+function _effective(deviceId) {
+  const local = _load().devices[deviceId] || null;
+  const cluster = coordination.clusterEnabled() ? _readClusterRec(deviceId) : null;
+  if (!local && !cluster) return null;
+  if (!cluster) return local;
+  if (!local) {
+    return {
+      gen: Number(cluster.gen) || 0, prevGen: Number(cluster.prevGen) || 0,
+      prevGenUntil: Number(cluster.prevGenUntil) || 0, revoked: !!cluster.revoked,
+      revokedAt: cluster.revokedAt || null, identityFp: cluster.identityFp || identity(deviceId),
+      actions: [], _clusterOnly: true
+    };
+  }
+  return {
+    ...local,
+    gen: Math.max(Number(local.gen) || 0, Number(cluster.gen) || 0),
+    revoked: !!(local.revoked || cluster.revoked),
+    revokedAt: local.revokedAt || cluster.revokedAt || null
+  };
+}
+
 /**
  * Issue a token on pairing. Idempotent while active (returns the existing
  * generation); a first pair or a re-pair after revoke mints a fresh generation.
@@ -119,6 +181,7 @@ function onPair(deviceId, opts = {}) {
     r.rotateDueAt = interval > 0 ? Date.now() + interval : 0;
     if (Array.isArray(opts.actions)) r.actions = opts.actions.map((a) => String(a).toLowerCase());
     _save(st);
+    if (coordination.clusterEnabled()) _mirrorCluster(deviceId, r);
   }
   return { ...r };
 }
@@ -144,6 +207,7 @@ function rotate(deviceId, opts = {}) {
   if (!r.issuedAt) r.issuedAt = r.rotatedAt;
   if (Array.isArray(opts.actions)) r.actions = opts.actions.map((a) => String(a).toLowerCase());
   _save(st);
+  if (coordination.clusterEnabled()) _mirrorCluster(deviceId, r);
   return { ...r };
 }
 
@@ -164,7 +228,7 @@ function rotateIfDue(deviceId, now = Date.now()) {
  */
 function isTokenValid(deviceId, gen, now = Date.now()) {
   if (!enabled()) return true; // no lifecycle enforcement when disabled
-  const d = _load().devices[deviceId];
+  const d = _effective(deviceId);
   if (!d || d.revoked) return false;
   if (Number(gen) === Number(d.gen)) return true;
   if (Number(gen) === Number(d.prevGen) && now < Number(d.prevGenUntil)) return true;
@@ -180,24 +244,25 @@ function revoke(deviceId) {
   r.revokedAt = new Date().toISOString();
   r.gen += 1;
   _save(st);
+  if (coordination.clusterEnabled()) _mirrorCluster(deviceId, r);
   return { ...r };
 }
 
 function isRevoked(deviceId) {
   if (!enabled()) return false;
-  const d = _load().devices[deviceId];
+  const d = _effective(deviceId);
   return !!(d && d.revoked);
 }
 
 function isActive(deviceId) {
   if (!enabled()) return false;
-  const d = _load().devices[deviceId];
+  const d = _effective(deviceId);
   return !!(d && !d.revoked && d.gen > 0);
 }
 
-/** Current lifecycle record for a device (or null). */
+/** Current lifecycle record for a device (or null). Cluster-aware. */
 function status(deviceId) {
-  const d = _load().devices[deviceId];
+  const d = _effective(deviceId);
   return d ? { ...d } : null;
 }
 
@@ -227,6 +292,68 @@ function issueToken(deviceId, opts = {}) {
   });
 }
 
+/** Actions currently granted for a device (its capability scope). */
+function grantedActions(deviceId) {
+  const d = _load().devices[deviceId];
+  return d && Array.isArray(d.actions) ? d.actions.slice() : [];
+}
+
+/**
+ * Phase 22 — PER-ACTION token. Mint a capability token scoped to EXACTLY ONE
+ * action (least-privilege). The action must be within the device's granted
+ * capability set when one is recorded; otherwise the request is refused.
+ * @param {string} deviceId
+ * @param {string} action
+ * @param {{ ttlSec?:number }} [opts]
+ */
+function issueActionToken(deviceId, action, opts = {}) {
+  if (!enabled()) return { ok: false, reason: 'disabled' };
+  const st = _load();
+  const r = _rec(st, deviceId);
+  const act = String(action || '').toLowerCase();
+  if (!act) return { ok: false, reason: 'no-action' };
+  if (Array.isArray(r.actions) && r.actions.length && !r.actions.includes(act)) {
+    return { ok: false, reason: 'action-not-granted' };
+  }
+  const token = dcp.issueCapabilityToken({
+    deviceId, actions: [act], ttlSec: opts.ttlSec,
+    gen: r.gen > 0 ? r.gen : undefined, identity: r.identityFp
+  });
+  return { ok: true, token, action: act, gen: r.gen, deviceId };
+}
+
+/**
+ * Phase 22 — verify a token for a device+action against the CURRENT (cluster-
+ * aware) lifecycle state: revocation, effective generation, identity binding and
+ * action scope. A token from the immediately-previous generation is accepted only
+ * within its grace window.
+ * @param {string} deviceId
+ * @param {string} action
+ * @param {string} token
+ * @param {{ now?:number }} [opts]
+ */
+function verifyDeviceToken(deviceId, action, token, opts = {}) {
+  if (!enabled()) return { ok: true, reason: 'disabled' };
+  const eff = _effective(deviceId);
+  if (!eff) return { ok: false, reason: 'no-token-state' };
+  if (eff.revoked) return { ok: false, reason: 'revoked' };
+  const now = Number.isFinite(opts.now) ? opts.now : Date.now();
+  const res = dcp.verifyCapabilityToken(token, {
+    deviceId, action, now,
+    gen: eff.gen > 0 ? eff.gen : undefined,
+    identity: eff.identityFp
+  });
+  if (res.ok) return res;
+  // Grace window: accept the previous generation if still within grace.
+  if (res.reason === 'generation-mismatch' && res.payload
+      && Number(res.payload.gen) === Number(eff.prevGen) && eff.prevGen > 0
+      && now < Number(eff.prevGenUntil)) {
+    const graceRes = dcp.verifyCapabilityToken(token, { deviceId, action, now, gen: eff.prevGen, identity: eff.identityFp });
+    if (graceRes.ok) return { ok: true, grace: true, payload: graceRes.payload };
+  }
+  return res;
+}
+
 /** Remove the store (governance/tests). No-op when disabled. */
 function clear() {
   if (!enabled()) return false;
@@ -238,5 +365,6 @@ module.exports = {
   FLAG, STORE_FILE, SCHEMA_VERSION,
   enabled, identity,
   onPair, rotate, rotateIfDue, revoke,
-  isRevoked, isActive, isTokenValid, status, all, issueToken, clear
+  isRevoked, isActive, isTokenValid, status, all, issueToken, clear,
+  grantedActions, issueActionToken, verifyDeviceToken
 };
