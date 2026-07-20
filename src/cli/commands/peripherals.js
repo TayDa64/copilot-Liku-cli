@@ -15,7 +15,7 @@
  *                                       Human-gated peripheral tasks (filterable)
  *   liku peripherals notifications [--pending|--severity <s>]
  *   liku peripherals channels           Show escalation notification channels
- *   liku peripherals power [--history|--trend|--anomalies|--forecast]
+ *   liku peripherals power [--history|--trend|--anomalies|--forecast [--seasonal]]
  *                                       Live budget + rolling power telemetry
  *   liku peripherals anomalies [--attributed]
  *                                       Detected anomalies (per-device attribution)
@@ -30,7 +30,7 @@
  *   liku peripherals cron [propose <dev> <act> "<cron>"|confirm <id>|dismiss <id>|rules|tick|remove <id>]
  *   liku peripherals pair <id>          Pair / commission a device (real when HIL off)
  *   liku peripherals unpair <id>        Tear down a device's pairing (re-pairable)
- *   liku peripherals token [status|rotate <id>|revoke <id>|action <id> <action>]
+ *   liku peripherals token [status|rotate <id>|revoke <id>|rotate-all|action <id> <action>]
  *   liku peripherals suggestions        Advisory schedule proposals (recurring anomalies)
  *   liku peripherals apply-schedule <id> Confirm + activate a proposed schedule
  */
@@ -226,6 +226,14 @@ async function run(args, flags) {
         else error(`Token ${op} failed for ${id}: ${res.reason || 'unknown'}`);
         return { success: !!res.ok, ...res };
       }
+      if (op === 'rotate-all') {
+        // Fleet-wide human-gated token rotation (rotate-all-on-event).
+        const res = pal.rotateAllTokens();
+        if (flags.json) return { success: !!res.ok, ...res };
+        if (res.ok) success(`Rotated ${res.rotated.length} device token(s): ${res.rotated.join(', ') || '(none active)'}.`);
+        else error(`Rotate-all failed: ${res.reason || 'unknown'}`);
+        return { success: !!res.ok, ...res };
+      }
       if (op === 'action') {
         // Mint a PER-ACTION (least-privilege) capability token.
         const id = args[2];
@@ -326,12 +334,14 @@ async function run(args, flags) {
         if (flags.json) return { success: !!res.ok, ...res };
         if (res.ok && op === 'confirm') {
           if (res.executed && res.executed.ok !== false) {
-            // Security action (rotate-token / unpair) was performed on confirmation.
-            success(`Action ${res.action} for ${res.deviceId} confirmed + applied (human-gated).`);
+            // Security / self-heal action was performed on confirmation.
+            success(`Action ${res.action}${res.deviceId ? ` for ${res.deviceId}` : ' (fleet)'} confirmed + applied (human-gated).`);
             if (res.action === 'rotate-token') log(dim(`  token rotated → gen ${res.executed.gen}`));
             if (res.action === 'unpair') log(dim('  device unpaired → capability token revoked'));
+            if (res.action === 'reduce-schedule' && res.executed.rule) log(dim(`  schedule capped ${res.executed.rule.fromHour}:00→${res.executed.rule.toHour}:00 ≤${res.executed.rule.maxW}W`));
+            if (res.action === 'rotate-all') log(dim(`  fleet rotated ${(res.executed.rotated || []).length} token(s)`));
           } else {
-            success(`Action ${res.action} for ${res.deviceId} confirmed (advisory).`);
+            success(`Action ${res.action}${res.deviceId ? ` for ${res.deviceId}` : ''} confirmed (advisory).`);
             if (res.directive) log(dim(`  Run this to apply: ${res.directive}`));
           }
         } else if (res.ok) {
@@ -345,9 +355,10 @@ async function run(args, flags) {
       if (flags.json) return { success: true, ...res };
       const acts = res.actions || [];
       log(highlight(`Advisory actions (${acts.length}):`));
-      if (!acts.length) log(dim('  none (persistent anomalies escalate reduce-schedule → rotate-token → unpair)'));
+      if (!acts.length) log(dim('  none (persistent anomalies escalate reduce-schedule → rotate-token → unpair; fleet → rotate-all)'));
       for (const a of acts) {
-        log(`  ${highlight(a.id)} ${dim(a.deviceId)} [${a.severity}] ${highlight(a.action)}  ${dim(a.reason)}`);
+        const scope = a.scope === 'fleet' ? highlight(' [FLEET]') : dim(a.deviceId);
+        log(`  ${highlight(a.id)} ${scope} [${a.severity}] ${highlight(a.action)}  ${dim(a.reason)}`);
         log(dim(`     confirm: liku peripherals anomaly-action confirm ${a.id}  →  ${a.directive}`));
       }
       return { success: true, ...res };
@@ -355,16 +366,23 @@ async function run(args, flags) {
 
     case 'power': {
       const ps = pal.powerStatus();
-      // Phase 19: --forecast shows the short-horizon per-hour forecast + warnings.
+      // Phase 19/23: --forecast shows the short-horizon forecast + warnings.
+      // --seasonal uses the day-of-week baselines; --device-warnings names the
+      // device likely to drive each upcoming breach.
       if (flags.forecast) {
-        const f = pal.getPowerForecast();
+        const f = flags.seasonal ? pal.getSeasonalForecast() : pal.getPowerForecast();
         const warn = pal.getForecastWarnings();
-        if (flags.json) return { success: true, forecast: f, warnings: warn.warnings };
-        log(highlight('Power forecast'));
+        const devWarn = pal.getDeviceForecastWarnings({ seasonal: !!flags.seasonal });
+        if (flags.json) return { success: true, forecast: f, warnings: warn.warnings, deviceWarnings: devWarn.warnings };
+        log(highlight(`Power forecast${flags.seasonal ? ' (day-of-week seasonal)' : ''}`));
         if (!f.ok) log(dim(`  ${f.basis || 'unavailable'} (${f.samples || 0} samples)`));
-        for (const h of f.horizon || []) log(`  hour ${h.hour}:00  ~${h.predictedW}W [${h.lowW}–${h.highW}W] ${dim(`${h.confidence} conf`)} ${dim(h.basis)}`);
+        for (const h of f.horizon || []) log(`  hour ${h.hour}:00${flags.seasonal && h.dow != null ? ` [dow ${h.dow}]` : ''}  ~${h.predictedW}W [${h.lowW}–${h.highW}W] ${dim(`${h.confidence} conf`)} ${dim(h.basis)}`);
         for (const w of warn.warnings || []) error(`  ⚠ ${w.advisory}`);
-        return { success: true, forecast: f };
+        if ((devWarn.warnings || []).length) {
+          log(highlight('  device warnings:'));
+          for (const w of devWarn.warnings) log(dim(`    ${w.deviceId} → hour ${w.hour}:00 (~${w.devicePeakW}W)`));
+        }
+        return { success: true, forecast: f, deviceWarnings: devWarn.warnings };
       }
       // Phase 19: --anomalies surfaces detected power anomalies (+ attribution).
       if (flags.anomalies) {
@@ -670,7 +688,7 @@ async function run(args, flags) {
 
     default:
       error(`Unknown subcommand: ${sub}`);
-      log('Usage: liku peripherals [scan|list|status [id]|power [--history|--trend|--anomalies|--forecast]|anomalies [--attributed]|anomaly-action [confirm|dismiss <id>]|schedules|locks [--record]|coordination [lease|release <id>]|cron [propose|confirm|dismiss|rules|tick|remove]|suggestions|apply-schedule <id>|pair <id>|unpair <id>|token [rotate|revoke|action <id> <action>]|tasks [--escalated|--pending|--severity <p>|--anomaly]|notifications|channels|simulate <id> <k=v>|execute <id> <action>|confirm <id> <action> [--execute]|drivers]');
+      log('Usage: liku peripherals [scan|list|status [id]|power [--history|--trend|--anomalies|--forecast [--seasonal]]|anomalies [--attributed]|anomaly-action [confirm|dismiss <id>]|schedules|locks [--record]|coordination [lease|release <id>]|cron [propose|confirm|dismiss|rules|tick|remove]|suggestions|apply-schedule <id>|pair <id>|unpair <id>|token [rotate|revoke|rotate-all|action <id> <action>]|tasks [--escalated|--pending|--severity <p>|--anomaly]|notifications|channels|simulate <id> <k=v>|execute <id> <action>|confirm <id> <action> [--execute]|drivers]');
       return { success: false };
   }
 }

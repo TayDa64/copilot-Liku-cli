@@ -248,12 +248,13 @@ function confirm(suggestionId) {
   if (!key) return { ok: false, reason: 'not-found' };
   const entry = st.proposed[key];
   if (entry.status !== 'proposed') return { ok: false, reason: `already-${entry.status}` };
-  if (entry.type === 'multi-device' && Array.isArray(entry.devices)) {
-    // Coordinated confirmation: write ONE restrict-only rule per contributor.
+  if (Array.isArray(entry.devices)) {
+    // Coordinated confirmation (multi-device OR multi-hour): write ONE
+    // restrict-only rule per contributor across the proposal's window.
     for (const d of entry.devices) {
       _appendConfirmed({
         id: d.deviceId, fromHour: entry.fromHour, toHour: entry.toHour, maxW: d.proposedMaxW,
-        source: 'advisor-confirmed-multi', suggestionId: entry.id, confirmedAt: new Date().toISOString()
+        source: `advisor-confirmed-${entry.type || 'multi'}`, suggestionId: entry.id, confirmedAt: new Date().toISOString()
       });
     }
   } else {
@@ -267,6 +268,93 @@ function confirm(suggestionId) {
   entry.confirmedAt = new Date().toISOString();
   _save(st);
   return { ok: true, schedule: { ...entry } };
+}
+
+/**
+ * MULTI-HOUR coordinated proposal (Phase 23). Scans the forecast horizon for the
+ * longest CONTIGUOUS run of hours whose confidence UPPER band exceeds the budget,
+ * then proposes a single window [from..to] with per-device caps (allocated by
+ * each contributor's share of the peak-hour draw). STRICTLY ADVISORY + human-gated;
+ * dedup one open multi-hour proposal per window.
+ * @param {{ budgetW:number, samples?:object[], horizonHours?:number, now?:number, seasonal?:boolean }} opts
+ * @param {number} [now]
+ * @returns {object|null}
+ */
+function proposeMultiHourSchedule(opts = {}, now = Date.now()) {
+  if (!enabled()) return null;
+  const budgetW = Number(opts.budgetW);
+  if (!Number.isFinite(budgetW) || budgetW <= 0) return null;
+  const effectiveNow = Number.isFinite(opts.now) ? opts.now : now;
+  let forecastMod;
+  let f;
+  try {
+    forecastMod = require('./power-forecast');
+    f = opts.seasonal
+      ? forecastMod.seasonalForecast({ budgetW, samples: opts.samples, horizonHours: opts.horizonHours, now: effectiveNow })
+      : forecastMod.forecast({ budgetW, samples: opts.samples, horizonHours: opts.horizonHours, now: effectiveNow });
+  } catch { return null; }
+  if (!f || !f.ok || !Array.isArray(f.horizon)) return null;
+  // Longest contiguous run where the confidence UPPER band exceeds budget.
+  const over = f.horizon.map((h) => (h.highW > budgetW || h.predictedW > budgetW));
+  let bestStart = -1; let bestLen = 0; let curStart = -1; let curLen = 0;
+  for (let i = 0; i < over.length; i++) {
+    if (over[i]) { if (curStart < 0) curStart = i; curLen++; if (curLen > bestLen) { bestLen = curLen; bestStart = curStart; } }
+    else { curStart = -1; curLen = 0; }
+  }
+  if (bestLen < 2) return null; // "multi-hour" requires a run of >= 2 hours
+  const runEntries = f.horizon.slice(bestStart, bestStart + bestLen);
+  const runHours = runEntries.map((h) => h.hour);
+  const fromHour = runHours[0];
+  const toHour = (runHours[runHours.length - 1] + 1) % 24;
+  const peakEntry = runEntries.reduce((a, b) => (b.predictedW > a.predictedW ? b : a));
+  const contrib = forecastMod.contributorsAtHour({ hour: peakEntry.hour, budgetW, samples: opts.samples });
+  if (!contrib || !Array.isArray(contrib.contributors) || !contrib.contributors.length || !(contrib.totalPeakW > 0)) return null;
+  const total = contrib.totalPeakW;
+  const devices = contrib.contributors.map((c) => ({
+    deviceId: c.deviceId, currentPeakW: c.peakW, proposedMaxW: Math.max(1, Math.round(budgetW * (c.peakW / total)))
+  }));
+  const key = `multihour:${fromHour}-${toHour}`;
+  const st = _load();
+  const existing = st.proposed[key];
+  if (existing && existing.status === 'proposed') return existing;
+  if (existing && (existing.status === 'confirmed' || existing.status === 'dismissed')) return null;
+  const suggestion = {
+    id: `multihour-sched-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
+    type: 'multi-hour', fromHour, toHour, hours: runHours, budgetW, devices, occurrences: devices.length,
+    reason: `coordinated ${bestLen}h cap ${fromHour}:00→${toHour}:00 (forecast band > budget ${budgetW}W)`,
+    status: 'proposed', proposed: true, requiresHuman: true, autonomousAction: false, createdAt: new Date().toISOString()
+  };
+  st.proposed[key] = suggestion;
+  _save(st);
+  return suggestion;
+}
+
+/**
+ * Directly create a HUMAN-CONFIRMED restrict-only schedule for a device. Used
+ * when a human confirms an anomaly→action `reduce-schedule` (the confirmation IS
+ * the gate). The cap is derived from the device's forecast baseline peak (cap the
+ * excess while allowing normal operation), falling back to an explicit maxW/budget.
+ * @param {string} deviceId
+ * @param {{ maxW?:number, budgetW?:number, fromHour?:number, toHour?:number, now?:number }} [opts]
+ */
+function createConfirmedSchedule(deviceId, opts = {}) {
+  if (!enabled()) return { ok: false, reason: 'disabled' };
+  if (!deviceId) return { ok: false, reason: 'no-device' };
+  const now = Number.isFinite(opts.now) ? opts.now : Date.now();
+  const fromHour = Number.isFinite(opts.fromHour) ? opts.fromHour : new Date(now).getHours();
+  const toHour = Number.isFinite(opts.toHour) ? opts.toHour : (fromHour + 1) % 24;
+  let maxW = Number.isFinite(opts.maxW) ? Math.round(opts.maxW) : null;
+  if (maxW == null) {
+    try {
+      const b = require('./power-forecast').deviceHourlyBaselines()[deviceId];
+      const hb = b && b[fromHour];
+      if (hb && hb.peak > 0) maxW = Math.round(hb.peak);
+    } catch { /* forecast is best-effort */ }
+  }
+  if (maxW == null && Number.isFinite(opts.budgetW) && opts.budgetW > 0) maxW = Math.round(opts.budgetW);
+  if (maxW == null) return { ok: false, reason: 'no-cap-basis' };
+  _appendConfirmed({ id: deviceId, fromHour, toHour, maxW, source: 'anomaly-action-confirmed', confirmedAt: new Date().toISOString() });
+  return { ok: true, rule: { id: deviceId, fromHour, toHour, maxW } };
 }
 
 /** Dismiss a proposed schedule (human declined). */
@@ -290,5 +378,6 @@ function clear() {
 
 module.exports = {
   FLAG, SUGGEST_FILE,
-  enabled, recordAnomaly, proposeSchedules, proposeMultiDeviceSchedule, listProposed, confirm, dismiss, clear
+  enabled, recordAnomaly, proposeSchedules, proposeMultiDeviceSchedule, proposeMultiHourSchedule,
+  createConfirmedSchedule, listProposed, confirm, dismiss, clear
 };

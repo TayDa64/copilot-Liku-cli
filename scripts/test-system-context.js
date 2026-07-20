@@ -3199,6 +3199,176 @@ test('PAL cron confirm-flow accessors propose + persist + dismiss', () => {
   delete process.env.LIKU_ENABLE_PERIPHERALS;
 });
 
+// ── Phase 23: forecast refinements + advanced anomaly→action ──
+
+test('seasonal forecast prefers the day-of-week baseline', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const forecast = require('../src/main/peripherals/power-forecast');
+  const dayA = new Date(2026, 6, 20, 18, 0, 0); // same hour, two different weekdays
+  const dayB = new Date(2026, 6, 21, 18, 0, 0);
+  const mk = (d, w) => ({ at: d.toISOString(), totalW: w, devices: [{ id: 'd1', loadW: w }] });
+  const samples = [mk(dayA, 200), mk(dayA, 210), mk(dayA, 190), mk(dayB, 600), mk(dayB, 610), mk(dayB, 590)];
+  const fA = forecast.seasonalForecast({ samples, horizonHours: 1, now: new Date(2026, 6, 20, 17, 30, 0).getTime() });
+  assert.strictEqual(fA.horizon[0].basis, 'dow-hour-baseline', 'uses the dow baseline');
+  assert.ok(fA.horizon[0].predictedW >= 180 && fA.horizon[0].predictedW <= 220, 'weekday-A prediction ~200W');
+  const fB = forecast.seasonalForecast({ samples, horizonHours: 1, now: new Date(2026, 6, 21, 17, 30, 0).getTime() });
+  assert.ok(fB.horizon[0].predictedW >= 560 && fB.horizon[0].predictedW <= 620, 'weekday-B prediction ~600W (seasonality)');
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('seasonal forecast falls back to hour-of-day when the weekday is undersampled', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const forecast = require('../src/main/peripherals/power-forecast');
+  const dayA = new Date(2026, 6, 20, 18, 0, 0);
+  const mk = (w) => ({ at: dayA.toISOString(), totalW: w, devices: [{ id: 'd1', loadW: w }] });
+  const samples = [mk(200), mk(210), mk(190), mk(205), mk(195), mk(200)];
+  // Forecast on a DIFFERENT weekday with no dow baseline → hour-of-day fallback.
+  const f = forecast.seasonalForecast({ samples, horizonHours: 1, now: new Date(2026, 6, 22, 17, 30, 0).getTime() });
+  assert.strictEqual(f.horizon[0].basis, 'hourly-baseline', 'falls back to hour-of-day baseline');
+  assert.ok(f.horizon[0].predictedW >= 180 && f.horizon[0].predictedW <= 220);
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('per-device forecast warnings name the driving device', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const forecast = require('../src/main/peripherals/power-forecast');
+  const at = (h) => new Date(2026, 6, 20, h, 0, 0).toISOString();
+  const mk = (h, oven, fridge) => ({ at: at(h), totalW: oven + fridge, devices: [{ id: 'oven', loadW: oven }, { id: 'fridge', loadW: fridge }] });
+  const samples = [mk(20, 500, 30), mk(20, 510, 30), mk(20, 490, 30), mk(20, 505, 30), mk(20, 495, 30), mk(20, 500, 30)];
+  const warns = forecast.deviceForecastWarnings({ budgetW: 400, samples, horizonHours: 1, now: new Date(2026, 6, 20, 19, 30, 0).getTime() });
+  assert.ok(warns.length >= 1, 'a device warning is raised');
+  assert.strictEqual(warns[0].deviceId, 'oven', 'names the biggest contributor');
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('multi-hour proposal spans a contiguous over-budget run + confirm caps the window', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const advisor = require('../src/main/peripherals/power-schedule-advisor');
+  const schedule = require('../src/main/peripherals/power-schedule');
+  advisor.clear();
+  const at = (h) => new Date(2026, 6, 20, h, 0, 0).toISOString();
+  const mk = (h, w) => ({ at: at(h), totalW: w, devices: [{ id: 'oven', loadW: w }] });
+  // Hours 20 and 21 both ~600W → a 2-hour over-budget run vs budget 400.
+  const samples = [mk(20, 600), mk(20, 610), mk(20, 590), mk(21, 600), mk(21, 610), mk(21, 590)];
+  const sug = advisor.proposeMultiHourSchedule({ budgetW: 400, samples, horizonHours: 2, now: new Date(2026, 6, 20, 19, 30, 0).getTime() });
+  assert.ok(sug && sug.type === 'multi-hour', 'multi-hour proposal created');
+  assert.strictEqual(sug.autonomousAction, false, 'advisory only');
+  assert.ok(sug.hours.length >= 2, 'spans a multi-hour run');
+  const c = advisor.confirm(sug.id);
+  assert.strictEqual(c.ok, true);
+  const cap = sug.devices.find((d) => d.deviceId === 'oven').proposedMaxW;
+  assert.strictEqual(schedule.deviceScheduleW('oven', new Date(2026, 6, 20, 20, 0, 0)), cap, 'hour 20 capped');
+  assert.strictEqual(schedule.deviceScheduleW('oven', new Date(2026, 6, 20, 21, 0, 0)), cap, 'hour 21 capped (multi-hour window)');
+  advisor.clear();
+  try { fs.rmSync(schedule.CONFIRMED_FILE); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('confirming a reduce-schedule anomaly→action auto-creates + confirms a schedule', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_CLUSTER_DIR;
+  const actions = require('../src/main/peripherals/anomaly-action-advisor');
+  const history = require('../src/main/peripherals/power-history');
+  const schedule = require('../src/main/peripherals/power-schedule');
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  actions.clear();
+  history.clear();
+  try { fs.rmSync(schedule.CONFIRMED_FILE); } catch { /* ignore */ }
+  // Seed a device forecast baseline for the current hour so a cap can be derived.
+  const nowHour = new Date().getHours();
+  history.record({ at: new Date().toISOString(), totalW: 120, budgetW: 200, overBudget: false, devices: [{ id: 'rdev', loadW: 120, active: true }] });
+  for (let i = 0; i < 3; i++) actions.recordAnomaly({ device: 'rdev', type: 'spike' });
+  const proposal = actions.proposeActions().find((a) => a.deviceId === 'rdev');
+  assert.strictEqual(proposal.action, 'reduce-schedule');
+  const res = pal.confirmAnomalyAction(proposal.id);
+  assert.strictEqual(res.ok, true);
+  assert.ok(res.executed && res.executed.ok, 'schedule auto-created on confirm');
+  assert.strictEqual(schedule.deviceScheduleW('rdev', new Date(2026, 6, 20, nowHour, 0, 0)) != null, true, 'a confirmed schedule now governs the device');
+  actions.clear();
+  history.clear();
+  try { fs.rmSync(schedule.CONFIRMED_FILE); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('fleet-wide rotate-all is proposed when several devices are persistently anomalous', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const actions = require('../src/main/peripherals/anomaly-action-advisor');
+  actions.clear();
+  for (const dev of ['fa', 'fb', 'fc']) for (let i = 0; i < 3; i++) actions.recordAnomaly({ device: dev, type: 'spike' });
+  const fleet = actions.proposeFleetAction();
+  assert.ok(fleet, 'fleet action proposed');
+  assert.strictEqual(fleet.action, 'rotate-all');
+  assert.strictEqual(fleet.scope, 'fleet');
+  assert.strictEqual(fleet.autonomousAction, false, 'advisory');
+  assert.ok(fleet.devices.length >= 3, 'names the anomalous devices');
+  actions.clear();
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('token rotateAll rotates active devices + skips revoked (human-gated fleet response)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_CLUSTER_DIR;
+  const ts = require('../src/main/peripherals/token-store');
+  ts.clear();
+  ts.onPair('ra-a', { actions: ['on'] });
+  ts.onPair('ra-b', { actions: ['on'] });
+  ts.revoke('ra-b');
+  const res = ts.rotateAll();
+  assert.strictEqual(res.ok, true);
+  assert.ok(res.rotated.includes('ra-a'), 'active device rotated');
+  assert.ok(!res.rotated.includes('ra-b'), 'revoked device skipped');
+  assert.strictEqual(ts.status('ra-a').gen, 2, 'active device gen bumped');
+  ts.clear();
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('confirming a fleet anomaly→action rotates all tokens (human-gated)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_CLUSTER_DIR;
+  const ts = require('../src/main/peripherals/token-store');
+  const actions = require('../src/main/peripherals/anomaly-action-advisor');
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  ts.clear();
+  actions.clear();
+  ts.onPair('flt-a', { actions: ['on'] });
+  ts.onPair('flt-b', { actions: ['on'] });
+  for (const dev of ['flt-a', 'flt-b', 'flt-c'] ) for (let i = 0; i < 3; i++) actions.recordAnomaly({ device: dev, type: 'spike' });
+  const fleet = actions.proposeFleetAction();
+  const res = pal.confirmAnomalyAction(fleet.id);
+  assert.strictEqual(res.ok, true);
+  assert.ok(res.executed && res.executed.ok, 'rotate-all executed on confirm');
+  assert.strictEqual(ts.status('flt-a').gen, 2, 'flt-a rotated');
+  assert.strictEqual(ts.status('flt-b').gen, 2, 'flt-b rotated');
+  ts.clear();
+  actions.clear();
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('createConfirmedSchedule writes a restrict-only rule directly (human-approved)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const advisor = require('../src/main/peripherals/power-schedule-advisor');
+  const schedule = require('../src/main/peripherals/power-schedule');
+  try { fs.rmSync(schedule.CONFIRMED_FILE); } catch { /* ignore */ }
+  const r = advisor.createConfirmedSchedule('direct-dev', { maxW: 150, fromHour: 10, toHour: 12 });
+  assert.strictEqual(r.ok, true);
+  assert.strictEqual(schedule.deviceScheduleW('direct-dev', new Date(2026, 6, 20, 10, 30, 0)), 150, 'rule enforced in window');
+  assert.strictEqual(schedule.deviceScheduleW('direct-dev', new Date(2026, 6, 20, 13, 0, 0)), 0, 'outside window → off');
+  try { fs.rmSync(schedule.CONFIRMED_FILE); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('PAL exposes seasonal forecast + device-warning + multi-hour accessors', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  const s = pal.getSeasonalForecast();
+  assert.strictEqual(s.enabled, true, 'seasonal forecast accessor enabled');
+  const w = pal.getDeviceForecastWarnings({ budgetW: 100 });
+  assert.ok(Array.isArray(w.warnings), 'device warnings accessor returns an array');
+  const m = pal.getMultiHourProposal({ budgetW: 100 });
+  assert.strictEqual(m.enabled, true, 'multi-hour accessor enabled');
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
 console.log(`\n${pass} checks passed.`);
 if (process.exitCode) { console.error('FAILED'); }
 else { console.log('OK'); }

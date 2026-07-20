@@ -223,6 +223,25 @@ function rotateIfDue(deviceId, now = Date.now()) {
 }
 
 /**
+ * Phase 23 — fleet-wide "rotate-all-on-event": rotate EVERY active device's
+ * token generation (a human-gated security response to a fleet anomaly). Revoked
+ * / unpaired devices are skipped. Each rotation is mirrored to the cluster.
+ * @param {{ now?:number }} [opts]
+ * @returns {{ ok:boolean, rotated:string[] }}
+ */
+function rotateAll(opts = {}) {
+  if (!enabled()) return { ok: false, reason: 'disabled', rotated: [] };
+  const now = Number.isFinite(opts.now) ? opts.now : Date.now();
+  const st = _load();
+  const targets = Object.keys(st.devices).filter((id) => {
+    const d = st.devices[id];
+    return d && !d.revoked && d.gen > 0;
+  });
+  for (const id of targets) rotate(id, { now });
+  return { ok: true, rotated: targets };
+}
+
+/**
  * Whether a token generation is currently valid for a device: the current
  * generation, or the immediately-previous one during its grace window.
  */
@@ -366,5 +385,5 @@ module.exports = {
   enabled, identity,
   onPair, rotate, rotateIfDue, revoke,
   isRevoked, isActive, isTokenValid, status, all, issueToken, clear,
-  grantedActions, issueActionToken, verifyDeviceToken
+  grantedActions, issueActionToken, verifyDeviceToken, rotateAll
 };

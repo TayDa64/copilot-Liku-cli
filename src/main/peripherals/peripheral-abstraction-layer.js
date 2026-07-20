@@ -441,6 +441,38 @@ function revokeToken(id) {
   } catch (err) { return { enabled: true, ok: false, reason: err.message }; }
 }
 
+/** Phase 23 — fleet-wide human-gated token rotation (rotate-all-on-event). */
+function rotateAllTokens() {
+  if (!isPeripheralsEnabled()) return { enabled: false };
+  try { return { enabled: true, ...tokenStore().rotateAll() }; }
+  catch (err) { return { enabled: true, ok: false, reason: err.message }; }
+}
+
+/** Phase 23 — day-of-week seasonal forecast (advisory). */
+function getSeasonalForecast(opts = {}) {
+  if (!isPeripheralsEnabled()) return { enabled: false, ok: false, horizon: [] };
+  try { return { enabled: true, ...powerForecast().seasonalForecast(opts) }; }
+  catch { return { enabled: true, ok: false, horizon: [] }; }
+}
+
+/** Phase 23 — per-device forecast warnings (which device likely drives a breach). */
+function getDeviceForecastWarnings(opts = {}) {
+  if (!isPeripheralsEnabled()) return { enabled: false, warnings: [] };
+  try {
+    const budgetW = Number.isFinite(opts.budgetW) ? opts.budgetW : _powerBudgetW();
+    return { enabled: true, warnings: powerForecast().deviceForecastWarnings({ ...opts, budgetW }) };
+  } catch { return { enabled: true, warnings: [] }; }
+}
+
+/** Phase 23 — propose a multi-hour coordinated schedule from the forecast bands. */
+function getMultiHourProposal(opts = {}) {
+  if (!isPeripheralsEnabled()) return { enabled: false, proposal: null };
+  try {
+    const budgetW = Number.isFinite(opts.budgetW) ? opts.budgetW : _powerBudgetW();
+    return { enabled: true, proposal: scheduleAdvisor().proposeMultiHourSchedule({ ...opts, budgetW }) };
+  } catch { return { enabled: true, proposal: null }; }
+}
+
 function scheduleAdvisor() { return require('./power-schedule-advisor'); }
 
 /** Advisory power-schedule suggestions from recurring anomalies (proposed only). */
@@ -491,6 +523,14 @@ function confirmAnomalyAction(id, opts = {}) {
       // Unpair tears down pairing AND revokes the device's capability token
       // (via driver-pairing → tokenStore.revoke) — a human-approved auto-revoke.
       executed = unpairDevice(res.deviceId);
+    } else if (execute && res.action === 'reduce-schedule') {
+      // Phase 23: auto-create+confirm a restrict-only schedule (human approved
+      // via THIS confirmation). Cap derived from the device forecast baseline,
+      // falling back to the power budget. Never actuates the device.
+      executed = { enabled: true, ...scheduleAdvisor().createConfirmedSchedule(res.deviceId, { budgetW: _powerBudgetW() }) };
+    } else if (execute && res.action === 'rotate-all') {
+      // Fleet-wide human-approved security response — rotate every active token.
+      executed = rotateAllTokens();
     }
     return { enabled: true, ...res, executed };
   } catch (err) { return { enabled: true, ok: false, reason: err.message }; }
@@ -827,6 +867,10 @@ module.exports = {
   dismissAnomalyAction,
   issueActionToken,
   verifyDeviceToken,
+  rotateAllTokens,
+  getSeasonalForecast,
+  getDeviceForecastWarnings,
+  getMultiHourProposal,
   getLockHistory,
   recordLockSnapshot,
   getLockTrends,

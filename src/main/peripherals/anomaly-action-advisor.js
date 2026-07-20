@@ -164,6 +164,54 @@ function listProposed() {
 }
 
 /**
+ * Phase 23 — FLEET-WIDE action. When MULTIPLE distinct devices are persistently
+ * anomalous within the window, propose a single advisory "rotate-all" (fleet-wide
+ * token rotation) — a human-gated security response reusing the escalation
+ * pipeline. Deduplicated: one open fleet proposal at a time.
+ * @param {{ minDevices?:number, minOccurrences?:number }} [opts]
+ * @param {number} [now]
+ * @returns {object|null}
+ */
+function proposeFleetAction(opts = {}, now = Date.now()) {
+  if (!enabled()) return null;
+  const st = _load();
+  const cutoff = now - _windowMs();
+  const minDevices = Number.isFinite(opts.minDevices)
+    ? opts.minDevices
+    : (Number(process.env.LIKU_PERIPHERAL_FLEET_MIN_DEVICES) || 3);
+  const minOcc = Number.isFinite(opts.minOccurrences) ? opts.minOccurrences : ACTION_LADDER[0].minOccurrences;
+  const anomalous = [];
+  for (const [deviceId, occs] of Object.entries(st.occurrences)) {
+    const recent = (occs || []).filter((o) => o.at >= cutoff);
+    if (recent.length >= minOcc) anomalous.push(deviceId);
+  }
+  if (anomalous.length < minDevices) return null;
+  const key = 'fleet:rotate-all';
+  const existing = st.proposed[key];
+  if (existing && existing.status === 'proposed') return existing;
+  if (existing && (existing.status === 'confirmed' || existing.status === 'dismissed')) return null;
+  const suggestion = {
+    id: `fleet-act-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
+    deviceId: null,
+    scope: 'fleet',
+    action: 'rotate-all',
+    severity: 'critical',
+    devices: anomalous.slice(),
+    occurrences: anomalous.length,
+    reason: `${anomalous.length} devices persistently anomalous → advisory fleet-wide token rotation`,
+    directive: 'liku peripherals token rotate-all',
+    status: 'proposed',
+    proposed: true,
+    requiresHuman: true,
+    autonomousAction: false,
+    createdAt: new Date().toISOString()
+  };
+  st.proposed[key] = suggestion;
+  _save(st);
+  return suggestion;
+}
+
+/**
  * EXPLICIT human confirmation. Records approval and RETURNS the exact command
  * to run — it deliberately does NOT execute the action (no autonomous actuation
  * path). The human runs the returned directive.
@@ -203,5 +251,5 @@ function clear() {
 
 module.exports = {
   FLAG, STORE_FILE, ACTION_LADDER,
-  enabled, recordAnomaly, proposeActions, listProposed, confirm, dismiss, clear
+  enabled, recordAnomaly, proposeActions, proposeFleetAction, listProposed, confirm, dismiss, clear
 };

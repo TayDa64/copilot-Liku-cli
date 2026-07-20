@@ -689,6 +689,53 @@ cluster view when a shared cluster dir is configured.
   when `LIKU_CLUSTER_DIR` is set; single-machine behaviour is byte-for-byte
   unchanged.
 
+## Seasonal forecasts + advanced anomaly→action (Phase 23)
+
+### Forecast refinements
+
+`power-forecast.js` sharpens prediction with weekly seasonality + per-device attribution:
+
+- **Day-of-week seasonality** — `dowHourlyBaselines()` buckets by day-of-week ×
+  hour-of-day. `seasonalForecast()` prefers the dow×hour baseline for each
+  upcoming hour (when it has `≥ LIKU_PERIPHERAL_FORECAST_DOW_MIN` samples),
+  falling back to the hour-of-day baseline, then the overall mean. The plain
+  `forecast()` is unchanged.
+- **Per-device forecast warnings** — `deviceForecastWarnings({ budgetW })` names,
+  for each upcoming over-budget hour, the device MOST LIKELY to drive it (highest
+  per-hour baseline peak). PAL: `getSeasonalForecast()`,
+  `getDeviceForecastWarnings()`. CLI: `power --forecast [--seasonal]`.
+- **Multi-hour coordinated scheduling** — `power-schedule-advisor.proposeMultiHourSchedule()`
+  scans the forecast for the longest CONTIGUOUS run of hours whose confidence
+  upper band exceeds budget and proposes ONE window `[from..to]` with per-device
+  caps (allocated by each contributor's share). Confirmation writes a restrict-only
+  rule per device across the whole window. PAL: `getMultiHourProposal()`.
+
+### Advanced anomaly→action patterns
+
+- **Auto-create + confirm reduce-schedule** — when a human confirms a
+  `reduce-schedule` anomaly→action, `PAL.confirmAnomalyAction()` calls
+  `power-schedule-advisor.createConfirmedSchedule()` to write a restrict-only
+  schedule for the device (cap derived from its forecast baseline peak, falling
+  back to the power budget). The confirmation IS the human gate; nothing actuates.
+- **Fleet-wide rotate-all** — `anomaly-action-advisor.proposeFleetAction()`
+  proposes a single advisory `rotate-all` when `≥ LIKU_PERIPHERAL_FLEET_MIN_DEVICES`
+  distinct devices are persistently anomalous. Confirming it runs
+  `token-store.rotateAll()` (rotate every ACTIVE token; skip revoked), mirrored
+  across the cluster. Human-gated; reuses the `supervisor:anomaly-action` event.
+  CLI: `token rotate-all`, `anomaly-action confirm <id>`.
+
+### Phase 23 safety invariants
+
+- **forecast-refinements-only-observe** — seasonality, per-device warnings, and
+  multi-hour analysis are pure prediction; they sharpen (still human-confirmed)
+  suggestions and never actuate.
+- **auto-heal-is-human-gated** — reduce-schedule / rotate-token / unpair /
+  rotate-all all execute ONLY on an explicit human confirmation of the escalated
+  anomaly→action, and are non-actuating (restrict / crypto / pairing) operations
+  that never bypass the PAL safety chain.
+- **fleet-actions-are-advisory** — a fleet rotate-all is a proposal until
+  confirmed; it rotates tokens (a security op), never actuates a device.
+
 ## If a human decides to act
 
 Any physical response still travels the full PAL safety chain — the alert path

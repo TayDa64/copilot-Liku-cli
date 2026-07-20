@@ -198,6 +198,15 @@ function attachPowerAnomalyConsumer(orchestrator, options = {}) {
                 emittedProposals.add(multi.id);
                 try { orchestrator.emit('supervisor:schedule-suggestion', multi); } catch { /* non-fatal */ }
               }
+              // Phase 23: when the forecast band shows a CONTIGUOUS multi-hour
+              // over-budget run, propose a coordinated multi-hour window cap.
+              if (typeof advisor.proposeMultiHourSchedule === 'function') {
+                const mh = advisor.proposeMultiHourSchedule({ budgetW });
+                if (mh && mh.status === 'proposed' && !emittedProposals.has(mh.id)) {
+                  emittedProposals.add(mh.id);
+                  try { orchestrator.emit('supervisor:schedule-suggestion', mh); } catch { /* non-fatal */ }
+                }
+              }
             }
           }
         } catch { /* advisory pipeline is best-effort */ }
@@ -218,6 +227,16 @@ function attachPowerAnomalyConsumer(orchestrator, options = {}) {
             if (a && a.status === 'proposed' && !emittedActions.has(a.id)) {
               emittedActions.add(a.id);
               try { orchestrator.emit('supervisor:anomaly-action', a); } catch { /* non-fatal */ }
+            }
+          }
+          // Phase 23: FLEET-WIDE action — when several distinct devices are
+          // persistently anomalous, propose a single advisory rotate-all (still
+          // human-gated). Reuses the same escalation event.
+          if (typeof actionAdvisor.proposeFleetAction === 'function') {
+            const fleet = actionAdvisor.proposeFleetAction();
+            if (fleet && fleet.status === 'proposed' && !emittedActions.has(fleet.id)) {
+              emittedActions.add(fleet.id);
+              try { orchestrator.emit('supervisor:anomaly-action', fleet); } catch { /* non-fatal */ }
             }
           }
         } catch { /* action advisory pipeline is best-effort */ }

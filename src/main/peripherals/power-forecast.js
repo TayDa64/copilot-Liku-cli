@@ -35,6 +35,7 @@ function enabled() {
 
 function _round(n) { return Math.round(n * 100) / 100; }
 function _hourOf(at) { const t = Date.parse(at); return Number.isFinite(t) ? new Date(t).getHours() : null; }
+function _dowOf(at) { const t = Date.parse(at); return Number.isFinite(t) ? new Date(t).getDay() : null; }
 function _std(values, mean) {
   if (!values || values.length < 2) return 0;
   const v = values.reduce((s, x) => s + (x - mean) * (x - mean), 0) / (values.length - 1);
@@ -206,7 +207,115 @@ function contributorsAtHour(opts = {}) {
   return { hour, budgetW, totalPeakW: _round(totalPeakW), exceeds: budgetW > 0 && totalPeakW > budgetW, contributors };
 }
 
+// ── Phase 23: day-of-week seasonality + per-device forecast warnings ─────────
+
+/**
+ * DAY-OF-WEEK × hour-of-day baseline for the TOTAL draw. Captures weekly
+ * seasonality (e.g. weekday-morning vs weekend-morning differ). PURE.
+ * @returns {{ [dow:number]: { [hour:number]: { mean:number, peak:number, count:number, std:number } } }}
+ */
+function dowHourlyBaselines(opts = {}) {
+  if (!enabled()) return {};
+  const samples = _loadSamples(opts);
+  const buckets = {};
+  for (const s of samples) {
+    const h = _hourOf(s && s.at);
+    const d = _dowOf(s && s.at);
+    if (h == null || d == null) continue;
+    const w = Number(s.totalW) || 0;
+    const perDow = buckets[d] || (buckets[d] = {});
+    const b = perDow[h] || (perDow[h] = { values: [], sum: 0, peak: 0, count: 0 });
+    b.values.push(w); b.sum += w; b.peak = Math.max(b.peak, w); b.count += 1;
+  }
+  const out = {};
+  for (const [d, hours] of Object.entries(buckets)) {
+    out[d] = {};
+    for (const [h, b] of Object.entries(hours)) {
+      const mean = b.sum / b.count;
+      out[d][h] = { mean: _round(mean), peak: _round(b.peak), count: b.count, std: _round(_std(b.values, mean)) };
+    }
+  }
+  return out;
+}
+
+/**
+ * SEASONAL forecast — like forecast(), but prefers the day-of-week × hour
+ * baseline for each upcoming hour (when it has enough samples), falling back to
+ * the hour-of-day baseline, then the overall mean. Advisory only; leaves the
+ * plain forecast() byte-identical.
+ * @param {{ samples?:object[], sinceMs?:number, horizonHours?:number, now?:number }} [opts]
+ */
+function seasonalForecast(opts = {}) {
+  if (!enabled()) return { ok: false, horizon: [], basis: 'disabled', samples: 0 };
+  const samples = _loadSamples(opts);
+  const minSamples = Number(process.env.LIKU_PERIPHERAL_FORECAST_MIN_SAMPLES) || 6;
+  const horizonHours = Number.isFinite(opts.horizonHours) ? opts.horizonHours
+    : (Number(process.env.LIKU_PERIPHERAL_FORECAST_HORIZON_HOURS) || 3);
+  if (samples.length < minSamples) return { ok: false, horizon: [], basis: 'insufficient-history', samples: samples.length };
+  const boundedHorizon = Math.max(1, Math.min(MAX_HORIZON_HOURS, Math.floor(horizonHours)));
+  const dowMin = Number(process.env.LIKU_PERIPHERAL_FORECAST_DOW_MIN) || 2;
+  const hourBaselines = hourlyBaselines({ samples });
+  const dowBaselines = dowHourlyBaselines({ samples });
+  const totals = samples.map((s) => Number(s.totalW) || 0);
+  const overallMean = _round(totals.reduce((a, b) => a + b, 0) / totals.length);
+  const overallStd = _round(_std(totals, overallMean));
+  const now = Number.isFinite(opts.now) ? opts.now : Date.now();
+  const horizon = [];
+  for (let i = 1; i <= boundedHorizon; i++) {
+    const future = new Date(now + i * 3600000);
+    const dow = future.getDay();
+    const hour = future.getHours();
+    const db = dowBaselines[dow] && dowBaselines[dow][hour];
+    const hb = hourBaselines[hour];
+    let mean; let std; let peak; let count; let basis;
+    if (db && db.count >= dowMin) { mean = db.mean; std = db.std; peak = db.peak; count = db.count; basis = 'dow-hour-baseline'; }
+    else if (hb) { mean = hb.mean; std = hb.std; peak = hb.peak; count = hb.count; basis = 'hourly-baseline'; }
+    else { mean = overallMean; std = overallStd; peak = overallMean; count = totals.length; basis = 'overall-mean'; }
+    const margin = _round(CONF_Z * std);
+    horizon.push({
+      hour, dow, stepsAhead: i, predictedW: mean, peakW: peak,
+      lowW: _round(Math.max(0, mean - margin)), highW: _round(mean + margin), stdW: _round(std),
+      confidence: _confidence(count, std, mean, i), basis
+    });
+  }
+  return { ok: true, horizon, basis: 'dow-seasonal', samples: samples.length, overallMean, horizonHours: boundedHorizon };
+}
+
+/**
+ * PER-DEVICE forecast warnings — for each upcoming hour whose (seasonal or plain)
+ * forecast would exceed the budget, name the device MOST LIKELY to drive it
+ * (highest per-hour baseline peak). Advisory only.
+ * @param {{ budgetW:number, samples?:object[], sinceMs?:number, horizonHours?:number, now?:number, seasonal?:boolean }} opts
+ * @returns {object[]}
+ */
+function deviceForecastWarnings(opts = {}) {
+  const budgetW = Number(opts.budgetW);
+  if (!enabled() || !Number.isFinite(budgetW) || budgetW <= 0) return [];
+  const f = opts.seasonal ? seasonalForecast(opts) : forecast(opts);
+  if (!f.ok) return [];
+  const dev = deviceHourlyBaselines({ samples: opts.samples, sinceMs: opts.sinceMs });
+  const warnings = [];
+  for (const h of f.horizon) {
+    if (!(h.predictedW > budgetW || h.peakW > budgetW)) continue;
+    const ranked = [];
+    for (const [id, hours] of Object.entries(dev)) {
+      const b = hours[h.hour];
+      if (b && b.peak > 0) ranked.push({ deviceId: id, peakW: b.peak, meanW: b.mean });
+    }
+    ranked.sort((a, b) => b.peakW - a.peakW);
+    if (!ranked.length) continue;
+    const top = ranked[0];
+    warnings.push({
+      hour: h.hour, deviceId: top.deviceId, devicePeakW: top.peakW,
+      predictedW: h.predictedW, budgetW, confidence: h.confidence,
+      advisory: `forecast: ${top.deviceId} likely drives hour ${h.hour}:00 breach (~${top.peakW}W) vs budget ${budgetW}W`
+    });
+  }
+  return warnings;
+}
+
 module.exports = {
   FLAG, MAX_HORIZON_HOURS, enabled,
-  hourlyBaselines, deviceHourlyBaselines, forecast, forecastExceedsBudget, contributorsAtHour
+  hourlyBaselines, deviceHourlyBaselines, forecast, forecastExceedsBudget, contributorsAtHour,
+  dowHourlyBaselines, seasonalForecast, deviceForecastWarnings
 };
