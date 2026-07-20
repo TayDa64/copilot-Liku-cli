@@ -3216,16 +3216,19 @@ test('seasonal forecast prefers the day-of-week baseline', () => {
   delete process.env.LIKU_ENABLE_PERIPHERALS;
 });
 
-test('seasonal forecast falls back to hour-of-day when the weekday is undersampled', () => {
+test('seasonal forecast falls back through the weekday group, then hour-of-day', () => {
   process.env.LIKU_ENABLE_PERIPHERALS = '1';
   const forecast = require('../src/main/peripherals/power-forecast');
-  const dayA = new Date(2026, 6, 20, 18, 0, 0);
+  const dayA = new Date(2026, 6, 20, 18, 0, 0); // Monday (weekday)
   const mk = (w) => ({ at: dayA.toISOString(), totalW: w, devices: [{ id: 'd1', loadW: w }] });
   const samples = [mk(200), mk(210), mk(190), mk(205), mk(195), mk(200)];
-  // Forecast on a DIFFERENT weekday with no dow baseline → hour-of-day fallback.
+  // A DIFFERENT weekday with no dow baseline → weekend/weekday GROUP fallback.
   const f = forecast.seasonalForecast({ samples, horizonHours: 1, now: new Date(2026, 6, 22, 17, 30, 0).getTime() });
-  assert.strictEqual(f.horizon[0].basis, 'hourly-baseline', 'falls back to hour-of-day baseline');
+  assert.strictEqual(f.horizon[0].basis, 'dow-group-baseline', 'weekday group fallback (improved dow handling)');
   assert.ok(f.horizon[0].predictedW >= 180 && f.horizon[0].predictedW <= 220);
+  // A WEEKEND day (no weekend samples at all) → falls through to hour-of-day.
+  const fWknd = forecast.seasonalForecast({ samples, horizonHours: 1, now: new Date(2026, 6, 25, 17, 30, 0).getTime() });
+  assert.strictEqual(fWknd.horizon[0].basis, 'hourly-baseline', 'no group match → hour-of-day fallback');
   delete process.env.LIKU_ENABLE_PERIPHERALS;
 });
 
@@ -3366,6 +3369,197 @@ test('PAL exposes seasonal forecast + device-warning + multi-hour accessors', ()
   assert.ok(Array.isArray(w.warnings), 'device warnings accessor returns an array');
   const m = pal.getMultiHourProposal({ budgetW: 100 });
   assert.strictEqual(m.enabled, true, 'multi-hour accessor enabled');
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+// ── Phase 24: multi-device auto-heal + policies + forecast refinements ──
+
+test('anomaly-aware baselines exclude flagged spikes from the forecast', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  process.env.LIKU_PERIPHERAL_FORECAST_MIN_SAMPLES = '3';
+  const forecast = require('../src/main/peripherals/power-forecast');
+  const at = (h) => new Date(2026, 6, 20, h, 0, 0).toISOString();
+  // Hour 18 is normally ~200W, but one sample is a flagged 900W anomaly.
+  const samples = [
+    { at: at(18), totalW: 200, devices: [{ id: 'd', loadW: 200 }] },
+    { at: at(18), totalW: 210, devices: [{ id: 'd', loadW: 210 }] },
+    { at: at(18), totalW: 190, devices: [{ id: 'd', loadW: 190 }] },
+    { at: at(18), totalW: 205, devices: [{ id: 'd', loadW: 205 }] },
+    { at: at(18), totalW: 195, devices: [{ id: 'd', loadW: 195 }] },
+    { at: at(18), totalW: 900, overBudget: true, devices: [{ id: 'd', loadW: 900 }] }
+  ];
+  const now = new Date(2026, 6, 20, 17, 30, 0).getTime();
+  const withAll = forecast.seasonalForecast({ samples, horizonHours: 1, now });
+  const excluded = forecast.seasonalForecast({ samples, horizonHours: 1, now, excludeAnomalous: true });
+  assert.ok(withAll.horizon[0].predictedW > excluded.horizon[0].predictedW, 'excluding the spike lowers the prediction');
+  assert.ok(excluded.horizon[0].predictedW <= 220, 'anomaly-aware prediction reflects normal operation');
+  assert.strictEqual(excluded.excludedAnomalous, true);
+  delete process.env.LIKU_PERIPHERAL_FORECAST_MIN_SAMPLES;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('holiday dates are excluded from anomaly-aware baselines', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  process.env.LIKU_PERIPHERAL_FORECAST_MIN_SAMPLES = '3';
+  process.env.LIKU_PERIPHERAL_FORECAST_HOLIDAYS = '2026-07-19';
+  const forecast = require('../src/main/peripherals/power-forecast');
+  const norm = (h) => new Date(2026, 6, 20, h, 0, 0).toISOString(); // Monday
+  const holiday = (h) => new Date(2026, 6, 19, h, 0, 0).toISOString(); // flagged holiday
+  const samples = [
+    { at: norm(18), totalW: 200, devices: [{ id: 'd', loadW: 200 }] },
+    { at: norm(18), totalW: 210, devices: [{ id: 'd', loadW: 210 }] },
+    { at: norm(18), totalW: 190, devices: [{ id: 'd', loadW: 190 }] },
+    { at: holiday(18), totalW: 800, devices: [{ id: 'd', loadW: 800 }] },
+    { at: holiday(18), totalW: 820, devices: [{ id: 'd', loadW: 820 }] },
+    { at: holiday(18), totalW: 810, devices: [{ id: 'd', loadW: 810 }] }
+  ];
+  const now = new Date(2026, 6, 20, 17, 30, 0).getTime();
+  const excluded = forecast.seasonalForecast({ samples, horizonHours: 1, now, excludeAnomalous: true });
+  assert.ok(excluded.horizon[0].predictedW <= 220, 'holiday samples excluded from the baseline');
+  delete process.env.LIKU_PERIPHERAL_FORECAST_MIN_SAMPLES;
+  delete process.env.LIKU_PERIPHERAL_FORECAST_HOLIDAYS;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('multi-hour caps are confidence-weighted (peak-leaning when low confidence)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const advisor = require('../src/main/peripherals/power-schedule-advisor');
+  advisor.clear();
+  const at = (h) => new Date(2026, 6, 20, h, 0, 0).toISOString();
+  // Two devices at hours 20-21: 'steady' (high mean, low variance) and 'spiky'
+  // (low mean, occasional high peaks) → low overall confidence for spiky.
+  const mk = (h, steady, spiky) => ({ at: at(h), totalW: steady + spiky, devices: [{ id: 'steady', loadW: steady }, { id: 'spiky', loadW: spiky }] });
+  const samples = [
+    mk(20, 300, 50), mk(20, 300, 400), mk(20, 300, 60),
+    mk(21, 300, 55), mk(21, 300, 380), mk(21, 300, 65)
+  ];
+  const sug = advisor.proposeMultiHourSchedule({ budgetW: 400, samples, horizonHours: 2, now: new Date(2026, 6, 20, 19, 30, 0).getTime() });
+  assert.ok(sug && sug.type === 'multi-hour', 'multi-hour proposal created');
+  assert.ok('confidence' in sug, 'proposal records confidence');
+  const sumCaps = sug.devices.reduce((s, d) => s + d.proposedMaxW, 0);
+  assert.ok(sumCaps <= sug.budgetW, 'confidence-weighted caps still sum within budget');
+  advisor.clear();
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('per-device auto-heal policy overrides the default ladder thresholds', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const actions = require('../src/main/peripherals/anomaly-action-advisor');
+  actions.clear();
+  actions.clearPolicies();
+  // Tighten this device: reduce-schedule after just 1 occurrence.
+  const set = actions.setPolicy('sensitive-dev', { 'reduce-schedule': 1 });
+  assert.strictEqual(set.ok, true);
+  assert.strictEqual(actions.getPolicy('sensitive-dev')['reduce-schedule'], 1, 'policy applied');
+  actions.recordAnomaly({ device: 'sensitive-dev', type: 'spike' });
+  const p = actions.proposeActions().find((a) => a.deviceId === 'sensitive-dev');
+  assert.ok(p, 'a single anomaly proposes an action under the tightened policy');
+  assert.strictEqual(p.action, 'reduce-schedule');
+  // A different device still uses the default threshold (3) → no proposal at 1.
+  actions.recordAnomaly({ device: 'normal-dev', type: 'spike' });
+  assert.ok(!actions.proposeActions().find((a) => a.deviceId === 'normal-dev'), 'default device unaffected');
+  actions.clear();
+  actions.clearPolicies();
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('confirming a reduce-schedule with multiple contributors creates a coordinated multi-device cap', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_CLUSTER_DIR;
+  const advisor = require('../src/main/peripherals/power-schedule-advisor');
+  const schedule = require('../src/main/peripherals/power-schedule');
+  advisor.clear();
+  try { fs.rmSync(schedule.CONFIRMED_FILE); } catch { /* ignore */ }
+  const hour = 20;
+  const at = new Date(2026, 6, 20, hour, 0, 0).toISOString();
+  const samples = [
+    { at, totalW: 550, devices: [{ id: 'heater', loadW: 300 }, { id: 'oven', loadW: 250 }] },
+    { at, totalW: 560, devices: [{ id: 'heater', loadW: 305 }, { id: 'oven', loadW: 255 }] }
+  ];
+  const res = advisor.createConfirmedMultiSchedule({ budgetW: 400, hour, samples });
+  assert.strictEqual(res.ok, true, 'multi-device schedule created');
+  assert.strictEqual(res.multiDevice, true);
+  assert.strictEqual(res.devices.length, 2, 'both contributors capped');
+  const sum = res.devices.reduce((s, d) => s + d.proposedMaxW, 0);
+  assert.ok(sum <= 400, 'coordinated caps sum within budget');
+  const heaterCap = res.devices.find((d) => d.deviceId === 'heater').proposedMaxW;
+  assert.strictEqual(schedule.deviceScheduleW('heater', new Date(2026, 6, 20, hour, 0, 0)), heaterCap, 'heater rule enforced');
+  // Single-contributor case → not multi-device.
+  advisor.clear();
+  try { fs.rmSync(schedule.CONFIRMED_FILE); } catch { /* ignore */ }
+  const solo = advisor.createConfirmedMultiSchedule({ budgetW: 400, hour, samples: [{ at, totalW: 600, devices: [{ id: 'heater', loadW: 600 }] }] });
+  assert.strictEqual(solo.ok, false, 'single contributor is not multi-device');
+  advisor.clear();
+  try { fs.rmSync(schedule.CONFIRMED_FILE); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('PAL confirmAnomalyAction reduce-schedule prefers a multi-device coordinated cap', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_CLUSTER_DIR;
+  const actions = require('../src/main/peripherals/anomaly-action-advisor');
+  const history = require('../src/main/peripherals/power-history');
+  const schedule = require('../src/main/peripherals/power-schedule');
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  actions.clear();
+  actions.clearPolicies();
+  history.clear();
+  try { fs.rmSync(schedule.CONFIRMED_FILE); } catch { /* ignore */ }
+  const nowHour = new Date().getHours();
+  // Two contributors at the current hour jointly exceed a small budget.
+  const seed = (h, a, b) => history.record({ at: new Date().toISOString(), totalW: a + b, budgetW: 100, overBudget: true, devices: [{ id: 'ha', loadW: a, active: true }, { id: 'hb', loadW: b, active: true }] });
+  seed(nowHour, 120, 90);
+  seed(nowHour, 125, 95);
+  // Set a tiny budget so the joint draw exceeds it.
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  for (let i = 0; i < 3; i++) actions.recordAnomaly({ device: 'ha', type: 'over-budget' });
+  const proposal = actions.proposeActions().find((a) => a.deviceId === 'ha');
+  assert.strictEqual(proposal.action, 'reduce-schedule');
+  const res = pal.confirmAnomalyAction(proposal.id);
+  assert.strictEqual(res.ok, true);
+  assert.ok(res.executed && res.executed.ok, 'a schedule was created on confirm');
+  // Either a coordinated multi-device cap (preferred) or a single-device fallback.
+  assert.ok(res.executed.multiDevice === true || (res.executed.rule && res.executed.rule.id), 'reduce-schedule applied');
+  actions.clear();
+  history.clear();
+  try { fs.rmSync(schedule.CONFIRMED_FILE); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('PAL exposes auto-heal policy accessors', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const actions = require('../src/main/peripherals/anomaly-action-advisor');
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  actions.clearPolicies();
+  const set = pal.setAutoHealPolicy('pal-pol-dev', { 'rotate-token': 4 });
+  assert.strictEqual(set.ok, true, 'PAL sets a policy');
+  const list = pal.getAutoHealPolicies();
+  assert.ok(list.policies['pal-pol-dev'] && list.policies['pal-pol-dev']['rotate-token'] === 4, 'PAL lists the policy');
+  actions.clearPolicies();
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('Phase 24 stores are flag-gated (no disk when disabled)', () => {
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+  const actions = require('../src/main/peripherals/anomaly-action-advisor');
+  assert.strictEqual(actions.setPolicy('x', { 'reduce-schedule': 1 }).ok, false, 'policy set inert when disabled');
+  assert.strictEqual(fs.existsSync(actions.POLICIES_FILE), false, 'no autoheal-policies.json when disabled');
+});
+
+test('env auto-heal policy sets a fleet-wide default via the * key', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  process.env.LIKU_PERIPHERAL_AUTOHEAL_POLICIES = JSON.stringify({ '*': { 'reduce-schedule': 2 } });
+  const actions = require('../src/main/peripherals/anomaly-action-advisor');
+  actions.clear();
+  actions.clearPolicies();
+  assert.strictEqual(actions.getPolicy('any-dev')['reduce-schedule'], 2, 'fleet default applied to all devices');
+  actions.recordAnomaly({ device: 'edev', type: 'spike' });
+  assert.ok(!actions.proposeActions().find((a) => a.deviceId === 'edev'), 'no proposal at 1 occurrence');
+  actions.recordAnomaly({ device: 'edev', type: 'spike' });
+  assert.ok(actions.proposeActions().find((a) => a.deviceId === 'edev'), 'proposal at 2 occurrences (env default)');
+  actions.clear();
+  actions.clearPolicies();
+  delete process.env.LIKU_PERIPHERAL_AUTOHEAL_POLICIES;
   delete process.env.LIKU_ENABLE_PERIPHERALS;
 });
 

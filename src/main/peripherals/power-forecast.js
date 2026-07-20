@@ -65,6 +65,40 @@ function _loadSamples(opts) {
   catch { return []; }
 }
 
+// ── Phase 24: holiday / anomaly-aware baselines ─────────────────────────────
+// A "known anomalous period" (a sample flagged overBudget/anomalous, or a date
+// on the holiday list) can be EXCLUDED from baselines so a one-off spike or an
+// atypical day doesn't skew normal-operation predictions. Opt-in: the low-level
+// functions default to NO filtering, so the plain forecast() stays byte-identical.
+
+function _holidaySet() {
+  const raw = String(process.env.LIKU_PERIPHERAL_FORECAST_HOLIDAYS || '').trim();
+  if (!raw) return null;
+  const set = new Set(raw.split(',').map((s) => s.trim()).filter(Boolean));
+  return set.size ? set : null;
+}
+function _dateKey(at) {
+  const t = Date.parse(at);
+  if (!Number.isFinite(t)) return null;
+  const d = new Date(t);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+function _isAnomalousSample(s) { return !!(s && (s.overBudget === true || s.anomalous === true)); }
+
+/** Drop known-anomalous samples (flagged spikes + holiday dates) when opted in. @private */
+function _filterSamples(samples, opts) {
+  if (!opts || !opts.excludeAnomalous) return samples;
+  const holidays = _holidaySet();
+  return samples.filter((s) => {
+    if (_isAnomalousSample(s)) return false;
+    if (holidays) { const k = _dateKey(s && s.at); if (k && holidays.has(k)) return false; }
+    return true;
+  });
+}
+
+/** Group day-of-week into 'weekend' (Sat/Sun) vs 'weekday' baselines. @private */
+function _dowGroup(dow) { return (dow === 0 || dow === 6) ? 'weekend' : 'weekday'; }
+
 /**
  * Per-hour-of-day baseline for TOTAL draw.
  * @returns {{ [hour:number]: { mean:number, peak:number, count:number } }}
@@ -239,6 +273,33 @@ function dowHourlyBaselines(opts = {}) {
 }
 
 /**
+ * WEEKEND/WEEKDAY × hour-of-day baseline (Phase 24 — improved dow handling). Fills
+ * a specific weekday's gaps from the broader weekend/weekday group. @private
+ */
+function _dowGroupBaselines(samples) {
+  const buckets = {};
+  for (const s of samples) {
+    const h = _hourOf(s && s.at);
+    const d = _dowOf(s && s.at);
+    if (h == null || d == null) continue;
+    const g = _dowGroup(d);
+    const w = Number(s.totalW) || 0;
+    const perG = buckets[g] || (buckets[g] = {});
+    const b = perG[h] || (perG[h] = { values: [], sum: 0, peak: 0, count: 0 });
+    b.values.push(w); b.sum += w; b.peak = Math.max(b.peak, w); b.count += 1;
+  }
+  const out = {};
+  for (const [g, hours] of Object.entries(buckets)) {
+    out[g] = {};
+    for (const [h, b] of Object.entries(hours)) {
+      const mean = b.sum / b.count;
+      out[g][h] = { mean: _round(mean), peak: _round(b.peak), count: b.count, std: _round(_std(b.values, mean)) };
+    }
+  }
+  return out;
+}
+
+/**
  * SEASONAL forecast — like forecast(), but prefers the day-of-week × hour
  * baseline for each upcoming hour (when it has enough samples), falling back to
  * the hour-of-day baseline, then the overall mean. Advisory only; leaves the
@@ -247,15 +308,19 @@ function dowHourlyBaselines(opts = {}) {
  */
 function seasonalForecast(opts = {}) {
   if (!enabled()) return { ok: false, horizon: [], basis: 'disabled', samples: 0 };
-  const samples = _loadSamples(opts);
+  // Phase 24: optionally EXCLUDE known-anomalous periods (flagged spikes +
+  // holidays) so a one-off event doesn't skew the seasonal baseline.
+  const samples = _filterSamples(_loadSamples(opts), opts);
   const minSamples = Number(process.env.LIKU_PERIPHERAL_FORECAST_MIN_SAMPLES) || 6;
   const horizonHours = Number.isFinite(opts.horizonHours) ? opts.horizonHours
     : (Number(process.env.LIKU_PERIPHERAL_FORECAST_HORIZON_HOURS) || 3);
   if (samples.length < minSamples) return { ok: false, horizon: [], basis: 'insufficient-history', samples: samples.length };
   const boundedHorizon = Math.max(1, Math.min(MAX_HORIZON_HOURS, Math.floor(horizonHours)));
   const dowMin = Number(process.env.LIKU_PERIPHERAL_FORECAST_DOW_MIN) || 2;
+  const groupMin = Number(process.env.LIKU_PERIPHERAL_FORECAST_GROUP_MIN) || 2;
   const hourBaselines = hourlyBaselines({ samples });
   const dowBaselines = dowHourlyBaselines({ samples });
+  const groupBaselines = _dowGroupBaselines(samples);
   const totals = samples.map((s) => Number(s.totalW) || 0);
   const overallMean = _round(totals.reduce((a, b) => a + b, 0) / totals.length);
   const overallStd = _round(_std(totals, overallMean));
@@ -266,19 +331,22 @@ function seasonalForecast(opts = {}) {
     const dow = future.getDay();
     const hour = future.getHours();
     const db = dowBaselines[dow] && dowBaselines[dow][hour];
+    const gb = groupBaselines[_dowGroup(dow)] && groupBaselines[_dowGroup(dow)][hour];
     const hb = hourBaselines[hour];
     let mean; let std; let peak; let count; let basis;
+    // Fallback chain: dow×hour → weekend/weekday group×hour → hour-of-day → overall.
     if (db && db.count >= dowMin) { mean = db.mean; std = db.std; peak = db.peak; count = db.count; basis = 'dow-hour-baseline'; }
+    else if (gb && gb.count >= groupMin) { mean = gb.mean; std = gb.std; peak = gb.peak; count = gb.count; basis = 'dow-group-baseline'; }
     else if (hb) { mean = hb.mean; std = hb.std; peak = hb.peak; count = hb.count; basis = 'hourly-baseline'; }
     else { mean = overallMean; std = overallStd; peak = overallMean; count = totals.length; basis = 'overall-mean'; }
     const margin = _round(CONF_Z * std);
     horizon.push({
-      hour, dow, stepsAhead: i, predictedW: mean, peakW: peak,
+      hour, dow, dowGroup: _dowGroup(dow), stepsAhead: i, predictedW: mean, peakW: peak,
       lowW: _round(Math.max(0, mean - margin)), highW: _round(mean + margin), stdW: _round(std),
       confidence: _confidence(count, std, mean, i), basis
     });
   }
-  return { ok: true, horizon, basis: 'dow-seasonal', samples: samples.length, overallMean, horizonHours: boundedHorizon };
+  return { ok: true, horizon, basis: 'dow-seasonal', samples: samples.length, overallMean, horizonHours: boundedHorizon, excludedAnomalous: !!opts.excludeAnomalous };
 }
 
 /**

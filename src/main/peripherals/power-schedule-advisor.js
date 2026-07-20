@@ -80,6 +80,17 @@ function _modeHour(hours) {
   return best;
 }
 
+const _CONF_RANK = { low: 0, medium: 1, high: 2 };
+/** Lowest confidence label across a set of forecast horizon entries. @private */
+function _minConfidence(entries) {
+  let min = 'high';
+  for (const e of entries) {
+    const c = (e && e.confidence) ? e.confidence : 'low';
+    if ((_CONF_RANK[c] != null ? _CONF_RANK[c] : 0) < _CONF_RANK[min]) min = c;
+  }
+  return min;
+}
+
 /** Suggested cap = a fraction below the recurring anomaly's observed draw. @private */
 function _suggestCapW(occs) {
   const budgets = occs.map((o) => Number(o.budgetW)).filter((n) => Number.isFinite(n) && n > 0);
@@ -309,9 +320,21 @@ function proposeMultiHourSchedule(opts = {}, now = Date.now()) {
   const peakEntry = runEntries.reduce((a, b) => (b.predictedW > a.predictedW ? b : a));
   const contrib = forecastMod.contributorsAtHour({ hour: peakEntry.hour, budgetW, samples: opts.samples });
   if (!contrib || !Array.isArray(contrib.contributors) || !contrib.contributors.length || !(contrib.totalPeakW > 0)) return null;
-  const total = contrib.totalPeakW;
-  const devices = contrib.contributors.map((c) => ({
-    deviceId: c.deviceId, currentPeakW: c.peakW, proposedMaxW: Math.max(1, Math.round(budgetW * (c.peakW / total)))
+  // Phase 24: CONFIDENCE-WEIGHTED caps. Under LOW confidence we lean on each
+  // device's PEAK (more headroom for volatile devices); under HIGH confidence we
+  // lean on its MEAN (tighter). The reference draw = mean + w·(peak−mean), where
+  // w grows as run confidence drops. Shares of the reference still sum to budget,
+  // so the coordinated caps NEVER exceed the budget (restrict-only invariant).
+  const runConfidence = _minConfidence(runEntries);
+  const w = runConfidence === 'high' ? 0 : (runConfidence === 'medium' ? 0.5 : 1);
+  const refs = contrib.contributors.map((c) => {
+    const meanW = Number.isFinite(c.meanW) ? c.meanW : c.peakW;
+    return { deviceId: c.deviceId, peakW: c.peakW, meanW, refW: meanW + w * (c.peakW - meanW) };
+  });
+  const totalRef = refs.reduce((s, r) => s + r.refW, 0) || 1;
+  const devices = refs.map((r) => ({
+    deviceId: r.deviceId, currentPeakW: r.peakW,
+    proposedMaxW: Math.max(1, Math.round(budgetW * (r.refW / totalRef)))
   }));
   const key = `multihour:${fromHour}-${toHour}`;
   const st = _load();
@@ -321,7 +344,8 @@ function proposeMultiHourSchedule(opts = {}, now = Date.now()) {
   const suggestion = {
     id: `multihour-sched-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
     type: 'multi-hour', fromHour, toHour, hours: runHours, budgetW, devices, occurrences: devices.length,
-    reason: `coordinated ${bestLen}h cap ${fromHour}:00→${toHour}:00 (forecast band > budget ${budgetW}W)`,
+    confidence: runConfidence,
+    reason: `coordinated ${bestLen}h cap ${fromHour}:00→${toHour}:00 (forecast band > budget ${budgetW}W, ${runConfidence} confidence)`,
     status: 'proposed', proposed: true, requiresHuman: true, autonomousAction: false, createdAt: new Date().toISOString()
   };
   st.proposed[key] = suggestion;
@@ -357,6 +381,39 @@ function createConfirmedSchedule(deviceId, opts = {}) {
   return { ok: true, rule: { id: deviceId, fromHour, toHour, maxW } };
 }
 
+/**
+ * Phase 24 — directly create a HUMAN-CONFIRMED MULTI-DEVICE coordinated
+ * reduce-schedule for the hour: when 2+ devices jointly exceed the budget, write
+ * one restrict-only rule per contributor (caps proportional to peak share, sum ≤
+ * budget). Used when a human confirms a reduce-schedule anomaly→action and the
+ * breach is multi-device. Returns { ok:false, reason:'not-multi-device' } for a
+ * single contributor (caller falls back to the single-device path).
+ * @param {{ budgetW:number, hour?:number, samples?:object[], now?:number }} opts
+ */
+function createConfirmedMultiSchedule(opts = {}) {
+  if (!enabled()) return { ok: false, reason: 'disabled' };
+  const budgetW = Number(opts.budgetW);
+  const now = Number.isFinite(opts.now) ? opts.now : Date.now();
+  const hour = Number.isFinite(opts.hour) ? opts.hour : new Date(now).getHours();
+  if (!Number.isFinite(budgetW) || budgetW <= 0) return { ok: false, reason: 'no-budget' };
+  let contrib;
+  try { contrib = require('./power-forecast').contributorsAtHour({ hour, budgetW, samples: opts.samples }); }
+  catch { return { ok: false, reason: 'forecast-error' }; }
+  if (!contrib || !Array.isArray(contrib.contributors) || contrib.contributors.length < 2 || !contrib.exceeds) {
+    return { ok: false, reason: 'not-multi-device' };
+  }
+  const total = contrib.totalPeakW || contrib.contributors.reduce((s, c) => s + c.peakW, 0);
+  const fromHour = hour;
+  const toHour = (hour + 1) % 24;
+  const devices = contrib.contributors.map((c) => {
+    const share = total > 0 ? c.peakW / total : 1 / contrib.contributors.length;
+    const maxW = Math.max(1, Math.round(budgetW * share));
+    _appendConfirmed({ id: c.deviceId, fromHour, toHour, maxW, source: 'anomaly-action-confirmed-multi', confirmedAt: new Date().toISOString() });
+    return { deviceId: c.deviceId, proposedMaxW: maxW };
+  });
+  return { ok: true, multiDevice: true, hour, fromHour, toHour, budgetW, devices };
+}
+
 /** Dismiss a proposed schedule (human declined). */
 function dismiss(suggestionId) {
   if (!enabled()) return { ok: false, reason: 'disabled' };
@@ -379,5 +436,5 @@ function clear() {
 module.exports = {
   FLAG, SUGGEST_FILE,
   enabled, recordAnomaly, proposeSchedules, proposeMultiDeviceSchedule, proposeMultiHourSchedule,
-  createConfirmedSchedule, listProposed, confirm, dismiss, clear
+  createConfirmedSchedule, createConfirmedMultiSchedule, listProposed, confirm, dismiss, clear
 };

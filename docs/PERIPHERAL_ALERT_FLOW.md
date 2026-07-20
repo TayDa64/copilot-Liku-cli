@@ -736,6 +736,50 @@ cluster view when a shared cluster dir is configured.
 - **fleet-actions-are-advisory** — a fleet rotate-all is a proposal until
   confirmed; it rotates tokens (a security op), never actuates a device.
 
+## Multi-device auto-heal + anomaly-aware forecasts (Phase 24)
+
+### Anomaly→action refinements
+
+- **Multi-device coordinated reduce on confirm** — when a human confirms a
+  `reduce-schedule` anomaly→action, `PAL.confirmAnomalyAction()` first tries
+  `power-schedule-advisor.createConfirmedMultiSchedule()`: if the current-hour
+  breach is jointly driven by 2+ devices, it writes ONE restrict-only rule per
+  contributor (caps proportional to peak share, sum ≤ budget). A single
+  contributor falls back to the single-device `createConfirmedSchedule()`. The
+  confirmation IS the human gate; nothing actuates.
+- **Per-device auto-heal policies** — `anomaly-action-advisor` supports
+  per-device occurrence thresholds for each ladder action (`reduce-schedule` /
+  `rotate-token` / `unpair`). Sources (later overrides earlier): default ladder →
+  `LIKU_PERIPHERAL_AUTOHEAL_POLICIES` env (a `*` key sets a fleet default) → the
+  persisted store (`setPolicy`). `proposeActions` uses each device's effective
+  thresholds. PAL: `getAutoHealPolicies()`, `setAutoHealPolicy()`. CLI:
+  `anomaly-action policy [list|set <device> reduce=N rotate=N unpair=N]`.
+
+### Power forecasting refinements
+
+- **Confidence-weighted multi-hour caps** — `proposeMultiHourSchedule` allocates
+  per-device caps from a confidence-weighted reference `mean + w·(peak−mean)`,
+  where `w` grows as the run's confidence drops (high→mean-leaning, low→peak-
+  leaning). Shares still sum to budget, so caps never exceed it (restrict-only).
+- **Holiday / anomaly-aware baselines** — `seasonalForecast({ excludeAnomalous:true })`
+  drops known-anomalous samples (flagged `overBudget`/`anomalous`, or dates in
+  `LIKU_PERIPHERAL_FORECAST_HOLIDAYS`) so a one-off spike or atypical day doesn't
+  skew normal-operation predictions. The plain `forecast()` stays byte-identical.
+- **Improved day-of-week handling** — a weekend/weekday GROUP baseline sits
+  between the dow×hour baseline and the hour-of-day fallback, filling a specific
+  weekday's gaps from the broader group. CLI: `power --forecast [--seasonal] [--exclude-anomalous]`.
+
+### Phase 24 safety invariants
+
+- **multi-device-caps-only-restrict** — a coordinated reduce writes only
+  restrict-only rules whose caps sum within budget, and only on explicit human
+  confirmation. It never turns a device on/off or raises a cap.
+- **policies-only-gate-visibility** — auto-heal policies change WHEN a proposal is
+  surfaced (per-device thresholds); they never make an action autonomous.
+- **forecast-refinements-only-observe** — confidence weighting, anomaly-aware
+  exclusion, and group baselines are pure prediction; they sharpen (still
+  human-confirmed) suggestions and never actuate.
+
 ## If a human decides to act
 
 Any physical response still travels the full PAL safety chain — the alert path

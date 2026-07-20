@@ -15,7 +15,7 @@
  *                                       Human-gated peripheral tasks (filterable)
  *   liku peripherals notifications [--pending|--severity <s>]
  *   liku peripherals channels           Show escalation notification channels
- *   liku peripherals power [--history|--trend|--anomalies|--forecast [--seasonal]]
+ *   liku peripherals power [--history|--trend|--anomalies|--forecast [--seasonal] [--exclude-anomalous]]
  *                                       Live budget + rolling power telemetry
  *   liku peripherals anomalies [--attributed]
  *                                       Detected anomalies (per-device attribution)
@@ -325,8 +325,37 @@ async function run(args, flags) {
     }
 
     case 'anomaly-action': {
-      // Advisory anomaly→action suggestions: list | confirm <id> | dismiss <id>.
+      // Advisory anomaly→action suggestions: list | confirm <id> | dismiss <id> |
+      // policy [list|set <device> reduce=N rotate=N unpair=N].
       const op = (args[1] || 'list').toLowerCase();
+      if (op === 'policy') {
+        const sub = (args[2] || 'list').toLowerCase();
+        if (sub === 'set') {
+          const deviceId = args[3];
+          if (!deviceId) { error('Usage: liku peripherals anomaly-action policy set <device> reduce-schedule=N rotate-token=N unpair=N'); return { success: false }; }
+          const thresholds = {};
+          const alias = { reduce: 'reduce-schedule', rotate: 'rotate-token', unpair: 'unpair' };
+          for (const kv of args.slice(4)) {
+            const eq = String(kv).indexOf('=');
+            if (eq <= 0) continue;
+            let k = kv.slice(0, eq).trim();
+            k = alias[k] || k;
+            thresholds[k] = Number(kv.slice(eq + 1).trim());
+          }
+          const r = pal.setAutoHealPolicy(deviceId, thresholds);
+          if (flags.json) return { success: !!r.ok, ...r };
+          if (r.ok) success(`Auto-heal policy for ${deviceId}: ${JSON.stringify(r.policy)}`);
+          else error(`Could not set policy: ${r.reason || 'unknown'}`);
+          return { success: !!r.ok, ...r };
+        }
+        const r = pal.getAutoHealPolicies();
+        if (flags.json) return { success: true, ...r };
+        const entries = Object.entries(r.policies || {});
+        log(highlight(`Auto-heal policies (${entries.length}):`));
+        if (!entries.length) log(dim('  none — default ladder: reduce-schedule=3, rotate-token=6, unpair=10'));
+        for (const [dev, pol] of entries) log(`  ${highlight(dev)} ${dim(JSON.stringify(pol))}`);
+        return { success: true, ...r };
+      }
       if (op === 'confirm' || op === 'dismiss') {
         const id = args[2];
         if (!id) { error(`Usage: liku peripherals anomaly-action ${op} <id>`); return { success: false }; }
@@ -338,7 +367,8 @@ async function run(args, flags) {
             success(`Action ${res.action}${res.deviceId ? ` for ${res.deviceId}` : ' (fleet)'} confirmed + applied (human-gated).`);
             if (res.action === 'rotate-token') log(dim(`  token rotated → gen ${res.executed.gen}`));
             if (res.action === 'unpair') log(dim('  device unpaired → capability token revoked'));
-            if (res.action === 'reduce-schedule' && res.executed.rule) log(dim(`  schedule capped ${res.executed.rule.fromHour}:00→${res.executed.rule.toHour}:00 ≤${res.executed.rule.maxW}W`));
+            if (res.action === 'reduce-schedule' && res.executed.multiDevice) log(dim(`  multi-device coordinated cap: ${(res.executed.devices || []).map((d) => `${d.deviceId}≤${d.proposedMaxW}W`).join(', ')}`));
+            else if (res.action === 'reduce-schedule' && res.executed.rule) log(dim(`  schedule capped ${res.executed.rule.fromHour}:00→${res.executed.rule.toHour}:00 ≤${res.executed.rule.maxW}W`));
             if (res.action === 'rotate-all') log(dim(`  fleet rotated ${(res.executed.rotated || []).length} token(s)`));
           } else {
             success(`Action ${res.action}${res.deviceId ? ` for ${res.deviceId}` : ''} confirmed (advisory).`);
@@ -370,13 +400,13 @@ async function run(args, flags) {
       // --seasonal uses the day-of-week baselines; --device-warnings names the
       // device likely to drive each upcoming breach.
       if (flags.forecast) {
-        const f = flags.seasonal ? pal.getSeasonalForecast() : pal.getPowerForecast();
+        const f = flags.seasonal ? pal.getSeasonalForecast({ excludeAnomalous: !!flags['exclude-anomalous'] }) : pal.getPowerForecast();
         const warn = pal.getForecastWarnings();
-        const devWarn = pal.getDeviceForecastWarnings({ seasonal: !!flags.seasonal });
+        const devWarn = pal.getDeviceForecastWarnings({ seasonal: !!flags.seasonal, excludeAnomalous: !!flags['exclude-anomalous'] });
         if (flags.json) return { success: true, forecast: f, warnings: warn.warnings, deviceWarnings: devWarn.warnings };
-        log(highlight(`Power forecast${flags.seasonal ? ' (day-of-week seasonal)' : ''}`));
+        log(highlight(`Power forecast${flags.seasonal ? ' (day-of-week seasonal)' : ''}${flags['exclude-anomalous'] ? ' [anomaly-aware]' : ''}`));
         if (!f.ok) log(dim(`  ${f.basis || 'unavailable'} (${f.samples || 0} samples)`));
-        for (const h of f.horizon || []) log(`  hour ${h.hour}:00${flags.seasonal && h.dow != null ? ` [dow ${h.dow}]` : ''}  ~${h.predictedW}W [${h.lowW}–${h.highW}W] ${dim(`${h.confidence} conf`)} ${dim(h.basis)}`);
+        for (const h of f.horizon || []) log(`  hour ${h.hour}:00${flags.seasonal && h.dow != null ? ` [${h.dowGroup || 'dow ' + h.dow}]` : ''}  ~${h.predictedW}W [${h.lowW}–${h.highW}W] ${dim(`${h.confidence} conf`)} ${dim(h.basis)}`);
         for (const w of warn.warnings || []) error(`  ⚠ ${w.advisory}`);
         if ((devWarn.warnings || []).length) {
           log(highlight('  device warnings:'));
@@ -688,7 +718,7 @@ async function run(args, flags) {
 
     default:
       error(`Unknown subcommand: ${sub}`);
-      log('Usage: liku peripherals [scan|list|status [id]|power [--history|--trend|--anomalies|--forecast [--seasonal]]|anomalies [--attributed]|anomaly-action [confirm|dismiss <id>]|schedules|locks [--record]|coordination [lease|release <id>]|cron [propose|confirm|dismiss|rules|tick|remove]|suggestions|apply-schedule <id>|pair <id>|unpair <id>|token [rotate|revoke|rotate-all|action <id> <action>]|tasks [--escalated|--pending|--severity <p>|--anomaly]|notifications|channels|simulate <id> <k=v>|execute <id> <action>|confirm <id> <action> [--execute]|drivers]');
+      log('Usage: liku peripherals [scan|list|status [id]|power [--history|--trend|--anomalies|--forecast [--seasonal] [--exclude-anomalous]]|anomalies [--attributed]|anomaly-action [confirm|dismiss <id>|policy [set <device> reduce=N rotate=N unpair=N]]|schedules|locks [--record]|coordination [lease|release <id>]|cron [propose|confirm|dismiss|rules|tick|remove]|suggestions|apply-schedule <id>|pair <id>|unpair <id>|token [rotate|revoke|rotate-all|action <id> <action>]|tasks [--escalated|--pending|--severity <p>|--anomaly]|notifications|channels|simulate <id> <k=v>|execute <id> <action>|confirm <id> <action> [--execute]|drivers]');
       return { success: false };
   }
 }

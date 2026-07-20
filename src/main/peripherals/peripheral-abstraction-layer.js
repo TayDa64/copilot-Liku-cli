@@ -524,10 +524,15 @@ function confirmAnomalyAction(id, opts = {}) {
       // (via driver-pairing → tokenStore.revoke) — a human-approved auto-revoke.
       executed = unpairDevice(res.deviceId);
     } else if (execute && res.action === 'reduce-schedule') {
-      // Phase 23: auto-create+confirm a restrict-only schedule (human approved
-      // via THIS confirmation). Cap derived from the device forecast baseline,
-      // falling back to the power budget. Never actuates the device.
-      executed = { enabled: true, ...scheduleAdvisor().createConfirmedSchedule(res.deviceId, { budgetW: _powerBudgetW() }) };
+      // Phase 24: prefer a MULTI-DEVICE coordinated reduce when the current-hour
+      // breach is jointly driven by 2+ devices; else fall back to a single-device
+      // schedule. Cap(s) derived from forecast baselines / the power budget.
+      // Human approved via THIS confirmation. Never actuates a device.
+      const budgetW = _powerBudgetW();
+      const hour = new Date().getHours();
+      const multi = scheduleAdvisor().createConfirmedMultiSchedule({ budgetW, hour });
+      if (multi && multi.ok) executed = { enabled: true, ...multi };
+      else executed = { enabled: true, ...scheduleAdvisor().createConfirmedSchedule(res.deviceId, { budgetW }) };
     } else if (execute && res.action === 'rotate-all') {
       // Fleet-wide human-approved security response — rotate every active token.
       executed = rotateAllTokens();
@@ -540,6 +545,20 @@ function confirmAnomalyAction(id, opts = {}) {
 function dismissAnomalyAction(id) {
   if (!isPeripheralsEnabled()) return { enabled: false };
   try { return { enabled: true, ...anomalyActionAdvisor().dismiss(id) }; }
+  catch (err) { return { enabled: true, ok: false, reason: err.message }; }
+}
+
+/** Phase 24 — per-device auto-heal policies (thresholds for each ladder action). */
+function getAutoHealPolicies() {
+  if (!isPeripheralsEnabled()) return { enabled: false, policies: {} };
+  try { return { enabled: true, policies: anomalyActionAdvisor().listPolicies() }; }
+  catch { return { enabled: true, policies: {} }; }
+}
+
+/** Phase 24 — set a device's auto-heal thresholds (human governance, persisted). */
+function setAutoHealPolicy(deviceId, thresholds) {
+  if (!isPeripheralsEnabled()) return { enabled: false };
+  try { return { enabled: true, ...anomalyActionAdvisor().setPolicy(deviceId, thresholds) }; }
   catch (err) { return { enabled: true, ok: false, reason: err.message }; }
 }
 
@@ -865,6 +884,8 @@ module.exports = {
   getAnomalyActions,
   confirmAnomalyAction,
   dismissAnomalyAction,
+  getAutoHealPolicies,
+  setAutoHealPolicy,
   issueActionToken,
   verifyDeviceToken,
   rotateAllTokens,

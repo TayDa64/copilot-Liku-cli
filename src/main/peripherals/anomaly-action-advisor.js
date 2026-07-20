@@ -40,6 +40,7 @@ const { atomicWriteFileSync } = require('../../shared/atomic-file');
 
 const FLAG = 'LIKU_ENABLE_PERIPHERALS';
 const STORE_FILE = path.join(LIKU_HOME, 'anomaly-actions.json');
+const POLICIES_FILE = path.join(LIKU_HOME, 'autoheal-policies.json');
 const DEFAULT_WINDOW_MS = 24 * 3600 * 1000;
 const MAX_TRACKED = 50;
 
@@ -64,6 +65,88 @@ function _windowMs() {
 
 function _rungIndex(action) {
   return ACTION_LADDER.findIndex((r) => r.action === action);
+}
+
+// ── Phase 24: per-device AUTO-HEAL policies ─────────────────────────────────
+// Configurable per-device occurrence thresholds for when each ladder action is
+// proposed. Sources (later overrides earlier): default ladder → env
+// LIKU_PERIPHERAL_AUTOHEAL_POLICIES → the confirmed store. A '*' key sets a
+// fleet-wide default. Policies only change WHEN a proposal is surfaced — they
+// never make an action autonomous.
+
+function _loadPolicyStore() {
+  if (!enabled()) return {};
+  try {
+    if (!fs.existsSync(POLICIES_FILE)) return {};
+    const raw = JSON.parse(fs.readFileSync(POLICIES_FILE, 'utf-8'));
+    return (raw && typeof raw.policies === 'object') ? raw.policies : {};
+  } catch { return {}; }
+}
+
+function _savePolicyStore(policies) {
+  if (!enabled()) return false;
+  try {
+    if (!fs.existsSync(LIKU_HOME)) fs.mkdirSync(LIKU_HOME, { recursive: true, mode: 0o700 });
+    atomicWriteFileSync(POLICIES_FILE, JSON.stringify({ updatedAt: new Date().toISOString(), policies }, null, 2), { mode: 0o600 });
+    return true;
+  } catch { return false; }
+}
+
+/** Merged policy map (env overlaid by the confirmed store). @private */
+function _loadPolicies() {
+  const out = {};
+  try {
+    const raw = process.env.LIKU_PERIPHERAL_AUTOHEAL_POLICIES;
+    if (raw) { const p = JSON.parse(raw); if (p && typeof p === 'object') for (const [k, v] of Object.entries(p)) out[k] = { ...v }; }
+  } catch { /* env policy is best-effort */ }
+  const store = _loadPolicyStore();
+  for (const [k, v] of Object.entries(store)) out[k] = { ...(out[k] || {}), ...v };
+  return out;
+}
+
+/** The ladder for a device with per-device / '*' threshold overrides applied. @private */
+function _policyLadder(deviceId) {
+  const pol = _loadPolicies();
+  const dev = pol[deviceId] || {};
+  const star = pol['*'] || {};
+  return ACTION_LADDER.map((r) => {
+    const raw = dev[r.action] != null ? Number(dev[r.action]) : (star[r.action] != null ? Number(star[r.action]) : null);
+    const minOccurrences = Number.isFinite(raw) && raw >= 1 ? Math.floor(raw) : r.minOccurrences;
+    return { ...r, minOccurrences };
+  });
+}
+
+/** Set a device's auto-heal thresholds (persisted). Human-configured governance. */
+function setPolicy(deviceId, thresholds) {
+  if (!enabled()) return { ok: false, reason: 'disabled' };
+  if (!deviceId || !thresholds || typeof thresholds !== 'object') return { ok: false, reason: 'invalid' };
+  const store = _loadPolicyStore();
+  const clean = {};
+  for (const action of ACTION_LADDER.map((r) => r.action)) {
+    if (thresholds[action] != null && Number.isFinite(Number(thresholds[action]))) clean[action] = Math.max(1, Math.floor(Number(thresholds[action])));
+  }
+  if (!Object.keys(clean).length) return { ok: false, reason: 'no-valid-thresholds' };
+  store[deviceId] = { ...(store[deviceId] || {}), ...clean };
+  _savePolicyStore(store);
+  return { ok: true, deviceId, policy: store[deviceId] };
+}
+
+/** Effective thresholds for a device ({ action: minOccurrences }). */
+function getPolicy(deviceId) {
+  const ladder = _policyLadder(deviceId);
+  const out = {};
+  for (const r of ladder) out[r.action] = r.minOccurrences;
+  return out;
+}
+
+/** All configured policies (merged env + store). */
+function listPolicies() { return _loadPolicies(); }
+
+/** Remove the policy store (governance/tests). No-op when disabled. */
+function clearPolicies() {
+  if (!enabled()) return false;
+  try { if (fs.existsSync(POLICIES_FILE)) fs.rmSync(POLICIES_FILE); return true; }
+  catch { return false; }
 }
 
 function _load() {
@@ -125,9 +208,10 @@ function proposeActions(opts = {}, now = Date.now()) {
   let changed = false;
   for (const [deviceId, occs] of Object.entries(st.occurrences)) {
     const recent = (occs || []).filter((o) => o.at >= cutoff);
-    // Highest ladder rung whose threshold is met.
+    // Highest ladder rung whose threshold is met (per-device policy thresholds).
+    const ladder = _policyLadder(deviceId);
     let rung = null;
-    for (const r of ACTION_LADDER) if (recent.length >= r.minOccurrences) rung = r;
+    for (const r of ladder) if (recent.length >= r.minOccurrences) rung = r;
     if (!rung) continue;
     const existing = st.proposed[deviceId];
     if (existing && existing.status === 'proposed' && _rungIndex(existing.action) >= rung.rung) {
@@ -250,6 +334,7 @@ function clear() {
 }
 
 module.exports = {
-  FLAG, STORE_FILE, ACTION_LADDER,
-  enabled, recordAnomaly, proposeActions, proposeFleetAction, listProposed, confirm, dismiss, clear
+  FLAG, STORE_FILE, POLICIES_FILE, ACTION_LADDER,
+  enabled, recordAnomaly, proposeActions, proposeFleetAction, listProposed, confirm, dismiss, clear,
+  setPolicy, getPolicy, listPolicies, clearPolicies
 };
