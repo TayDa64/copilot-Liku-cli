@@ -23,6 +23,7 @@
 'use strict';
 
 const { AgentRole } = require('./base-agent');
+const coordination = require('../peripherals/coordination');
 
 const DEFAULT_COOLDOWN_MS = 300000; // 5 min per device:action (avoid intra-minute dupes)
 
@@ -79,10 +80,18 @@ function attachCronScheduler(orchestrator, options = {}) {
     try { due = deviceSchedule.proposeCronTasks(at) || []; } catch { due = []; }
     const created = [];
     const supervisor = getSupervisor();
+    // Minute bucket for DISTRIBUTED dedup: every node computes the same key so
+    // only ONE node in the fleet claims (and fires) a given rule this minute.
+    const bucket = new Date(at).toISOString().slice(0, 16); // yyyy-mm-ddThh:mm
     for (const cronTask of due) {
       const dedupeKey = `${cronTask.deviceId}:${cronTask.action}`;
       const prev = lastSeen.get(dedupeKey);
       if (cooldownMs > 0 && prev != null && (now() - prev) < cooldownMs) continue;
+      // Phase 25: DISTRIBUTED dedup. In cluster mode claim a short-lived lease for
+      // this rule's firing bucket; if another node already claimed it, skip so we
+      // don't create a duplicate Supervisor task. Single-machine → always claims.
+      const claim = coordination.claimOnce(`cron:${cronTask.deviceId}:${cronTask.action}:${bucket}`, { ttlMs: Math.max(60000, cooldownMs) });
+      if (!claim.claimed) continue;
       lastSeen.set(dedupeKey, now());
       const notification = _notificationFor(cronTask);
       let task = null;

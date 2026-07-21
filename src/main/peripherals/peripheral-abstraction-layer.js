@@ -472,7 +472,23 @@ function getMultiHourProposal(opts = {}) {
     return { enabled: true, proposal: scheduleAdvisor().proposeMultiHourSchedule({ ...opts, budgetW }) };
   } catch { return { enabled: true, proposal: null }; }
 }
+/** Phase 25 — data-driven special/holiday day detection (advisory). */
+function getSpecialDays(opts = {}) {
+  if (!isPeripheralsEnabled()) return { enabled: false, dates: [] };
+  try { return { enabled: true, ...powerForecast().detectSpecialDays(opts) }; }
+  catch { return { enabled: true, dates: [] }; }
+}
 
+/** Phase 25 — best-effort cluster GC: expire stale token records + prune expired
+ * leases. Cluster off → no-op. Drives lazily (no background timer). */
+function sweepCluster(opts = {}) {
+  if (!isPeripheralsEnabled()) return { enabled: false };
+  try {
+    const tokens = tokenStore().sweepClusterTokens(opts);
+    const leases = coordination().pruneExpiredLeases(opts.now);
+    return { enabled: true, tokens, leases };
+  } catch (err) { return { enabled: true, ok: false, reason: err.message }; }
+}
 function scheduleAdvisor() { return require('./power-schedule-advisor'); }
 
 /** Advisory power-schedule suggestions from recurring anomalies (proposed only). */
@@ -524,15 +540,20 @@ function confirmAnomalyAction(id, opts = {}) {
       // (via driver-pairing → tokenStore.revoke) — a human-approved auto-revoke.
       executed = unpairDevice(res.deviceId);
     } else if (execute && res.action === 'reduce-schedule') {
-      // Phase 24: prefer a MULTI-DEVICE coordinated reduce when the current-hour
-      // breach is jointly driven by 2+ devices; else fall back to a single-device
-      // schedule. Cap(s) derived from forecast baselines / the power budget.
-      // Human approved via THIS confirmation. Never actuates a device.
+      // Phase 24/25: on a reduce-schedule confirm, prefer the STRONGEST coordinated
+      // response: a MULTI-HOUR window (contiguous over-budget run) → else a single-
+      // hour MULTI-DEVICE cap → else a single-device schedule. All restrict-only,
+      // caps sum ≤ budget, human-approved via THIS confirmation. Never actuates.
       const budgetW = _powerBudgetW();
       const hour = new Date().getHours();
-      const multi = scheduleAdvisor().createConfirmedMultiSchedule({ budgetW, hour });
-      if (multi && multi.ok) executed = { enabled: true, ...multi };
-      else executed = { enabled: true, ...scheduleAdvisor().createConfirmedSchedule(res.deviceId, { budgetW }) };
+      const adv = scheduleAdvisor();
+      const multiHour = adv.createConfirmedMultiHourSchedule({ budgetW });
+      if (multiHour && multiHour.ok) executed = { enabled: true, ...multiHour };
+      else {
+        const multi = adv.createConfirmedMultiSchedule({ budgetW, hour });
+        if (multi && multi.ok) executed = { enabled: true, ...multi };
+        else executed = { enabled: true, ...adv.createConfirmedSchedule(res.deviceId, { budgetW }) };
+      }
     } else if (execute && res.action === 'rotate-all') {
       // Fleet-wide human-approved security response — rotate every active token.
       executed = rotateAllTokens();
@@ -892,6 +913,8 @@ module.exports = {
   getSeasonalForecast,
   getDeviceForecastWarnings,
   getMultiHourProposal,
+  getSpecialDays,
+  sweepCluster,
   getLockHistory,
   recordLockSnapshot,
   getLockTrends,

@@ -21,6 +21,14 @@
 
 const hil = require('./hil-simulator');
 const tokenStore = require('./token-store');
+const coordination = require('./coordination');
+
+/** Cross-host device lease key (shared with the PAL execute gate). @private */
+function _leaseKey(id) { return `device:${id}`; }
+function _pairLeaseTtlMs() {
+  const v = Number(process.env.LIKU_PERIPHERAL_PAIR_LEASE_TTL_MS);
+  return Number.isFinite(v) && v > 0 ? v : 300000; // 5 min; auto-expires so a crashed node can't block forever
+}
 
 /**
  * @param {object} deps
@@ -34,6 +42,15 @@ function createDriverPairing({ loadDeviceConfig, ensureManager, getManager, comm
     if (hil.isEnabled()) return { id: deviceId, state: 'paired', simulated: true, hil: true };
     const cfg = (loadDeviceConfig() || []).find((d) => d.id === deviceId);
     if (!cfg) return { id: deviceId, state: 'unpaired', error: 'unknown-device' };
+    // Phase 25: LEASE-AWARE pairing. In cluster mode only the node that holds the
+    // device lease may complete pairing (and bind its token). Single-machine
+    // (cluster off) → always granted → behaviour unchanged.
+    if (coordination.clusterEnabled()) {
+      const lease = coordination.acquireLease(_leaseKey(deviceId), { ttlMs: _pairLeaseTtlMs() });
+      if (!lease.granted) {
+        return { id: deviceId, state: 'unpaired', error: 'leased-elsewhere', holder: lease.holder ? lease.holder.nodeId : null };
+      }
+    }
     const mgr = ensureManager();
     if (!mgr) return { id: deviceId, state: 'unpaired', error: 'no-transport' };
     try { commission(mgr, cfg); } catch { /* the state machine records the failure */ }
@@ -53,6 +70,8 @@ function createDriverPairing({ loadDeviceConfig, ensureManager, getManager, comm
     else if (mgr && mgr.pairing) mgr.pairing.requeue(deviceId);
     // Phase 18: revoke the device's capability token on unpair.
     try { tokenStore.revoke(deviceId); } catch { /* non-fatal */ }
+    // Phase 25: release the device lease so another node may take over pairing.
+    if (coordination.clusterEnabled()) { try { coordination.releaseLease(_leaseKey(deviceId)); } catch { /* non-fatal */ } }
     return { id: deviceId, ...((mgr && mgr.pairing) ? mgr.pairing.get(deviceId) : { state: 'unpaired' }), token: _tokenSummary(deviceId) };
   }
 

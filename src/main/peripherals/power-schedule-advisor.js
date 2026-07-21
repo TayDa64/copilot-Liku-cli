@@ -414,6 +414,60 @@ function createConfirmedMultiSchedule(opts = {}) {
   return { ok: true, multiDevice: true, hour, fromHour, toHour, budgetW, devices };
 }
 
+/**
+ * Phase 25 — directly create a HUMAN-CONFIRMED MULTI-HOUR coordinated
+ * reduce-schedule: find the longest contiguous forecast over-budget run and write
+ * one restrict-only rule per contributor spanning the WHOLE window (caps
+ * confidence-weighted, sum ≤ budget). Preferred on a reduce-schedule confirm when
+ * the breach spans multiple hours. Returns { ok:false } when there is no ≥2h run
+ * or fewer than 2 contributors (caller falls back to multi-device / single).
+ * @param {{ budgetW:number, samples?:object[], horizonHours?:number, now?:number, seasonal?:boolean }} opts
+ */
+function createConfirmedMultiHourSchedule(opts = {}) {
+  if (!enabled()) return { ok: false, reason: 'disabled' };
+  const budgetW = Number(opts.budgetW);
+  if (!Number.isFinite(budgetW) || budgetW <= 0) return { ok: false, reason: 'no-budget' };
+  const effectiveNow = Number.isFinite(opts.now) ? opts.now : Date.now();
+  let forecastMod;
+  let f;
+  try {
+    forecastMod = require('./power-forecast');
+    f = opts.seasonal
+      ? forecastMod.seasonalForecast({ budgetW, samples: opts.samples, horizonHours: opts.horizonHours, now: effectiveNow })
+      : forecastMod.forecast({ budgetW, samples: opts.samples, horizonHours: opts.horizonHours, now: effectiveNow });
+  } catch { return { ok: false, reason: 'forecast-error' }; }
+  if (!f || !f.ok || !Array.isArray(f.horizon)) return { ok: false, reason: 'no-forecast' };
+  const over = f.horizon.map((h) => (h.highW > budgetW || h.predictedW > budgetW));
+  let bestStart = -1; let bestLen = 0; let curStart = -1; let curLen = 0;
+  for (let i = 0; i < over.length; i++) {
+    if (over[i]) { if (curStart < 0) curStart = i; curLen++; if (curLen > bestLen) { bestLen = curLen; bestStart = curStart; } }
+    else { curStart = -1; curLen = 0; }
+  }
+  if (bestLen < 2) return { ok: false, reason: 'not-multi-hour' };
+  const runEntries = f.horizon.slice(bestStart, bestStart + bestLen);
+  const runHours = runEntries.map((h) => h.hour);
+  const fromHour = runHours[0];
+  const toHour = (runHours[runHours.length - 1] + 1) % 24;
+  const peakEntry = runEntries.reduce((a, b) => (b.predictedW > a.predictedW ? b : a));
+  const contrib = forecastMod.contributorsAtHour({ hour: peakEntry.hour, budgetW, samples: opts.samples });
+  if (!contrib || !Array.isArray(contrib.contributors) || contrib.contributors.length < 2 || !(contrib.totalPeakW > 0)) {
+    return { ok: false, reason: 'not-multi-device' };
+  }
+  const runConfidence = _minConfidence(runEntries);
+  const w = runConfidence === 'high' ? 0 : (runConfidence === 'medium' ? 0.5 : 1);
+  const refs = contrib.contributors.map((c) => {
+    const meanW = Number.isFinite(c.meanW) ? c.meanW : c.peakW;
+    return { deviceId: c.deviceId, peakW: c.peakW, refW: meanW + w * (c.peakW - meanW) };
+  });
+  const totalRef = refs.reduce((s, r) => s + r.refW, 0) || 1;
+  const devices = refs.map((r) => {
+    const maxW = Math.max(1, Math.round(budgetW * (r.refW / totalRef)));
+    _appendConfirmed({ id: r.deviceId, fromHour, toHour, maxW, source: 'anomaly-action-confirmed-multihour', confirmedAt: new Date().toISOString() });
+    return { deviceId: r.deviceId, proposedMaxW: maxW };
+  });
+  return { ok: true, multiHour: true, fromHour, toHour, hours: runHours, budgetW, confidence: runConfidence, devices };
+}
+
 /** Dismiss a proposed schedule (human declined). */
 function dismiss(suggestionId) {
   if (!enabled()) return { ok: false, reason: 'disabled' };
@@ -436,5 +490,6 @@ function clear() {
 module.exports = {
   FLAG, SUGGEST_FILE,
   enabled, recordAnomaly, proposeSchedules, proposeMultiDeviceSchedule, proposeMultiHourSchedule,
-  createConfirmedSchedule, createConfirmedMultiSchedule, listProposed, confirm, dismiss, clear
+  createConfirmedSchedule, createConfirmedMultiSchedule, createConfirmedMultiHourSchedule,
+  listProposed, confirm, dismiss, clear
 };

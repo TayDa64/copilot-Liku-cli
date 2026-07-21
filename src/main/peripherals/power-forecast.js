@@ -61,8 +61,18 @@ function _confidence(count, std, mean, stepsAhead = 1) {
 
 function _loadSamples(opts) {
   if (Array.isArray(opts.samples)) return opts.samples;
-  try { return require('./power-history').query({ sinceMs: opts.sinceMs }); }
-  catch { return []; }
+  try {
+    // Phase 25: a LONGER rolling window (e.g. 7–14 days) can be set via
+    // LIKU_PERIPHERAL_FORECAST_LOOKBACK_MS. Unset → undefined → all history
+    // (byte-identical to the pre-Phase-25 behaviour).
+    const since = opts.sinceMs != null ? opts.sinceMs : _defaultLookbackMs();
+    return require('./power-history').query({ sinceMs: since });
+  } catch { return []; }
+}
+
+function _defaultLookbackMs() {
+  const v = Number(process.env.LIKU_PERIPHERAL_FORECAST_LOOKBACK_MS);
+  return Number.isFinite(v) && v > 0 ? v : null;
 }
 
 // ── Phase 24: holiday / anomaly-aware baselines ─────────────────────────────
@@ -89,11 +99,54 @@ function _isAnomalousSample(s) { return !!(s && (s.overBudget === true || s.anom
 function _filterSamples(samples, opts) {
   if (!opts || !opts.excludeAnomalous) return samples;
   const holidays = _holidaySet();
+  // Phase 25: optional DATA-DRIVEN special-day auto-detection (recurring low/high
+  // power days) — excluded in addition to the flagged spikes + override holidays.
+  const autoSpecial = String(process.env.LIKU_PERIPHERAL_FORECAST_AUTO_SPECIAL || '').trim() === '1';
+  const specialSet = autoSpecial ? new Set(detectSpecialDays({ samples }).dates.map((d) => d.date)) : null;
   return samples.filter((s) => {
     if (_isAnomalousSample(s)) return false;
-    if (holidays) { const k = _dateKey(s && s.at); if (k && holidays.has(k)) return false; }
+    const k = _dateKey(s && s.at);
+    if (holidays && k && holidays.has(k)) return false;
+    if (specialSet && k && specialSet.has(k)) return false;
     return true;
   });
+}
+
+/**
+ * Phase 25 — DATA-DRIVEN special/holiday detection. Groups history by date,
+ * computes each day's mean total draw, and flags dates whose daily mean deviates
+ * from the cross-day distribution by more than `sigma` standard deviations
+ * (recurring unusually-low or unusually-high days). Prefer this over a hard-coded
+ * calendar; combine with the LIKU_PERIPHERAL_FORECAST_HOLIDAYS override list.
+ * @param {{ samples?:object[], sinceMs?:number, sigma?:number }} [opts]
+ * @returns {{ dates:object[], overallMeanW:number, std:number }}
+ */
+function detectSpecialDays(opts = {}) {
+  if (!enabled()) return { dates: [], overallMeanW: 0, std: 0 };
+  const samples = Array.isArray(opts.samples) ? opts.samples : _loadSamples(opts);
+  const sigma = Number.isFinite(opts.sigma) ? opts.sigma : (Number(process.env.LIKU_PERIPHERAL_FORECAST_SPECIAL_SIGMA) || 2);
+  const byDate = {};
+  for (const s of samples) {
+    const k = _dateKey(s && s.at);
+    if (!k) continue;
+    const w = Number(s.totalW) || 0;
+    const b = byDate[k] || (byDate[k] = { sum: 0, count: 0 });
+    b.sum += w; b.count += 1;
+  }
+  const dateMeans = Object.entries(byDate).map(([date, b]) => ({ date, meanW: _round(b.sum / b.count) }));
+  if (dateMeans.length < 3) {
+    const om = dateMeans.length ? _round(dateMeans.reduce((a, d) => a + d.meanW, 0) / dateMeans.length) : 0;
+    return { dates: [], overallMeanW: om, std: 0 };
+  }
+  const means = dateMeans.map((d) => d.meanW);
+  const overall = means.reduce((a, b) => a + b, 0) / means.length;
+  const std = _std(means, overall);
+  const dates = [];
+  for (const d of dateMeans) {
+    const dev = d.meanW - overall;
+    if (std > 0 && Math.abs(dev) > sigma * std) dates.push({ date: d.date, meanW: d.meanW, deviation: _round(dev), kind: dev > 0 ? 'high' : 'low' });
+  }
+  return { dates, overallMeanW: _round(overall), std: _round(std) };
 }
 
 /** Group day-of-week into 'weekend' (Sat/Sun) vs 'weekday' baselines. @private */
@@ -385,5 +438,5 @@ function deviceForecastWarnings(opts = {}) {
 module.exports = {
   FLAG, MAX_HORIZON_HOURS, enabled,
   hourlyBaselines, deviceHourlyBaselines, forecast, forecastExceedsBudget, contributorsAtHour,
-  dowHourlyBaselines, seasonalForecast, deviceForecastWarnings
+  dowHourlyBaselines, seasonalForecast, deviceForecastWarnings, detectSpecialDays
 };

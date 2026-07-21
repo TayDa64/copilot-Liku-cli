@@ -380,10 +380,43 @@ function clear() {
   catch { return false; }
 }
 
+/**
+ * Phase 25 — CLUSTER TOKEN GC. Best-effort sweep of the shared token store:
+ * removes cluster token records not updated within a (generous) TTL — i.e. from
+ * decommissioned devices / departed nodes. Conservative by design: a live
+ * revocation keeps mirroring `updatedAt`, so an active revocation is NEVER
+ * GC'd out from under other nodes. Cluster off (or flag off) → no-op.
+ * @param {{ now?:number, ttlMs?:number }} [opts]
+ * @returns {{ ok:boolean, removed:string[] }}
+ */
+function sweepClusterTokens(opts = {}) {
+  if (!enabled() || !coordination.clusterEnabled()) return { ok: false, removed: [] };
+  const dir = coordination.clusterDir();
+  const tokensDir = path.join(dir, 'tokens');
+  const now = Number.isFinite(opts.now) ? opts.now : Date.now();
+  const ttlMs = Number.isFinite(opts.ttlMs) ? opts.ttlMs
+    : (Number(process.env.LIKU_DCP_CLUSTER_TOKEN_TTL_MS) || 7 * 24 * 3600 * 1000); // 7 days
+  const removed = [];
+  try {
+    if (!fs.existsSync(tokensDir)) return { ok: true, removed };
+    for (const f of fs.readdirSync(tokensDir)) {
+      if (!f.endsWith('.json')) continue;
+      const p = path.join(tokensDir, f);
+      let rec;
+      try { rec = JSON.parse(fs.readFileSync(p, 'utf-8')); } catch { rec = null; }
+      const updated = rec && Number.isFinite(Date.parse(rec.updatedAt)) ? Date.parse(rec.updatedAt) : 0;
+      if (!rec || (now - updated) > ttlMs) {
+        try { fs.rmSync(p, { force: true }); removed.push(f); } catch { /* ignore */ }
+      }
+    }
+  } catch { /* best-effort */ }
+  return { ok: true, removed };
+}
+
 module.exports = {
   FLAG, STORE_FILE, SCHEMA_VERSION,
   enabled, identity,
   onPair, rotate, rotateIfDue, revoke,
   isRevoked, isActive, isTokenValid, status, all, issueToken, clear,
-  grantedActions, issueActionToken, verifyDeviceToken, rotateAll
+  grantedActions, issueActionToken, verifyDeviceToken, rotateAll, sweepClusterTokens
 };

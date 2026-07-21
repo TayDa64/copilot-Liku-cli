@@ -780,6 +780,77 @@ cluster view when a shared cluster dir is configured.
   exclusion, and group baselines are pure prediction; they sharpen (still
   human-confirmed) suggestions and never actuate.
 
+## Cross-host refinements + deeper self-healing (Phase 25)
+
+### Cross-host coordination refinements
+
+- **Lease-aware pairing** — in cluster mode `driver-pairing.pair()` first acquires
+  the device lease (`device:<id>`, the SAME key the PAL execute gate checks); only
+  the lease holder may complete pairing (and bind its token). A blocked node
+  returns `error:'leased-elsewhere'`. `unpair()` releases the lease. Lease TTL:
+  `LIKU_PERIPHERAL_PAIR_LEASE_TTL_MS` (default 300000) — auto-expires so a crashed
+  node can't block forever. Single-machine (cluster off) → unchanged.
+- **Distributed cron dedup** — `coordination.claimOnce(resourceId, {ttlMs})` claims
+  a short-lived lease so exactly ONE fleet node fires a given rule per minute
+  bucket. The cron scheduler claims `cron:<device>:<action>:<yyyy-mm-ddThh:mm>`
+  before creating a task; a losing node skips (no duplicate Supervisor task).
+- **Cluster GC / TTL sweeper** — `token-store.sweepClusterTokens({ttlMs})` removes
+  cluster token records not updated within `LIKU_DCP_CLUSTER_TOKEN_TTL_MS`
+  (default 7 days; a live revocation keeps mirroring `updatedAt`, so it is never
+  GC'd out from under other nodes). `coordination.pruneExpiredLeases()` removes
+  expired lease dirs. PAL `sweepCluster()` drives both lazily (no background
+  timer). CLI: `coordination sweep`.
+
+### Anomaly→action refinements
+
+- **Auto multi-hour coordinated reduce on confirm** — confirming a
+  `reduce-schedule` anomaly→action now prefers the STRONGEST coordinated response:
+  a **multi-hour** window (`createConfirmedMultiHourSchedule`, contiguous
+  over-budget run, confidence-weighted per-device caps) → else a single-hour
+  **multi-device** cap → else a single-device schedule. All restrict-only, caps
+  sum ≤ budget, human-approved via the confirm.
+- **Per-device auto-heal escalation cooldown** — a device with a lower-rung
+  proposal does not escalate to the next rung until
+  `LIKU_PERIPHERAL_AUTOHEAL_ESCALATION_COOLDOWN_MS` (default 3600000) elapses. It
+  NEVER suppresses the first proposal, and NEVER suppresses a CRITICAL rung
+  (e.g. `unpair`) — safety paths always surface immediately.
+
+### Forecast refinements
+
+- **Longer seasonal windows** — `LIKU_PERIPHERAL_FORECAST_LOOKBACK_MS` sets the
+  default history lookback (e.g. 7–14 days). Unset → all history (byte-identical).
+- **Data-driven special-day detection** — `detectSpecialDays()` flags dates whose
+  daily-mean draw deviates from the cross-day distribution by `>` 
+  `LIKU_PERIPHERAL_FORECAST_SPECIAL_SIGMA` σ (default 2). With
+  `LIKU_PERIPHERAL_FORECAST_AUTO_SPECIAL=1`, `seasonalForecast({excludeAnomalous})`
+  also excludes those auto-detected days (in addition to the
+  `LIKU_PERIPHERAL_FORECAST_HOLIDAYS` override list). PAL: `getSpecialDays()`.
+  CLI: `power --forecast --special-days`.
+
+### New environment variables (all default OFF / inert)
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `LIKU_PERIPHERAL_PAIR_LEASE_TTL_MS` | `300000` | Lease TTL for lease-aware pairing |
+| `LIKU_DCP_CLUSTER_TOKEN_TTL_MS` | `604800000` | Cluster token GC age threshold |
+| `LIKU_PERIPHERAL_AUTOHEAL_ESCALATION_COOLDOWN_MS` | `3600000` | Auto-heal escalation cooldown (0 = off) |
+| `LIKU_PERIPHERAL_FORECAST_LOOKBACK_MS` | unset | Rolling seasonal window |
+| `LIKU_PERIPHERAL_FORECAST_AUTO_SPECIAL` | unset | Enable data-driven special-day exclusion |
+| `LIKU_PERIPHERAL_FORECAST_SPECIAL_SIGMA` | `2` | Special-day detection sensitivity |
+
+### Phase 25 safety invariants
+
+- **lease-owned-pairing** — in cluster mode pairing/token binding only proceeds
+  on the node holding the device lease; single-machine is byte-for-byte unchanged.
+- **cron-fires-once-per-fleet** — a cron rule creates at most one Supervisor task
+  per minute bucket across the fleet (claim-once); losers skip, never duplicate.
+- **token-gc-is-conservative** — only records stale beyond a generous TTL are
+  GC'd; an active revocation keeps refreshing `updatedAt` and is never removed.
+- **cooldown-never-suppresses-safety** — escalation cooldown holds only non-critical
+  rung upgrades; first proposals and critical rungs always surface.
+- **coordinated-reduce-only-restricts** — multi-hour/multi-device reduce writes
+  only restrict-only rules whose caps sum ≤ budget, and only on human confirm.
+
 ## If a human decides to act
 
 Any physical response still travels the full PAL safety chain — the alert path

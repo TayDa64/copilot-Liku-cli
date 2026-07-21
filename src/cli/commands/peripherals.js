@@ -403,7 +403,8 @@ async function run(args, flags) {
         const f = flags.seasonal ? pal.getSeasonalForecast({ excludeAnomalous: !!flags['exclude-anomalous'] }) : pal.getPowerForecast();
         const warn = pal.getForecastWarnings();
         const devWarn = pal.getDeviceForecastWarnings({ seasonal: !!flags.seasonal, excludeAnomalous: !!flags['exclude-anomalous'] });
-        if (flags.json) return { success: true, forecast: f, warnings: warn.warnings, deviceWarnings: devWarn.warnings };
+        const special = flags['special-days'] ? pal.getSpecialDays() : null;
+        if (flags.json) return { success: true, forecast: f, warnings: warn.warnings, deviceWarnings: devWarn.warnings, specialDays: special && special.dates };
         log(highlight(`Power forecast${flags.seasonal ? ' (day-of-week seasonal)' : ''}${flags['exclude-anomalous'] ? ' [anomaly-aware]' : ''}`));
         if (!f.ok) log(dim(`  ${f.basis || 'unavailable'} (${f.samples || 0} samples)`));
         for (const h of f.horizon || []) log(`  hour ${h.hour}:00${flags.seasonal && h.dow != null ? ` [${h.dowGroup || 'dow ' + h.dow}]` : ''}  ~${h.predictedW}W [${h.lowW}–${h.highW}W] ${dim(`${h.confidence} conf`)} ${dim(h.basis)}`);
@@ -412,7 +413,11 @@ async function run(args, flags) {
           log(highlight('  device warnings:'));
           for (const w of devWarn.warnings) log(dim(`    ${w.deviceId} → hour ${w.hour}:00 (~${w.devicePeakW}W)`));
         }
-        return { success: true, forecast: f, deviceWarnings: devWarn.warnings };
+        if (special && (special.dates || []).length) {
+          log(highlight('  special days (data-driven):'));
+          for (const d of special.dates) log(dim(`    ${d.date} ${d.kind} (~${d.meanW}W, Δ${d.deviation}W)`));
+        }
+        return { success: true, forecast: f, deviceWarnings: devWarn.warnings, specialDays: special && special.dates };
       }
       // Phase 19: --anomalies surfaces detected power anomalies (+ attribution).
       if (flags.anomalies) {
@@ -522,6 +527,15 @@ async function run(args, flags) {
         if (flags.json) return { success: true, ...res };
         if (op === 'lease') success(`Lease for ${id}: ${res.granted ? 'GRANTED' : 'denied'}${res.local ? ' (single-machine/local)' : ''}${res.holder && !res.granted ? ` held by ${res.holder.nodeId}` : ''}`);
         else success(`Lease for ${id}: ${res.released ? 'released' : `not released (${res.reason})`}`);
+        return { success: true, ...res };
+      }
+      if (op === 'sweep') {
+        // Phase 25: best-effort cluster GC — expire stale token records + prune leases.
+        const res = pal.sweepCluster();
+        if (flags.json) return { success: true, ...res };
+        const tk = (res.tokens && res.tokens.removed) || [];
+        const lz = (res.leases && res.leases.removed) || [];
+        success(`Cluster GC: ${tk.length} stale token record(s), ${lz.length} expired lease(s) removed.`);
         return { success: true, ...res };
       }
       const res = pal.getCoordinationStatus();
@@ -718,7 +732,7 @@ async function run(args, flags) {
 
     default:
       error(`Unknown subcommand: ${sub}`);
-      log('Usage: liku peripherals [scan|list|status [id]|power [--history|--trend|--anomalies|--forecast [--seasonal] [--exclude-anomalous]]|anomalies [--attributed]|anomaly-action [confirm|dismiss <id>|policy [set <device> reduce=N rotate=N unpair=N]]|schedules|locks [--record]|coordination [lease|release <id>]|cron [propose|confirm|dismiss|rules|tick|remove]|suggestions|apply-schedule <id>|pair <id>|unpair <id>|token [rotate|revoke|rotate-all|action <id> <action>]|tasks [--escalated|--pending|--severity <p>|--anomaly]|notifications|channels|simulate <id> <k=v>|execute <id> <action>|confirm <id> <action> [--execute]|drivers]');
+      log('Usage: liku peripherals [scan|list|status [id]|power [--history|--trend|--anomalies|--forecast [--seasonal] [--exclude-anomalous] [--special-days]]|anomalies [--attributed]|anomaly-action [confirm|dismiss <id>|policy [set <device> reduce=N rotate=N unpair=N]]|schedules|locks [--record]|coordination [lease|release <id>|sweep]|cron [propose|confirm|dismiss|rules|tick|remove]|suggestions|apply-schedule <id>|pair <id>|unpair <id>|token [rotate|revoke|rotate-all|action <id> <action>]|tasks [--escalated|--pending|--severity <p>|--anomaly]|notifications|channels|simulate <id> <k=v>|execute <id> <action>|confirm <id> <action> [--execute]|drivers]');
       return { success: false };
   }
 }

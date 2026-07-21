@@ -191,6 +191,48 @@ function listLeases(now = Date.now()) {
   } catch { return []; }
 }
 
+/**
+ * Phase 25 — CLAIM-ONCE: atomically claim a one-shot resource (e.g. a cron rule
+ * firing bucket) so exactly ONE node acts on it. Single-machine → always claimed.
+ * In cluster mode a claim succeeds only for the node that FIRST creates the
+ * short-lived lease (a re-claim by the same owner, or a claim by another node
+ * while held, returns claimed:false). The lease auto-expires after ttlMs so the
+ * next firing window is claimable again.
+ * @param {string} resourceId
+ * @param {{ ttlMs?:number, now?:number }} [opts]
+ * @returns {{ claimed:boolean, local?:boolean, holder?:object }}
+ */
+function claimOnce(resourceId, opts = {}) {
+  if (!clusterEnabled()) return { claimed: true, local: true };
+  const res = acquireLease(resourceId, opts);
+  return { claimed: !!(res.granted && !res.renewed), granted: !!res.granted, holder: res.holder, reason: res.reason };
+}
+
+/**
+ * Phase 25 — best-effort sweeper: remove EXPIRED lease directories (crashed /
+ * released holders whose TTL elapsed). Cluster off → no-op. Never throws.
+ * @param {number} [now]
+ * @returns {{ removed:string[] }}
+ */
+function pruneExpiredLeases(now = Date.now()) {
+  if (!clusterEnabled()) return { removed: [] };
+  const dir = _leasesDir();
+  const removed = [];
+  try {
+    if (!fs.existsSync(dir)) return { removed };
+    for (const n of fs.readdirSync(dir)) {
+      if (!n.endsWith('.lease')) continue;
+      const leasePath = path.join(dir, n);
+      const holder = _readHolder(leasePath);
+      const expiresMs = holder && Number.isFinite(Date.parse(holder.expiresAt)) ? Date.parse(holder.expiresAt) : 0;
+      if (!holder || now >= expiresMs) {
+        try { fs.rmSync(leasePath, { recursive: true, force: true }); removed.push(n); } catch { /* ignore */ }
+      }
+    }
+  } catch { /* best-effort */ }
+  return { removed };
+}
+
 /** Coordination status for the CLI / PAL. */
 function status(now = Date.now()) {
   const enabled = clusterEnabled();
@@ -205,5 +247,6 @@ function status(now = Date.now()) {
 
 module.exports = {
   DEFAULT_TTL_MS, nodeId, clusterDir, clusterEnabled,
-  acquireLease, renewLease, releaseLease, whoHolds, canAct, listLeases, status
+  acquireLease, renewLease, releaseLease, whoHolds, canAct, listLeases, status,
+  claimOnce, pruneExpiredLeases
 };

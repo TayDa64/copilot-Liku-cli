@@ -63,6 +63,12 @@ function _windowMs() {
   return Number.isFinite(v) && v > 0 ? v : DEFAULT_WINDOW_MS;
 }
 
+/** Cooldown between escalating a device to the NEXT (firmer) ladder rung. 0 = off. */
+function _escalationCooldownMs() {
+  const v = Number(process.env.LIKU_PERIPHERAL_AUTOHEAL_ESCALATION_COOLDOWN_MS);
+  return Number.isFinite(v) && v >= 0 ? v : 3600000; // 1h default
+}
+
 function _rungIndex(action) {
   return ACTION_LADDER.findIndex((r) => r.action === action);
 }
@@ -204,6 +210,7 @@ function proposeActions(opts = {}, now = Date.now()) {
   if (!enabled()) return [];
   const st = _load();
   const cutoff = now - _windowMs();
+  const cooldownMs = _escalationCooldownMs();
   const out = [];
   let changed = false;
   for (const [deviceId, occs] of Object.entries(st.occurrences)) {
@@ -220,6 +227,15 @@ function proposeActions(opts = {}, now = Date.now()) {
     if (existing && (existing.status === 'confirmed' || existing.status === 'dismissed') && _rungIndex(existing.action) >= rung.rung) {
       continue; // human already handled this or a firmer action
     }
+    // Phase 25: ESCALATION COOLDOWN. When a device already has a lower-rung
+    // proposal and now qualifies for a HIGHER rung, don't escalate too soon —
+    // keep the current proposal until the cooldown elapses. NEVER suppress the
+    // FIRST proposal, and NEVER suppress a CRITICAL rung (e.g. unpair) — safety
+    // paths always surface immediately.
+    if (existing && existing.status === 'proposed' && rung.severity !== 'critical' && cooldownMs > 0) {
+      const lastAt = Date.parse(existing.escalatedAt || existing.createdAt);
+      if (Number.isFinite(lastAt) && (now - lastAt) < cooldownMs) { out.push(existing); continue; }
+    }
     const suggestion = {
       id: `anom-act-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
       deviceId,
@@ -232,7 +248,8 @@ function proposeActions(opts = {}, now = Date.now()) {
       proposed: true,
       requiresHuman: true,
       autonomousAction: false,
-      createdAt: new Date().toISOString()
+      createdAt: new Date().toISOString(),
+      escalatedAt: new Date(now).toISOString()
     };
     st.proposed[deviceId] = suggestion;
     out.push(suggestion);

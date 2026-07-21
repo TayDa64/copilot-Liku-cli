@@ -2697,6 +2697,7 @@ test('multi-device coordinated proposal caps several devices under budget (human
 
 test('anomaly→action advisor escalates reduce-schedule → rotate-token → unpair', () => {
   process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  process.env.LIKU_PERIPHERAL_AUTOHEAL_ESCALATION_COOLDOWN_MS = '0'; // test raw escalation (cooldown covered separately)
   const actions = require('../src/main/peripherals/anomaly-action-advisor');
   actions.clear();
   const rec = (n) => { for (let i = 0; i < n; i++) actions.recordAnomaly({ device: 'dev-x', type: 'spike' }); };
@@ -2711,6 +2712,7 @@ test('anomaly→action advisor escalates reduce-schedule → rotate-token → un
   p = actions.proposeActions();
   assert.strictEqual(p.find((a) => a.deviceId === 'dev-x').action, 'unpair', '10 occurrences → unpair');
   actions.clear();
+  delete process.env.LIKU_PERIPHERAL_AUTOHEAL_ESCALATION_COOLDOWN_MS;
   delete process.env.LIKU_ENABLE_PERIPHERALS;
 });
 
@@ -3560,6 +3562,196 @@ test('env auto-heal policy sets a fleet-wide default via the * key', () => {
   actions.clear();
   actions.clearPolicies();
   delete process.env.LIKU_PERIPHERAL_AUTOHEAL_POLICIES;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+// ── Phase 25: cross-host refinements + auto multi-hour + escalation cooldown + special-days ──
+
+test('lease-aware pairing: only the lease holder may complete pairing (cluster)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const clusterDir = require('path').join(TMP_HOME, 'p25pair');
+  process.env.LIKU_CLUSTER_DIR = clusterDir;
+  const coordination = require('../src/main/peripherals/coordination');
+  const { createDriverPairing } = require('../src/main/peripherals/driver-pairing');
+  // Another node already holds the device lease.
+  process.env.LIKU_NODE_ID = 'nodeOther';
+  coordination.acquireLease('device:pd1', { ttlMs: 60000 }); // live now (real clock)
+  // This node tries to pair the same device → refused (leased elsewhere).
+  process.env.LIKU_NODE_ID = 'nodeMe';
+  let commissioned = false;
+  const pairing = createDriverPairing({
+    loadDeviceConfig: () => [{ id: 'pd1', capabilities: ['on'] }],
+    ensureManager: () => ({ pairing: { get: () => ({ state: 'paired' }) } }),
+    getManager: () => ({ pairing: { get: () => ({ state: 'paired' }) } }),
+    commission: () => { commissioned = true; }
+  });
+  const res = pairing.pair('pd1');
+  assert.strictEqual(res.error, 'leased-elsewhere', 'pairing refused when lease held elsewhere');
+  assert.strictEqual(commissioned, false, 'commission never ran');
+  delete process.env.LIKU_NODE_ID;
+  delete process.env.LIKU_CLUSTER_DIR;
+  try { fs.rmSync(clusterDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('lease-aware pairing is unchanged on a single machine', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_CLUSTER_DIR;
+  const { createDriverPairing } = require('../src/main/peripherals/driver-pairing');
+  let commissioned = false;
+  const pairing = createDriverPairing({
+    loadDeviceConfig: () => [{ id: 'sm1', capabilities: ['on'] }],
+    ensureManager: () => ({ pairing: { get: () => ({ state: 'paired' }) } }),
+    getManager: () => ({ pairing: { get: () => ({ state: 'paired' }) } }),
+    commission: () => { commissioned = true; }
+  });
+  const res = pairing.pair('sm1');
+  assert.strictEqual(res.state, 'paired', 'single-machine pairing completes');
+  assert.strictEqual(commissioned, true, 'commission ran');
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('distributed cron dedup: claimOnce lets exactly one node fire a bucket', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const clusterDir = require('path').join(TMP_HOME, 'p25cron');
+  process.env.LIKU_CLUSTER_DIR = clusterDir;
+  const coordination = require('../src/main/peripherals/coordination');
+  process.env.LIKU_NODE_ID = 'nodeA';
+  const a = coordination.claimOnce('cron:lamp:on:2026-07-20T06:30', { ttlMs: 60000, now: 1000 });
+  assert.strictEqual(a.claimed, true, 'first node claims the bucket');
+  // A second (different) node cannot claim the same bucket.
+  process.env.LIKU_NODE_ID = 'nodeB';
+  const b = coordination.claimOnce('cron:lamp:on:2026-07-20T06:30', { ttlMs: 60000, now: 1100 });
+  assert.strictEqual(b.claimed, false, 'second node is deduped');
+  // The same node re-claiming (renewal) also does not double-fire.
+  process.env.LIKU_NODE_ID = 'nodeA';
+  const a2 = coordination.claimOnce('cron:lamp:on:2026-07-20T06:30', { ttlMs: 60000, now: 1200 });
+  assert.strictEqual(a2.claimed, false, 'owner re-claim does not double-fire');
+  delete process.env.LIKU_NODE_ID;
+  delete process.env.LIKU_CLUSTER_DIR;
+  try { fs.rmSync(clusterDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('cluster token GC expires stale records but keeps fresh ones', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const clusterDir = require('path').join(TMP_HOME, 'p25gc');
+  process.env.LIKU_CLUSTER_DIR = clusterDir;
+  const ts = require('../src/main/peripherals/token-store');
+  const tdir = require('path').join(clusterDir, 'tokens');
+  fs.mkdirSync(tdir, { recursive: true });
+  const now = 10_000_000_000;
+  fs.writeFileSync(require('path').join(tdir, 'stale.json'), JSON.stringify({ deviceId: 'stale', gen: 1, updatedAt: new Date(now - 8 * 24 * 3600 * 1000).toISOString() }));
+  fs.writeFileSync(require('path').join(tdir, 'fresh.json'), JSON.stringify({ deviceId: 'fresh', gen: 1, updatedAt: new Date(now - 1 * 3600 * 1000).toISOString() }));
+  const res = ts.sweepClusterTokens({ now });
+  assert.ok(res.removed.includes('stale.json'), 'stale record GC-ed');
+  assert.ok(!res.removed.includes('fresh.json'), 'fresh record kept');
+  assert.strictEqual(fs.existsSync(require('path').join(tdir, 'fresh.json')), true);
+  delete process.env.LIKU_CLUSTER_DIR;
+  try { fs.rmSync(clusterDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('pruneExpiredLeases removes only expired leases', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const clusterDir = require('path').join(TMP_HOME, 'p25lease');
+  process.env.LIKU_CLUSTER_DIR = clusterDir;
+  process.env.LIKU_NODE_ID = 'nx';
+  const coordination = require('../src/main/peripherals/coordination');
+  coordination.acquireLease('device:live', { ttlMs: 100000, now: 5000 });
+  coordination.acquireLease('device:dead', { ttlMs: 1000, now: 5000 });
+  const res = coordination.pruneExpiredLeases(5000 + 2000); // dead expired, live alive
+  assert.ok(res.removed.some((n) => n.includes('dead')), 'expired lease pruned');
+  assert.ok(!res.removed.some((n) => n.includes('live')), 'live lease kept');
+  delete process.env.LIKU_NODE_ID;
+  delete process.env.LIKU_CLUSTER_DIR;
+  try { fs.rmSync(clusterDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('auto-heal escalation cooldown holds a lower rung but never suppresses critical', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  process.env.LIKU_PERIPHERAL_AUTOHEAL_ESCALATION_COOLDOWN_MS = '100000';
+  const actions = require('../src/main/peripherals/anomaly-action-advisor');
+  actions.clear();
+  const at = 20_000_000;
+  const rec = (n, ts) => { for (let i = 0; i < n; i++) actions.recordAnomaly({ device: 'cd', type: 'spike' }, ts); };
+  rec(3, at);
+  let p = actions.proposeActions({}, at).find((a) => a.deviceId === 'cd');
+  assert.strictEqual(p.action, 'reduce-schedule', 'first rung proposed immediately');
+  // Enough occurrences to escalate to rotate-token, but within the cooldown → held.
+  rec(3, at + 1000);
+  p = actions.proposeActions({}, at + 1000).find((a) => a.deviceId === 'cd');
+  assert.strictEqual(p.action, 'reduce-schedule', 'escalation held during cooldown');
+  // After the cooldown elapses → escalates.
+  p = actions.proposeActions({}, at + 200000).find((a) => a.deviceId === 'cd');
+  assert.strictEqual(p.action, 'rotate-token', 'escalates after cooldown');
+  // Critical rung (unpair) is NEVER suppressed by the cooldown.
+  rec(4, at + 200500); // 10 total
+  p = actions.proposeActions({}, at + 200600).find((a) => a.deviceId === 'cd');
+  assert.strictEqual(p.action, 'unpair', 'critical rung surfaces immediately (cooldown never suppresses safety)');
+  actions.clear();
+  delete process.env.LIKU_PERIPHERAL_AUTOHEAL_ESCALATION_COOLDOWN_MS;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('auto multi-hour coordinated reduce-schedule caps a contiguous run (human-confirmed)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const advisor = require('../src/main/peripherals/power-schedule-advisor');
+  const schedule = require('../src/main/peripherals/power-schedule');
+  advisor.clear();
+  try { fs.rmSync(schedule.CONFIRMED_FILE); } catch { /* ignore */ }
+  const at = (h) => new Date(2026, 6, 20, h, 0, 0).toISOString();
+  const mk = (h, heater, oven) => ({ at: at(h), totalW: heater + oven, devices: [{ id: 'heater', loadW: heater }, { id: 'oven', loadW: oven }] });
+  // Hours 20 + 21 both over budget, two contributors.
+  const samples = [mk(20, 300, 250), mk(20, 305, 255), mk(20, 295, 245), mk(21, 300, 250), mk(21, 305, 255), mk(21, 295, 245)];
+  const res = advisor.createConfirmedMultiHourSchedule({ budgetW: 400, samples, horizonHours: 2, now: new Date(2026, 6, 20, 19, 30, 0).getTime() });
+  assert.strictEqual(res.ok, true, 'multi-hour reduce created');
+  assert.strictEqual(res.multiHour, true);
+  assert.ok(res.hours.length >= 2, 'covers a contiguous run');
+  const sum = res.devices.reduce((s, d) => s + d.proposedMaxW, 0);
+  assert.ok(sum <= 400, 'coordinated caps sum within budget');
+  const heaterCap = res.devices.find((d) => d.deviceId === 'heater').proposedMaxW;
+  assert.strictEqual(schedule.deviceScheduleW('heater', new Date(2026, 6, 20, 20, 0, 0)), heaterCap, 'hour 20 capped');
+  assert.strictEqual(schedule.deviceScheduleW('heater', new Date(2026, 6, 20, 21, 0, 0)), heaterCap, 'hour 21 capped (whole window)');
+  advisor.clear();
+  try { fs.rmSync(schedule.CONFIRMED_FILE); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('data-driven special-day detection flags an unusually low/high day', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const forecast = require('../src/main/peripherals/power-forecast');
+  const day = (d, w) => ({ at: new Date(2026, 6, d, 12, 0, 0).toISOString(), totalW: w, devices: [{ id: 'd', loadW: w }] });
+  // Five normal days ~500W, one very low day ~50W.
+  const samples = [day(10, 500), day(11, 510), day(12, 490), day(13, 505), day(14, 495), day(15, 50)];
+  const res = forecast.detectSpecialDays({ samples, sigma: 1.5 });
+  assert.ok(res.dates.length >= 1, 'a special day detected');
+  assert.strictEqual(res.dates[0].kind, 'low', 'the low-power day is flagged');
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('PAL sweepCluster + getSpecialDays accessors are safe (single-machine)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_CLUSTER_DIR;
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  const sweep = pal.sweepCluster();
+  assert.strictEqual(sweep.enabled, true);
+  assert.ok(sweep.leases && Array.isArray(sweep.leases.removed), 'lease prune returns a result');
+  const sd = pal.getSpecialDays({ samples: [] });
+  assert.strictEqual(sd.enabled, true);
+  assert.ok(Array.isArray(sd.dates), 'special-days accessor returns an array');
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('Phase 25 cluster features are inert on a single machine (backward compatible)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_CLUSTER_DIR;
+  const coordination = require('../src/main/peripherals/coordination');
+  const ts = require('../src/main/peripherals/token-store');
+  assert.strictEqual(coordination.claimOnce('anything').claimed, true, 'claimOnce always true single-machine');
+  assert.deepStrictEqual(coordination.pruneExpiredLeases().removed, [], 'no leases to prune single-machine');
+  assert.deepStrictEqual(ts.sweepClusterTokens().removed, [], 'no cluster tokens single-machine');
   delete process.env.LIKU_ENABLE_PERIPHERALS;
 });
 
