@@ -540,18 +540,48 @@ function sweepCluster(opts = {}) {
         actions: coord.sweepShared('anomaly-actions', ttl, opts.now).removed,
         anomalies: clusterAnomaly().sweep(opts.now).removed
       };
+      // Phase 27: GC stale shared task/notification summaries + old cluster schedules.
+      try {
+        const ts2 = clusterTasks().sweep(opts.now);
+        const schedTtl = Number(process.env.LIKU_PERIPHERAL_CLUSTER_SCHEDULE_TTL_MS) || 30 * 24 * 3600 * 1000;
+        shared.tasks = ts2.tasks;
+        shared.notifications = ts2.notifications;
+        shared.schedules = coord.sweepShared('schedules', schedTtl, opts.now).removed;
+      } catch { /* best-effort */ }
     } catch { /* best-effort */ }
     return { enabled: true, tokens, leases, shared };
   } catch (err) { return { enabled: true, ok: false, reason: err.message }; }
 }
 
 function clusterAnomaly() { return require('./cluster-anomaly'); }
+function clusterTasks() { return require('./cluster-tasks'); }
 
 /** Phase 26 — fleet-wide aggregated anomaly + power view (advisory). */
 function getClusterAnomalies(opts = {}) {
   if (!isPeripheralsEnabled()) return { enabled: false, nodes: 0, anomalies: [] };
   try { return { enabled: true, ...clusterAnomaly().aggregate(opts) }; }
   catch { return { enabled: true, nodes: 0, anomalies: [] }; }
+}
+
+/** Phase 27 — fleet-wide visible Supervisor tasks (compact, advisory). */
+function getClusterTasks(opts = {}) {
+  if (!isPeripheralsEnabled()) return { enabled: false, tasks: [] };
+  try { return { enabled: true, tasks: clusterTasks().listTasks(opts) }; }
+  catch { return { enabled: true, tasks: [] }; }
+}
+
+/** Phase 27 — fleet-wide visible notifications (compact, advisory). */
+function getClusterNotifications(opts = {}) {
+  if (!isPeripheralsEnabled()) return { enabled: false, notifications: [] };
+  try { return { enabled: true, notifications: clusterTasks().listNotifications(opts) }; }
+  catch { return { enabled: true, notifications: [] }; }
+}
+
+/** Phase 27 — mirror a task status change (acknowledged/confirmed/dismissed/resolved). */
+function updateClusterTaskStatus(taskId, status) {
+  if (!isPeripheralsEnabled()) return { enabled: false };
+  try { return { enabled: true, ok: clusterTasks().updateTaskStatus(taskId, status) }; }
+  catch (err) { return { enabled: true, ok: false, reason: err.message }; }
 }
 
 function scheduleAdvisor() { return require('./power-schedule-advisor'); }
@@ -994,6 +1024,9 @@ module.exports = {
   getSpecialDays,
   sweepCluster,
   getClusterAnomalies,
+  getClusterTasks,
+  getClusterNotifications,
+  updateClusterTaskStatus,
   getLockHistory,
   recordLockSnapshot,
   getLockTrends,

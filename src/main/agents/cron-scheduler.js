@@ -105,6 +105,8 @@ function attachCronScheduler(orchestrator, options = {}) {
         created.push(task);
         try { orchestrator.emit('supervisor:task', task); } catch { /* non-fatal */ }
         try { orchestrator.emit('supervisor:cron-task', task); } catch { /* non-fatal */ }
+        // Phase 27: make the cron task visible fleet-wide (compact, advisory).
+        try { require('../peripherals/cluster-tasks').publishTask(task); } catch { /* non-fatal */ }
       }
     }
     return { created };

@@ -572,6 +572,11 @@ async function run(args, flags) {
       else log(dim('  set LIKU_CLUSTER_DIR=<shared-path> to enable multi-node coordination'));
       if (res.enabled && res.mode === 'cluster') {
         try { const ca = pal.getClusterAnomalies(); log(`  fleet anomaly summaries: ${ca.nodes} node(s), top: ${(ca.topDevices[0] && ca.topDevices[0].id) || '(none)'}`); } catch { /* observability */ }
+        try {
+          const ct = pal.getClusterTasks();
+          const cn = pal.getClusterNotifications();
+          log(`  fleet tasks: ${ct.tasks.length}  notifications: ${cn.notifications.length}`);
+        } catch { /* observability */ }
       }
       return { success: true, ...res };
     }

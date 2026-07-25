@@ -3973,6 +3973,176 @@ test('PAL sweepCluster GCs shared proposal/action/anomaly state (cluster)', () =
   delete process.env.LIKU_ENABLE_PERIPHERALS;
 });
 
+// ── Phase 27: distributed confirmed schedules + task visibility + lock persistence ──
+
+test('confirmed schedules are visible + respected across the cluster', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const clusterDir = require('path').join(TMP_HOME, 'p27sched');
+  process.env.LIKU_CLUSTER_DIR = clusterDir;
+  const coordination = require('../src/main/peripherals/coordination');
+  const schedule = require('../src/main/peripherals/power-schedule');
+  const advisor = require('../src/main/peripherals/power-schedule-advisor');
+  advisor.clear();
+  try { fs.rmSync(schedule.CONFIRMED_FILE); } catch { /* ignore */ }
+  // Node A confirms a restrict-only schedule for heater 20:00→21:00 ≤ 150W.
+  process.env.LIKU_NODE_ID = 'nodeA';
+  const r = advisor.createConfirmedSchedule('heater', { maxW: 150, fromHour: 20, toHour: 21 });
+  assert.strictEqual(r.ok, true);
+  assert.ok(coordination.getShared('schedules', 'heater:20:21'), 'confirmed rule mirrored to the cluster');
+  // Node B (no local confirmed file) must RESPECT the peer-confirmed schedule.
+  process.env.LIKU_NODE_ID = 'nodeB';
+  try { fs.rmSync(schedule.CONFIRMED_FILE); } catch { /* ignore */ } // node B has no local rule
+  assert.strictEqual(schedule.deviceScheduleW('heater', new Date(2026, 6, 20, 20, 30, 0)), 150, 'peer-confirmed schedule respected fleet-wide');
+  advisor.clear();
+  try { fs.rmSync(schedule.CONFIRMED_FILE); } catch { /* ignore */ }
+  delete process.env.LIKU_NODE_ID;
+  delete process.env.LIKU_CLUSTER_DIR;
+  try { fs.rmSync(clusterDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('a node does not re-propose a schedule a peer already confirmed', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const clusterDir = require('path').join(TMP_HOME, 'p27nodup');
+  process.env.LIKU_CLUSTER_DIR = clusterDir;
+  const coordination = require('../src/main/peripherals/coordination');
+  const advisor = require('../src/main/peripherals/power-schedule-advisor');
+  advisor.clear();
+  // A peer already CONFIRMED the multi-device proposal for hour 20.
+  process.env.LIKU_NODE_ID = 'peer';
+  coordination.putShared('proposals', 'multi:20', { id: 'peer-1', type: 'multi-device', status: 'confirmed' });
+  // This node evaluates the same breach → must NOT re-propose.
+  process.env.LIKU_NODE_ID = 'me';
+  const at = new Date(2026, 6, 20, 20, 0, 0).toISOString();
+  const samples = [
+    { at, totalW: 550, devices: [{ id: 'heater', loadW: 300 }, { id: 'oven', loadW: 250 }] },
+    { at, totalW: 560, devices: [{ id: 'heater', loadW: 305 }, { id: 'oven', loadW: 255 }] }
+  ];
+  assert.strictEqual(advisor.proposeMultiDeviceSchedule({ budgetW: 400, hour: 20, samples }), null, 'no re-proposal after peer confirmation');
+  advisor.clear();
+  delete process.env.LIKU_NODE_ID;
+  delete process.env.LIKU_CLUSTER_DIR;
+  try { fs.rmSync(clusterDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('confirmed schedules stay single-machine when cluster is off (backward compatible)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_CLUSTER_DIR;
+  const schedule = require('../src/main/peripherals/power-schedule');
+  const advisor = require('../src/main/peripherals/power-schedule-advisor');
+  advisor.clear();
+  try { fs.rmSync(schedule.CONFIRMED_FILE); } catch { /* ignore */ }
+  const r = advisor.createConfirmedSchedule('lamp', { maxW: 100, fromHour: 10, toHour: 12 });
+  assert.strictEqual(r.ok, true);
+  assert.strictEqual(schedule.deviceScheduleW('lamp', new Date(2026, 6, 20, 10, 30, 0)), 100, 'local schedule works with no cluster');
+  advisor.clear();
+  try { fs.rmSync(schedule.CONFIRMED_FILE); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('cluster task visibility: a peer task is visible + status mirrorable (advisory)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const clusterDir = require('path').join(TMP_HOME, 'p27tasks');
+  process.env.LIKU_CLUSTER_DIR = clusterDir;
+  const clusterTasks = require('../src/main/peripherals/cluster-tasks');
+  // A peer publishes a task.
+  process.env.LIKU_NODE_ID = 'peerNode';
+  clusterTasks.publishTask({ id: 'task-1', dedupeKey: 'heater:power:spike', type: 'peripheral-response', device: { id: 'heater' }, priority: 'medium', status: 'pending-review', source: 'power-anomaly' });
+  // This node can SEE it + detect a peer is already handling the condition.
+  process.env.LIKU_NODE_ID = 'meNode';
+  assert.strictEqual(clusterTasks.listTasks().length, 1, 'peer task visible');
+  const peer = clusterTasks.peerHasOpenTaskFor('heater:power:spike');
+  assert.ok(peer && peer.id === 'task-1', 'peer detected as already handling the condition');
+  // Status change is mirrorable.
+  assert.strictEqual(clusterTasks.updateTaskStatus('task-1', 'resolved'), true);
+  assert.strictEqual(clusterTasks.listTasks()[0].status, 'resolved', 'status change mirrored');
+  // After resolve, the peer no longer counts as "open" for the condition.
+  assert.strictEqual(clusterTasks.peerHasOpenTaskFor('heater:power:spike'), null, 'resolved task no longer blocks');
+  delete process.env.LIKU_NODE_ID;
+  delete process.env.LIKU_CLUSTER_DIR;
+  try { fs.rmSync(clusterDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('cluster task visibility is inert on a single machine + is not an actuation path', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_CLUSTER_DIR;
+  const clusterTasks = require('../src/main/peripherals/cluster-tasks');
+  assert.strictEqual(clusterTasks.publishTask({ id: 'x' }), false, 'publish inert single-machine');
+  assert.deepStrictEqual(clusterTasks.listTasks(), [], 'list empty single-machine');
+  assert.strictEqual(clusterTasks.peerHasOpenTaskFor('k'), null, 'no peer single-machine');
+  // The module exposes NO execute/actuate surface — only publish/list/status.
+  assert.strictEqual(typeof clusterTasks.execute, 'undefined', 'no execute path exists');
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('lock history survives a process restart + still yields trends + alerts', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const atomic = require('../src/shared/atomic-file');
+  const lh = require('../src/main/peripherals/lock-history');
+  lh.clear();
+  atomic.resetLockMetrics();
+  // Generate activity on a file, then persist two snapshots to lock-history.jsonl.
+  const hot = require('path').join(TMP_HOME, 'restart-lock.json');
+  for (let i = 0; i < 6; i++) atomic.atomicWriteFileSync(hot, `{"i":${i}}`);
+  lh.record();
+  for (let i = 0; i < 4; i++) atomic.atomicWriteFileSync(hot, `{"j":${i}}`);
+  lh.record();
+  // Simulate a RESTART: in-memory counters reset, but the jsonl persists on disk.
+  atomic.resetLockMetrics();
+  const snaps = lh.query({ limit: 50 });
+  assert.ok(snaps.length >= 2, 'snapshots persisted across the (simulated) restart');
+  const ft = lh.fileTrends({ limit: 50 });
+  assert.ok(ft.files.some((f) => f.file === 'restart-lock.json'), 'per-file trend recovered after restart');
+  const al = lh.alerts({ acquireThreshold: 5, rateThreshold: 1 });
+  assert.ok(al.alerts.some((a) => a.file === 'restart-lock.json'), 'contention alert recovered after restart');
+  lh.clear();
+  atomic.resetLockMetrics();
+  try { fs.rmSync(hot); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('PAL exposes cluster task/notification accessors + status update', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const clusterDir = require('path').join(TMP_HOME, 'p27pal');
+  process.env.LIKU_CLUSTER_DIR = clusterDir;
+  process.env.LIKU_NODE_ID = 'palNode';
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  const clusterTasks = require('../src/main/peripherals/cluster-tasks');
+  clusterTasks.publishTask({ id: 'pt-1', dedupeKey: 'oven:power:over-budget', device: { id: 'oven' }, priority: 'high', status: 'pending-review' });
+  const ct = pal.getClusterTasks();
+  assert.strictEqual(ct.enabled, true);
+  assert.ok(ct.tasks.length >= 1, 'PAL lists cluster tasks');
+  const upd = pal.updateClusterTaskStatus('pt-1', 'acknowledged');
+  assert.strictEqual(upd.ok, true, 'PAL mirrors a status change');
+  assert.strictEqual(pal.getClusterTasks().tasks.find((t) => t.id === 'pt-1').status, 'acknowledged');
+  delete process.env.LIKU_NODE_ID;
+  delete process.env.LIKU_CLUSTER_DIR;
+  try { fs.rmSync(clusterDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('PAL sweepCluster GCs stale shared schedules + tasks + notifications', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const clusterDir = require('path').join(TMP_HOME, 'p27sweep');
+  process.env.LIKU_CLUSTER_DIR = clusterDir;
+  process.env.LIKU_NODE_ID = 'swNode';
+  const coordination = require('../src/main/peripherals/coordination');
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  coordination.putShared('schedules', 'heater:20:21', { id: 'heater', fromHour: 20, toHour: 21, maxW: 150 });
+  coordination.putShared('tasks', 'tk-1', { id: 'tk-1', status: 'resolved' });
+  coordination.putShared('notifications', 'nt-1', { id: 'nt-1', status: 'acknowledged' });
+  const res = pal.sweepCluster({ now: Date.now() + 40 * 24 * 3600 * 1000 }); // 40 days ahead → all stale
+  assert.ok(res.shared.schedules.length >= 1, 'stale cluster schedule GC-ed');
+  assert.ok(res.shared.tasks.length >= 1, 'stale cluster task GC-ed');
+  assert.ok(res.shared.notifications.length >= 1, 'stale cluster notification GC-ed');
+  delete process.env.LIKU_NODE_ID;
+  delete process.env.LIKU_CLUSTER_DIR;
+  try { fs.rmSync(clusterDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
 console.log(`\n${pass} checks passed.`);
 if (process.exitCode) { console.error('FAILED'); }
 else { console.log('OK'); }

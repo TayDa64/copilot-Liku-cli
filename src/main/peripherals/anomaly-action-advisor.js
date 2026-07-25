@@ -82,7 +82,8 @@ function _clusterHasOpenAction(key, now = Date.now()) {
     const coord = require('./coordination');
     if (!coord.clusterEnabled()) return null;
     const rec = coord.getShared('anomaly-actions', key);
-    if (rec && rec.status === 'proposed' && rec.nodeId !== coord.nodeId()) {
+    // Phase 27: a peer's OPEN or recently-CONFIRMED action both mean "handled".
+    if (rec && (rec.status === 'proposed' || rec.status === 'confirmed') && rec.nodeId !== coord.nodeId()) {
       const updated = Number.isFinite(Date.parse(rec.updatedAt)) ? Date.parse(rec.updatedAt) : 0;
       if ((now - updated) < _clusterActionTtlMs()) return rec;
     }

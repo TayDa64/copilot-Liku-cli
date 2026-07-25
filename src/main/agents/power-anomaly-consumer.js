@@ -155,12 +155,19 @@ function attachPowerAnomalyConsumer(orchestrator, options = {}) {
       }
       const finalNotification = delivered || notification;
       try { orchestrator.emit('supervisor:notification', finalNotification); } catch { /* non-fatal */ }
+      // Phase 27: mirror a COMPACT notification summary to the cluster (advisory,
+      // best-effort, cluster-gated). Never a new actuation path.
+      try { require('../peripherals/cluster-tasks').publishNotification(finalNotification); } catch { /* non-fatal */ }
 
       const createTasks = options.createTasks !== false
         && String(process.env.LIKU_PERIPHERAL_CREATE_TASKS || '1') !== '0';
       if (createTasks && supervisor && typeof supervisor.createPeripheralTask === 'function') {
         const task = supervisor.createPeripheralTask(finalNotification, { source: 'power-anomaly' });
-        if (task) { try { orchestrator.emit('supervisor:task', task); } catch { /* non-fatal */ } }
+        if (task) {
+          try { orchestrator.emit('supervisor:task', task); } catch { /* non-fatal */ }
+          // Phase 27: make the task visible fleet-wide (compact, advisory).
+          try { require('../peripherals/cluster-tasks').publishTask(task); } catch { /* non-fatal */ }
+        }
       }
 
       if (typeof options.onAnomaly === 'function') {

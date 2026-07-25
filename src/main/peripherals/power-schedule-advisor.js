@@ -62,7 +62,9 @@ function _clusterHasOpenProposal(key, now = Date.now()) {
     const coord = require('./coordination');
     if (!coord.clusterEnabled()) return null;
     const rec = coord.getShared('proposals', key);
-    if (rec && rec.status === 'proposed' && rec.nodeId !== coord.nodeId()) {
+    // Phase 27: a peer's OPEN ('proposed') OR recently-CONFIRMED proposal both
+    // mean "already handled" → this node must not re-propose the same schedule.
+    if (rec && (rec.status === 'proposed' || rec.status === 'confirmed') && rec.nodeId !== coord.nodeId()) {
       const updated = Number.isFinite(Date.parse(rec.updatedAt)) ? Date.parse(rec.updatedAt) : 0;
       if ((now - updated) < _proposalTtlMs()) return rec;
     }
@@ -281,6 +283,13 @@ function _appendConfirmed(rule) {
   schedules.push(rule);
   if (!fs.existsSync(LIKU_HOME)) fs.mkdirSync(LIKU_HOME, { recursive: true, mode: 0o700 });
   atomicWriteFileSync(CONFIRMED_FILE, JSON.stringify({ updatedAt: new Date().toISOString(), schedules }, null, 2), { mode: 0o600 });
+  // Phase 27: mirror the confirmed restrict-only rule to the shared cluster store
+  // so other nodes see + RESPECT it (and don't re-propose the same schedule).
+  // Cluster off → inert (single-machine unchanged).
+  try {
+    const coord = require('./coordination');
+    if (coord.clusterEnabled()) coord.putShared('schedules', `${rule.id}:${rule.fromHour}:${rule.toHour}`, rule);
+  } catch { /* best-effort */ }
 }
 
 /**

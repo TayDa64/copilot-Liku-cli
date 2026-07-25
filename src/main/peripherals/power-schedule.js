@@ -78,12 +78,43 @@ function _confirmedSchedules() {
 }
 
 /**
- * All active schedule rules = env-declared + human-confirmed (advisor). Advisory
- * suggestions are NEVER included until explicitly confirmed.
+ * Phase 27 — CLUSTER-CONFIRMED schedules: restrict-only rules confirmed on OTHER
+ * nodes, mirrored to the shared cluster store. A schedule a peer confirmed is
+ * respected fleet-wide. Cluster off → empty (single-machine unchanged).
+ * @private
+ */
+function _clusterSchedules() {
+  try {
+    const coord = require('./coordination');
+    if (!coord.clusterEnabled()) return [];
+    const ttl = Number(process.env.LIKU_PERIPHERAL_CLUSTER_SCHEDULE_TTL_MS) || 30 * 24 * 3600 * 1000; // 30d
+    return coord.listShared('schedules', { maxAgeMs: ttl })
+      .filter((s) => s && s.id)
+      .map((s) => _normalizeRule({ ...s, source: 'cluster-confirmed' }));
+  } catch { return []; }
+}
+
+/** De-duplicate rules by id + window + cap so a node's own mirrored rule isn't double-counted. @private */
+function _dedupRules(rules) {
+  const seen = new Set();
+  const out = [];
+  for (const r of rules) {
+    const k = `${r.id}:${r.fromHour}:${r.toHour}:${r.maxW}:${(r.days || []).join(',')}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(r);
+  }
+  return out;
+}
+
+/**
+ * All active schedule rules = env-declared + human-confirmed (advisor) +
+ * cluster-confirmed (peers). Advisory suggestions are NEVER included until
+ * explicitly confirmed.
  */
 function loadSchedules() {
   if (!enabled()) return [];
-  return [..._envSchedules(), ..._confirmedSchedules()];
+  return _dedupRules([..._envSchedules(), ..._confirmedSchedules(), ..._clusterSchedules()]);
 }
 
 /** Keep a numeric hour clamped, or pass through the sunrise/sunset tokens. @private */

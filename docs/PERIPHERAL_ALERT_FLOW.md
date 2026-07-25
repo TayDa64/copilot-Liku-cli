@@ -927,6 +927,67 @@ cluster view when a shared cluster dir is configured.
 - **token-rotations-are-targeted-and-gated** — per-action / identity rotation only
   invalidate tokens (crypto), never actuate a device, and are explicit human ops.
 
+## Distributed schedules + task visibility + durable lock history (Phase 27)
+
+### Distributed confirmed-schedule store
+
+When a node confirms a restrict-only schedule (single, multi-device or multi-hour),
+`power-schedule-advisor._appendConfirmed` writes it to the local
+`peripheral-schedules.json` AND mirrors it to the shared cluster store
+(`coordination.putShared('schedules', '<id>:<from>:<to>', rule)`).
+`power-schedule.loadSchedules()` now merges env + local-confirmed +
+**cluster-confirmed** rules (de-duplicated), so a schedule a peer confirmed is
+respected fleet-wide. To avoid duplicate work, the advisor's cluster dedup now
+treats a peer proposal that is `proposed` **or** recently `confirmed` as
+"handled" — a node will not re-propose a schedule a peer already confirmed.
+Cluster off → cluster reads/writes are inert (single-machine unchanged).
+
+### Cluster-wide task / notification visibility
+
+`cluster-tasks.js` mirrors a COMPACT summary of high-value Supervisor tasks +
+notifications (id, dedupeKey, device, severity, status, source — no payloads) to
+the shared store. A node can `listTasks()`/`listNotifications()` to SEE peer
+activity, `peerHasOpenTaskFor(dedupeKey)` to detect a peer already handling a
+condition, and `updateTaskStatus(id, status)` to mirror
+acknowledged/confirmed/dismissed/resolved. The consumer + cron scheduler publish
+tasks/notifications on creation. PAL: `getClusterTasks()`,
+`getClusterNotifications()`, `updateClusterTaskStatus()`. **Strictly advisory —
+the shared view exposes NO execute/actuate surface; a task is still a human-gated
+proposal executed only through the PAL chain.**
+
+### Durable lock history
+
+Lock trends/alerts are computed from the persisted rolling
+`~/.liku/lock-history.jsonl` (atomic + flag-gated, Phase 21), so per-file trends
+and contention alerts survive a process restart — a fresh process reads the
+snapshots from disk. In-memory counters reset on restart, but the persisted
+snapshots remain; delta computations clamp to 0 across a counter reset (graceful
+degradation). Cluster-wide rollup via the existing `lock-metrics` mirroring is
+unchanged. Pure observation — never changes locking behaviour.
+
+### New environment variables (all default OFF / inert single-machine)
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `LIKU_PERIPHERAL_CLUSTER_SCHEDULE_TTL_MS` | `2592000000` (30d) | Shared confirmed-schedule freshness / GC |
+| `LIKU_PERIPHERAL_CLUSTER_TASK_TTL_MS` | `3600000` (1h) | Shared task/notification freshness / GC |
+
+### Phase 27 safety invariants
+
+- **cluster-schedules-only-restrict** — cluster-confirmed schedules are the same
+  restrict-only rules; they only ever cap power and only after an explicit human
+  confirm on some node. A peer schedule can never grant power.
+- **no-duplicate-after-confirm** — a schedule/action confirmed on one node is
+  seen as "handled" fleet-wide, so peers don't re-propose the same coordinated
+  reduce.
+- **task-visibility-is-advisory** — the shared task/notification view is compact,
+  best-effort, and exposes no actuation surface; it only minimizes duplicate work.
+- **lock-history-is-pure-observation** — persistence + trends + alerts read the
+  recorded metrics only and never change locking behaviour; corruption-tolerant.
+- **single-machine-unchanged** — every cluster read/write is inert when
+  `LIKU_CLUSTER_DIR` is unset; local confirmed schedules + tasks work exactly as
+  before.
+
 ## If a human decides to act
 
 Any physical response still travels the full PAL safety chain — the alert path
