@@ -78,6 +78,9 @@ function issueCapabilityToken(opts = {}) {
   // per-device identity fingerprint. Both are optional + backward compatible.
   if (Number.isFinite(opts.gen)) payload.gen = opts.gen;
   if (opts.identity) payload.idfp = String(opts.identity);
+  // Phase 26: optional PER-ACTION generation. Lets a single action's tokens be
+  // invalidated (rotated) independently of the device generation. Backward compatible.
+  if (Number.isFinite(opts.actionGen)) payload.agen = opts.actionGen;
   const payloadStr = _b64url(JSON.stringify(payload));
   const sig = secret ? _sign(payloadStr, secret) : UNSIGNED_MARKER;
   return `${payloadStr}.${sig}`;
@@ -127,6 +130,10 @@ function verifyCapabilityToken(token, opts = {}) {
   }
   if (opts.identity != null && payload.idfp != null && String(payload.idfp) !== String(opts.identity)) {
     return { ok: false, reason: 'identity-mismatch', payload };
+  }
+  // Phase 26: per-action generation check (only when the caller supplies it).
+  if (opts.actionGen != null && payload.agen != null && Number(payload.agen) !== Number(opts.actionGen)) {
+    return { ok: false, reason: 'action-generation-mismatch', payload };
   }
   return { ok: true, payload };
 }

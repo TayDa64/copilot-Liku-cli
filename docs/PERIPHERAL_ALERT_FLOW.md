@@ -851,6 +851,82 @@ cluster view when a shared cluster dir is configured.
 - **coordinated-reduce-only-restricts** — multi-hour/multi-device reduce writes
   only restrict-only rules whose caps sum ≤ budget, and only on human confirm.
 
+## Cross-host maturation + observability (Phase 26)
+
+### Cross-host maturation
+
+- **Lease renewal on execute** — a successful actuation on a REMOTE device
+  renews (or claims) its `device:<id>` lease (`LIKU_PERIPHERAL_DEVICE_LEASE_TTL_MS`,
+  default = the pairing lease TTL, 300000). A device under continuous control never
+  silently expires to another node. Single-machine / HIL → inert.
+- **Distributed advisor/schedule state** — `coordination.putShared/getShared/
+  listShared/deleteShared/sweepShared` add a tiny per-kind shared record layer
+  (reusing atomic-file). Before creating a coordinated proposal (recurring,
+  multi-device, multi-hour) or a fleet action, an advisor checks whether ANOTHER
+  node already has a fresh open proposal for the same key (`_clusterHasOpenProposal`
+  / `_clusterHasOpenAction`); if so it skips — no duplicate coordinated proposals
+  across nodes. Status (proposed → confirmed/dismissed) is mirrored so the fleet
+  converges. Freshness: `LIKU_PERIPHERAL_CLUSTER_PROPOSAL_TTL_MS` (default = advisor
+  window).
+- **Cluster-wide anomaly aggregation** — `cluster-anomaly.js` publishes a COMPACT
+  per-node summary (last N anomalies + top-3 devices + totals; NO full history) to
+  the shared store on each anomaly sample. `aggregate()` merges fresh summaries
+  into a fleet-wide recent-anomaly list + per-device draw so multi-device
+  attribution/proposals reason about the whole fleet. `LIKU_PERIPHERAL_CLUSTER_ANOMALY_MAX`
+  (10), `LIKU_PERIPHERAL_CLUSTER_ANOMALY_TTL_MS` (900000 freshness). Stale
+  summaries are ignored/GC'd. PAL: `getClusterAnomalies()`. `PAL.sweepCluster()`
+  also GCs stale shared proposals/actions/summaries.
+
+### Lock observability
+
+- **Per-file trends** — `lock-history.fileTrends()` reports each file's
+  acquire/steal/contended deltas over the window + current contention rate,
+  hottest first. PAL: `getLockFileTrends()`.
+- **Contention alerts** — `lock-history.alerts()` flags files exceeding
+  `LIKU_LOCK_ALERT_ACQUIRES` (1000) or `LIKU_LOCK_ALERT_RATE` (0.5). PAL:
+  `getLockAlerts()`. CLI `locks` prints alerts + (cluster mode) the fleet rollup.
+  Pure observation — never changes locking behaviour.
+
+### Light token improvements
+
+- **Per-action generation** — `token-store.rotateAction(id, action)` bumps ONLY
+  that action's generation (DCP `agen` payload), invalidating just that action's
+  outstanding tokens while other actions + the device generation stay valid. PAL:
+  `rotateActionToken()`. CLI: `token action-rotate <id> <action>`.
+- **Identity rotation (human-gated)** — `token-store.rotateIdentity(id)` re-salts
+  the identity fingerprint and bumps the generation, invalidating outstanding
+  tokens (security hygiene, e.g. suspected key exposure). PAL:
+  `rotateDeviceIdentity()`. CLI: `token identity-rotate <id>`.
+- **Cluster token GC** — `sweepCluster()` continues to expire stale cluster token
+  records + prune leases + now also sweep shared proposal/action/anomaly state.
+
+### New environment variables (all default OFF / inert single-machine)
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `LIKU_PERIPHERAL_DEVICE_LEASE_TTL_MS` | pairing TTL (300000) | Lease renewed on execute |
+| `LIKU_PERIPHERAL_CLUSTER_PROPOSAL_TTL_MS` | advisor window | Shared proposal freshness/GC |
+| `LIKU_PERIPHERAL_CLUSTER_ANOMALY_MAX` | `10` | Anomalies per node summary |
+| `LIKU_PERIPHERAL_CLUSTER_ANOMALY_TTL_MS` | `900000` | Cluster anomaly summary freshness |
+| `LIKU_LOCK_ALERT_ACQUIRES` | `1000` | Lock acquire-count alert threshold |
+| `LIKU_LOCK_ALERT_RATE` | `0.5` | Lock contention-rate alert threshold |
+
+### Phase 26 safety invariants
+
+- **lease-renewal-preserves-ownership** — renewal only extends a lease this node
+  owns (or claims a free one); a device leased by another node is still blocked at
+  the execute gate. Single-machine → renewal is inert.
+- **no-duplicate-coordinated-proposals** — a coordinated proposal / fleet action
+  is created by at most one node while a fresh peer proposal exists; every proposal
+  remains proposal → explicit human confirm.
+- **cluster-anomaly-is-advisory** — aggregation only WIDENS the input to
+  human-gated proposals; stale summaries are dropped so decisions never rest on
+  outdated data. It never actuates.
+- **lock-observability-is-pure** — trends/alerts/rollup are read-only over the
+  recorded metrics; they never change locking behaviour.
+- **token-rotations-are-targeted-and-gated** — per-action / identity rotation only
+  invalidate tokens (crypto), never actuate a device, and are explicit human ops.
+
 ## If a human decides to act
 
 Any physical response still travels the full PAL safety chain — the alert path

@@ -200,4 +200,58 @@ function clear() {
   catch { return false; }
 }
 
-module.exports = { FLAG, HISTORY_FILE, enabled, record, query, trends, clusterAggregate, clear };
+/**
+ * Phase 26 — PER-FILE trends over the recorded window: for each file, the
+ * acquire/steal/contended delta between the first and last snapshot + the current
+ * contention rate. Pure observation. Sorted by contention delta (hottest first).
+ */
+function fileTrends(opts = {}) {
+  const snaps = query(opts);
+  if (!snaps.length) return { snapshots: 0, files: [] };
+  const first = snaps[0].perFile || {};
+  const last = snaps[snaps.length - 1].perFile || {};
+  const files = [];
+  for (const [file, m] of Object.entries(last)) {
+    const f0 = first[file] || {};
+    const dAcq = Math.max(0, (Number(m.acquired) || 0) - (Number(f0.acquired) || 0));
+    const dCont = Math.max(0, (Number(m.contended) || 0) - (Number(f0.contended) || 0));
+    const dSteal = Math.max(0, (Number(m.steals) || 0) - (Number(f0.steals) || 0));
+    const acquired = Number(m.acquired) || 0;
+    files.push({
+      file,
+      acquired,
+      contended: Number(m.contended) || 0,
+      steals: Number(m.steals) || 0,
+      dAcquired: dAcq, dContended: dCont, dSteals: dSteal,
+      contentionRate: acquired > 0 ? Math.round((Number(m.contended) || 0) / acquired * 1000) / 1000 : 0
+    });
+  }
+  files.sort((a, b) => b.dContended - a.dContended || b.contentionRate - a.contentionRate || b.acquired - a.acquired);
+  return { snapshots: snaps.length, files };
+}
+
+/**
+ * Phase 26 — CONTENTION ALERTS: flag files that exceed acquire-count or
+ * contention-rate thresholds within the window. Advisory only — reports, never
+ * changes locking behaviour.
+ * @param {{ acquireThreshold?:number, rateThreshold?:number }} [opts]
+ */
+function alerts(opts = {}) {
+  const acquireThreshold = Number.isFinite(opts.acquireThreshold)
+    ? opts.acquireThreshold
+    : (Number(process.env.LIKU_LOCK_ALERT_ACQUIRES) || 1000);
+  const rateThreshold = Number.isFinite(opts.rateThreshold)
+    ? opts.rateThreshold
+    : (Number(process.env.LIKU_LOCK_ALERT_RATE) || 0.5);
+  const t = fileTrends(opts);
+  const out = [];
+  for (const f of t.files) {
+    const reasons = [];
+    if (f.acquired >= acquireThreshold) reasons.push(`acquires ${f.acquired} ≥ ${acquireThreshold}`);
+    if (f.contentionRate >= rateThreshold) reasons.push(`contention ${Math.round(f.contentionRate * 100)}% ≥ ${Math.round(rateThreshold * 100)}%`);
+    if (reasons.length) out.push({ file: f.file, acquired: f.acquired, contentionRate: f.contentionRate, reasons, advisory: `lock hotspot: ${f.file} (${reasons.join(', ')})` });
+  }
+  return { acquireThreshold, rateThreshold, alerts: out };
+}
+
+module.exports = { FLAG, HISTORY_FILE, enabled, record, query, trends, fileTrends, alerts, clusterAggregate, clear };

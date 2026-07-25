@@ -48,6 +48,38 @@ function _minOccurrences() {
   return Number.isFinite(v) && v >= 1 ? Math.floor(v) : DEFAULT_MIN_OCCURRENCES;
 }
 
+// ── Phase 26: distributed proposal dedup (cluster-visible open proposals) ──
+// Before creating a coordinated proposal, check whether ANOTHER node already has
+// a fresh open proposal for the same dedup key; if so, skip (don't duplicate).
+// On create / confirm / dismiss, mirror the status so the fleet converges.
+// Cluster off → both helpers are inert (single-machine unchanged).
+function _proposalTtlMs() {
+  const v = Number(process.env.LIKU_PERIPHERAL_CLUSTER_PROPOSAL_TTL_MS);
+  return Number.isFinite(v) && v > 0 ? v : _windowMs();
+}
+function _clusterHasOpenProposal(key, now = Date.now()) {
+  try {
+    const coord = require('./coordination');
+    if (!coord.clusterEnabled()) return null;
+    const rec = coord.getShared('proposals', key);
+    if (rec && rec.status === 'proposed' && rec.nodeId !== coord.nodeId()) {
+      const updated = Number.isFinite(Date.parse(rec.updatedAt)) ? Date.parse(rec.updatedAt) : 0;
+      if ((now - updated) < _proposalTtlMs()) return rec;
+    }
+    return null;
+  } catch { return null; }
+}
+function _clusterMirrorProposal(key, suggestion) {
+  try {
+    const coord = require('./coordination');
+    if (!coord.clusterEnabled()) return;
+    coord.putShared('proposals', key, {
+      id: suggestion.id, type: suggestion.type || 'single',
+      status: suggestion.status, deviceId: suggestion.deviceId || null
+    });
+  } catch { /* best-effort */ }
+}
+
 function _load() {
   const empty = { occurrences: {}, proposed: {} };
   if (!enabled()) return empty;
@@ -139,6 +171,8 @@ function proposeSchedules(opts = {}, now = Date.now()) {
     const existing = st.proposed[key];
     if (existing && existing.status === 'proposed') { out.push(existing); continue; }
     if (existing && (existing.status === 'confirmed' || existing.status === 'dismissed')) continue;
+    // Phase 26: cluster dedup — another node already has an open proposal here.
+    if (_clusterHasOpenProposal(key, now)) continue;
     const [deviceId, type] = key.split(':');
     const hour = _modeHour(recent.map((o) => o.hour));
     // Phase 19: use the device's per-hour-of-day baseline (forecast) to set a
@@ -168,6 +202,7 @@ function proposeSchedules(opts = {}, now = Date.now()) {
       createdAt: new Date().toISOString()
     };
     st.proposed[key] = suggestion;
+    _clusterMirrorProposal(key, suggestion);
     out.push(suggestion);
     changed = true;
   }
@@ -179,7 +214,6 @@ function proposeSchedules(opts = {}, now = Date.now()) {
 function listProposed() {
   return Object.values(_load().proposed).filter((s) => s.status === 'proposed');
 }
-
 /**
  * MULTI-DEVICE coordinated proposal (Phase 20). When a budget breach at a given
  * hour is jointly driven by MORE THAN ONE device, propose a coordinated set of
@@ -206,6 +240,8 @@ function proposeMultiDeviceSchedule(opts = {}, now = Date.now()) {
   const existing = st.proposed[key];
   if (existing && existing.status === 'proposed') return existing;
   if (existing && (existing.status === 'confirmed' || existing.status === 'dismissed')) return null;
+  // Phase 26: cluster dedup — skip if another node already proposed this window.
+  if (_clusterHasOpenProposal(key, now)) return null;
   const total = contrib.totalPeakW || contrib.contributors.reduce((s, c) => s + c.peakW, 0);
   // Allocate each device a cap proportional to its share of the combined peak,
   // scaled so the caps SUM to (at most) the budget. Only ever RESTRICTS.
@@ -233,6 +269,7 @@ function proposeMultiDeviceSchedule(opts = {}, now = Date.now()) {
   };
   st.proposed[key] = suggestion;
   _save(st);
+  _clusterMirrorProposal(key, suggestion);
   return suggestion;
 }
 
@@ -278,6 +315,7 @@ function confirm(suggestionId) {
   entry.status = 'confirmed';
   entry.confirmedAt = new Date().toISOString();
   _save(st);
+  _clusterMirrorProposal(key, entry); // Phase 26: propagate 'confirmed' to the fleet
   return { ok: true, schedule: { ...entry } };
 }
 
@@ -341,6 +379,8 @@ function proposeMultiHourSchedule(opts = {}, now = Date.now()) {
   const existing = st.proposed[key];
   if (existing && existing.status === 'proposed') return existing;
   if (existing && (existing.status === 'confirmed' || existing.status === 'dismissed')) return null;
+  // Phase 26: cluster dedup — skip if another node already proposed this window.
+  if (_clusterHasOpenProposal(key, now)) return null;
   const suggestion = {
     id: `multihour-sched-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
     type: 'multi-hour', fromHour, toHour, hours: runHours, budgetW, devices, occurrences: devices.length,
@@ -350,6 +390,7 @@ function proposeMultiHourSchedule(opts = {}, now = Date.now()) {
   };
   st.proposed[key] = suggestion;
   _save(st);
+  _clusterMirrorProposal(key, suggestion);
   return suggestion;
 }
 
@@ -477,6 +518,7 @@ function dismiss(suggestionId) {
   st.proposed[key].status = 'dismissed';
   st.proposed[key].dismissedAt = new Date().toISOString();
   _save(st);
+  _clusterMirrorProposal(key, st.proposed[key]); // Phase 26: propagate 'dismissed'
   return { ok: true };
 }
 

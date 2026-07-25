@@ -30,7 +30,7 @@
  *   liku peripherals cron [propose <dev> <act> "<cron>"|confirm <id>|dismiss <id>|rules|tick|remove <id>]
  *   liku peripherals pair <id>          Pair / commission a device (real when HIL off)
  *   liku peripherals unpair <id>        Tear down a device's pairing (re-pairable)
- *   liku peripherals token [status|rotate <id>|revoke <id>|rotate-all|action <id> <action>]
+ *   liku peripherals token [status|rotate <id>|revoke <id>|rotate-all|action <id> <action>|action-rotate <id> <action>|identity-rotate <id>]
  *   liku peripherals suggestions        Advisory schedule proposals (recurring anomalies)
  *   liku peripherals apply-schedule <id> Confirm + activate a proposed schedule
  */
@@ -232,6 +232,27 @@ async function run(args, flags) {
         if (flags.json) return { success: !!res.ok, ...res };
         if (res.ok) success(`Rotated ${res.rotated.length} device token(s): ${res.rotated.join(', ') || '(none active)'}.`);
         else error(`Rotate-all failed: ${res.reason || 'unknown'}`);
+        return { success: !!res.ok, ...res };
+      }
+      if (op === 'action-rotate') {
+        // Phase 26: rotate a SINGLE action's generation (targeted revocation).
+        const id = args[2];
+        const action = args[3];
+        if (!id || !action) { error('Usage: liku peripherals token action-rotate <id> <action>'); return { success: false }; }
+        const res = pal.rotateActionToken(id, action);
+        if (flags.json) return { success: !!res.ok, ...res };
+        if (res.ok) success(`Rotated ${id}:${action} action generation → ${res.actionGen} (prior ${action} tokens invalidated).`);
+        else error(`Action rotate failed: ${res.reason || 'unknown'}`);
+        return { success: !!res.ok, ...res };
+      }
+      if (op === 'identity-rotate') {
+        // Phase 26: rotate a device's identity fingerprint (human-gated hygiene).
+        const id = args[2];
+        if (!id) { error('Usage: liku peripherals token identity-rotate <id>'); return { success: false }; }
+        const res = pal.rotateDeviceIdentity(id);
+        if (flags.json) return { success: !!res.ok, ...res };
+        if (res.ok) success(`Rotated identity for ${id} (gen ${res.gen}, idfp ${res.identityFp}). Outstanding tokens invalidated.`);
+        else error(`Identity rotate failed: ${res.reason || 'unknown'}`);
         return { success: !!res.ok, ...res };
       }
       if (op === 'action') {
@@ -505,6 +526,9 @@ async function run(args, flags) {
       } else {
         log(dim('  no history yet (snapshots accrue as stores are written; force one with --record)'));
       }
+      // Phase 26: contention alerts (files over acquire / rate thresholds).
+      const lockAlerts = pal.getLockAlerts();
+      for (const a of (lockAlerts.alerts || [])) error(`  ⚠ ${a.advisory}`);
       // Phase 22: cluster-wide aggregation when a shared cluster dir is configured.
       const cluster = pal.getClusterLockMetrics();
       if (cluster && cluster.mode === 'cluster') {
@@ -513,7 +537,7 @@ async function run(args, flags) {
         log(`    total: ${ct.acquired || 0} acquired, ${ct.contended || 0} contended, ${ct.steals || 0} steals  (rate ${Math.round((cluster.contentionRate || 0) * 1000) / 10}%)`);
         for (const n of cluster.perNode || []) log(dim(`    ${n.nodeId}${n.live ? ' (live)' : ''}: ${n.metrics.acquired} acq, ${n.metrics.contended} cont`));
       }
-      return { success: true, live, perFile, trends, cluster };
+      return { success: true, live, perFile, trends, alerts: lockAlerts.alerts, cluster };
     }
 
     case 'coordination':
@@ -546,6 +570,9 @@ async function run(args, flags) {
       log(`  clusterDir: ${res.clusterDir || dim('(unset — single-machine)')}`);
       if (res.enabled && res.mode === 'cluster') log(`  active leases: ${res.leases}`);
       else log(dim('  set LIKU_CLUSTER_DIR=<shared-path> to enable multi-node coordination'));
+      if (res.enabled && res.mode === 'cluster') {
+        try { const ca = pal.getClusterAnomalies(); log(`  fleet anomaly summaries: ${ca.nodes} node(s), top: ${(ca.topDevices[0] && ca.topDevices[0].id) || '(none)'}`); } catch { /* observability */ }
+      }
       return { success: true, ...res };
     }
 
@@ -732,7 +759,7 @@ async function run(args, flags) {
 
     default:
       error(`Unknown subcommand: ${sub}`);
-      log('Usage: liku peripherals [scan|list|status [id]|power [--history|--trend|--anomalies|--forecast [--seasonal] [--exclude-anomalous] [--special-days]]|anomalies [--attributed]|anomaly-action [confirm|dismiss <id>|policy [set <device> reduce=N rotate=N unpair=N]]|schedules|locks [--record]|coordination [lease|release <id>|sweep]|cron [propose|confirm|dismiss|rules|tick|remove]|suggestions|apply-schedule <id>|pair <id>|unpair <id>|token [rotate|revoke|rotate-all|action <id> <action>]|tasks [--escalated|--pending|--severity <p>|--anomaly]|notifications|channels|simulate <id> <k=v>|execute <id> <action>|confirm <id> <action> [--execute]|drivers]');
+      log('Usage: liku peripherals [scan|list|status [id]|power [--history|--trend|--anomalies|--forecast [--seasonal] [--exclude-anomalous] [--special-days]]|anomalies [--attributed]|anomaly-action [confirm|dismiss <id>|policy [set <device> reduce=N rotate=N unpair=N]]|schedules|locks [--record]|coordination [lease|release <id>|sweep]|cron [propose|confirm|dismiss|rules|tick|remove]|suggestions|apply-schedule <id>|pair <id>|unpair <id>|token [rotate|revoke|rotate-all|action <id> <action>|action-rotate <id> <action>|identity-rotate <id>]|tasks [--escalated|--pending|--severity <p>|--anomaly]|notifications|channels|simulate <id> <k=v>|execute <id> <action>|confirm <id> <action> [--execute]|drivers]');
       return { success: false };
   }
 }

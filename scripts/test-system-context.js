@@ -3755,6 +3755,224 @@ test('Phase 25 cluster features are inert on a single machine (backward compatib
   delete process.env.LIKU_ENABLE_PERIPHERALS;
 });
 
+// ── Phase 26: cross-host maturation + lock observability + token improvements ──
+
+test('lease renewal on execute keeps device ownership alive (cluster)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const clusterDir = require('path').join(TMP_HOME, 'p26renew');
+  process.env.LIKU_CLUSTER_DIR = clusterDir;
+  process.env.LIKU_NODE_ID = 'renewNode';
+  const coordination = require('../src/main/peripherals/coordination');
+  // Acquire a short lease, then renew it via the same primitive execute() uses.
+  const a = coordination.acquireLease('device:rn1', { ttlMs: 1000, now: 5000 });
+  assert.strictEqual(a.granted, true);
+  // Just before expiry, a renewal (execute path) extends the TTL.
+  const r = coordination.renewLease('device:rn1', { ttlMs: 10000, now: 5900 });
+  assert.strictEqual(r.granted, true, 'owner renews its lease');
+  // After the ORIGINAL expiry, the device is still owned (renewal extended it).
+  assert.strictEqual(coordination.canAct('device:rn1', 6500), true, 'still owned after original TTL');
+  const holder = coordination.whoHolds('device:rn1', 6500);
+  assert.ok(holder && holder.nodeId === 'renewNode', 'ownership retained during active use');
+  delete process.env.LIKU_NODE_ID;
+  delete process.env.LIKU_CLUSTER_DIR;
+  try { fs.rmSync(clusterDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('coordination shared-state records are visible + swept across the cluster', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const clusterDir = require('path').join(TMP_HOME, 'p26shared');
+  process.env.LIKU_CLUSTER_DIR = clusterDir;
+  process.env.LIKU_NODE_ID = 'shareNode';
+  const coordination = require('../src/main/peripherals/coordination');
+  assert.strictEqual(coordination.putShared('proposals', 'multi:20', { id: 'x', status: 'proposed' }), true);
+  const rec = coordination.getShared('proposals', 'multi:20');
+  assert.ok(rec && rec.status === 'proposed' && rec.nodeId === 'shareNode', 'shared record written + stamped');
+  assert.strictEqual(coordination.listShared('proposals').length, 1, 'listed');
+  // Sweep by TTL removes stale entries.
+  const removed = coordination.sweepShared('proposals', -1).removed; // ttl -1 → everything stale
+  assert.ok(removed.length >= 1, 'stale shared record swept');
+  delete process.env.LIKU_NODE_ID;
+  delete process.env.LIKU_CLUSTER_DIR;
+  try { fs.rmSync(clusterDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('distributed proposal dedup: a node skips a proposal another node already opened', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const clusterDir = require('path').join(TMP_HOME, 'p26dedup');
+  process.env.LIKU_CLUSTER_DIR = clusterDir;
+  const coordination = require('../src/main/peripherals/coordination');
+  const advisor = require('../src/main/peripherals/power-schedule-advisor');
+  advisor.clear();
+  // Another node has already published an open multi-device proposal for hour 20.
+  process.env.LIKU_NODE_ID = 'nodeOther';
+  coordination.putShared('proposals', 'multi:20', { id: 'other-1', type: 'multi-device', status: 'proposed', deviceId: null });
+  // This node evaluates the same breach → must NOT create a duplicate.
+  process.env.LIKU_NODE_ID = 'nodeMe';
+  const at = new Date(2026, 6, 20, 20, 0, 0).toISOString();
+  const samples = [
+    { at, totalW: 550, devices: [{ id: 'heater', loadW: 300 }, { id: 'oven', loadW: 250 }] },
+    { at, totalW: 560, devices: [{ id: 'heater', loadW: 305 }, { id: 'oven', loadW: 255 }] }
+  ];
+  const res = advisor.proposeMultiDeviceSchedule({ budgetW: 400, hour: 20, samples });
+  assert.strictEqual(res, null, 'no duplicate proposal (deduped against the peer node)');
+  advisor.clear();
+  delete process.env.LIKU_NODE_ID;
+  delete process.env.LIKU_CLUSTER_DIR;
+  try { fs.rmSync(clusterDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('cluster anomaly aggregation merges compact summaries from multiple nodes', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const clusterDir = require('path').join(TMP_HOME, 'p26agg');
+  process.env.LIKU_CLUSTER_DIR = clusterDir;
+  const coordination = require('../src/main/peripherals/coordination');
+  const clusterAnomaly = require('../src/main/peripherals/cluster-anomaly');
+  // nodeA and nodeB each publish a compact summary.
+  process.env.LIKU_NODE_ID = 'nodeA';
+  clusterAnomaly.publish({ anomalies: [{ type: 'spike', attributedDevice: 'heater', valueW: 900, at: new Date().toISOString() }], devices: [{ id: 'heater', loadW: 900 }], totalW: 900, budgetW: 500 });
+  process.env.LIKU_NODE_ID = 'nodeB';
+  clusterAnomaly.publish({ anomalies: [{ type: 'over-budget', attributedDevice: 'oven', valueW: 700, at: new Date().toISOString() }], devices: [{ id: 'oven', loadW: 700 }], totalW: 700, budgetW: 500 });
+  const agg = clusterAnomaly.aggregate();
+  assert.strictEqual(agg.nodes, 2, 'aggregates both nodes');
+  assert.ok(agg.anomalies.length >= 2, 'fleet-wide anomalies merged');
+  assert.ok(agg.perDeviceW.heater === 900 && agg.perDeviceW.oven === 700, 'per-device draw summed across nodes');
+  assert.ok(agg.topDevices[0].id === 'heater', 'top device is the biggest fleet-wide draw');
+  delete process.env.LIKU_NODE_ID;
+  delete process.env.LIKU_CLUSTER_DIR;
+  try { fs.rmSync(clusterDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('cluster anomaly aggregation drops stale summaries (no inconsistent decisions)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const clusterDir = require('path').join(TMP_HOME, 'p26stale');
+  process.env.LIKU_CLUSTER_DIR = clusterDir;
+  const coordination = require('../src/main/peripherals/coordination');
+  const clusterAnomaly = require('../src/main/peripherals/cluster-anomaly');
+  // Write a summary with an old updatedAt directly.
+  const dir = require('path').join(clusterDir, 'anomaly-summary');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(require('path').join(dir, 'oldnode.json'), JSON.stringify({ nodeId: 'oldnode', updatedAt: new Date(Date.now() - 3600000).toISOString(), anomalies: [], topDevices: [], totalW: 10 }));
+  const agg = clusterAnomaly.aggregate({ maxAgeMs: 60000 }); // 1 min freshness
+  assert.strictEqual(agg.nodes, 0, 'stale summary excluded');
+  delete process.env.LIKU_CLUSTER_DIR;
+  try { fs.rmSync(clusterDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('lock file trends + contention alerts flag a hot file (pure observation)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const atomic = require('../src/shared/atomic-file');
+  const lh = require('../src/main/peripherals/lock-history');
+  lh.clear();
+  atomic.resetLockMetrics();
+  // Generate acquires on one file, snapshot, then check trends + alerts.
+  const hot = require('path').join(TMP_HOME, 'hot-lock.json');
+  for (let i = 0; i < 5; i++) atomic.atomicWriteFileSync(hot, `{"i":${i}}`);
+  lh.record();
+  const ft = lh.fileTrends({ limit: 10 });
+  assert.ok(ft.files.some((f) => f.file === 'hot-lock.json'), 'per-file trend present');
+  const al = lh.alerts({ acquireThreshold: 3, rateThreshold: 1 });
+  assert.ok(al.alerts.some((a) => a.file === 'hot-lock.json'), 'hot file exceeds acquire threshold → alert');
+  lh.clear();
+  atomic.resetLockMetrics();
+  try { fs.rmSync(hot); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('per-action token generation invalidates only that action', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_CLUSTER_DIR;
+  const ts = require('../src/main/peripherals/token-store');
+  ts.clear();
+  ts.onPair('pa-gen', { actions: ['on', 'off'] });
+  const onTok = ts.issueActionToken('pa-gen', 'on').token;
+  const offTok = ts.issueActionToken('pa-gen', 'off').token;
+  assert.strictEqual(ts.verifyDeviceToken('pa-gen', 'on', onTok).ok, true);
+  assert.strictEqual(ts.verifyDeviceToken('pa-gen', 'off', offTok).ok, true);
+  // Rotate ONLY the 'on' action's generation.
+  const r = ts.rotateAction('pa-gen', 'on');
+  assert.strictEqual(r.ok, true);
+  assert.strictEqual(ts.verifyDeviceToken('pa-gen', 'on', onTok).ok, false, 'old on-token invalidated');
+  assert.strictEqual(ts.verifyDeviceToken('pa-gen', 'off', offTok).ok, true, 'off-token still valid (untouched)');
+  // A fresh on-token (new action gen) verifies again.
+  const onTok2 = ts.issueActionToken('pa-gen', 'on').token;
+  assert.strictEqual(ts.verifyDeviceToken('pa-gen', 'on', onTok2).ok, true, 're-issued on-token valid');
+  ts.clear();
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('identity rotation invalidates outstanding tokens (human-gated hygiene)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_CLUSTER_DIR;
+  const ts = require('../src/main/peripherals/token-store');
+  ts.clear();
+  ts.onPair('id-rot', { actions: ['unlock'] });
+  const tok = ts.issueActionToken('id-rot', 'unlock').token;
+  assert.strictEqual(ts.verifyDeviceToken('id-rot', 'unlock', tok).ok, true);
+  const before = ts.status('id-rot').identityFp;
+  const r = ts.rotateIdentity('id-rot');
+  assert.strictEqual(r.ok, true);
+  assert.notStrictEqual(r.identityFp, before, 'identity fingerprint changed');
+  assert.strictEqual(ts.verifyDeviceToken('id-rot', 'unlock', tok).ok, false, 'old token invalidated by identity rotation');
+  ts.clear();
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('Phase 26 cluster features are inert on a single machine (backward compatible)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_CLUSTER_DIR;
+  const coordination = require('../src/main/peripherals/coordination');
+  const clusterAnomaly = require('../src/main/peripherals/cluster-anomaly');
+  assert.strictEqual(coordination.putShared('proposals', 'k', { status: 'proposed' }), false, 'putShared inert single-machine');
+  assert.deepStrictEqual(coordination.listShared('proposals'), [], 'listShared empty single-machine');
+  assert.strictEqual(clusterAnomaly.publish({ anomalies: [] }), false, 'cluster anomaly publish inert');
+  assert.strictEqual(clusterAnomaly.aggregate().nodes, 0, 'aggregate empty single-machine');
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('PAL exposes cluster-anomaly + lock-alert + per-action token accessors', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_CLUSTER_DIR;
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  const ts = require('../src/main/peripherals/token-store');
+  ts.clear();
+  const ca = pal.getClusterAnomalies();
+  assert.strictEqual(ca.enabled, true);
+  assert.strictEqual(ca.nodes, 0, 'single-machine → no cluster anomalies');
+  const la = pal.getLockAlerts({ acquireThreshold: 1, rateThreshold: 0 });
+  assert.strictEqual(la.enabled, true);
+  assert.ok(Array.isArray(la.alerts), 'lock alerts accessor returns an array');
+  ts.onPair('pal-ag', { actions: ['on'] });
+  const r = pal.rotateActionToken('pal-ag', 'on');
+  assert.strictEqual(r.ok, true, 'PAL rotates a per-action generation');
+  assert.strictEqual(r.actionGen, 2, 'action generation bumped');
+  ts.clear();
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('PAL sweepCluster GCs shared proposal/action/anomaly state (cluster)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const clusterDir = require('path').join(TMP_HOME, 'p26sweepall');
+  process.env.LIKU_CLUSTER_DIR = clusterDir;
+  process.env.LIKU_NODE_ID = 'sweepNode';
+  const coordination = require('../src/main/peripherals/coordination');
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  coordination.putShared('proposals', 'old:1', { status: 'confirmed' });
+  coordination.putShared('anomaly-actions', 'old:2', { status: 'confirmed' });
+  const res = pal.sweepCluster({ now: Date.now() + 2 * 24 * 3600 * 1000 }); // 2 days ahead → both stale
+  assert.strictEqual(res.enabled, true);
+  assert.ok(res.shared && res.shared.proposals.length >= 1, 'stale shared proposal GC-ed');
+  assert.ok(res.shared.actions.length >= 1, 'stale shared action GC-ed');
+  delete process.env.LIKU_NODE_ID;
+  delete process.env.LIKU_CLUSTER_DIR;
+  try { fs.rmSync(clusterDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
 console.log(`\n${pass} checks passed.`);
 if (process.exitCode) { console.error('FAILED'); }
 else { console.log('OK'); }

@@ -37,6 +37,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { atomicWriteFileSync } = require('../../shared/atomic-file');
 
 const DEFAULT_TTL_MS = 30000;
 
@@ -245,8 +246,97 @@ function status(now = Date.now()) {
   };
 }
 
+// ── Phase 26: generic SHARED-STATE records (compact cross-node visibility) ──
+// A tiny key/value layer over the shared cluster dir, reusing the same atomic +
+// per-kind subdir pattern as token/lock mirroring. Used to make advisor/schedule
+// proposals and compact anomaly summaries visible + dedup'd across nodes. Cluster
+// off → every operation is an inert no-op (single-machine unchanged).
+
+function _sharedDir(kind) {
+  const dir = clusterDir();
+  const safeKind = String(kind || '').replace(/[^A-Za-z0-9._-]/g, '_').replace(/\.{2,}/g, '_');
+  return dir && safeKind ? path.join(dir, safeKind) : null;
+}
+
+function _sharedPath(kind, id) {
+  const dir = _sharedDir(kind);
+  const safeId = String(id || '').replace(/[^A-Za-z0-9._-]/g, '_').replace(/\.{2,}/g, '_').slice(0, 160);
+  return dir && safeId ? path.join(dir, `${safeId}.json`) : null;
+}
+
+/** Publish/overwrite a shared record (stamped with nodeId + updatedAt). */
+function putShared(kind, id, record) {
+  if (!clusterEnabled()) return false;
+  const p = _sharedPath(kind, id);
+  if (!p) return false;
+  try {
+    atomicWriteFileSync(p, JSON.stringify({ ...record, nodeId: nodeId(), updatedAt: new Date().toISOString() }, null, 2), { mode: 0o600 });
+    return true;
+  } catch { return false; }
+}
+
+/** Read a shared record (or null). */
+function getShared(kind, id) {
+  if (!clusterEnabled()) return null;
+  const p = _sharedPath(kind, id);
+  if (!p) return null;
+  try { if (!fs.existsSync(p)) return null; return JSON.parse(fs.readFileSync(p, 'utf-8')); }
+  catch { return null; }
+}
+
+/** List shared records of a kind, optionally dropping ones older than maxAgeMs. */
+function listShared(kind, opts = {}) {
+  if (!clusterEnabled()) return [];
+  const dir = _sharedDir(kind);
+  const now = Number.isFinite(opts.now) ? opts.now : Date.now();
+  const out = [];
+  try {
+    if (!dir || !fs.existsSync(dir)) return [];
+    for (const f of fs.readdirSync(dir)) {
+      if (!f.endsWith('.json')) continue;
+      let rec;
+      try { rec = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf-8')); } catch { rec = null; }
+      if (!rec) continue;
+      if (Number.isFinite(opts.maxAgeMs)) {
+        const updated = Number.isFinite(Date.parse(rec.updatedAt)) ? Date.parse(rec.updatedAt) : 0;
+        if ((now - updated) > opts.maxAgeMs) continue;
+      }
+      out.push(rec);
+    }
+  } catch { /* best-effort */ }
+  return out;
+}
+
+/** Delete a shared record (best-effort). */
+function deleteShared(kind, id) {
+  if (!clusterEnabled()) return false;
+  const p = _sharedPath(kind, id);
+  if (!p) return false;
+  try { if (fs.existsSync(p)) fs.rmSync(p, { force: true }); return true; } catch { return false; }
+}
+
+/** Sweep shared records of a kind older than ttlMs (GC). */
+function sweepShared(kind, ttlMs, now = Date.now()) {
+  if (!clusterEnabled()) return { removed: [] };
+  const dir = _sharedDir(kind);
+  const removed = [];
+  try {
+    if (!dir || !fs.existsSync(dir)) return { removed };
+    for (const f of fs.readdirSync(dir)) {
+      if (!f.endsWith('.json')) continue;
+      const p = path.join(dir, f);
+      let rec;
+      try { rec = JSON.parse(fs.readFileSync(p, 'utf-8')); } catch { rec = null; }
+      const updated = rec && Number.isFinite(Date.parse(rec.updatedAt)) ? Date.parse(rec.updatedAt) : 0;
+      if (!rec || (now - updated) > ttlMs) { try { fs.rmSync(p, { force: true }); removed.push(f); } catch { /* ignore */ } }
+    }
+  } catch { /* best-effort */ }
+  return { removed };
+}
+
 module.exports = {
   DEFAULT_TTL_MS, nodeId, clusterDir, clusterEnabled,
   acquireLease, renewLease, releaseLease, whoHolds, canAct, listLeases, status,
-  claimOnce, pruneExpiredLeases
+  claimOnce, pruneExpiredLeases,
+  putShared, getShared, listShared, deleteShared, sweepShared
 };

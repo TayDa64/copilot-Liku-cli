@@ -150,6 +150,14 @@ function _powerBudgetW() {
   } catch { return undefined; }
 }
 
+/** TTL for the device lease renewed on execute (Phase 26). @private */
+function _deviceLeaseTtlMs() {
+  const v = Number(process.env.LIKU_PERIPHERAL_DEVICE_LEASE_TTL_MS);
+  if (Number.isFinite(v) && v > 0) return v;
+  const pv = Number(process.env.LIKU_PERIPHERAL_PAIR_LEASE_TTL_MS);
+  return Number.isFinite(pv) && pv > 0 ? pv : 300000; // default 5 min (matches pairing lease)
+}
+
 /**
  * Sum the CURRENT continuous draw (watts) of all registered devices except the
  * given id. Used for live cumulative power budgeting. @private
@@ -234,6 +242,14 @@ function recordPowerSample() {
       if (res && res.anomalies && res.anomalies.length) {
         for (const a of res.anomalies) _emit({ type: 'power-anomaly', anomaly: a, baselineW: res.baselineW, at: a.at });
       }
+      // Phase 26: publish a COMPACT anomaly summary to the cluster (best-effort)
+      // so other nodes can reason about a fleet-wide picture. Cluster off → no-op.
+      try {
+        clusterAnomaly().publish({
+          anomalies: (res && res.anomalies) || [],
+          devices: ps.devices, totalW: ps.currentW, budgetW: ps.budgetW
+        });
+      } catch { /* cluster publish is best-effort */ }
     } catch { /* anomaly detection is advisory + best-effort */ }
     // Phase 21: capture a lock-metrics snapshot so contention is observable over
     // time (best-effort, flag-gated, atomic). Pure observability.
@@ -261,6 +277,20 @@ function getLockTrends(opts = {}) {
   if (!isPeripheralsEnabled()) return { enabled: false };
   try { return { enabled: true, ...lockHistory().trends(opts) }; }
   catch { return { enabled: true, snapshots: 0, hotFiles: [] }; }
+}
+
+/** Phase 26 — per-file lock trends over the recorded window (observability). */
+function getLockFileTrends(opts = {}) {
+  if (!isPeripheralsEnabled()) return { enabled: false, files: [] };
+  try { return { enabled: true, ...lockHistory().fileTrends(opts) }; }
+  catch { return { enabled: true, snapshots: 0, files: [] }; }
+}
+
+/** Phase 26 — contention alerts for files exceeding acquire / rate thresholds. */
+function getLockAlerts(opts = {}) {
+  if (!isPeripheralsEnabled()) return { enabled: false, alerts: [] };
+  try { return { enabled: true, ...lockHistory().alerts(opts) }; }
+  catch { return { enabled: true, alerts: [] }; }
 }
 
 /** Cross-host coordination status (single-machine vs cluster). */
@@ -448,6 +478,20 @@ function rotateAllTokens() {
   catch (err) { return { enabled: true, ok: false, reason: err.message }; }
 }
 
+/** Phase 26 — rotate a single action's token generation (targeted revocation). */
+function rotateActionToken(id, action) {
+  if (!isPeripheralsEnabled()) return { enabled: false };
+  try { return { enabled: true, ...tokenStore().rotateAction(id, action) }; }
+  catch (err) { return { enabled: true, ok: false, reason: err.message }; }
+}
+
+/** Phase 26 — rotate a device's identity fingerprint (human-gated hygiene). */
+function rotateDeviceIdentity(id) {
+  if (!isPeripheralsEnabled()) return { enabled: false };
+  try { return { enabled: true, ...tokenStore().rotateIdentity(id) }; }
+  catch (err) { return { enabled: true, ok: false, reason: err.message }; }
+}
+
 /** Phase 23 — day-of-week seasonal forecast (advisory). */
 function getSeasonalForecast(opts = {}) {
   if (!isPeripheralsEnabled()) return { enabled: false, ok: false, horizon: [] };
@@ -486,9 +530,30 @@ function sweepCluster(opts = {}) {
   try {
     const tokens = tokenStore().sweepClusterTokens(opts);
     const leases = coordination().pruneExpiredLeases(opts.now);
-    return { enabled: true, tokens, leases };
+    // Phase 26: also GC stale shared advisor/action proposals + anomaly summaries.
+    let shared = { proposals: [], actions: [], anomalies: [] };
+    try {
+      const coord = coordination();
+      const ttl = Number(process.env.LIKU_PERIPHERAL_CLUSTER_PROPOSAL_TTL_MS) || 24 * 3600 * 1000;
+      shared = {
+        proposals: coord.sweepShared('proposals', ttl, opts.now).removed,
+        actions: coord.sweepShared('anomaly-actions', ttl, opts.now).removed,
+        anomalies: clusterAnomaly().sweep(opts.now).removed
+      };
+    } catch { /* best-effort */ }
+    return { enabled: true, tokens, leases, shared };
   } catch (err) { return { enabled: true, ok: false, reason: err.message }; }
 }
+
+function clusterAnomaly() { return require('./cluster-anomaly'); }
+
+/** Phase 26 — fleet-wide aggregated anomaly + power view (advisory). */
+function getClusterAnomalies(opts = {}) {
+  if (!isPeripheralsEnabled()) return { enabled: false, nodes: 0, anomalies: [] };
+  try { return { enabled: true, ...clusterAnomaly().aggregate(opts) }; }
+  catch { return { enabled: true, nodes: 0, anomalies: [] }; }
+}
+
 function scheduleAdvisor() { return require('./power-schedule-advisor'); }
 
 /** Advisory power-schedule suggestions from recurring anomalies (proposed only). */
@@ -763,6 +828,17 @@ function execute(id, action, params = {}) {
   const result = drv.perform(device, decision.normalized.action, decision.normalized.params);
   if (result.ok && result.state) registry().updateState(id, result.state);
 
+  // Phase 26: LEASE RENEWAL ON EXECUTE. A successful actuation on a REMOTE device
+  // renews (or claims) the `device:<id>` lease so ownership stays alive during
+  // active control — a device under continuous use never silently expires to
+  // another node. Single-machine / HIL → inert.
+  if (result.ok && drv && drv.REMOTE && !isHilEnabled()) {
+    try {
+      const coord = coordination();
+      if (coord.clusterEnabled()) coord.renewLease(`device:${id}`, { ttlMs: _deviceLeaseTtlMs() });
+    } catch { /* lease renewal is best-effort + non-fatal */ }
+  }
+
   // Class A one-shot: consume the authorization after a successful use so each
   // confirmation grants exactly one action (TTL is the time-based backstop).
   if (decision.klass === 'A' && result.ok && decision.authKey) {
@@ -910,14 +986,19 @@ module.exports = {
   issueActionToken,
   verifyDeviceToken,
   rotateAllTokens,
+  rotateActionToken,
+  rotateDeviceIdentity,
   getSeasonalForecast,
   getDeviceForecastWarnings,
   getMultiHourProposal,
   getSpecialDays,
   sweepCluster,
+  getClusterAnomalies,
   getLockHistory,
   recordLockSnapshot,
   getLockTrends,
+  getLockFileTrends,
+  getLockAlerts,
   getClusterLockMetrics,
   getCoordinationStatus,
   acquireDeviceLease,

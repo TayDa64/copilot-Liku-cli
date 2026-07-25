@@ -56,6 +56,12 @@ function identity(deviceId) {
   return crypto.createHmac('sha256', secret).update(`identity:${deviceId}`).digest('hex').slice(0, 16);
 }
 
+/** Phase 26 — SALTED identity fingerprint (for human-gated identity rotation). @private */
+function _saltedIdentity(deviceId, salt) {
+  const secret = process.env.LIKU_DCP_SECRET || 'liku-local-identity';
+  return crypto.createHmac('sha256', secret).update(`identity:${deviceId}:${salt}`).digest('hex').slice(0, 16);
+}
+
 function _load() {
   const empty = { schemaVersion: SCHEMA_VERSION, devices: {} };
   if (!enabled()) return empty;
@@ -93,6 +99,8 @@ function _rec(state, id) {
   if (r.prevGen == null) r.prevGen = 0;
   if (r.prevGenUntil == null) r.prevGenUntil = 0;
   if (r.rotateDueAt == null) r.rotateDueAt = 0;
+  // Phase 26: per-action generation map (default empty → action uses device gen).
+  if (r.actionGen == null || typeof r.actionGen !== 'object') r.actionGen = {};
   return r;
 }
 
@@ -336,9 +344,51 @@ function issueActionToken(deviceId, action, opts = {}) {
   }
   const token = dcp.issueCapabilityToken({
     deviceId, actions: [act], ttlSec: opts.ttlSec,
-    gen: r.gen > 0 ? r.gen : undefined, identity: r.identityFp
+    gen: r.gen > 0 ? r.gen : undefined, identity: r.identityFp,
+    actionGen: (r.actionGen && Number.isFinite(r.actionGen[act])) ? r.actionGen[act] : 1
   });
-  return { ok: true, token, action: act, gen: r.gen, deviceId };
+  return { ok: true, token, action: act, gen: r.gen, actionGen: (r.actionGen && r.actionGen[act]) || 1, deviceId };
+}
+
+/**
+ * Phase 26 — rotate a SINGLE action's generation (invalidates only that action's
+ * outstanding tokens; the device generation + other actions are untouched). A
+ * targeted, human-gated way to revoke one capability without unpairing.
+ * @param {string} deviceId
+ * @param {string} action
+ */
+function rotateAction(deviceId, action) {
+  if (!enabled()) return { ok: false, reason: 'disabled' };
+  const act = String(action || '').toLowerCase();
+  if (!act) return { ok: false, reason: 'no-action' };
+  const st = _load();
+  const r = _rec(st, deviceId);
+  const current = Number.isFinite(r.actionGen[act]) ? r.actionGen[act] : 1;
+  r.actionGen[act] = current + 1;
+  _save(st);
+  if (coordination.clusterEnabled()) _mirrorCluster(deviceId, r);
+  return { ok: true, deviceId, action: act, actionGen: r.actionGen[act] };
+}
+
+/**
+ * Phase 26 — rotate a device's IDENTITY fingerprint (new salt → new idfp), also
+ * bumping the generation so all outstanding tokens are invalidated. Human-gated
+ * security hygiene (e.g. suspected key exposure). Non-actuating.
+ * @param {string} deviceId
+ */
+function rotateIdentity(deviceId) {
+  if (!enabled()) return { ok: false, reason: 'disabled' };
+  const st = _load();
+  const r = _rec(st, deviceId);
+  r.identitySalt = crypto.randomBytes(8).toString('hex');
+  r.identityFp = _saltedIdentity(deviceId, r.identitySalt);
+  r.prevGen = r.gen;
+  r.prevGenUntil = Date.now() + _graceMs();
+  r.gen += 1;
+  r.rotatedAt = new Date().toISOString();
+  _save(st);
+  if (coordination.clusterEnabled()) _mirrorCluster(deviceId, r);
+  return { ok: true, deviceId, gen: r.gen, identityFp: r.identityFp };
 }
 
 /**
@@ -357,17 +407,22 @@ function verifyDeviceToken(deviceId, action, token, opts = {}) {
   if (!eff) return { ok: false, reason: 'no-token-state' };
   if (eff.revoked) return { ok: false, reason: 'revoked' };
   const now = Number.isFinite(opts.now) ? opts.now : Date.now();
+  // Phase 26: enforce the per-action generation (local record) when one is set.
+  const localRec = _load().devices[deviceId];
+  const act = String(action || '').toLowerCase();
+  const actionGen = (localRec && localRec.actionGen && Number.isFinite(localRec.actionGen[act])) ? localRec.actionGen[act] : undefined;
   const res = dcp.verifyCapabilityToken(token, {
     deviceId, action, now,
     gen: eff.gen > 0 ? eff.gen : undefined,
-    identity: eff.identityFp
+    identity: eff.identityFp,
+    actionGen
   });
   if (res.ok) return res;
   // Grace window: accept the previous generation if still within grace.
   if (res.reason === 'generation-mismatch' && res.payload
       && Number(res.payload.gen) === Number(eff.prevGen) && eff.prevGen > 0
       && now < Number(eff.prevGenUntil)) {
-    const graceRes = dcp.verifyCapabilityToken(token, { deviceId, action, now, gen: eff.prevGen, identity: eff.identityFp });
+    const graceRes = dcp.verifyCapabilityToken(token, { deviceId, action, now, gen: eff.prevGen, identity: eff.identityFp, actionGen });
     if (graceRes.ok) return { ok: true, grace: true, payload: graceRes.payload };
   }
   return res;
@@ -418,5 +473,6 @@ module.exports = {
   enabled, identity,
   onPair, rotate, rotateIfDue, revoke,
   isRevoked, isActive, isTokenValid, status, all, issueToken, clear,
-  grantedActions, issueActionToken, verifyDeviceToken, rotateAll, sweepClusterTokens
+  grantedActions, issueActionToken, verifyDeviceToken, rotateAll, sweepClusterTokens,
+  rotateAction, rotateIdentity
 };

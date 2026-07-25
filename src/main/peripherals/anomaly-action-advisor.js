@@ -69,6 +69,37 @@ function _escalationCooldownMs() {
   return Number.isFinite(v) && v >= 0 ? v : 3600000; // 1h default
 }
 
+// ── Phase 26: distributed action dedup (cluster-visible open proposals) ──
+// Before a node proposes an action/fleet-action, check whether ANOTHER node
+// already has a fresh open proposal for the same key; if so, skip. Mirror status
+// on create/confirm/dismiss so the fleet converges. Cluster off → inert.
+function _clusterActionTtlMs() {
+  const v = Number(process.env.LIKU_PERIPHERAL_CLUSTER_PROPOSAL_TTL_MS);
+  return Number.isFinite(v) && v > 0 ? v : _windowMs();
+}
+function _clusterHasOpenAction(key, now = Date.now()) {
+  try {
+    const coord = require('./coordination');
+    if (!coord.clusterEnabled()) return null;
+    const rec = coord.getShared('anomaly-actions', key);
+    if (rec && rec.status === 'proposed' && rec.nodeId !== coord.nodeId()) {
+      const updated = Number.isFinite(Date.parse(rec.updatedAt)) ? Date.parse(rec.updatedAt) : 0;
+      if ((now - updated) < _clusterActionTtlMs()) return rec;
+    }
+    return null;
+  } catch { return null; }
+}
+function _clusterMirrorAction(key, suggestion) {
+  try {
+    const coord = require('./coordination');
+    if (!coord.clusterEnabled()) return;
+    coord.putShared('anomaly-actions', key, {
+      id: suggestion.id, action: suggestion.action, scope: suggestion.scope || 'device',
+      status: suggestion.status, deviceId: suggestion.deviceId || null
+    });
+  } catch { /* best-effort */ }
+}
+
 function _rungIndex(action) {
   return ACTION_LADDER.findIndex((r) => r.action === action);
 }
@@ -236,6 +267,8 @@ function proposeActions(opts = {}, now = Date.now()) {
       const lastAt = Date.parse(existing.escalatedAt || existing.createdAt);
       if (Number.isFinite(lastAt) && (now - lastAt) < cooldownMs) { out.push(existing); continue; }
     }
+    // Phase 26: cluster dedup — another node already has an open action here.
+    if (!existing && _clusterHasOpenAction(deviceId, now)) continue;
     const suggestion = {
       id: `anom-act-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
       deviceId,
@@ -252,6 +285,7 @@ function proposeActions(opts = {}, now = Date.now()) {
       escalatedAt: new Date(now).toISOString()
     };
     st.proposed[deviceId] = suggestion;
+    _clusterMirrorAction(deviceId, suggestion);
     out.push(suggestion);
     changed = true;
   }
@@ -291,6 +325,8 @@ function proposeFleetAction(opts = {}, now = Date.now()) {
   const existing = st.proposed[key];
   if (existing && existing.status === 'proposed') return existing;
   if (existing && (existing.status === 'confirmed' || existing.status === 'dismissed')) return null;
+  // Phase 26: cluster dedup — another node already proposed a fleet rotate-all.
+  if (_clusterHasOpenAction(key, now)) return null;
   const suggestion = {
     id: `fleet-act-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
     deviceId: null,
@@ -309,6 +345,7 @@ function proposeFleetAction(opts = {}, now = Date.now()) {
   };
   st.proposed[key] = suggestion;
   _save(st);
+  _clusterMirrorAction(key, suggestion);
   return suggestion;
 }
 
@@ -328,6 +365,7 @@ function confirm(suggestionId) {
   entry.status = 'confirmed';
   entry.confirmedAt = new Date().toISOString();
   _save(st);
+  _clusterMirrorAction(key, entry); // Phase 26: propagate 'confirmed' to the fleet
   return { ok: true, action: entry.action, deviceId: entry.deviceId, directive: entry.directive };
 }
 
@@ -340,6 +378,7 @@ function dismiss(suggestionId) {
   st.proposed[key].status = 'dismissed';
   st.proposed[key].dismissedAt = new Date().toISOString();
   _save(st);
+  _clusterMirrorAction(key, st.proposed[key]); // Phase 26: propagate 'dismissed'
   return { ok: true };
 }
 
