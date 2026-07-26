@@ -107,6 +107,12 @@ function attachCronScheduler(orchestrator, options = {}) {
         try { orchestrator.emit('supervisor:cron-task', task); } catch { /* non-fatal */ }
         // Phase 27: make the cron task visible fleet-wide (compact, advisory).
         try { require('../peripherals/cluster-tasks').publishTask(task); } catch { /* non-fatal */ }
+        // Phase 29: this node CLAIMED the firing bucket above, so it owns the work.
+        // Optionally self-assign the task (opt-in, cluster-gated) so the assignment
+        // inbox reflects ownership and a peer can hand it off later if needed.
+        if (String(process.env.LIKU_PERIPHERAL_TASK_AUTO_ASSIGN || '') === '1') {
+          try { const ct = require('../peripherals/cluster-tasks'); ct.assignTask(task.id, coordination.nodeId()); } catch { /* non-fatal */ }
+        }
       }
     }
     return { created };

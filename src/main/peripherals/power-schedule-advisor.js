@@ -467,8 +467,13 @@ function proposeMultiHourSchedule(opts = {}, now = Date.now()) {
  * when a human confirms an anomaly→action `reduce-schedule` (the confirmation IS
  * the gate). The cap is derived from the device's forecast baseline peak (cap the
  * excess while allowing normal operation), falling back to an explicit maxW/budget.
+ *
+ * Phase 29 — optionally TIME-BOXED: pass `expiresAt` (ISO string or epoch ms) or a
+ * relative `ttlMs` to make the rule auto-retire. A time-boxed rule stops being
+ * applied fleet-wide once the wall clock passes its expiry (power-schedule.js
+ * filters it), and `sweepExpiredSchedules()` later GCs + tombstones it.
  * @param {string} deviceId
- * @param {{ maxW?:number, budgetW?:number, fromHour?:number, toHour?:number, now?:number }} [opts]
+ * @param {{ maxW?:number, budgetW?:number, fromHour?:number, toHour?:number, now?:number, expiresAt?:string|number, ttlMs?:number }} [opts]
  */
 function createConfirmedSchedule(deviceId, opts = {}) {
   if (!enabled()) return { ok: false, reason: 'disabled' };
@@ -486,8 +491,69 @@ function createConfirmedSchedule(deviceId, opts = {}) {
   }
   if (maxW == null && Number.isFinite(opts.budgetW) && opts.budgetW > 0) maxW = Math.round(opts.budgetW);
   if (maxW == null) return { ok: false, reason: 'no-cap-basis' };
-  _appendConfirmed({ id: deviceId, fromHour, toHour, maxW, source: 'anomaly-action-confirmed', confirmedAt: new Date().toISOString() });
-  return { ok: true, rule: { id: deviceId, fromHour, toHour, maxW } };
+  const rule = { id: deviceId, fromHour, toHour, maxW, source: 'anomaly-action-confirmed', confirmedAt: new Date().toISOString() };
+  const expiresAt = _resolveExpiry(opts, now);
+  if (expiresAt != null) rule.expiresAt = new Date(expiresAt).toISOString();
+  _appendConfirmed(rule);
+  return { ok: true, rule };
+}
+
+/**
+ * Phase 29 — resolve an optional expiry from opts (`expiresAt` absolute ISO/epoch,
+ * or `ttlMs` relative to `now`) into epoch ms, or null when none. @private
+ */
+function _resolveExpiry(opts, now) {
+  if (opts && opts.expiresAt != null) {
+    const t = typeof opts.expiresAt === 'number' ? opts.expiresAt : Date.parse(opts.expiresAt);
+    return Number.isFinite(t) ? t : null;
+  }
+  if (opts && Number.isFinite(opts.ttlMs) && opts.ttlMs > 0) return now + opts.ttlMs;
+  return null;
+}
+
+/**
+ * Phase 29 — GC pass for TIME-BOXED confirmed schedules. Any confirmed rule whose
+ * `expiresAt` has passed is removed locally AND (cluster mode) tombstoned fleet-wide
+ * via {@link removeConfirmedSchedule}, so the retirement propagates like an explicit
+ * remove. Note: an expired rule already STOPS being applied immediately via the
+ * loadSchedules() expiry filter — this sweeper is the durable cleanup + propagation.
+ * Single-machine → local removal only (byte-compatible). Best-effort / non-fatal.
+ * @param {{ now?:number }} [opts]
+ * @returns {{ ok:boolean, expired:string[] }}
+ */
+function sweepExpiredSchedules(opts = {}) {
+  if (!enabled()) return { ok: false, reason: 'disabled', expired: [] };
+  const now = Number.isFinite(opts.now) ? opts.now : Date.now();
+  const expired = [];
+  const _exp = (r) => {
+    if (r == null || r.expiresAt == null) return null;
+    const t = typeof r.expiresAt === 'number' ? r.expiresAt : Date.parse(r.expiresAt);
+    return Number.isFinite(t) ? t : null;
+  };
+  // Local confirmed rules.
+  for (const r of listConfirmedSchedules()) {
+    const t = _exp(r);
+    if (t != null && now >= t) {
+      const res = removeConfirmedSchedule(r.id, { fromHour: Number(r.fromHour), toHour: Number(r.toHour) });
+      if (res.ok) for (const k of res.removed) if (!expired.includes(k)) expired.push(k);
+    }
+  }
+  // Cluster-mirrored rules a peer confirmed (this node may never have held locally).
+  try {
+    const coord = require('./coordination');
+    if (coord.clusterEnabled()) {
+      for (const s of coord.listShared('schedules', {})) {
+        const t = _exp(s);
+        if (t != null && now >= t) {
+          const key = `${s.id}:${s.fromHour}:${s.toHour}`;
+          if (expired.includes(key)) continue;
+          const res = removeConfirmedSchedule(s.id, { fromHour: Number(s.fromHour), toHour: Number(s.toHour) });
+          if (res.ok) for (const k of res.removed) if (!expired.includes(k)) expired.push(k);
+        }
+      }
+    }
+  } catch { /* best-effort */ }
+  return { ok: true, expired };
 }
 
 /**
@@ -601,6 +667,6 @@ module.exports = {
   FLAG, SUGGEST_FILE,
   enabled, recordAnomaly, proposeSchedules, proposeMultiDeviceSchedule, proposeMultiHourSchedule,
   createConfirmedSchedule, createConfirmedMultiSchedule, createConfirmedMultiHourSchedule,
-  listConfirmedSchedules, removeConfirmedSchedule,
+  listConfirmedSchedules, removeConfirmedSchedule, sweepExpiredSchedules,
   listProposed, confirm, dismiss, clear
 };

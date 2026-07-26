@@ -46,8 +46,26 @@ function _normalizeRule(s) {
     days: _parseDays(s.days),
     sunriseHour: Number.isFinite(Number(s.sunriseHour)) ? _clampHour(s.sunriseHour, 6) : undefined,
     sunsetHour: Number.isFinite(Number(s.sunsetHour)) ? _clampHour(s.sunsetHour, 18) : undefined,
+    expiresAt: _parseExpiry(s.expiresAt),
     source: s.source || 'env'
   };
+}
+
+/**
+ * Phase 29 — parse an optional `expiresAt` (ISO string or epoch ms) into epoch ms,
+ * or undefined when absent/invalid. A rule with an expiry is TIME-BOXED: it stops
+ * being applied once the wall clock passes the expiry (see {@link _isExpired}). @private
+ */
+function _parseExpiry(v) {
+  if (v == null) return undefined;
+  if (typeof v === 'number') return Number.isFinite(v) ? v : undefined;
+  const t = Date.parse(v);
+  return Number.isFinite(t) ? t : undefined;
+}
+
+/** True when a time-boxed rule has passed its expiry at `nowMs`. @private */
+function _isExpired(rule, nowMs) {
+  return rule && rule.expiresAt != null && Number.isFinite(rule.expiresAt) && nowMs >= rule.expiresAt;
 }
 
 /** Parse env-declared schedules (LIKU_PERIPHERAL_SCHEDULES). @private */
@@ -128,15 +146,19 @@ function _dedupRules(rules) {
 
 /**
  * All active schedule rules = env-declared + human-confirmed (advisor) +
- * cluster-confirmed (peers), MINUS any tombstoned (fleet-removed) advisor rules.
- * Advisory suggestions are NEVER included until explicitly confirmed. Env rules
- * are operator-owned and NOT subject to advisor tombstones.
+ * cluster-confirmed (peers), MINUS any tombstoned (fleet-removed) advisor rules
+ * and MINUS any time-boxed advisor rule that has passed its `expiresAt`. Advisory
+ * suggestions are NEVER included until explicitly confirmed. Env rules are
+ * operator-owned and NOT subject to advisor tombstones/expiry.
+ * @param {number} [now] wall-clock epoch ms (for expiry evaluation)
  */
-function loadSchedules() {
+function loadSchedules(now = Date.now()) {
   if (!enabled()) return [];
+  const nowMs = now instanceof Date ? now.getTime() : (Number.isFinite(now) ? now : Date.now());
   const tombstones = _clusterTombstones();
   const advisorRules = _dedupRules([..._confirmedSchedules(), ..._clusterSchedules()])
-    .filter((r) => !tombstones.has(`${r.id}:${r.fromHour}:${r.toHour}`));
+    .filter((r) => !tombstones.has(`${r.id}:${r.fromHour}:${r.toHour}`))
+    .filter((r) => !_isExpired(r, nowMs)); // Phase 29: drop time-boxed rules past expiry
   return _dedupRules([..._envSchedules(), ...advisorRules]);
 }
 
@@ -205,7 +227,7 @@ function _inWindow(hour, fromHour, toHour) {
  */
 function deviceScheduleW(deviceId, now = new Date()) {
   if (!enabled()) return null;
-  const rules = loadSchedules().filter((s) => s.id === deviceId);
+  const rules = loadSchedules(now).filter((s) => s.id === deviceId);
   if (!rules.length) return null;
   const day = now.getDay();
   const applicable = rules.filter((r) => !r.days || r.days.includes(day));
@@ -246,7 +268,7 @@ function evaluate(deviceId, projectedDeviceLoadW, now = new Date()) {
 
 /** Describe configured schedules + their current (in-window) status (CLI). */
 function describe(now = new Date()) {
-  const rules = loadSchedules();
+  const rules = loadSchedules(now);
   const hour = now.getHours() + now.getMinutes() / 60;
   const day = now.getDay();
   return rules.map((r) => {
@@ -261,6 +283,7 @@ function describe(now = new Date()) {
       resolvedTo: to,
       maxW: r.maxW,
       days: r.days,
+      expiresAt: r.expiresAt != null ? new Date(r.expiresAt).toISOString() : undefined,
       active: governsToday && _inWindow(hour, from, to)
     };
   });

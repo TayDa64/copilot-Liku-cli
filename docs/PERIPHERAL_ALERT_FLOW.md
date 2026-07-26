@@ -1051,6 +1051,82 @@ NO execute/actuate surface — a task remains a human-gated proposal.
 - **single-machine-unchanged** — schedule removal is local-only and task claims are
   granted locally when `LIKU_CLUSTER_DIR` is unset; behaviour is byte-compatible.
 
+## Phase 29 — task assignment / handoff + auto-renew + schedule expiry
+
+### Distributed task inbox: assignment / handoff + auto-renew
+
+Phase 28 gave exactly-one-owner *claims*. Phase 29 adds explicit **assignment**
+(intent) and clean **handoff**, plus **auto-renew** for long-running work — all
+built on the same TTL-lease + shared-state primitives, all strictly advisory.
+
+- **Assignment** is a separate advisory INTENT record (`task-assignments` shared
+  kind) that says which node *should* take a task next. `assignTask(taskId, node)`
+  records it; `assignmentFor(taskId)` reads it; `myAssignments()` is the target
+  node's inbox. Assignment is never exclusive by itself — exclusivity still comes
+  from the claim (lease).
+- **Handoff** — `handoffTask(taskId, toNode)` is **owner-only**: it releases this
+  node's claim (so the target — or the open pool — can claim cleanly) and records
+  the new assignment. Pass a falsy `toNode` to release a task back to the OPEN pool
+  (assignment cleared, no owner). A non-owner attempt returns
+  `{ handedOff:false, reason:'not-owner', owner }`, so there is never double
+  ownership or a stuck task.
+- **Auto-renew** — `startAutoRenew(taskId, { ttlMs, intervalMs })` returns a handle:
+  `renewNow(now?)` renews the claim once (the **timer-free default** — call it from
+  a tick/consumer loop), and `stop()` clears any background interval. A background
+  interval is started only when a positive `intervalMs` is supplied (opt-in,
+  matching the cron-scheduler pattern) and is `unref`'d so it never keeps the
+  process alive. Because renewing requires a live process, a **crashed owner stops
+  renewing → the lease TTL expires → a peer steals the task (no permanent orphan)**.
+- PAL: `assignClusterTask()`, `handoffClusterTask()`, `getClusterTaskAssignment()`,
+  `getMyClusterAssignments()`, `renewClusterTaskClaim()`. CLI:
+  `coordination assign <task> <node>` / `handoff <task> [node]` / `renew <task>`.
+- **Integration** — the anomaly consumer and cron-scheduler optionally self-assign
+  the task they create (opt-in `LIKU_PERIPHERAL_TASK_AUTO_ASSIGN=1`, cluster-gated),
+  so the assignment inbox reflects which node is handling the work. Off by default →
+  existing behaviour byte-identical.
+
+### Confirmed-schedule expiry (time-boxed rules)
+
+Confirmed schedules may now be **time-boxed** with an `expiresAt` field (ISO string
+or epoch ms) or a relative `ttlMs`:
+
+- `createConfirmedSchedule(deviceId, { …, expiresAt | ttlMs })` stores the expiry on
+  the rule (and mirrors it to the shared `schedules` store in cluster mode).
+- `power-schedule.loadSchedules(now)` filters out any advisor rule whose `expiresAt`
+  has passed — so an expired rule **immediately stops being applied**, on the owning
+  node AND on peers (the expiry travels with the mirrored rule; **no tombstone is
+  required** for peers to stop honouring it — it is self-describing).
+- `sweepExpiredSchedules({ now })` is the durable GC pass: it removes expired rules
+  locally and (cluster mode) tombstones them fleet-wide via `removeConfirmedSchedule`,
+  exactly like an explicit remove. Wired into `PAL.sweepCluster()`.
+- Env rules remain operator-owned and are NOT auto-expired by the advisor.
+  Single-machine behaviour is unchanged when `LIKU_CLUSTER_DIR` is unset.
+- PAL: `createTimeBoxedSchedule()`, `sweepExpiredSchedules()`. CLI: `sweep-schedules`.
+
+### New environment variables (all default OFF / inert single-machine)
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `LIKU_PERIPHERAL_TASK_ASSIGN_TTL_MS` | `3600000` (1h) | Task-assignment record freshness / GC |
+| `LIKU_PERIPHERAL_TASK_RENEW_INTERVAL_MS` | `ttlMs / 2` | Default background auto-renew interval (opt-in) |
+| `LIKU_PERIPHERAL_TASK_AUTO_ASSIGN` | `0` (off) | Consumer/cron self-assign created tasks (cluster-gated) |
+
+Confirmed-schedule expiry uses an explicit `expiresAt` / `ttlMs` field on the rule
+itself — no new parallel expiry system.
+
+### Phase 29 safety invariants
+
+- **assignment-is-advisory** — assignment/handoff are pure coordination bookkeeping
+  and expose no execute/actuate surface; a task remains a human-gated proposal.
+- **clean-transfer-no-orphan** — handoff is owner-only and atomically releases +
+  reassigns, so there is never double ownership; auto-renew keeps a legitimate claim
+  alive, but a crashed node's claim still expires via TTL (no permanent orphan).
+- **expiry-retires-cleanly** — a time-boxed rule stops being applied fleet-wide once
+  it expires (self-describing on the mirrored rule) and is GC-able + tombstoned via
+  `sweepExpiredSchedules`; expiry adds no new actuation path.
+- **single-machine-unchanged** — assignment/handoff are inert local acks and schedule
+  expiry filtering is byte-compatible when `LIKU_CLUSTER_DIR` is unset.
+
 ## If a human decides to act
 
 Any physical response still travels the full PAL safety chain — the alert path

@@ -549,6 +549,9 @@ function sweepCluster(opts = {}) {
         shared.notifications = ts2.notifications;
         shared.schedules = coord.sweepShared('schedules', schedTtl, opts.now).removed;
         shared.tombstones = coord.sweepShared('schedule-tombstones', tombTtl, opts.now).removed;
+        shared.assignments = coord.sweepShared('task-assignments', Number(process.env.LIKU_PERIPHERAL_TASK_ASSIGN_TTL_MS) || 3600000, opts.now).removed;
+        // Phase 29: retire any time-boxed confirmed schedules that have expired.
+        try { shared.expiredSchedules = scheduleAdvisor().sweepExpiredSchedules({ now: opts.now }).expired; } catch { /* best-effort */ }
       } catch { /* best-effort */ }
     } catch { /* best-effort */ }
     return { enabled: true, tokens, leases, shared };
@@ -642,6 +645,57 @@ function getClusterTaskOwner(taskId) {
   if (!isPeripheralsEnabled()) return { enabled: false, owner: null };
   try { return { enabled: true, owner: clusterTasks().taskOwner(taskId) }; }
   catch { return { enabled: true, owner: null }; }
+}
+
+// ── Phase 29: task assignment / handoff / auto-renew + time-boxed schedules ──
+
+/** Phase 29 — assign a task to a specific node (advisory intent). */
+function assignClusterTask(taskId, assignee, opts = {}) {
+  if (!isPeripheralsEnabled()) return { enabled: false };
+  try { return { enabled: true, ...clusterTasks().assignTask(taskId, assignee, opts) }; }
+  catch (err) { return { enabled: true, assigned: false, reason: err.message }; }
+}
+
+/** Phase 29 — hand a task off to a peer (or release to the open pool with falsy node). */
+function handoffClusterTask(taskId, toNodeId, opts = {}) {
+  if (!isPeripheralsEnabled()) return { enabled: false };
+  try { return { enabled: true, ...clusterTasks().handoffTask(taskId, toNodeId, opts) }; }
+  catch (err) { return { enabled: true, handedOff: false, reason: err.message }; }
+}
+
+/** Phase 29 — the node a task is currently assigned to (or null). */
+function getClusterTaskAssignment(taskId) {
+  if (!isPeripheralsEnabled()) return { enabled: false, assignee: null };
+  try { return { enabled: true, assignee: clusterTasks().assignmentFor(taskId) }; }
+  catch { return { enabled: true, assignee: null }; }
+}
+
+/** Phase 29 — this node's assignment inbox (tasks assigned to it). */
+function getMyClusterAssignments(opts = {}) {
+  if (!isPeripheralsEnabled()) return { enabled: false, assignments: [] };
+  try { return { enabled: true, assignments: clusterTasks().myAssignments(opts) }; }
+  catch { return { enabled: true, assignments: [] }; }
+}
+
+/** Phase 29 — renew this node's claim (auto-renew tick; keeps a working claim alive). */
+function renewClusterTaskClaim(taskId, opts = {}) {
+  if (!isPeripheralsEnabled()) return { enabled: false };
+  try { return { enabled: true, ...clusterTasks().renewClaim(taskId, opts) }; }
+  catch (err) { return { enabled: true, claimed: false, reason: err.message }; }
+}
+
+/** Phase 29 — create a TIME-BOXED human-confirmed restrict-only schedule (expiresAt/ttlMs). */
+function createTimeBoxedSchedule(deviceId, opts = {}) {
+  if (!isPeripheralsEnabled()) return { enabled: false };
+  try { return { enabled: true, ...scheduleAdvisor().createConfirmedSchedule(deviceId, opts) }; }
+  catch (err) { return { enabled: true, ok: false, reason: err.message }; }
+}
+
+/** Phase 29 — GC pass for expired time-boxed schedules (removes + tombstones them). */
+function sweepExpiredSchedules(opts = {}) {
+  if (!isPeripheralsEnabled()) return { enabled: false, expired: [] };
+  try { return { enabled: true, ...scheduleAdvisor().sweepExpiredSchedules(opts) }; }
+  catch (err) { return { enabled: true, ok: false, reason: err.message, expired: [] }; }
 }
 
 function anomalyActionAdvisor() { return require('./anomaly-action-advisor'); }
@@ -1083,6 +1137,13 @@ module.exports = {
   claimClusterTask,
   releaseClusterTask,
   getClusterTaskOwner,
+  assignClusterTask,
+  handoffClusterTask,
+  getClusterTaskAssignment,
+  getMyClusterAssignments,
+  renewClusterTaskClaim,
+  createTimeBoxedSchedule,
+  sweepExpiredSchedules,
   getLockHistory,
   recordLockSnapshot,
   getLockTrends,

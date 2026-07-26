@@ -23,9 +23,11 @@
  *   liku peripherals anomaly-action [list|confirm <id>|dismiss <id>]
  *                                       Advisory anomaly→action suggestions (human-gated)
  *   liku peripherals schedules          Show per-device time-boxed power budgets
+ *   liku peripherals sweep-schedules    GC expired time-boxed confirmed schedules
  *   liku peripherals locks [--record]   Lock observability: metrics, per-file, trends
- *   liku peripherals coordination [status|lease <id>|release <id>|sweep|claim <task>|release-task <task>]
- *                                       Cross-host lease coordination (cluster mode)
+ *   liku peripherals coordination [status|lease <id>|release <id>|sweep|claim <task>|release-task <task>
+ *                                 |assign <task> <node>|handoff <task> [node]|renew <task>]
+ *                                       Cross-host lease + task coordination (cluster mode)
  *   liku peripherals cron [--at <ISO>]  Cron device schedules → advisory human-gated tasks
  *   liku peripherals cron [propose <dev> <act> "<cron>"|confirm <id>|dismiss <id>|rules|tick|remove <id>]
  *   liku peripherals pair <id>          Pair / commission a device (real when HIL off)
@@ -334,6 +336,15 @@ async function run(args, flags) {
       return { success: !!res.ok, ...res };
     }
 
+    case 'sweep-schedules': {
+      // Phase 29: GC time-boxed confirmed schedules that have passed their expiry.
+      const res = pal.sweepExpiredSchedules();
+      if (flags.json) return { success: !!res.ok, ...res };
+      if (res.ok) success(`Retired ${res.expired.length} expired schedule rule(s)${res.expired.length ? ` (${res.expired.join(', ')})` : ''}.`);
+      else error(`Could not sweep expired schedules: ${res.reason || 'unknown'}`);
+      return { success: !!res.ok, ...res };
+    }
+
     case 'anomalies': {
       // Phase 20: detected power anomalies with per-device ATTRIBUTION + the
       // advisory self-healing actions proposed for persistently anomalous devices.
@@ -577,6 +588,38 @@ async function run(args, flags) {
         else success(`Task ${id}: ${res.released ? 'released' : `not released (${res.reason})`}`);
         return { success: true, ...res };
       }
+      if (op === 'assign') {
+        // Phase 29: explicit task assignment (advisory intent).
+        const id = args[2];
+        const node = args[3];
+        if (!id || !node) { error('Usage: liku peripherals coordination assign <task-id> <node-id>'); return { success: false }; }
+        const res = pal.assignClusterTask(id, node);
+        if (flags.json) return { success: !!res.assigned, ...res };
+        if (res.assigned) success(`Task ${id} assigned to ${res.assignee}${res.local ? ' (single-machine/local)' : ''}.`);
+        else error(`Could not assign ${id}: ${res.reason || 'unknown'}`);
+        return { success: !!res.assigned, ...res };
+      }
+      if (op === 'handoff') {
+        // Phase 29: owner hands a task off to a peer (or the open pool when no node).
+        const id = args[2];
+        const node = args[3];
+        if (!id) { error('Usage: liku peripherals coordination handoff <task-id> [node-id]'); return { success: false }; }
+        const res = pal.handoffClusterTask(id, node);
+        if (flags.json) return { success: !!res.handedOff, ...res };
+        if (res.handedOff) success(`Task ${id} handed off to ${res.to || 'open pool'}${res.local ? ' (single-machine/local)' : ''}.`);
+        else error(`Could not hand off ${id}: ${res.reason || 'unknown'}${res.owner ? ` (owner ${res.owner})` : ''}`);
+        return { success: !!res.handedOff, ...res };
+      }
+      if (op === 'renew') {
+        // Phase 29: auto-renew tick — extend this node's claim while working.
+        const id = args[2];
+        if (!id) { error('Usage: liku peripherals coordination renew <task-id>'); return { success: false }; }
+        const res = pal.renewClusterTaskClaim(id);
+        if (flags.json) return { success: !!res.claimed, ...res };
+        if (res.claimed) success(`Claim for ${id} renewed${res.local ? ' (single-machine/local)' : ''}.`);
+        else error(`Could not renew ${id}${res.owner ? ` (owned by ${res.owner})` : ''}`);
+        return { success: !!res.claimed, ...res };
+      }
       if (op === 'sweep') {
         // Phase 25: best-effort cluster GC — expire stale token records + prune leases.
         const res = pal.sweepCluster();
@@ -788,7 +831,7 @@ async function run(args, flags) {
 
     default:
       error(`Unknown subcommand: ${sub}`);
-      log('Usage: liku peripherals [scan|list|status [id]|power [--history|--trend|--anomalies|--forecast [--seasonal] [--exclude-anomalous] [--special-days]]|anomalies [--attributed]|anomaly-action [confirm|dismiss <id>|policy [set <device> reduce=N rotate=N unpair=N]]|schedules|locks [--record]|coordination [lease|release <id>|sweep|claim|release-task <task>]|cron [propose|confirm|dismiss|rules|tick|remove]|suggestions|apply-schedule <id>|remove-schedule <device> [--from N] [--to N]|pair <id>|unpair <id>|token [rotate|revoke|rotate-all|action <id> <action>|action-rotate <id> <action>|identity-rotate <id>]|tasks [--escalated|--pending|--severity <p>|--anomaly]|notifications|channels|simulate <id> <k=v>|execute <id> <action>|confirm <id> <action> [--execute]|drivers]');
+      log('Usage: liku peripherals [scan|list|status [id]|power [--history|--trend|--anomalies|--forecast [--seasonal] [--exclude-anomalous] [--special-days]]|anomalies [--attributed]|anomaly-action [confirm|dismiss <id>|policy [set <device> reduce=N rotate=N unpair=N]]|schedules|sweep-schedules|locks [--record]|coordination [lease|release <id>|sweep|claim|release-task <task>|assign <task> <node>|handoff <task> [node]|renew <task>]|cron [propose|confirm|dismiss|rules|tick|remove]|suggestions|apply-schedule <id>|remove-schedule <device> [--from N] [--to N]|pair <id>|unpair <id>|token [rotate|revoke|rotate-all|action <id> <action>|action-rotate <id> <action>|identity-rotate <id>]|tasks [--escalated|--pending|--severity <p>|--anomaly]|notifications|channels|simulate <id> <k=v>|execute <id> <action>|confirm <id> <action> [--execute]|drivers]');
       return { success: false };
   }
 }

@@ -4382,6 +4382,262 @@ test('task claim renewal extends ownership past the original TTL', () => {
   delete process.env.LIKU_ENABLE_PERIPHERALS;
 });
 
+// ── Phase 29: distributed task assignment/handoff + auto-renew + schedule expiry ──
+
+test('task assignment records intent + the target node sees it in its inbox', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const clusterDir = require('path').join(TMP_HOME, 'p29assign');
+  process.env.LIKU_CLUSTER_DIR = clusterDir;
+  const clusterTasks = require('../src/main/peripherals/cluster-tasks');
+  process.env.LIKU_NODE_ID = 'nodeA';
+  clusterTasks.publishTask({ id: 'ct-asg', dedupeKey: 'heater:power:spike', device: { id: 'heater' }, priority: 'high', status: 'pending-review' });
+  const a = clusterTasks.assignTask('ct-asg', 'nodeB');
+  assert.strictEqual(a.assigned, true, 'assignment recorded');
+  assert.strictEqual(clusterTasks.assignmentFor('ct-asg'), 'nodeB', 'assignee readable');
+  // nodeB sees the assignment in its inbox; nodeA does not.
+  process.env.LIKU_NODE_ID = 'nodeB';
+  assert.ok(clusterTasks.myAssignments().some((r) => r.taskId === 'ct-asg'), 'target node inbox includes the task');
+  process.env.LIKU_NODE_ID = 'nodeA';
+  assert.ok(!clusterTasks.myAssignments().some((r) => r.taskId === 'ct-asg'), 'assigner inbox excludes it');
+  delete process.env.LIKU_NODE_ID;
+  delete process.env.LIKU_CLUSTER_DIR;
+  try { fs.rmSync(clusterDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('task handoff transfers ownership cleanly (owner releases, target claims)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const clusterDir = require('path').join(TMP_HOME, 'p29handoff');
+  process.env.LIKU_CLUSTER_DIR = clusterDir;
+  const clusterTasks = require('../src/main/peripherals/cluster-tasks');
+  process.env.LIKU_NODE_ID = 'nodeA';
+  clusterTasks.publishTask({ id: 'ct-ho', dedupeKey: 'oven:power:sustained', device: { id: 'oven' }, priority: 'high', status: 'pending-review' });
+  assert.strictEqual(clusterTasks.claimTask('ct-ho', { ttlMs: 60000 }).claimed, true, 'nodeA owns it');
+  const h = clusterTasks.handoffTask('ct-ho', 'nodeB');
+  assert.strictEqual(h.handedOff, true, 'handoff succeeds');
+  assert.strictEqual(h.released, true, 'owner lease released on handoff');
+  assert.strictEqual(clusterTasks.assignmentFor('ct-ho'), 'nodeB', 'reassigned to nodeB');
+  assert.strictEqual(clusterTasks.taskOwner('ct-ho'), null, 'no owner until re-claimed');
+  // nodeB now claims it cleanly (no double ownership).
+  process.env.LIKU_NODE_ID = 'nodeB';
+  assert.strictEqual(clusterTasks.claimTask('ct-ho', { ttlMs: 60000 }).claimed, true, 'target claims the handed-off task');
+  assert.strictEqual(clusterTasks.taskOwner('ct-ho'), 'nodeB', 'ownership transferred');
+  delete process.env.LIKU_NODE_ID;
+  delete process.env.LIKU_CLUSTER_DIR;
+  try { fs.rmSync(clusterDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('task handoff is owner-only (a non-owner cannot hand off)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const clusterDir = require('path').join(TMP_HOME, 'p29owneronly');
+  process.env.LIKU_CLUSTER_DIR = clusterDir;
+  const clusterTasks = require('../src/main/peripherals/cluster-tasks');
+  process.env.LIKU_NODE_ID = 'nodeA';
+  clusterTasks.publishTask({ id: 'ct-own', device: { id: 'fan' }, status: 'pending-review' });
+  assert.strictEqual(clusterTasks.claimTask('ct-own', { ttlMs: 60000 }).claimed, true);
+  // nodeB tries to hand off a task it does NOT own → refused.
+  process.env.LIKU_NODE_ID = 'nodeB';
+  const h = clusterTasks.handoffTask('ct-own', 'nodeC');
+  assert.strictEqual(h.handedOff, false, 'non-owner cannot hand off');
+  assert.strictEqual(h.reason, 'not-owner');
+  assert.strictEqual(h.owner, 'nodeA', 'true owner reported');
+  assert.strictEqual(clusterTasks.taskOwner('ct-own'), 'nodeA', 'ownership unchanged');
+  delete process.env.LIKU_NODE_ID;
+  delete process.env.LIKU_CLUSTER_DIR;
+  try { fs.rmSync(clusterDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('task handoff to the open pool releases the claim + clears assignment (re-claimable)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const clusterDir = require('path').join(TMP_HOME, 'p29pool');
+  process.env.LIKU_CLUSTER_DIR = clusterDir;
+  const clusterTasks = require('../src/main/peripherals/cluster-tasks');
+  process.env.LIKU_NODE_ID = 'nodeA';
+  clusterTasks.publishTask({ id: 'ct-pool', device: { id: 'pump' }, status: 'pending-review' });
+  clusterTasks.assignTask('ct-pool', 'nodeA');
+  assert.strictEqual(clusterTasks.claimTask('ct-pool', { ttlMs: 60000 }).claimed, true);
+  const h = clusterTasks.handoffTask('ct-pool', null); // release to open pool
+  assert.strictEqual(h.handedOff, true);
+  assert.strictEqual(h.to, null, 'no specific assignee');
+  assert.strictEqual(clusterTasks.assignmentFor('ct-pool'), null, 'assignment cleared');
+  assert.strictEqual(clusterTasks.taskOwner('ct-pool'), null, 'no owner (open pool)');
+  process.env.LIKU_NODE_ID = 'nodeB';
+  assert.strictEqual(clusterTasks.claimTask('ct-pool', { ttlMs: 60000 }).claimed, true, 'any node may claim a pooled task');
+  delete process.env.LIKU_NODE_ID;
+  delete process.env.LIKU_CLUSTER_DIR;
+  try { fs.rmSync(clusterDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('auto-renew keeps a legitimate claim alive past the original TTL', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const clusterDir = require('path').join(TMP_HOME, 'p29autorenew');
+  process.env.LIKU_CLUSTER_DIR = clusterDir;
+  process.env.LIKU_NODE_ID = 'worker';
+  const coordination = require('../src/main/peripherals/coordination');
+  const clusterTasks = require('../src/main/peripherals/cluster-tasks');
+  assert.strictEqual(clusterTasks.claimTask('long-task', { ttlMs: 1000, now: 5000 }).claimed, true);
+  // A working loop calls renewNow() before the TTL elapses.
+  const handle = clusterTasks.startAutoRenew('long-task', { ttlMs: 10000 });
+  assert.strictEqual(handle.renewNow(5900).claimed, true, 'renewNow extends the claim');
+  handle.stop();
+  // Past the ORIGINAL 1000ms TTL (expired at 6000), still owned thanks to renewal.
+  assert.strictEqual(coordination.whoHolds('task:long-task', 6500).nodeId, 'worker', 'claim alive past original TTL');
+  delete process.env.LIKU_NODE_ID;
+  delete process.env.LIKU_CLUSTER_DIR;
+  try { fs.rmSync(clusterDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('a crashed owner stops renewing → the claim TTL expires → a peer steals it (no orphan)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const clusterDir = require('path').join(TMP_HOME, 'p29crash');
+  process.env.LIKU_CLUSTER_DIR = clusterDir;
+  const coordination = require('../src/main/peripherals/coordination');
+  const clusterTasks = require('../src/main/peripherals/cluster-tasks');
+  process.env.LIKU_NODE_ID = 'crashy';
+  assert.strictEqual(clusterTasks.claimTask('orphan-task', { ttlMs: 1000, now: 5000 }).claimed, true);
+  // "crashy" dies (no more renewNow). After its TTL, the lease is free.
+  assert.strictEqual(coordination.whoHolds('task:orphan-task', 7000), null, 'expired claim is free (no permanent orphan)');
+  process.env.LIKU_NODE_ID = 'rescuer';
+  assert.strictEqual(clusterTasks.claimTask('orphan-task', { ttlMs: 1000, now: 7000 }).claimed, true, 'a peer steals the expired claim');
+  assert.strictEqual(coordination.whoHolds('task:orphan-task', 7500).nodeId, 'rescuer', 'peer now owns it');
+  delete process.env.LIKU_NODE_ID;
+  delete process.env.LIKU_CLUSTER_DIR;
+  try { fs.rmSync(clusterDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('assignment / handoff are inert single-machine + never an actuation path', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_CLUSTER_DIR;
+  const clusterTasks = require('../src/main/peripherals/cluster-tasks');
+  assert.strictEqual(clusterTasks.assignTask('t', 'n').local, true, 'assign is a local ack single-machine');
+  assert.strictEqual(clusterTasks.assignmentFor('t'), null, 'no cluster assignment single-machine');
+  assert.deepStrictEqual(clusterTasks.myAssignments(), [], 'empty inbox single-machine');
+  assert.strictEqual(clusterTasks.handoffTask('t', 'n').local, true, 'handoff is a local ack single-machine');
+  // No execute / actuate surface exists on the assignment layer.
+  assert.strictEqual(typeof clusterTasks.execute, 'undefined');
+  assert.strictEqual(typeof clusterTasks.perform, 'undefined');
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('a time-boxed confirmed schedule stops being applied after expiry (single-machine)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_CLUSTER_DIR;
+  const schedule = require('../src/main/peripherals/power-schedule');
+  const advisor = require('../src/main/peripherals/power-schedule-advisor');
+  advisor.clear();
+  try { fs.rmSync(schedule.CONFIRMED_FILE); } catch { /* ignore */ }
+  const base = new Date(2026, 6, 26, 12, 0, 0).getTime();
+  advisor.createConfirmedSchedule('boxdev', { maxW: 150, fromHour: 0, toHour: 24, expiresAt: new Date(base + 10000).toISOString() });
+  assert.strictEqual(schedule.deviceScheduleW('boxdev', new Date(base)), 150, 'applied before expiry');
+  assert.strictEqual(schedule.deviceScheduleW('boxdev', new Date(base + 20000)), null, 'retired after expiry');
+  advisor.clear();
+  try { fs.rmSync(schedule.CONFIRMED_FILE); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('a ttlMs-relative time-boxed schedule expires', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_CLUSTER_DIR;
+  const schedule = require('../src/main/peripherals/power-schedule');
+  const advisor = require('../src/main/peripherals/power-schedule-advisor');
+  advisor.clear();
+  try { fs.rmSync(schedule.CONFIRMED_FILE); } catch { /* ignore */ }
+  const base = new Date(2026, 6, 26, 9, 0, 0).getTime();
+  advisor.createConfirmedSchedule('ttldev', { maxW: 100, fromHour: 0, toHour: 24, ttlMs: 10000, now: base });
+  assert.strictEqual(schedule.deviceScheduleW('ttldev', new Date(base + 5000)), 100, 'applied within ttl');
+  assert.strictEqual(schedule.deviceScheduleW('ttldev', new Date(base + 15000)), null, 'retired after ttl');
+  advisor.clear();
+  try { fs.rmSync(schedule.CONFIRMED_FILE); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('schedule expiry propagates fleet-wide (a peer stops applying the mirrored expired rule)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const clusterDir = require('path').join(TMP_HOME, 'p29fleetexp');
+  process.env.LIKU_CLUSTER_DIR = clusterDir;
+  const schedule = require('../src/main/peripherals/power-schedule');
+  const advisor = require('../src/main/peripherals/power-schedule-advisor');
+  advisor.clear();
+  try { fs.rmSync(schedule.CONFIRMED_FILE); } catch { /* ignore */ }
+  const base = new Date(2026, 6, 26, 15, 0, 0).getTime();
+  process.env.LIKU_NODE_ID = 'nodeA';
+  advisor.createConfirmedSchedule('fleetbox', { maxW: 200, fromHour: 0, toHour: 24, expiresAt: new Date(base + 10000).toISOString() });
+  // Simulate a peer that only sees the shared mirror (no local confirmed file).
+  process.env.LIKU_NODE_ID = 'nodeB';
+  try { fs.rmSync(schedule.CONFIRMED_FILE); } catch { /* ignore */ }
+  assert.strictEqual(schedule.deviceScheduleW('fleetbox', new Date(base)), 200, 'peer applies mirrored rule before expiry');
+  assert.strictEqual(schedule.deviceScheduleW('fleetbox', new Date(base + 20000)), null, 'peer stops applying it after expiry (self-describing, no tombstone needed)');
+  advisor.clear();
+  try { fs.rmSync(schedule.CONFIRMED_FILE); } catch { /* ignore */ }
+  delete process.env.LIKU_NODE_ID;
+  delete process.env.LIKU_CLUSTER_DIR;
+  try { fs.rmSync(clusterDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('sweepExpiredSchedules retires + tombstones expired rules (GC-able)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const clusterDir = require('path').join(TMP_HOME, 'p29sweepexp');
+  process.env.LIKU_CLUSTER_DIR = clusterDir;
+  process.env.LIKU_NODE_ID = 'sweeper';
+  const coordination = require('../src/main/peripherals/coordination');
+  const schedule = require('../src/main/peripherals/power-schedule');
+  const advisor = require('../src/main/peripherals/power-schedule-advisor');
+  advisor.clear();
+  try { fs.rmSync(schedule.CONFIRMED_FILE); } catch { /* ignore */ }
+  const base = new Date(2026, 6, 26, 8, 0, 0).getTime();
+  advisor.createConfirmedSchedule('sweepbox', { maxW: 120, fromHour: 0, toHour: 24, expiresAt: new Date(base + 10000).toISOString() });
+  const sw = advisor.sweepExpiredSchedules({ now: base + 20000 });
+  assert.strictEqual(sw.ok, true);
+  assert.ok(sw.expired.includes('sweepbox:0:24'), 'expired rule reported');
+  assert.ok(!advisor.listConfirmedSchedules().some((r) => r.id === 'sweepbox'), 'local rule GC-ed');
+  assert.ok(coordination.getShared('schedule-tombstones', 'sweepbox:0:24'), 'tombstone written fleet-wide');
+  advisor.clear();
+  try { fs.rmSync(schedule.CONFIRMED_FILE); } catch { /* ignore */ }
+  delete process.env.LIKU_NODE_ID;
+  delete process.env.LIKU_CLUSTER_DIR;
+  try { fs.rmSync(clusterDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('PAL exposes Phase 29 assignment / handoff / renew / time-box / sweep accessors', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const clusterDir = require('path').join(TMP_HOME, 'p29pal');
+  process.env.LIKU_CLUSTER_DIR = clusterDir;
+  process.env.LIKU_NODE_ID = 'palN';
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  const schedule = require('../src/main/peripherals/power-schedule');
+  const advisor = require('../src/main/peripherals/power-schedule-advisor');
+  advisor.clear();
+  try { fs.rmSync(schedule.CONFIRMED_FILE); } catch { /* ignore */ }
+  const base = new Date(2026, 6, 26, 10, 0, 0).getTime();
+  // Time-boxed schedule via PAL.
+  assert.strictEqual(pal.createTimeBoxedSchedule('palbox', { maxW: 90, fromHour: 0, toHour: 24, ttlMs: 10000, now: base }).ok, true);
+  // Assignment + inbox.
+  assert.strictEqual(pal.assignClusterTask('palt', 'peerX').assigned, true);
+  assert.strictEqual(pal.getClusterTaskAssignment('palt').assignee, 'peerX');
+  // Claim + auto-renew tick.
+  assert.strictEqual(pal.claimClusterTask('palt2').claimed, true);
+  assert.strictEqual(pal.renewClusterTaskClaim('palt2').claimed, true, 'auto-renew tick keeps the claim');
+  // Handoff of an owned task to the pool.
+  assert.strictEqual(pal.handoffClusterTask('palt2', null).handedOff, true);
+  // GC the expired time-boxed schedule.
+  const sw = pal.sweepExpiredSchedules({ now: base + 20000 });
+  assert.strictEqual(sw.ok, true);
+  assert.ok(sw.expired.includes('palbox:0:24'), 'PAL sweep retires the expired rule');
+  advisor.clear();
+  try { fs.rmSync(schedule.CONFIRMED_FILE); } catch { /* ignore */ }
+  delete process.env.LIKU_NODE_ID;
+  delete process.env.LIKU_CLUSTER_DIR;
+  try { fs.rmSync(clusterDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
 console.log(`\n${pass} checks passed.`);
 if (process.exitCode) { console.error('FAILED'); }
 else { console.log('OK'); }

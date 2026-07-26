@@ -167,6 +167,11 @@ function attachPowerAnomalyConsumer(orchestrator, options = {}) {
           try { orchestrator.emit('supervisor:task', task); } catch { /* non-fatal */ }
           // Phase 27: make the task visible fleet-wide (compact, advisory).
           try { require('../peripherals/cluster-tasks').publishTask(task); } catch { /* non-fatal */ }
+          // Phase 29: optionally self-assign (opt-in, cluster-gated) so the
+          // assignment inbox reflects which node is handling this anomaly task.
+          if (String(process.env.LIKU_PERIPHERAL_TASK_AUTO_ASSIGN || '') === '1') {
+            try { const ct = require('../peripherals/cluster-tasks'); ct.assignTask(task.id, require('../peripherals/coordination').nodeId()); } catch { /* non-fatal */ }
+          }
         }
       }
 
