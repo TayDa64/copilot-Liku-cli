@@ -292,6 +292,65 @@ function _appendConfirmed(rule) {
   } catch { /* best-effort */ }
 }
 
+/** Read the local confirmed schedule rules (corruption-tolerant). */
+function listConfirmedSchedules() {
+  try {
+    if (!fs.existsSync(CONFIRMED_FILE)) return [];
+    const raw = JSON.parse(fs.readFileSync(CONFIRMED_FILE, 'utf-8'));
+    return Array.isArray(raw && raw.schedules) ? raw.schedules : [];
+  } catch { return []; }
+}
+
+/**
+ * Phase 28 — REMOVE a confirmed schedule and TOMBSTONE it fleet-wide so peers
+ * stop respecting it (completing the create → confirm → remove lifecycle). Removes
+ * matching rules from the local confirmed store; in cluster mode it deletes the
+ * shared active rule AND writes a tombstone (`schedule-tombstones`) so a node that
+ * still has the rule locally also drops it. Matching: by deviceId, optionally
+ * narrowed to a specific fromHour/toHour window. Single-machine → local removal
+ * only (byte-compatible; no tombstone written).
+ * @param {string} deviceId
+ * @param {{ fromHour?:number, toHour?:number }} [opts]
+ * @returns {{ ok:boolean, removed:string[] }}
+ */
+function removeConfirmedSchedule(deviceId, opts = {}) {
+  if (!enabled()) return { ok: false, reason: 'disabled' };
+  if (!deviceId) return { ok: false, reason: 'no-device' };
+  const match = (r) => String(r.id) === String(deviceId)
+    && (!Number.isFinite(opts.fromHour) || Number(r.fromHour) === opts.fromHour)
+    && (!Number.isFinite(opts.toHour) || Number(r.toHour) === opts.toHour);
+  const all = listConfirmedSchedules();
+  const removed = all.filter(match);
+  const kept = all.filter((r) => !match(r));
+  // Rewrite the local confirmed store without the removed rules.
+  try {
+    if (!fs.existsSync(LIKU_HOME)) fs.mkdirSync(LIKU_HOME, { recursive: true, mode: 0o700 });
+    atomicWriteFileSync(CONFIRMED_FILE, JSON.stringify({ updatedAt: new Date().toISOString(), schedules: kept }, null, 2), { mode: 0o600 });
+  } catch { /* best-effort */ }
+  const keys = removed.map((r) => `${r.id}:${r.fromHour}:${r.toHour}`);
+  // Cluster mode: also tombstone the shared rule(s) — including peer-confirmed
+  // rules this node never held locally — so the removal propagates fleet-wide.
+  try {
+    const coord = require('./coordination');
+    if (coord.clusterEnabled()) {
+      const active = coord.listShared('schedules', {})
+        .filter((s) => s && String(s.id) === String(deviceId)
+          && (!Number.isFinite(opts.fromHour) || Number(s.fromHour) === opts.fromHour)
+          && (!Number.isFinite(opts.toHour) || Number(s.toHour) === opts.toHour));
+      for (const s of active) { const k = `${s.id}:${s.fromHour}:${s.toHour}`; if (!keys.includes(k)) keys.push(k); }
+      if (!keys.length && Number.isFinite(opts.fromHour) && Number.isFinite(opts.toHour)) {
+        keys.push(`${deviceId}:${opts.fromHour}:${opts.toHour}`);
+      }
+      for (const k of keys) {
+        const [id, fh, th] = k.split(':');
+        coord.deleteShared('schedules', k);
+        coord.putShared('schedule-tombstones', k, { id, fromHour: Number(fh), toHour: Number(th), tombstonedAt: new Date().toISOString() });
+      }
+    }
+  } catch { /* best-effort */ }
+  return { ok: true, removed: keys };
+}
+
 /**
  * EXPLICIT human confirmation: activate a proposed schedule. Writes it to the
  * confirmed schedule store (which power-schedule.js enforces). Nothing is applied
@@ -542,5 +601,6 @@ module.exports = {
   FLAG, SUGGEST_FILE,
   enabled, recordAnomaly, proposeSchedules, proposeMultiDeviceSchedule, proposeMultiHourSchedule,
   createConfirmedSchedule, createConfirmedMultiSchedule, createConfirmedMultiHourSchedule,
+  listConfirmedSchedules, removeConfirmedSchedule,
   listProposed, confirm, dismiss, clear
 };

@@ -4143,6 +4143,245 @@ test('PAL sweepCluster GCs stale shared schedules + tasks + notifications', () =
   delete process.env.LIKU_ENABLE_PERIPHERALS;
 });
 
+// ── Phase 28: confirmed-schedule tombstones + distributed task ownership ──
+
+test('confirmed-schedule removal tombstones it fleet-wide (peers stop respecting it)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const clusterDir = require('path').join(TMP_HOME, 'p28tomb');
+  process.env.LIKU_CLUSTER_DIR = clusterDir;
+  const coordination = require('../src/main/peripherals/coordination');
+  const schedule = require('../src/main/peripherals/power-schedule');
+  const advisor = require('../src/main/peripherals/power-schedule-advisor');
+  advisor.clear();
+  try { fs.rmSync(schedule.CONFIRMED_FILE); } catch { /* ignore */ }
+  // Node A confirms a schedule → mirrored + respected.
+  process.env.LIKU_NODE_ID = 'nodeA';
+  advisor.createConfirmedSchedule('heater', { maxW: 150, fromHour: 20, toHour: 21 });
+  assert.strictEqual(schedule.deviceScheduleW('heater', new Date(2026, 6, 20, 20, 30, 0)), 150, 'schedule active before removal');
+  // Node A removes it → tombstone written, active mirror deleted.
+  const rem = advisor.removeConfirmedSchedule('heater', { fromHour: 20, toHour: 21 });
+  assert.strictEqual(rem.ok, true);
+  assert.ok(rem.removed.includes('heater:20:21'), 'the rule key was tombstoned');
+  assert.ok(coordination.getShared('schedule-tombstones', 'heater:20:21'), 'tombstone visible fleet-wide');
+  assert.strictEqual(coordination.getShared('schedules', 'heater:20:21'), null, 'active mirror deleted');
+  // Node A no longer applies it.
+  assert.strictEqual(schedule.deviceScheduleW('heater', new Date(2026, 6, 20, 20, 30, 0)), null, 'removed schedule no longer applied on nodeA');
+  // Node B (which would only see the shared store) also stops respecting it.
+  process.env.LIKU_NODE_ID = 'nodeB';
+  try { fs.rmSync(schedule.CONFIRMED_FILE); } catch { /* ignore */ }
+  assert.strictEqual(schedule.deviceScheduleW('heater', new Date(2026, 6, 20, 20, 30, 0)), null, 'peer respects the tombstone');
+  advisor.clear();
+  try { fs.rmSync(schedule.CONFIRMED_FILE); } catch { /* ignore */ }
+  delete process.env.LIKU_NODE_ID;
+  delete process.env.LIKU_CLUSTER_DIR;
+  try { fs.rmSync(clusterDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('a node can tombstone a peer-confirmed schedule it never held locally', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const clusterDir = require('path').join(TMP_HOME, 'p28peertomb');
+  process.env.LIKU_CLUSTER_DIR = clusterDir;
+  const coordination = require('../src/main/peripherals/coordination');
+  const schedule = require('../src/main/peripherals/power-schedule');
+  const advisor = require('../src/main/peripherals/power-schedule-advisor');
+  advisor.clear();
+  try { fs.rmSync(schedule.CONFIRMED_FILE); } catch { /* ignore */ }
+  // A peer confirmed a schedule (only the shared mirror exists here).
+  coordination.putShared('schedules', 'oven:18:19', { id: 'oven', fromHour: 18, toHour: 19, maxW: 200 });
+  assert.strictEqual(schedule.deviceScheduleW('oven', new Date(2026, 6, 20, 18, 30, 0)), 200, 'peer schedule respected');
+  // This node removes by deviceId (no local copy) → tombstones the cluster rule.
+  process.env.LIKU_NODE_ID = 'remover';
+  const rem = advisor.removeConfirmedSchedule('oven');
+  assert.ok(rem.ok && rem.removed.includes('oven:18:19'), 'peer rule tombstoned by deviceId');
+  assert.strictEqual(schedule.deviceScheduleW('oven', new Date(2026, 6, 20, 18, 30, 0)), null, 'peer rule no longer applied');
+  advisor.clear();
+  try { fs.rmSync(schedule.CONFIRMED_FILE); } catch { /* ignore */ }
+  delete process.env.LIKU_NODE_ID;
+  delete process.env.LIKU_CLUSTER_DIR;
+  try { fs.rmSync(clusterDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('schedule removal is local-only + byte-compatible when cluster is off', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_CLUSTER_DIR;
+  const schedule = require('../src/main/peripherals/power-schedule');
+  const advisor = require('../src/main/peripherals/power-schedule-advisor');
+  advisor.clear();
+  try { fs.rmSync(schedule.CONFIRMED_FILE); } catch { /* ignore */ }
+  advisor.createConfirmedSchedule('lamp', { maxW: 100, fromHour: 10, toHour: 12 });
+  assert.strictEqual(schedule.deviceScheduleW('lamp', new Date(2026, 6, 20, 10, 30, 0)), 100);
+  const rem = advisor.removeConfirmedSchedule('lamp', { fromHour: 10, toHour: 12 });
+  assert.strictEqual(rem.ok, true);
+  assert.strictEqual(schedule.deviceScheduleW('lamp', new Date(2026, 6, 20, 10, 30, 0)), null, 'removed locally with no cluster');
+  advisor.clear();
+  try { fs.rmSync(schedule.CONFIRMED_FILE); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('tombstones are GC-able (sweepShared removes stale tombstones)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const clusterDir = require('path').join(TMP_HOME, 'p28tombgc');
+  process.env.LIKU_CLUSTER_DIR = clusterDir;
+  process.env.LIKU_NODE_ID = 'gcNode';
+  const coordination = require('../src/main/peripherals/coordination');
+  coordination.putShared('schedule-tombstones', 'heater:20:21', { id: 'heater', fromHour: 20, toHour: 21, tombstonedAt: new Date().toISOString() });
+  const removed = coordination.sweepShared('schedule-tombstones', -1).removed; // ttl -1 → stale
+  assert.ok(removed.includes('heater_20_21.json') || removed.length >= 1, 'stale tombstone GC-ed');
+  delete process.env.LIKU_NODE_ID;
+  delete process.env.LIKU_CLUSTER_DIR;
+  try { fs.rmSync(clusterDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('distributed task claim: exactly one node owns a task; peers see it owned', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const clusterDir = require('path').join(TMP_HOME, 'p28claim');
+  process.env.LIKU_CLUSTER_DIR = clusterDir;
+  const clusterTasks = require('../src/main/peripherals/cluster-tasks');
+  // Node A publishes + claims a task.
+  process.env.LIKU_NODE_ID = 'nodeA';
+  clusterTasks.publishTask({ id: 'ct-claim', dedupeKey: 'heater:power:spike', device: { id: 'heater' }, priority: 'high', status: 'pending-review' });
+  const a = clusterTasks.claimTask('ct-claim', { ttlMs: 60000 });
+  assert.strictEqual(a.claimed, true, 'nodeA claims the task');
+  assert.strictEqual(clusterTasks.taskOwner('ct-claim'), 'nodeA', 'owner recorded');
+  // Node B cannot claim it + sees it owned by a peer.
+  process.env.LIKU_NODE_ID = 'nodeB';
+  const b = clusterTasks.claimTask('ct-claim', { ttlMs: 60000 });
+  assert.strictEqual(b.claimed, false, 'nodeB cannot double-claim');
+  assert.strictEqual(b.owner, 'nodeA', 'nodeB sees the peer owner');
+  assert.strictEqual(clusterTasks.isOwnedByPeer('ct-claim'), true, 'peer ownership visible');
+  // Node A releases → now claimable again.
+  process.env.LIKU_NODE_ID = 'nodeA';
+  assert.strictEqual(clusterTasks.releaseTask('ct-claim').released, true, 'owner releases cleanly');
+  process.env.LIKU_NODE_ID = 'nodeB';
+  assert.strictEqual(clusterTasks.claimTask('ct-claim', { ttlMs: 60000 }).claimed, true, 'released task is re-claimable');
+  delete process.env.LIKU_NODE_ID;
+  delete process.env.LIKU_CLUSTER_DIR;
+  try { fs.rmSync(clusterDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('task claim is inert single-machine + never an actuation path', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_CLUSTER_DIR;
+  const clusterTasks = require('../src/main/peripherals/cluster-tasks');
+  assert.strictEqual(clusterTasks.claimTask('x').claimed, true, 'single-machine always claims locally');
+  assert.strictEqual(clusterTasks.taskOwner('x'), null, 'no cluster owner single-machine');
+  assert.strictEqual(clusterTasks.isOwnedByPeer('x'), false, 'no peer single-machine');
+  // No execute/actuate surface exists on the claim layer.
+  assert.strictEqual(typeof clusterTasks.execute, 'undefined');
+  assert.strictEqual(typeof clusterTasks.perform, 'undefined');
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('fleet rotate-all uses a quorum claim so only one node rotates (human-gated)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const clusterDir = require('path').join(TMP_HOME, 'p28quorum');
+  process.env.LIKU_CLUSTER_DIR = clusterDir;
+  const coordination = require('../src/main/peripherals/coordination');
+  const ts = require('../src/main/peripherals/token-store');
+  const actions = require('../src/main/peripherals/anomaly-action-advisor');
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  ts.clear();
+  actions.clear();
+  ts.onPair('q-a', { actions: ['on'] });
+  ts.onPair('q-b', { actions: ['on'] });
+  // A PEER already claimed the fleet rotate-all lease.
+  process.env.LIKU_NODE_ID = 'peerHolder';
+  coordination.acquireLease('task:fleet:rotate-all', { ttlMs: 60000 });
+  // This node confirms rotate-all → claim denied → does NOT rotate.
+  process.env.LIKU_NODE_ID = 'meNode';
+  for (const dev of ['q-a', 'q-b', 'q-c']) for (let i = 0; i < 3; i++) actions.recordAnomaly({ device: dev, type: 'spike' });
+  const fleet = actions.proposeFleetAction();
+  const res = pal.confirmAnomalyAction(fleet.id);
+  assert.strictEqual(res.ok, true, 'confirmation recorded (human gate honored)');
+  assert.strictEqual(res.executed.ok, false, 'rotation NOT performed (peer holds the claim)');
+  assert.strictEqual(res.executed.reason, 'claimed-by-peer');
+  assert.strictEqual(ts.status('q-a').gen, 1, 'tokens NOT rotated by this node');
+  ts.clear();
+  actions.clear();
+  delete process.env.LIKU_NODE_ID;
+  delete process.env.LIKU_CLUSTER_DIR;
+  try { fs.rmSync(clusterDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('PAL exposes schedule-remove + task-claim accessors', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const clusterDir = require('path').join(TMP_HOME, 'p28pal');
+  process.env.LIKU_CLUSTER_DIR = clusterDir;
+  process.env.LIKU_NODE_ID = 'palN';
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  const schedule = require('../src/main/peripherals/power-schedule');
+  const advisor = require('../src/main/peripherals/power-schedule-advisor');
+  advisor.clear();
+  try { fs.rmSync(schedule.CONFIRMED_FILE); } catch { /* ignore */ }
+  advisor.createConfirmedSchedule('fan', { maxW: 80, fromHour: 14, toHour: 16 });
+  assert.ok(pal.getConfirmedSchedules().schedules.length >= 1, 'PAL lists confirmed schedules');
+  const rm = pal.removeConfirmedSchedule('fan', { fromHour: 14, toHour: 16 });
+  assert.strictEqual(rm.ok, true, 'PAL removes + tombstones');
+  assert.strictEqual(schedule.deviceScheduleW('fan', new Date(2026, 6, 20, 14, 30, 0)), null, 'removed schedule not applied');
+  const cl = pal.claimClusterTask('pal-task');
+  assert.strictEqual(cl.claimed, true);
+  assert.strictEqual(pal.getClusterTaskOwner('pal-task').owner, 'palN');
+  assert.strictEqual(pal.releaseClusterTask('pal-task').released, true);
+  advisor.clear();
+  try { fs.rmSync(schedule.CONFIRMED_FILE); } catch { /* ignore */ }
+  delete process.env.LIKU_NODE_ID;
+  delete process.env.LIKU_CLUSTER_DIR;
+  try { fs.rmSync(clusterDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('a fresh (non-stale) tombstone still hides the rule; TTL-expired tombstone is ignored', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  process.env.LIKU_PERIPHERAL_CLUSTER_TOMBSTONE_TTL_MS = '1000'; // 1s freshness
+  const clusterDir = require('path').join(TMP_HOME, 'p28tombttl');
+  process.env.LIKU_CLUSTER_DIR = clusterDir;
+  process.env.LIKU_NODE_ID = 'ttlNode';
+  const coordination = require('../src/main/peripherals/coordination');
+  const schedule = require('../src/main/peripherals/power-schedule');
+  // Active rule + a FRESH tombstone → rule hidden.
+  coordination.putShared('schedules', 'heater:20:21', { id: 'heater', fromHour: 20, toHour: 21, maxW: 150 });
+  coordination.putShared('schedule-tombstones', 'heater:20:21', { id: 'heater', fromHour: 20, toHour: 21, tombstonedAt: new Date().toISOString() });
+  assert.strictEqual(schedule.deviceScheduleW('heater', new Date(2026, 6, 20, 20, 30, 0)), null, 'fresh tombstone hides the rule');
+  // Age the tombstone file beyond the 1s TTL → tombstone ignored → rule respected again
+  // (represents a re-confirm scenario where the active rule outlives an old tombstone).
+  const tPath = require('path').join(clusterDir, 'schedule-tombstones', 'heater_20_21.json');
+  const old = new Date(Date.now() - 5000);
+  try { fs.utimesSync(tPath, old, old); } catch { /* platform best-effort */ }
+  // Also stamp updatedAt in the past so the maxAge filter drops it.
+  try { const rec = JSON.parse(fs.readFileSync(tPath, 'utf-8')); rec.updatedAt = old.toISOString(); fs.writeFileSync(tPath, JSON.stringify(rec)); } catch { /* ignore */ }
+  assert.strictEqual(schedule.deviceScheduleW('heater', new Date(2026, 6, 20, 20, 30, 0)), 150, 'TTL-expired tombstone ignored → active rule respected');
+  delete process.env.LIKU_NODE_ID;
+  delete process.env.LIKU_CLUSTER_DIR;
+  delete process.env.LIKU_PERIPHERAL_CLUSTER_TOMBSTONE_TTL_MS;
+  try { fs.rmSync(clusterDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('task claim renewal extends ownership past the original TTL', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const clusterDir = require('path').join(TMP_HOME, 'p28renew');
+  process.env.LIKU_CLUSTER_DIR = clusterDir;
+  process.env.LIKU_NODE_ID = 'owner';
+  const coordination = require('../src/main/peripherals/coordination');
+  const clusterTasks = require('../src/main/peripherals/cluster-tasks');
+  const a = clusterTasks.claimTask('rtask', { ttlMs: 1000, now: 5000 });
+  assert.strictEqual(a.claimed, true);
+  // Renew before expiry extends the TTL.
+  const r = clusterTasks.renewClaim('rtask', { ttlMs: 10000, now: 5900 });
+  assert.strictEqual(r.claimed, true, 'owner renews the claim');
+  // After the ORIGINAL TTL, still owned (renewal extended it).
+  assert.strictEqual(coordination.whoHolds('task:rtask', 6500).nodeId, 'owner', 'ownership retained after original TTL');
+  delete process.env.LIKU_NODE_ID;
+  delete process.env.LIKU_CLUSTER_DIR;
+  try { fs.rmSync(clusterDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
 console.log(`\n${pass} checks passed.`);
 if (process.exitCode) { console.error('FAILED'); }
 else { console.log('OK'); }

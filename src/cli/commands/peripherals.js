@@ -24,7 +24,7 @@
  *                                       Advisory anomaly→action suggestions (human-gated)
  *   liku peripherals schedules          Show per-device time-boxed power budgets
  *   liku peripherals locks [--record]   Lock observability: metrics, per-file, trends
- *   liku peripherals coordination [status|lease <id>|release <id>]
+ *   liku peripherals coordination [status|lease <id>|release <id>|sweep|claim <task>|release-task <task>]
  *                                       Cross-host lease coordination (cluster mode)
  *   liku peripherals cron [--at <ISO>]  Cron device schedules → advisory human-gated tasks
  *   liku peripherals cron [propose <dev> <act> "<cron>"|confirm <id>|dismiss <id>|rules|tick|remove <id>]
@@ -320,6 +320,20 @@ async function run(args, flags) {
       return { success: !!res.ok, ...res };
     }
 
+    case 'remove-schedule': {
+      // Phase 28: retire a CONFIRMED schedule + tombstone it fleet-wide.
+      const id = args[1];
+      if (!id) { error('Usage: liku peripherals remove-schedule <device-id> [--from N] [--to N]'); return { success: false }; }
+      const opts = {};
+      if (flags.from !== undefined) opts.fromHour = Number(flags.from);
+      if (flags.to !== undefined) opts.toHour = Number(flags.to);
+      const res = pal.removeConfirmedSchedule(id, opts);
+      if (flags.json) return { success: !!res.ok, ...res };
+      if (res.ok) success(`Removed ${res.removed.length} confirmed schedule rule(s) for ${id}${res.removed.length ? ` (${res.removed.join(', ')})` : ''}; tombstoned fleet-wide.`);
+      else error(`Could not remove schedule for ${id}: ${res.reason || 'unknown'}`);
+      return { success: !!res.ok, ...res };
+    }
+
     case 'anomalies': {
       // Phase 20: detected power anomalies with per-device ATTRIBUTION + the
       // advisory self-healing actions proposed for persistently anomalous devices.
@@ -553,6 +567,16 @@ async function run(args, flags) {
         else success(`Lease for ${id}: ${res.released ? 'released' : `not released (${res.reason})`}`);
         return { success: true, ...res };
       }
+      if (op === 'claim' || op === 'release-task') {
+        // Phase 28: distributed task ownership (advisory).
+        const id = args[2];
+        if (!id) { error(`Usage: liku peripherals coordination ${op} <task-id>`); return { success: false }; }
+        const res = op === 'claim' ? pal.claimClusterTask(id) : pal.releaseClusterTask(id);
+        if (flags.json) return { success: true, ...res };
+        if (op === 'claim') success(`Task ${id}: ${res.claimed ? 'CLAIMED' : `owned by ${res.owner || 'peer'}`}${res.local ? ' (single-machine/local)' : ''}`);
+        else success(`Task ${id}: ${res.released ? 'released' : `not released (${res.reason})`}`);
+        return { success: true, ...res };
+      }
       if (op === 'sweep') {
         // Phase 25: best-effort cluster GC — expire stale token records + prune leases.
         const res = pal.sweepCluster();
@@ -764,7 +788,7 @@ async function run(args, flags) {
 
     default:
       error(`Unknown subcommand: ${sub}`);
-      log('Usage: liku peripherals [scan|list|status [id]|power [--history|--trend|--anomalies|--forecast [--seasonal] [--exclude-anomalous] [--special-days]]|anomalies [--attributed]|anomaly-action [confirm|dismiss <id>|policy [set <device> reduce=N rotate=N unpair=N]]|schedules|locks [--record]|coordination [lease|release <id>|sweep]|cron [propose|confirm|dismiss|rules|tick|remove]|suggestions|apply-schedule <id>|pair <id>|unpair <id>|token [rotate|revoke|rotate-all|action <id> <action>|action-rotate <id> <action>|identity-rotate <id>]|tasks [--escalated|--pending|--severity <p>|--anomaly]|notifications|channels|simulate <id> <k=v>|execute <id> <action>|confirm <id> <action> [--execute]|drivers]');
+      log('Usage: liku peripherals [scan|list|status [id]|power [--history|--trend|--anomalies|--forecast [--seasonal] [--exclude-anomalous] [--special-days]]|anomalies [--attributed]|anomaly-action [confirm|dismiss <id>|policy [set <device> reduce=N rotate=N unpair=N]]|schedules|locks [--record]|coordination [lease|release <id>|sweep|claim|release-task <task>]|cron [propose|confirm|dismiss|rules|tick|remove]|suggestions|apply-schedule <id>|remove-schedule <device> [--from N] [--to N]|pair <id>|unpair <id>|token [rotate|revoke|rotate-all|action <id> <action>|action-rotate <id> <action>|identity-rotate <id>]|tasks [--escalated|--pending|--severity <p>|--anomaly]|notifications|channels|simulate <id> <k=v>|execute <id> <action>|confirm <id> <action> [--execute]|drivers]');
       return { success: false };
   }
 }

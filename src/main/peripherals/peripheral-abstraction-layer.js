@@ -544,9 +544,11 @@ function sweepCluster(opts = {}) {
       try {
         const ts2 = clusterTasks().sweep(opts.now);
         const schedTtl = Number(process.env.LIKU_PERIPHERAL_CLUSTER_SCHEDULE_TTL_MS) || 30 * 24 * 3600 * 1000;
+        const tombTtl = Number(process.env.LIKU_PERIPHERAL_CLUSTER_TOMBSTONE_TTL_MS) || 7 * 24 * 3600 * 1000;
         shared.tasks = ts2.tasks;
         shared.notifications = ts2.notifications;
         shared.schedules = coord.sweepShared('schedules', schedTtl, opts.now).removed;
+        shared.tombstones = coord.sweepShared('schedule-tombstones', tombTtl, opts.now).removed;
       } catch { /* best-effort */ }
     } catch { /* best-effort */ }
     return { enabled: true, tokens, leases, shared };
@@ -607,6 +609,41 @@ function dismissScheduleSuggestion(id) {
   catch (err) { return { enabled: true, ok: false, reason: err.message }; }
 }
 
+/** Phase 28 — list locally-confirmed schedule rules. */
+function getConfirmedSchedules() {
+  if (!isPeripheralsEnabled()) return { enabled: false, schedules: [] };
+  try { return { enabled: true, schedules: scheduleAdvisor().listConfirmedSchedules() }; }
+  catch { return { enabled: true, schedules: [] }; }
+}
+
+/** Phase 28 — remove a confirmed schedule + tombstone it fleet-wide (human-gated). */
+function removeConfirmedSchedule(deviceId, opts = {}) {
+  if (!isPeripheralsEnabled()) return { enabled: false };
+  try { return { enabled: true, ...scheduleAdvisor().removeConfirmedSchedule(deviceId, opts) }; }
+  catch (err) { return { enabled: true, ok: false, reason: err.message }; }
+}
+
+/** Phase 28 — claim ownership of a cluster task (advisory, exactly-one-owner). */
+function claimClusterTask(taskId, opts = {}) {
+  if (!isPeripheralsEnabled()) return { enabled: false };
+  try { return { enabled: true, ...clusterTasks().claimTask(taskId, opts) }; }
+  catch (err) { return { enabled: true, claimed: false, reason: err.message }; }
+}
+
+/** Phase 28 — release a cluster task claim (resolve / dismiss). */
+function releaseClusterTask(taskId) {
+  if (!isPeripheralsEnabled()) return { enabled: false };
+  try { return { enabled: true, ...clusterTasks().releaseTask(taskId) }; }
+  catch (err) { return { enabled: true, released: false, reason: err.message }; }
+}
+
+/** Phase 28 — current owner of a cluster task (or null). */
+function getClusterTaskOwner(taskId) {
+  if (!isPeripheralsEnabled()) return { enabled: false, owner: null };
+  try { return { enabled: true, owner: clusterTasks().taskOwner(taskId) }; }
+  catch { return { enabled: true, owner: null }; }
+}
+
 function anomalyActionAdvisor() { return require('./anomaly-action-advisor'); }
 
 /** Advisory proactive-action suggestions for persistently anomalous devices. */
@@ -651,7 +688,21 @@ function confirmAnomalyAction(id, opts = {}) {
       }
     } else if (execute && res.action === 'rotate-all') {
       // Fleet-wide human-approved security response — rotate every active token.
-      executed = rotateAllTokens();
+      // Phase 28: QUORUM-STYLE CLAIM. When clustered, only the node that claims
+      // the `fleet:rotate-all` task actually performs the rotation, so two nodes'
+      // confirmations don't both rotate. Still human-gated (this IS the confirm).
+      const coord = coordination();
+      if (coord.clusterEnabled()) {
+        const claim = clusterTasks().claimTask('fleet:rotate-all');
+        if (!claim.claimed) {
+          executed = { enabled: true, ok: false, reason: 'claimed-by-peer', owner: claim.owner };
+        } else {
+          executed = rotateAllTokens();
+          try { clusterTasks().releaseTask('fleet:rotate-all'); } catch { /* best-effort */ }
+        }
+      } else {
+        executed = rotateAllTokens();
+      }
     }
     return { enabled: true, ...res, executed };
   } catch (err) { return { enabled: true, ok: false, reason: err.message }; }
@@ -1027,6 +1078,11 @@ module.exports = {
   getClusterTasks,
   getClusterNotifications,
   updateClusterTaskStatus,
+  getConfirmedSchedules,
+  removeConfirmedSchedule,
+  claimClusterTask,
+  releaseClusterTask,
+  getClusterTaskOwner,
   getLockHistory,
   recordLockSnapshot,
   getLockTrends,

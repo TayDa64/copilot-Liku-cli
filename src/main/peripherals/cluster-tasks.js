@@ -135,6 +135,73 @@ function peerHasOpenTaskFor(dedupeKey, opts = {}) {
   return null;
 }
 
+// ── Phase 28: distributed task OWNERSHIP / claim ────────────────────────────
+// Exactly ONE node owns a high-value task at a time, using the existing TTL-lease
+// primitive (`task:<id>`). A claim auto-expires (TTL) so a crashed owner never
+// orphans a task; the owner renews while working and releases on resolve. STRICTLY
+// ADVISORY — claiming is coordination only and is NEVER an actuation path.
+
+function _claimTtlMs(opts) {
+  if (opts && Number.isFinite(opts.ttlMs) && opts.ttlMs > 0) return opts.ttlMs;
+  const v = Number(process.env.LIKU_PERIPHERAL_TASK_CLAIM_TTL_MS);
+  return Number.isFinite(v) && v > 0 ? v : 300000; // 5 min
+}
+
+/**
+ * Claim ownership of a task. Single-machine → always claimed locally. Cluster →
+ * granted only when free or already owned by this node. Records the owner on the
+ * shared task summary for visibility.
+ * @param {string} taskId
+ * @param {{ ttlMs?:number, now?:number }} [opts]
+ * @returns {{ claimed:boolean, local?:boolean, owner?:string, holder?:object }}
+ */
+function claimTask(taskId, opts = {}) {
+  if (!enabled() || !taskId) return { claimed: false };
+  const coord = _coord();
+  if (!coord.clusterEnabled()) return { claimed: true, local: true, owner: coord.nodeId() };
+  const res = coord.acquireLease(`task:${taskId}`, { ttlMs: _claimTtlMs(opts), now: opts.now });
+  if (res.granted) {
+    try { const rec = coord.getShared(TASK_KIND, taskId); if (rec) { rec.owner = coord.nodeId(); coord.putShared(TASK_KIND, taskId, rec); } } catch { /* best-effort */ }
+    return { claimed: true, owner: coord.nodeId() };
+  }
+  return { claimed: false, owner: res.holder ? res.holder.nodeId : null, holder: res.holder };
+}
+
+/** Renew this node's claim (extends the TTL while actively working). */
+function renewClaim(taskId, opts = {}) {
+  if (!enabled() || !taskId) return { claimed: false };
+  const coord = _coord();
+  if (!coord.clusterEnabled()) return { claimed: true, local: true };
+  const res = coord.renewLease(`task:${taskId}`, { ttlMs: _claimTtlMs(opts), now: opts.now });
+  return { claimed: !!res.granted, owner: res.granted ? coord.nodeId() : (res.holder && res.holder.nodeId) };
+}
+
+/** Release a task claim (resolve / dismiss). Only the owner may release. */
+function releaseTask(taskId) {
+  if (!enabled() || !taskId) return { released: false };
+  const coord = _coord();
+  if (!coord.clusterEnabled()) return { released: true, local: true };
+  const res = coord.releaseLease(`task:${taskId}`);
+  try { const rec = coord.getShared(TASK_KIND, taskId); if (rec && rec.owner === coord.nodeId()) { rec.owner = null; coord.putShared(TASK_KIND, taskId, rec); } } catch { /* best-effort */ }
+  return { released: !!res.released, reason: res.reason };
+}
+
+/** Current owner of a task (or null when free / expired / single-machine). */
+function taskOwner(taskId, now = Date.now()) {
+  if (!enabled() || !taskId) return null;
+  const coord = _coord();
+  if (!coord.clusterEnabled()) return null;
+  const holder = coord.whoHolds(`task:${taskId}`, now);
+  return holder ? holder.nodeId : null;
+}
+
+/** True when a task is currently owned by ANOTHER node (peer is handling it). */
+function isOwnedByPeer(taskId, now = Date.now()) {
+  const owner = taskOwner(taskId, now);
+  if (!owner) return false;
+  return owner !== _coord().nodeId();
+}
+
 /** GC stale task + notification summaries (best-effort). */
 function sweep(now = Date.now()) {
   if (!enabled()) return { tasks: [], notifications: [] };
@@ -151,5 +218,6 @@ function sweep(now = Date.now()) {
 module.exports = {
   FLAG, TASK_KIND, NOTIF_KIND, enabled,
   publishTask, publishNotification, updateTaskStatus,
-  listTasks, listNotifications, peerHasOpenTaskFor, sweep
+  listTasks, listNotifications, peerHasOpenTaskFor, sweep,
+  claimTask, renewClaim, releaseTask, taskOwner, isOwnedByPeer
 };

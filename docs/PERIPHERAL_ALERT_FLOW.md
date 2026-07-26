@@ -988,6 +988,69 @@ unchanged. Pure observation — never changes locking behaviour.
   `LIKU_CLUSTER_DIR` is unset; local confirmed schedules + tasks work exactly as
   before.
 
+## Confirmed-schedule lifecycle + distributed task ownership (Phase 28)
+
+### Confirmed-schedule tombstones (full lifecycle)
+
+Confirmed schedules can now be RETIRED, not just added.
+`power-schedule-advisor.removeConfirmedSchedule(deviceId, { fromHour?, toHour? })`:
+- removes matching rules from the local `peripheral-schedules.json`, and
+- (cluster mode) `deleteShared('schedules', key)` for the active mirror AND
+  `putShared('schedule-tombstones', key, {...})` — a compact soft-delete marker.
+
+`power-schedule.loadSchedules()` reads the `schedule-tombstones` shared kind and
+**filters out any advisor rule whose `id:fromHour:toHour` is tombstoned**, so a
+removed schedule is no longer applied fleet-wide — even on a node that still holds
+it locally, or a peer that only saw the shared mirror. Env (operator-owned) rules
+are NOT subject to advisor tombstones. Tombstones are GC-able via
+`sweepShared('schedule-tombstones', ttl)` (`LIKU_PERIPHERAL_CLUSTER_TOMBSTONE_TTL_MS`,
+default 7 days) so the shared store never grows unbounded. Single-machine → removal
+is local-only (no tombstone written; byte-compatible). PAL:
+`getConfirmedSchedules()`, `removeConfirmedSchedule()`. CLI:
+`remove-schedule <device> [--from N] [--to N]`.
+
+### Distributed task ownership / claim
+
+`cluster-tasks.js` adds a claim layer over the existing TTL-lease primitive so
+exactly ONE node owns a high-value task at a time:
+- `claimTask(taskId, { ttlMs })` → `acquireLease('task:<id>')`; granted only when
+  free or already owned. Records `owner` on the shared task summary.
+- `renewClaim` extends the TTL while working; `releaseTask` frees it on
+  resolve/dismiss (owner-only). A claim auto-expires (TTL) so a crashed owner
+  never orphans a task (`LIKU_PERIPHERAL_TASK_CLAIM_TTL_MS`, default 5 min).
+- `taskOwner(id)` / `isOwnedByPeer(id)` let peers see a task is already owned and
+  avoid duplicate handling. PAL: `claimClusterTask()`, `releaseClusterTask()`,
+  `getClusterTaskOwner()`. CLI: `coordination claim <task>` / `release-task <task>`.
+
+**Quorum on fleet rotate-all** — when a human confirms a `rotate-all` action in
+cluster mode, `PAL.confirmAnomalyAction` first claims the `task:fleet:rotate-all`
+lease; only the claiming node performs the rotation (others get
+`reason:'claimed-by-peer'` and rotate nothing). Still human-gated — the claim
+only prevents two nodes' confirmations from both rotating.
+
+**Strictly advisory:** the claim/ownership layer is coordination only and exposes
+NO execute/actuate surface — a task remains a human-gated proposal.
+
+### New environment variables (all default OFF / inert single-machine)
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `LIKU_PERIPHERAL_CLUSTER_TOMBSTONE_TTL_MS` | `604800000` (7d) | Schedule-tombstone freshness / GC |
+| `LIKU_PERIPHERAL_TASK_CLAIM_TTL_MS` | `300000` (5m) | Task claim lease TTL (auto-expire) |
+
+### Phase 28 safety invariants
+
+- **tombstones-retire-cleanly** — a tombstoned schedule is no longer applied by
+  any node; tombstones are compact soft-deletes that GC after a TTL. Env rules are
+  never tombstoned by the advisor.
+- **exactly-one-owner** — a task claim is granted to at most one node; the claim
+  auto-expires (no permanent orphan) and is released on resolve/dismiss.
+- **claim-is-not-actuation** — claiming/owning a task never executes anything; the
+  shared view + claim layer expose no actuate surface. Every action stays
+  proposal → explicit human confirm.
+- **single-machine-unchanged** — schedule removal is local-only and task claims are
+  granted locally when `LIKU_CLUSTER_DIR` is unset; behaviour is byte-compatible.
+
 ## If a human decides to act
 
 Any physical response still travels the full PAL safety chain — the alert path

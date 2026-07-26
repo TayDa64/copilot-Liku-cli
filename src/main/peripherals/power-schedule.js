@@ -94,6 +94,25 @@ function _clusterSchedules() {
   } catch { return []; }
 }
 
+/**
+ * Phase 28 — TOMBSTONE keys: schedules that were removed/dismissed/expired on
+ * some node. A tombstone (`schedule-tombstones` shared kind) means the fleet must
+ * STOP respecting that rule, even a node that still has it locally. @private
+ * @returns {Set<string>} `${id}:${fromHour}:${toHour}` keys
+ */
+function _clusterTombstones() {
+  const set = new Set();
+  try {
+    const coord = require('./coordination');
+    if (!coord.clusterEnabled()) return set;
+    const ttl = Number(process.env.LIKU_PERIPHERAL_CLUSTER_TOMBSTONE_TTL_MS) || 7 * 24 * 3600 * 1000; // 7d
+    for (const t of coord.listShared('schedule-tombstones', { maxAgeMs: ttl })) {
+      if (t && t.id != null) set.add(`${t.id}:${t.fromHour}:${t.toHour}`);
+    }
+  } catch { /* best-effort */ }
+  return set;
+}
+
 /** De-duplicate rules by id + window + cap so a node's own mirrored rule isn't double-counted. @private */
 function _dedupRules(rules) {
   const seen = new Set();
@@ -109,12 +128,16 @@ function _dedupRules(rules) {
 
 /**
  * All active schedule rules = env-declared + human-confirmed (advisor) +
- * cluster-confirmed (peers). Advisory suggestions are NEVER included until
- * explicitly confirmed.
+ * cluster-confirmed (peers), MINUS any tombstoned (fleet-removed) advisor rules.
+ * Advisory suggestions are NEVER included until explicitly confirmed. Env rules
+ * are operator-owned and NOT subject to advisor tombstones.
  */
 function loadSchedules() {
   if (!enabled()) return [];
-  return _dedupRules([..._envSchedules(), ..._confirmedSchedules(), ..._clusterSchedules()]);
+  const tombstones = _clusterTombstones();
+  const advisorRules = _dedupRules([..._confirmedSchedules(), ..._clusterSchedules()])
+    .filter((r) => !tombstones.has(`${r.id}:${r.fromHour}:${r.toHour}`));
+  return _dedupRules([..._envSchedules(), ...advisorRules]);
 }
 
 /** Keep a numeric hour clamped, or pass through the sunrise/sunset tokens. @private */
