@@ -557,6 +557,56 @@ function sweepExpiredSchedules(opts = {}) {
 }
 
 /**
+ * Phase 30 — list confirmed schedules whose expiry is UPCOMING (about to lapse)
+ * or JUST-EXPIRED (recently lapsed, within a grace window), for advisory
+ * expiry NOTIFICATIONS. PURE read — never mutates a rule and never auto-extends.
+ * Scans BOTH the local confirmed store and (cluster mode) peer-confirmed mirrored
+ * rules so an operator sees any restrict-only cap about to lapse fleet-wide.
+ * @param {{ now?:number, withinMs?:number, graceMs?:number }} [opts]
+ * @returns {Array<{ id:string, fromHour:number, toHour:number, maxW:number, expiresAt:string, expiresInMs:number, state:'upcoming'|'expired', source?:string }>}
+ */
+function expiringSchedules(opts = {}) {
+  if (!enabled()) return [];
+  const now = Number.isFinite(opts.now) ? opts.now : Date.now();
+  const withinMs = Number.isFinite(opts.withinMs) && opts.withinMs >= 0 ? opts.withinMs : _expiryWarnMs();
+  const graceMs = Number.isFinite(opts.graceMs) && opts.graceMs >= 0 ? opts.graceMs : _expiryGraceMs();
+  const seen = new Set();
+  const out = [];
+  const consider = (r, source) => {
+    if (!r || r.expiresAt == null) return;
+    const t = typeof r.expiresAt === 'number' ? r.expiresAt : Date.parse(r.expiresAt);
+    if (!Number.isFinite(t)) return;
+    const key = `${r.id}:${r.fromHour}:${r.toHour}`;
+    if (seen.has(key)) return;
+    const delta = t - now;
+    let state = null;
+    if (delta >= 0 && delta <= withinMs) state = 'upcoming';
+    else if (delta < 0 && -delta <= graceMs) state = 'expired';
+    if (!state) return;
+    seen.add(key);
+    out.push({
+      id: String(r.id), fromHour: Number(r.fromHour), toHour: Number(r.toHour),
+      maxW: Number(r.maxW), expiresAt: new Date(t).toISOString(), expiresInMs: delta, state, source: source || r.source
+    });
+  };
+  for (const r of listConfirmedSchedules()) consider(r, 'local');
+  try {
+    const coord = require('./coordination');
+    if (coord.clusterEnabled()) for (const s of coord.listShared('schedules', {})) consider(s, 'cluster');
+  } catch { /* best-effort */ }
+  return out;
+}
+
+function _expiryWarnMs() {
+  const v = Number(process.env.LIKU_PERIPHERAL_SCHEDULE_EXPIRY_WARN_MS);
+  return Number.isFinite(v) && v >= 0 ? v : 3600000; // 1h ahead
+}
+function _expiryGraceMs() {
+  const v = Number(process.env.LIKU_PERIPHERAL_SCHEDULE_EXPIRY_GRACE_MS);
+  return Number.isFinite(v) && v >= 0 ? v : 3600000; // 1h after
+}
+
+/**
  * Phase 24 — directly create a HUMAN-CONFIRMED MULTI-DEVICE coordinated
  * reduce-schedule for the hour: when 2+ devices jointly exceed the budget, write
  * one restrict-only rule per contributor (caps proportional to peak share, sum ≤
@@ -667,6 +717,6 @@ module.exports = {
   FLAG, SUGGEST_FILE,
   enabled, recordAnomaly, proposeSchedules, proposeMultiDeviceSchedule, proposeMultiHourSchedule,
   createConfirmedSchedule, createConfirmedMultiSchedule, createConfirmedMultiHourSchedule,
-  listConfirmedSchedules, removeConfirmedSchedule, sweepExpiredSchedules,
+  listConfirmedSchedules, removeConfirmedSchedule, sweepExpiredSchedules, expiringSchedules,
   listProposed, confirm, dismiss, clear
 };

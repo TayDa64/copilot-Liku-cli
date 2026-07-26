@@ -130,15 +130,37 @@ function _savePolicyStore(policies) {
   } catch { return false; }
 }
 
-/** Merged policy map (env overlaid by the confirmed store). @private */
+/** Merged policy map (env overlaid by the cluster-shared store, then the local store). @private */
 function _loadPolicies() {
   const out = {};
   try {
     const raw = process.env.LIKU_PERIPHERAL_AUTOHEAL_POLICIES;
     if (raw) { const p = JSON.parse(raw); if (p && typeof p === 'object') for (const [k, v] of Object.entries(p)) out[k] = { ...v }; }
   } catch { /* env policy is best-effort */ }
+  // Phase 30: CLUSTER-SHARED policies (visible fleet-wide) so nodes converge on
+  // the same per-device thresholds instead of escalating on divergent local views.
+  for (const [k, v] of Object.entries(_clusterPolicies())) out[k] = { ...(out[k] || {}), ...v };
   const store = _loadPolicyStore();
   for (const [k, v] of Object.entries(store)) out[k] = { ...(out[k] || {}), ...v };
+  return out;
+}
+
+/** Cluster policy record freshness / GC (long-lived — governance, not ephemeral). @private */
+function _clusterPolicyTtlMs() {
+  const v = Number(process.env.LIKU_PERIPHERAL_CLUSTER_POLICY_TTL_MS);
+  return Number.isFinite(v) && v > 0 ? v : 30 * 24 * 3600 * 1000; // 30d
+}
+
+/** Read peer-shared auto-heal policies (cluster mode). @private */
+function _clusterPolicies() {
+  const out = {};
+  try {
+    const coord = require('./coordination');
+    if (!coord.clusterEnabled()) return out;
+    for (const rec of coord.listShared('autoheal-policies', { maxAgeMs: _clusterPolicyTtlMs() })) {
+      if (rec && rec.deviceId && rec.policy && typeof rec.policy === 'object') out[rec.deviceId] = { ...rec.policy };
+    }
+  } catch { /* best-effort */ }
   return out;
 }
 
@@ -166,6 +188,12 @@ function setPolicy(deviceId, thresholds) {
   if (!Object.keys(clean).length) return { ok: false, reason: 'no-valid-thresholds' };
   store[deviceId] = { ...(store[deviceId] || {}), ...clean };
   _savePolicyStore(store);
+  // Phase 30: mirror the policy to the cluster so peers converge on the same
+  // thresholds (best-effort, cluster-gated). Single-machine → inert.
+  try {
+    const coord = require('./coordination');
+    if (coord.clusterEnabled()) coord.putShared('autoheal-policies', deviceId, { deviceId, policy: store[deviceId] });
+  } catch { /* best-effort */ }
   return { ok: true, deviceId, policy: store[deviceId] };
 }
 
@@ -390,8 +418,124 @@ function clear() {
   catch { return false; }
 }
 
+// ── Phase 30: DE-ESCALATION / AUTO-CLEAR on recovery ────────────────────────
+// When a device that had an active heal action returns to a healthy baseline for
+// a configurable period (no fresh anomalies), propose stepping DOWN the response:
+//   - A confirmed temporary reduce-schedule → propose `clear-schedule` (HUMAN-GATED;
+//     removing a power restriction always requires explicit confirmation — the
+//     confirm IS the gate, executed by PAL.confirmAnomalyAction).
+//   - Purely-advisory OPEN (proposed, not confirmed) suggestions → may be SAFELY
+//     auto-cleared (dismissed) since that only removes a suggestion and never
+//     touches a restriction or actuates anything.
+
+function _recoveryMs() {
+  const v = Number(process.env.LIKU_PERIPHERAL_AUTOHEAL_RECOVERY_MS);
+  return Number.isFinite(v) && v > 0 ? v : 3600000; // 1h healthy → recovered
+}
+
+/** The most-recent recorded anomaly time for a device (or 0). @private */
+function _lastAnomalyAt(occs) {
+  let last = 0;
+  for (const o of (occs || [])) if (Number.isFinite(o.at) && o.at > last) last = o.at;
+  return last;
+}
+
+/** True when a device confirmed a temporary reduce-schedule heal action. @private */
+function _hasTemporaryRestriction(deviceId, proposed) {
+  const p = proposed[deviceId];
+  if (p && p.status === 'confirmed' && p.action === 'reduce-schedule') return true;
+  // Also treat an anomaly-action-confirmed schedule rule as a temporary restriction.
+  try {
+    const rules = require('./power-schedule-advisor').listConfirmedSchedules();
+    return rules.some((r) => String(r.id) === String(deviceId) && String(r.source || '').startsWith('anomaly-action-confirmed'));
+  } catch { return false; }
+}
+
+/**
+ * Propose DE-ESCALATIONS for devices that have RECOVERED (no anomaly for
+ * `recoveryMs`) but still carry a temporary reduce-schedule restriction. Each is
+ * a human-gated `clear-schedule` proposal (removing a restriction requires
+ * explicit confirmation). Deduplicated: one open de-escalation per device.
+ * @param {{ recoveryMs?:number }} [opts]
+ * @param {number} [now]
+ * @returns {object[]} de-escalation proposals
+ */
+function proposeDeescalations(opts = {}, now = Date.now()) {
+  if (!enabled()) return [];
+  const st = _load();
+  const recoveryMs = Number.isFinite(opts.recoveryMs) && opts.recoveryMs > 0 ? opts.recoveryMs : _recoveryMs();
+  const out = [];
+  let changed = false;
+  for (const [deviceId, occs] of Object.entries(st.occurrences)) {
+    const last = _lastAnomalyAt(occs);
+    if (!last || (now - last) < recoveryMs) continue; // not recovered yet
+    if (!_hasTemporaryRestriction(deviceId, st.proposed)) continue; // nothing to step down
+    const key = `deescalate:${deviceId}`;
+    const existing = st.proposed[key];
+    if (existing && existing.status === 'proposed') { out.push(existing); continue; }
+    if (existing && (existing.status === 'confirmed' || existing.status === 'dismissed')) continue;
+    const suggestion = {
+      id: `deesc-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
+      deviceId,
+      action: 'clear-schedule',
+      type: 'de-escalation',
+      severity: 'info',
+      recoveredForMs: now - last,
+      reason: `${deviceId} healthy for ${Math.round((now - last) / 60000)}m → propose clearing its temporary reduce-schedule`,
+      directive: `liku peripherals remove-schedule ${deviceId}`,
+      status: 'proposed',
+      proposed: true,
+      requiresHuman: true,
+      autonomousAction: false,
+      createdAt: new Date().toISOString()
+    };
+    st.proposed[key] = suggestion;
+    _clusterMirrorAction(key, suggestion);
+    out.push(suggestion);
+    changed = true;
+  }
+  if (changed) _save(st);
+  return out;
+}
+
+/**
+ * SAFE auto-clear: dismiss purely-advisory OPEN (proposed, not confirmed)
+ * escalation suggestions for RECOVERED devices. This only removes a suggestion —
+ * it NEVER removes a confirmed restriction and NEVER actuates — so it is a
+ * documented, still-safe advisory-only auto-clear path. OFF by default; enable
+ * with LIKU_PERIPHERAL_AUTOHEAL_AUTOCLEAR=1.
+ * @param {{ recoveryMs?:number }} [opts]
+ * @param {number} [now]
+ * @returns {{ cleared:string[] }}
+ */
+function autoClearRecovered(opts = {}, now = Date.now()) {
+  if (!enabled()) return { cleared: [] };
+  if (String(process.env.LIKU_PERIPHERAL_AUTOHEAL_AUTOCLEAR || '') !== '1') return { cleared: [] };
+  const st = _load();
+  const recoveryMs = Number.isFinite(opts.recoveryMs) && opts.recoveryMs > 0 ? opts.recoveryMs : _recoveryMs();
+  const cleared = [];
+  let changed = false;
+  for (const [deviceId, occs] of Object.entries(st.occurrences)) {
+    const last = _lastAnomalyAt(occs);
+    if (!last || (now - last) < recoveryMs) continue;
+    const entry = st.proposed[deviceId];
+    // Only clear a purely-advisory OPEN device proposal (never confirmed, never
+    // the fleet key, never a de-escalation key).
+    if (entry && entry.status === 'proposed' && entry.action !== 'clear-schedule') {
+      entry.status = 'auto-cleared';
+      entry.autoClearedAt = new Date(now).toISOString();
+      _clusterMirrorAction(deviceId, { ...entry, status: 'dismissed' });
+      cleared.push(entry.id);
+      changed = true;
+    }
+  }
+  if (changed) _save(st);
+  return { cleared };
+}
+
 module.exports = {
   FLAG, STORE_FILE, POLICIES_FILE, ACTION_LADDER,
   enabled, recordAnomaly, proposeActions, proposeFleetAction, listProposed, confirm, dismiss, clear,
-  setPolicy, getPolicy, listPolicies, clearPolicies
+  setPolicy, getPolicy, listPolicies, clearPolicies,
+  proposeDeescalations, autoClearRecovered
 };

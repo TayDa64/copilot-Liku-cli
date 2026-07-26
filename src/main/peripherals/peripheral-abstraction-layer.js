@@ -757,6 +757,12 @@ function confirmAnomalyAction(id, opts = {}) {
       } else {
         executed = rotateAllTokens();
       }
+    } else if (execute && res.action === 'clear-schedule') {
+      // Phase 30: human-approved DE-ESCALATION — remove the device's temporary
+      // reduce-schedule restriction now that it has recovered. Removing a
+      // restriction is human-gated; THIS confirmation is the gate. Non-actuating
+      // (a device simply regains its normal, unrestricted operation envelope).
+      executed = { enabled: true, ...scheduleAdvisor().removeConfirmedSchedule(res.deviceId) };
     }
     return { enabled: true, ...res, executed };
   } catch (err) { return { enabled: true, ok: false, reason: err.message }; }
@@ -781,6 +787,36 @@ function setAutoHealPolicy(deviceId, thresholds) {
   if (!isPeripheralsEnabled()) return { enabled: false };
   try { return { enabled: true, ...anomalyActionAdvisor().setPolicy(deviceId, thresholds) }; }
   catch (err) { return { enabled: true, ok: false, reason: err.message }; }
+}
+
+// ── Phase 30: rebalancing + expiry notifications + de-escalation/recovery ────
+
+/** Phase 30 — rebalance stale / unclaimed open tasks to less-loaded nodes (advisory). */
+function rebalanceClusterTasks(opts = {}) {
+  if (!isPeripheralsEnabled()) return { enabled: false, rebalanced: [] };
+  try { return { enabled: true, ...clusterTasks().rebalance(opts) }; }
+  catch (err) { return { enabled: true, rebalanced: [], reason: err.message }; }
+}
+
+/** Phase 30 — confirmed schedules whose cap is about to lapse or just lapsed (advisory). */
+function getExpiringSchedules(opts = {}) {
+  if (!isPeripheralsEnabled()) return { enabled: false, schedules: [] };
+  try { return { enabled: true, schedules: scheduleAdvisor().expiringSchedules(opts) }; }
+  catch { return { enabled: true, schedules: [] }; }
+}
+
+/** Phase 30 — propose human-gated de-escalations for RECOVERED devices. */
+function getDeescalations(opts = {}) {
+  if (!isPeripheralsEnabled()) return { enabled: false, deescalations: [] };
+  try { return { enabled: true, deescalations: anomalyActionAdvisor().proposeDeescalations(opts) }; }
+  catch { return { enabled: true, deescalations: [] }; }
+}
+
+/** Phase 30 — SAFE auto-clear of purely-advisory OPEN suggestions for recovered devices. */
+function autoClearRecovered(opts = {}) {
+  if (!isPeripheralsEnabled()) return { enabled: false, cleared: [] };
+  try { return { enabled: true, ...anomalyActionAdvisor().autoClearRecovered(opts) }; }
+  catch { return { enabled: true, cleared: [] }; }
 }
 
 /** Phase 22 — mint a PER-ACTION (least-privilege) capability token for a device. */
@@ -1118,6 +1154,10 @@ module.exports = {
   dismissAnomalyAction,
   getAutoHealPolicies,
   setAutoHealPolicy,
+  rebalanceClusterTasks,
+  getExpiringSchedules,
+  getDeescalations,
+  autoClearRecovered,
   issueActionToken,
   verifyDeviceToken,
   rotateAllTokens,

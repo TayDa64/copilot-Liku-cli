@@ -341,6 +341,87 @@ function startAutoRenew(taskId, opts = {}) {
   return { renewNow, ttlMs, intervalMs, stop() { if (timer) { clearInterval(timer); timer = null; } } };
 }
 
+// ── Phase 30: TASK INBOX REBALANCING (best-effort, advisory) ────────────────
+// Reassign STALE or UNCLAIMED open tasks to a less-loaded node so work does not
+// pile up on (or get stuck behind) a node that never picked it up. Rebalancing
+// only rewrites the advisory ASSIGNMENT intent — it NEVER claims on behalf of
+// another node and NEVER actuates. Exclusivity still comes from the claim (lease),
+// so a rebalance can never create double ownership. Deterministic heuristic:
+// least-loaded node wins (tie broken by nodeId); a stale assignee is avoided.
+
+const _OPEN_STATUSES = new Set(['pending-review', 'escalate', 'open']);
+
+function _isOpenStatus(status) { return _OPEN_STATUSES.has(String(status || 'pending-review')); }
+
+function _staleMs(opts) {
+  if (opts && Number.isFinite(opts.staleMs) && opts.staleMs > 0) return opts.staleMs;
+  const v = Number(process.env.LIKU_PERIPHERAL_TASK_STALE_MS);
+  return Number.isFinite(v) && v > 0 ? v : 600000; // 10 min unclaimed → stale
+}
+
+/** Pick the least-loaded node (deterministic), avoiding `exclude` when possible. @private */
+function _leastLoaded(load, exclude) {
+  const nodes = Object.keys(load).sort();
+  let best = null; let bestLoad = Infinity;
+  for (const n of nodes) {
+    if (exclude && n === exclude && nodes.length > 1) continue;
+    if (load[n] < bestLoad) { bestLoad = load[n]; best = n; }
+  }
+  if (!best && exclude) best = exclude; // exclude was the only known node
+  return best;
+}
+
+/**
+ * Rebalance stale / unclaimed open tasks across the fleet. A task is a candidate
+ * when it is OPEN, currently UNOWNED (no live claim), and either UNASSIGNED or its
+ * assignment is older than `staleMs` (the assignee never claimed it). Each such
+ * task is (advisorily) reassigned to the least-loaded known node. Cluster off →
+ * inert. Best-effort / non-fatal.
+ * @param {{ now?:number, staleMs?:number, maxAgeMs?:number }} [opts]
+ * @returns {{ rebalanced:Array<{taskId:string, from:string|null, to:string}>, local?:boolean }}
+ */
+function rebalance(opts = {}) {
+  if (!enabled()) return { rebalanced: [] };
+  const coord = _coord();
+  if (!coord.clusterEnabled()) return { rebalanced: [], local: true };
+  const now = Number.isFinite(opts.now) ? opts.now : Date.now();
+  const staleMs = _staleMs(opts);
+  const tasks = listTasks({ now, maxAgeMs: opts.maxAgeMs });
+  let assignments = [];
+  try { assignments = coord.listShared(ASSIGN_KIND, { now, maxAgeMs: Number.isFinite(opts.maxAgeMs) ? opts.maxAgeMs : _assignTtlMs(opts) }); }
+  catch { assignments = []; }
+  const assignByTask = {};
+  for (const a of assignments) if (a && a.taskId) assignByTask[a.taskId] = a;
+  // Known nodes + per-node load. Load = open tasks a node OWNS or is ASSIGNED.
+  const load = { [coord.nodeId()]: 0 };
+  for (const a of assignments) { if (a.assignee && !(a.assignee in load)) load[a.assignee] = 0; if (a.assignedBy && !(a.assignedBy in load)) load[a.assignedBy] = 0; }
+  for (const t of tasks) {
+    if (!t.id || !_isOpenStatus(t.status)) continue;
+    const owner = taskOwner(t.id, now);
+    if (owner) { if (!(owner in load)) load[owner] = 0; load[owner] += 1; continue; }
+    const a = assignByTask[t.id];
+    if (a && a.assignee) { if (!(a.assignee in load)) load[a.assignee] = 0; load[a.assignee] += 1; }
+  }
+  const rebalanced = [];
+  for (const t of tasks) {
+    if (!t.id || !_isOpenStatus(t.status)) continue;
+    if (taskOwner(t.id, now)) continue; // actively owned → leave it
+    const a = assignByTask[t.id];
+    const assignedAtMs = a ? (Date.parse(a.assignedAt || a.updatedAt) || 0) : 0;
+    const isStale = a ? (now - assignedAtMs) >= staleMs : true; // unassigned counts as stale
+    if (!isStale) continue;
+    const staleAssignee = a ? a.assignee : null;
+    const target = _leastLoaded(load, staleAssignee);
+    if (!target) continue;
+    if (target === staleAssignee) continue; // nowhere better to move it
+    assignTask(t.id, target, { now });
+    if (staleAssignee && staleAssignee in load) load[staleAssignee] = Math.max(0, load[staleAssignee] - 1);
+    load[target] = (load[target] || 0) + 1;
+    rebalanced.push({ taskId: t.id, from: staleAssignee, to: target });
+  }
+  return { rebalanced };
+}
+
 /** GC stale task + notification + assignment summaries (best-effort). */
 function sweep(now = Date.now()) {
   if (!enabled()) return { tasks: [], notifications: [], assignments: [] };
@@ -360,5 +441,6 @@ module.exports = {
   publishTask, publishNotification, updateTaskStatus,
   listTasks, listNotifications, peerHasOpenTaskFor, sweep,
   claimTask, renewClaim, releaseTask, taskOwner, isOwnedByPeer,
-  assignTask, assignmentFor, releaseAssignment, myAssignments, handoffTask, startAutoRenew
+  assignTask, assignmentFor, releaseAssignment, myAssignments, handoffTask, startAutoRenew,
+  rebalance
 };

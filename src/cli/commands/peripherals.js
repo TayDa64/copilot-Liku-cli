@@ -24,9 +24,10 @@
  *                                       Advisory anomaly→action suggestions (human-gated)
  *   liku peripherals schedules          Show per-device time-boxed power budgets
  *   liku peripherals sweep-schedules    GC expired time-boxed confirmed schedules
+ *   liku peripherals schedule-expiry    Confirmed caps about to lapse / just lapsed (advisory)
  *   liku peripherals locks [--record]   Lock observability: metrics, per-file, trends
  *   liku peripherals coordination [status|lease <id>|release <id>|sweep|claim <task>|release-task <task>
- *                                 |assign <task> <node>|handoff <task> [node]|renew <task>]
+ *                                 |assign <task> <node>|handoff <task> [node]|renew <task>|rebalance]
  *                                       Cross-host lease + task coordination (cluster mode)
  *   liku peripherals cron [--at <ISO>]  Cron device schedules → advisory human-gated tasks
  *   liku peripherals cron [propose <dev> <act> "<cron>"|confirm <id>|dismiss <id>|rules|tick|remove <id>]
@@ -345,6 +346,22 @@ async function run(args, flags) {
       return { success: !!res.ok, ...res };
     }
 
+    case 'schedule-expiry': {
+      // Phase 30: confirmed schedules whose cap is about to lapse or just lapsed
+      // (advisory — re-confirm to keep restricting; this NEVER auto-extends).
+      const res = pal.getExpiringSchedules();
+      if (flags.json) return { success: true, ...res };
+      const list = res.schedules || [];
+      log(highlight(`Expiring schedules (${list.length}):`));
+      if (!list.length) log(dim('  none upcoming or recently lapsed'));
+      for (const s of list) {
+        const when = s.state === 'expired' ? `LAPSED ${Math.round(-s.expiresInMs / 60000)}m ago` : `expires in ${Math.round(s.expiresInMs / 60000)}m`;
+        log(`  ${highlight(s.id)} ${s.fromHour}:00→${s.toHour}:00 ≤${s.maxW}W  [${s.state}] ${dim(when)}`);
+        log(dim(`     re-confirm: keep the cap by creating a fresh time-boxed schedule (never auto-extended)`));
+      }
+      return { success: true, ...res };
+    }
+
     case 'anomalies': {
       // Phase 20: detected power anomalies with per-device ATTRIBUTION + the
       // advisory self-healing actions proposed for persistently anomalous devices.
@@ -372,8 +389,25 @@ async function run(args, flags) {
 
     case 'anomaly-action': {
       // Advisory anomaly→action suggestions: list | confirm <id> | dismiss <id> |
-      // policy [list|set <device> reduce=N rotate=N unpair=N].
+      // policy [list|set <device> reduce=N rotate=N unpair=N] | recovery.
       const op = (args[1] || 'list').toLowerCase();
+      if (op === 'recovery') {
+        // Phase 30: propose human-gated de-escalations for RECOVERED devices +
+        // (if LIKU_PERIPHERAL_AUTOHEAL_AUTOCLEAR=1) safely auto-clear open advisory
+        // suggestions. De-escalations are confirmed like any other action.
+        const de = pal.getDeescalations();
+        const cleared = pal.autoClearRecovered();
+        if (flags.json) return { success: true, deescalations: de.deescalations, autoCleared: cleared.cleared };
+        const list = de.deescalations || [];
+        log(highlight(`Recovery de-escalations (${list.length}):`));
+        if (!list.length) log(dim('  none (no recovered device with an active temporary restriction)'));
+        for (const d of list) {
+          log(`  ${highlight(d.id)} ${dim(d.deviceId)} [${d.severity}] ${highlight(d.action)}  ${dim(d.reason)}`);
+          log(dim(`     confirm: liku peripherals anomaly-action confirm ${d.id}  →  ${d.directive}`));
+        }
+        if ((cleared.cleared || []).length) log(dim(`  auto-cleared ${cleared.cleared.length} advisory suggestion(s) for recovered devices`));
+        return { success: true, deescalations: list, autoCleared: cleared.cleared };
+      }
       if (op === 'policy') {
         const sub = (args[2] || 'list').toLowerCase();
         if (sub === 'set') {
@@ -415,6 +449,7 @@ async function run(args, flags) {
             if (res.action === 'unpair') log(dim('  device unpaired → capability token revoked'));
             if (res.action === 'reduce-schedule' && res.executed.multiDevice) log(dim(`  multi-device coordinated cap: ${(res.executed.devices || []).map((d) => `${d.deviceId}≤${d.proposedMaxW}W`).join(', ')}`));
             else if (res.action === 'reduce-schedule' && res.executed.rule) log(dim(`  schedule capped ${res.executed.rule.fromHour}:00→${res.executed.rule.toHour}:00 ≤${res.executed.rule.maxW}W`));
+            if (res.action === 'clear-schedule') log(dim(`  temporary restriction cleared for ${res.deviceId} (recovered) → ${(res.executed.removed || []).join(', ') || 'none'}`));
             if (res.action === 'rotate-all') log(dim(`  fleet rotated ${(res.executed.rotated || []).length} token(s)`));
           } else {
             success(`Action ${res.action}${res.deviceId ? ` for ${res.deviceId}` : ''} confirmed (advisory).`);
@@ -619,6 +654,15 @@ async function run(args, flags) {
         if (res.claimed) success(`Claim for ${id} renewed${res.local ? ' (single-machine/local)' : ''}.`);
         else error(`Could not renew ${id}${res.owner ? ` (owned by ${res.owner})` : ''}`);
         return { success: !!res.claimed, ...res };
+      }
+      if (op === 'rebalance') {
+        // Phase 30: reassign stale / unclaimed open tasks to less-loaded nodes (advisory).
+        const res = pal.rebalanceClusterTasks();
+        if (flags.json) return { success: true, ...res };
+        const moves = res.rebalanced || [];
+        success(`Rebalanced ${moves.length} task(s)${res.local ? ' (single-machine/local — no-op)' : ''}.`);
+        for (const m of moves) log(dim(`  ${m.taskId}: ${m.from || '(unassigned)'} → ${m.to}`));
+        return { success: true, ...res };
       }
       if (op === 'sweep') {
         // Phase 25: best-effort cluster GC — expire stale token records + prune leases.
@@ -831,7 +875,7 @@ async function run(args, flags) {
 
     default:
       error(`Unknown subcommand: ${sub}`);
-      log('Usage: liku peripherals [scan|list|status [id]|power [--history|--trend|--anomalies|--forecast [--seasonal] [--exclude-anomalous] [--special-days]]|anomalies [--attributed]|anomaly-action [confirm|dismiss <id>|policy [set <device> reduce=N rotate=N unpair=N]]|schedules|sweep-schedules|locks [--record]|coordination [lease|release <id>|sweep|claim|release-task <task>|assign <task> <node>|handoff <task> [node]|renew <task>]|cron [propose|confirm|dismiss|rules|tick|remove]|suggestions|apply-schedule <id>|remove-schedule <device> [--from N] [--to N]|pair <id>|unpair <id>|token [rotate|revoke|rotate-all|action <id> <action>|action-rotate <id> <action>|identity-rotate <id>]|tasks [--escalated|--pending|--severity <p>|--anomaly]|notifications|channels|simulate <id> <k=v>|execute <id> <action>|confirm <id> <action> [--execute]|drivers]');
+      log('Usage: liku peripherals [scan|list|status [id]|power [--history|--trend|--anomalies|--forecast [--seasonal] [--exclude-anomalous] [--special-days]]|anomalies [--attributed]|anomaly-action [confirm|dismiss <id>|policy [set <device> reduce=N rotate=N unpair=N]|recovery]|schedules|sweep-schedules|schedule-expiry|locks [--record]|coordination [lease|release <id>|sweep|claim|release-task <task>|assign <task> <node>|handoff <task> [node]|renew <task>|rebalance]|cron [propose|confirm|dismiss|rules|tick|remove]|suggestions|apply-schedule <id>|remove-schedule <device> [--from N] [--to N]|pair <id>|unpair <id>|token [rotate|revoke|rotate-all|action <id> <action>|action-rotate <id> <action>|identity-rotate <id>]|tasks [--escalated|--pending|--severity <p>|--anomaly]|notifications|channels|simulate <id> <k=v>|execute <id> <action>|confirm <id> <action> [--execute]|drivers]');
       return { success: false };
   }
 }

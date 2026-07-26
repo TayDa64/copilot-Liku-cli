@@ -1127,6 +1127,92 @@ itself — no new parallel expiry system.
 - **single-machine-unchanged** — assignment/handoff are inert local acks and schedule
   expiry filtering is byte-compatible when `LIKU_CLUSTER_DIR` is unset.
 
+## Phase 30 — inbox rebalancing + expiry notifications + de-escalation
+
+### Task inbox rebalancing
+
+`cluster-tasks.rebalance({ now, staleMs })` reassigns STALE or UNCLAIMED open tasks
+to a less-loaded node so work never piles up on (or gets stuck behind) a node that
+never picked it up. A task is a candidate when it is OPEN, currently UNOWNED (no
+live claim), and either unassigned or its assignment is older than `staleMs`
+(`LIKU_PERIPHERAL_TASK_STALE_MS`, default 10 min). The target is the least-loaded
+known node (deterministic tiebreak by nodeId; the stale assignee is avoided).
+
+Rebalancing only rewrites the advisory ASSIGNMENT intent — it NEVER claims on behalf
+of another node and NEVER actuates. Exclusivity still comes from the claim (lease),
+so a rebalance can never create double ownership. Cluster off → inert.
+PAL: `rebalanceClusterTasks()`. CLI: `coordination rebalance`.
+
+### Schedule-expiry notifications
+
+`power-schedule-advisor.expiringSchedules({ now, withinMs, graceMs })` lists confirmed
+caps whose expiry is UPCOMING (within `LIKU_PERIPHERAL_SCHEDULE_EXPIRY_WARN_MS`,
+default 1h) or JUST-EXPIRED (within `LIKU_PERIPHERAL_SCHEDULE_EXPIRY_GRACE_MS`,
+default 1h). The new `schedule-expiry-notifier` agent turns these into bounded,
+human-gated Supervisor tasks + fleet-visible notifications via the SAME pipeline as
+power anomalies + cron:
+
+```
+ advisor.expiringSchedules(now)
+   → (per rule:state dedup, LIKU_PERIPHERAL_EXPIRY_NOTIFY_COOLDOWN_MS default 1h)
+     → SupervisorAgent.createPeripheralTask()  (status: pending-review)
+       → orchestrator.emit('supervisor:task' + 'supervisor:schedule-expiry')
+         → cluster-tasks.publishTask/publishNotification (fleet-visible)
+```
+
+STRICTLY ADVISORY: the notifier NEVER re-creates, extends, or mutates a schedule. An
+operator re-confirms a lapsing cap by creating a fresh time-boxed schedule (an
+explicit human action). Timer-free by default (`tick(now)`); optional unref'd
+interval. PAL: `getExpiringSchedules()`. CLI: `schedule-expiry`.
+
+### Cluster-aware auto-heal + de-escalation / auto-clear on recovery
+
+- **Cluster-shared policies** — `setPolicy` now mirrors a device's auto-heal
+  thresholds to the shared `autoheal-policies` store, and `_loadPolicies` merges
+  peer-shared policies (`LIKU_PERIPHERAL_CLUSTER_POLICY_TTL_MS`, default 30d) so nodes
+  converge on the same thresholds instead of escalating on divergent local views.
+  Precedence: default ladder → env → cluster-shared → local store. Cluster off → inert.
+- **De-escalation (human-gated)** — `proposeDeescalations({ recoveryMs })` proposes a
+  `clear-schedule` action for any device that has RECOVERED (no anomaly for
+  `LIKU_PERIPHERAL_AUTOHEAL_RECOVERY_MS`, default 1h) but still carries a temporary
+  reduce-schedule restriction. Confirming it (via `PAL.confirmAnomalyAction`) removes
+  the restriction — **removing a restriction is human-gated; the confirm IS the gate**
+  and is non-actuating (the device simply regains its normal envelope).
+- **Safe auto-clear (advisory-only)** — `autoClearRecovered({ recoveryMs })` dismisses
+  purely-advisory OPEN suggestions for recovered devices. This ONLY removes a
+  suggestion — it never removes a confirmed restriction and never actuates — so it is a
+  documented, still-safe auto-clear path. OFF by default
+  (`LIKU_PERIPHERAL_AUTOHEAL_AUTOCLEAR=1` to enable).
+- PAL: `getDeescalations()`, `autoClearRecovered()`. CLI: `anomaly-action recovery`.
+
+### New environment variables (all default OFF / inert single-machine)
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `LIKU_PERIPHERAL_TASK_STALE_MS` | `600000` (10m) | Unclaimed assignment age → rebalance candidate |
+| `LIKU_PERIPHERAL_SCHEDULE_EXPIRY_WARN_MS` | `3600000` (1h) | Upcoming-expiry look-ahead window |
+| `LIKU_PERIPHERAL_SCHEDULE_EXPIRY_GRACE_MS` | `3600000` (1h) | Just-expired grace window (still surfaced) |
+| `LIKU_PERIPHERAL_EXPIRY_NOTIFY_COOLDOWN_MS` | `3600000` (1h) | Per rule:state expiry-notification dedup |
+| `LIKU_PERIPHERAL_CLUSTER_POLICY_TTL_MS` | `2592000000` (30d) | Cluster-shared auto-heal policy freshness / GC |
+| `LIKU_PERIPHERAL_AUTOHEAL_RECOVERY_MS` | `3600000` (1h) | Healthy period before a device counts as recovered |
+| `LIKU_PERIPHERAL_AUTOHEAL_AUTOCLEAR` | `0` (off) | Safely auto-clear OPEN advisory suggestions on recovery |
+
+### Phase 30 safety invariants
+
+- **rebalancing-is-advisory** — rebalance only rewrites assignment intent; it never
+  claims for another node and exposes no actuate surface, so it can never create double
+  ownership or actuate a device.
+- **expiry-notifications-never-auto-extend** — expiry notifications are advisory tasks
+  only; re-confirming a lapsing cap is an explicit human action. The notifier never
+  mutates, re-creates, or extends a schedule.
+- **de-escalation-stays-gated** — clearing a temporary restriction is proposal →
+  explicit human confirmation; only purely-advisory OPEN suggestions may be safely
+  auto-cleared (never a confirmed restriction, never actuation).
+- **recovery-is-genuine** — de-escalation / auto-clear trigger only after a device has
+  been anomaly-free for the full recovery window; a recent anomaly suppresses them.
+- **single-machine-unchanged** — rebalancing and cluster policy sharing are inert when
+  `LIKU_CLUSTER_DIR` is unset; expiry/recovery logic is byte-compatible.
+
 ## If a human decides to act
 
 Any physical response still travels the full PAL safety chain — the alert path

@@ -4638,6 +4638,236 @@ test('PAL exposes Phase 29 assignment / handoff / renew / time-box / sweep acces
   delete process.env.LIKU_ENABLE_PERIPHERALS;
 });
 
+// ── Phase 30: task rebalancing + schedule-expiry notifications + de-escalation ──
+
+test('rebalance reassigns a stale unclaimed task to a less-loaded node', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const clusterDir = require('path').join(TMP_HOME, 'p30rebal');
+  process.env.LIKU_CLUSTER_DIR = clusterDir;
+  process.env.LIKU_NODE_ID = 'nodeA';
+  const clusterTasks = require('../src/main/peripherals/cluster-tasks');
+  const t0 = Date.now();
+  clusterTasks.publishTask({ id: 'rb1', device: { id: 'heater' }, status: 'pending-review' });
+  clusterTasks.assignTask('rb1', 'nodeB'); // assigned but never claimed
+  const res = clusterTasks.rebalance({ now: t0 + 100000, staleMs: 1000 });
+  assert.strictEqual(res.rebalanced.length, 1, 'the stale task is rebalanced');
+  assert.strictEqual(res.rebalanced[0].from, 'nodeB');
+  assert.strictEqual(res.rebalanced[0].to, 'nodeA', 'moved to the less-loaded node');
+  assert.strictEqual(clusterTasks.assignmentFor('rb1'), 'nodeA', 'assignment updated');
+  delete process.env.LIKU_NODE_ID;
+  delete process.env.LIKU_CLUSTER_DIR;
+  try { fs.rmSync(clusterDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('rebalance never touches an actively-owned task (no double ownership)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const clusterDir = require('path').join(TMP_HOME, 'p30rebalown');
+  process.env.LIKU_CLUSTER_DIR = clusterDir;
+  process.env.LIKU_NODE_ID = 'nodeA';
+  const clusterTasks = require('../src/main/peripherals/cluster-tasks');
+  const t0 = Date.now();
+  clusterTasks.publishTask({ id: 'rb2', device: { id: 'oven' }, status: 'pending-review' });
+  clusterTasks.assignTask('rb2', 'nodeB');
+  clusterTasks.claimTask('rb2', { ttlMs: 300000, now: t0 }); // nodeA owns it
+  const res = clusterTasks.rebalance({ now: t0 + 1000, staleMs: 500 });
+  assert.strictEqual(res.rebalanced.length, 0, 'owned task is left alone');
+  assert.strictEqual(clusterTasks.taskOwner('rb2', t0 + 1000), 'nodeA', 'ownership unchanged');
+  delete process.env.LIKU_NODE_ID;
+  delete process.env.LIKU_CLUSTER_DIR;
+  try { fs.rmSync(clusterDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('rebalance is inert single-machine + exposes no actuation surface', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_CLUSTER_DIR;
+  const clusterTasks = require('../src/main/peripherals/cluster-tasks');
+  const res = clusterTasks.rebalance();
+  assert.deepStrictEqual(res.rebalanced, [], 'no rebalancing single-machine');
+  assert.strictEqual(res.local, true);
+  assert.strictEqual(typeof clusterTasks.execute, 'undefined');
+  assert.strictEqual(typeof clusterTasks.perform, 'undefined');
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('expiringSchedules lists upcoming + just-expired confirmed caps (advisory)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_CLUSTER_DIR;
+  const schedule = require('../src/main/peripherals/power-schedule');
+  const advisor = require('../src/main/peripherals/power-schedule-advisor');
+  advisor.clear();
+  try { fs.rmSync(schedule.CONFIRMED_FILE); } catch { /* ignore */ }
+  const base = new Date(2026, 6, 26, 12, 0, 0).getTime();
+  advisor.createConfirmedSchedule('soon', { maxW: 150, fromHour: 0, toHour: 24, expiresAt: new Date(base + 30 * 60000).toISOString() });
+  advisor.createConfirmedSchedule('lapsed', { maxW: 120, fromHour: 0, toHour: 24, expiresAt: new Date(base - 10 * 60000).toISOString() });
+  advisor.createConfirmedSchedule('faraway', { maxW: 90, fromHour: 0, toHour: 24, expiresAt: new Date(base + 10 * 3600000).toISOString() });
+  const list = advisor.expiringSchedules({ now: base });
+  const byId = Object.fromEntries(list.map((s) => [s.id, s]));
+  assert.strictEqual(byId.soon && byId.soon.state, 'upcoming', 'soon is upcoming');
+  assert.strictEqual(byId.lapsed && byId.lapsed.state, 'expired', 'lapsed is just-expired');
+  assert.ok(!byId.faraway, 'far-future expiry not surfaced yet');
+  advisor.clear();
+  try { fs.rmSync(schedule.CONFIRMED_FILE); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('buildExpiryNotification is advisory-only (never autonomous)', () => {
+  const { buildExpiryNotification } = require('../src/main/agents/schedule-expiry-notifier');
+  const expired = buildExpiryNotification({ id: 'd', fromHour: 0, toHour: 24, maxW: 100, expiresAt: new Date().toISOString(), expiresInMs: -1000, state: 'expired' });
+  assert.strictEqual(expired.autonomousAction, false);
+  assert.strictEqual(expired.requiresHuman, false);
+  assert.strictEqual(expired.severity, 'warning', 'a lapsed cap is a warning');
+  assert.strictEqual(expired.source, 'schedule-expiry');
+  assert.ok(expired.dedupeKey.startsWith('schedule-expiry:d:'), 'dedupe key present');
+  const upcoming = buildExpiryNotification({ id: 'd', fromHour: 0, toHour: 24, maxW: 100, expiresAt: new Date().toISOString(), expiresInMs: 1000, state: 'upcoming' });
+  assert.strictEqual(upcoming.severity, 'info', 'an upcoming expiry is info');
+});
+
+test('schedule-expiry notifier creates a human-gated task + NEVER auto-extends the schedule', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_CLUSTER_DIR;
+  const schedule = require('../src/main/peripherals/power-schedule');
+  const advisor = require('../src/main/peripherals/power-schedule-advisor');
+  const { attachScheduleExpiryNotifier } = require('../src/main/agents/schedule-expiry-notifier');
+  advisor.clear();
+  try { fs.rmSync(schedule.CONFIRMED_FILE); } catch { /* ignore */ }
+  const base = new Date(2026, 6, 26, 12, 0, 0).getTime();
+  const expiresAt = new Date(base + 30 * 60000).toISOString();
+  advisor.createConfirmedSchedule('boxN', { maxW: 150, fromHour: 0, toHour: 24, expiresAt });
+  const created = [];
+  const supervisor = {
+    receiveNotification() {},
+    createPeripheralTask(n) { return { id: n.id, source: 'schedule-expiry', status: 'pending-review', requiresHuman: false, autonomousAction: false, notification: n }; }
+  };
+  const orch = new (require('events').EventEmitter)();
+  const notifier = attachScheduleExpiryNotifier(orch, { getSupervisor: () => supervisor, now: () => base });
+  const r = notifier.tick(base);
+  assert.strictEqual(r.created.length, 1, 'one advisory expiry task created');
+  assert.strictEqual(r.created[0].autonomousAction, false, 'task is not autonomous');
+  // The schedule was NOT auto-extended — its expiry is unchanged.
+  const rule = advisor.listConfirmedSchedules().find((x) => x.id === 'boxN');
+  assert.strictEqual(rule.expiresAt, expiresAt, 'notifier never mutates the schedule');
+  advisor.clear();
+  try { fs.rmSync(schedule.CONFIRMED_FILE); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('auto-heal policies are cluster-shared (a peer sees the threshold without a local store)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const clusterDir = require('path').join(TMP_HOME, 'p30policy');
+  process.env.LIKU_CLUSTER_DIR = clusterDir;
+  process.env.LIKU_NODE_ID = 'nodeA';
+  const actions = require('../src/main/peripherals/anomaly-action-advisor');
+  actions.clear();
+  actions.clearPolicies();
+  actions.setPolicy('devP', { 'reduce-schedule': 1 }); // writes local + mirrors to cluster
+  // Drop the LOCAL policy store; the cluster mirror must still supply the threshold.
+  actions.clearPolicies();
+  assert.strictEqual(actions.getPolicy('devP')['reduce-schedule'], 1, 'cluster-shared policy visible after local store cleared');
+  actions.clearPolicies();
+  actions.clear();
+  delete process.env.LIKU_NODE_ID;
+  delete process.env.LIKU_CLUSTER_DIR;
+  try { fs.rmSync(clusterDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('recovery de-escalation proposes clearing a temporary restriction (human-gated confirm)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_CLUSTER_DIR;
+  const schedule = require('../src/main/peripherals/power-schedule');
+  const advisor = require('../src/main/peripherals/power-schedule-advisor');
+  const actions = require('../src/main/peripherals/anomaly-action-advisor');
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  advisor.clear(); actions.clear();
+  try { fs.rmSync(schedule.CONFIRMED_FILE); } catch { /* ignore */ }
+  const base = new Date(2026, 6, 26, 12, 0, 0).getTime();
+  // Device was anomalous once, then a temporary reduce-schedule was confirmed.
+  actions.recordAnomaly({ device: 'devR', type: 'spike' }, base);
+  advisor.createConfirmedSchedule('devR', { maxW: 100, fromHour: 0, toHour: 24 }); // source anomaly-action-confirmed
+  assert.strictEqual(schedule.deviceScheduleW('devR', new Date(base)), 100, 'restriction active');
+  // Recovered (no anomaly for the recovery window) → propose clear-schedule.
+  const de = actions.proposeDeescalations({ recoveryMs: 1000 }, base + 5000);
+  assert.strictEqual(de.length, 1, 'one de-escalation proposed');
+  assert.strictEqual(de[0].action, 'clear-schedule');
+  assert.strictEqual(de[0].requiresHuman, true, 'still human-gated');
+  // Human confirms → PAL removes the restriction (confirm IS the gate).
+  const conf = pal.confirmAnomalyAction(de[0].id);
+  assert.strictEqual(conf.ok, true);
+  assert.strictEqual(conf.executed.ok, true, 'restriction removed on confirm');
+  assert.strictEqual(schedule.deviceScheduleW('devR', new Date(base)), null, 'device unrestricted after recovery clear');
+  advisor.clear(); actions.clear();
+  try { fs.rmSync(schedule.CONFIRMED_FILE); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('de-escalation only triggers on genuine recovery (recent anomaly → no proposal)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_CLUSTER_DIR;
+  const schedule = require('../src/main/peripherals/power-schedule');
+  const advisor = require('../src/main/peripherals/power-schedule-advisor');
+  const actions = require('../src/main/peripherals/anomaly-action-advisor');
+  advisor.clear(); actions.clear();
+  try { fs.rmSync(schedule.CONFIRMED_FILE); } catch { /* ignore */ }
+  const base = new Date(2026, 6, 26, 12, 0, 0).getTime();
+  actions.recordAnomaly({ device: 'devRecent', type: 'spike' }, base);
+  advisor.createConfirmedSchedule('devRecent', { maxW: 100, fromHour: 0, toHour: 24 });
+  // Only 2s since last anomaly but recovery window is large → NOT recovered.
+  const de = actions.proposeDeescalations({ recoveryMs: 100000 }, base + 2000);
+  assert.strictEqual(de.length, 0, 'no de-escalation while still recently anomalous');
+  advisor.clear(); actions.clear();
+  try { fs.rmSync(schedule.CONFIRMED_FILE); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('auto-clear is OFF by default + only clears advisory OPEN suggestions when enabled', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_CLUSTER_DIR;
+  const actions = require('../src/main/peripherals/anomaly-action-advisor');
+  actions.clear();
+  const base = new Date(2026, 6, 26, 12, 0, 0).getTime();
+  for (let i = 0; i < 3; i++) actions.recordAnomaly({ device: 'devAC', type: 'spike' }, base);
+  const props = actions.proposeActions({}, base);
+  assert.ok(props.length >= 1, 'an open advisory action exists');
+  // Default OFF → no auto-clear even when recovered.
+  delete process.env.LIKU_PERIPHERAL_AUTOHEAL_AUTOCLEAR;
+  assert.deepStrictEqual(actions.autoClearRecovered({ recoveryMs: 1000 }, base + 5000).cleared, [], 'no auto-clear by default');
+  assert.ok(actions.listProposed().some((p) => p.deviceId === 'devAC'), 'proposal still open');
+  // Enabled → safely clears the OPEN advisory suggestion (never a confirmed restriction).
+  process.env.LIKU_PERIPHERAL_AUTOHEAL_AUTOCLEAR = '1';
+  const cleared = actions.autoClearRecovered({ recoveryMs: 1000 }, base + 5000).cleared;
+  assert.strictEqual(cleared.length, 1, 'recovered open suggestion auto-cleared');
+  assert.ok(!actions.listProposed().some((p) => p.deviceId === 'devAC'), 'suggestion no longer open');
+  delete process.env.LIKU_PERIPHERAL_AUTOHEAL_AUTOCLEAR;
+  actions.clear();
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('PAL exposes Phase 30 rebalance / expiry / de-escalation accessors', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const clusterDir = require('path').join(TMP_HOME, 'p30pal');
+  process.env.LIKU_CLUSTER_DIR = clusterDir;
+  process.env.LIKU_NODE_ID = 'palN';
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  const rb = pal.rebalanceClusterTasks();
+  assert.strictEqual(rb.enabled, true);
+  assert.ok(Array.isArray(rb.rebalanced));
+  const ex = pal.getExpiringSchedules();
+  assert.strictEqual(ex.enabled, true);
+  assert.ok(Array.isArray(ex.schedules));
+  const de = pal.getDeescalations();
+  assert.strictEqual(de.enabled, true);
+  assert.ok(Array.isArray(de.deescalations));
+  const ac = pal.autoClearRecovered();
+  assert.strictEqual(ac.enabled, true);
+  assert.ok(Array.isArray(ac.cleared));
+  delete process.env.LIKU_NODE_ID;
+  delete process.env.LIKU_CLUSTER_DIR;
+  try { fs.rmSync(clusterDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
 console.log(`\n${pass} checks passed.`);
 if (process.exitCode) { console.error('FAILED'); }
 else { console.log('OK'); }

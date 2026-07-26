@@ -21,6 +21,7 @@ const { PeripheralMonitorAgent, attachPeripheralMonitor } = require('./periphera
 const { attachPeripheralAlertConsumer, buildSupervisorNotification } = require('./peripheral-alert-consumer');
 const { attachPowerAnomalyConsumer, buildAnomalyNotification } = require('./power-anomaly-consumer');
 const { attachCronScheduler } = require('./cron-scheduler');
+const { attachScheduleExpiryNotifier, buildExpiryNotification } = require('./schedule-expiry-notifier');
 const { AgentStateManager } = require('./state-manager');
 const { TraceWriter } = require('./trace-writer');
 
@@ -38,6 +39,8 @@ module.exports = {
   attachPowerAnomalyConsumer,
   buildAnomalyNotification,
   attachCronScheduler,
+  attachScheduleExpiryNotifier,
+  buildExpiryNotification,
   AgentStateManager,
   TraceWriter,
   
@@ -120,8 +123,23 @@ module.exports = {
       });
     } catch { /* cron integration is best-effort */ }
 
+    // Pillar 3 (Phase 30): schedule-expiry notifier. Surfaces UPCOMING or
+    // JUST-EXPIRED time-boxed confirmed schedules as bounded, human-gated tasks
+    // so an operator can re-confirm a lapsing restrict-only cap. TIMER-FREE by
+    // default — a caller invokes scheduleExpiryNotifier.tick(now). Strictly
+    // advisory: it NEVER re-creates or extends a schedule.
+    let scheduleExpiryNotifier = null;
+    try {
+      scheduleExpiryNotifier = attachScheduleExpiryNotifier(orchestrator, {
+        cooldownMs: options.scheduleExpiryCooldownMs,
+        withinMs: options.scheduleExpiryWarnMs,
+        graceMs: options.scheduleExpiryGraceMs,
+        intervalMs: options.scheduleExpiryIntervalMs // OFF unless explicitly provided
+      });
+    } catch { /* schedule-expiry integration is best-effort */ }
+
     // Return object with orchestrator, stateManager, and peripheral integration
-    return { orchestrator, stateManager, traceWriter, peripheralMonitor, peripheralAlertConsumer, powerAnomalyConsumer, cronScheduler };
+    return { orchestrator, stateManager, traceWriter, peripheralMonitor, peripheralAlertConsumer, powerAnomalyConsumer, cronScheduler, scheduleExpiryNotifier };
   },
   
   // Recovery function for checkpoint restoration
