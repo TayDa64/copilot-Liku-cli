@@ -359,13 +359,39 @@ function _staleMs(opts) {
   return Number.isFinite(v) && v > 0 ? v : 600000; // 10 min unclaimed → stale
 }
 
-/** Pick the least-loaded node (deterministic), avoiding `exclude` when possible. @private */
-function _leastLoaded(load, exclude) {
+// Phase 32: FAIRNESS weighting. A task's "weight" reflects its severity/priority
+// (a critical task costs a node more capacity than an info task). A node's
+// "capacity" (LIKU_PERIPHERAL_NODE_CAPACITY = JSON { nodeId: weight }, default 1)
+// scales how much weighted load it can carry. Target score = weightedLoad /
+// capacity (LOWER is a better target). Higher-severity tasks are placed FIRST so
+// they get first pick of the lowest-scored (most available) node.
+const _SEVERITY_WEIGHT = Object.freeze({ critical: 3, high: 3, warning: 2, medium: 2, info: 1, low: 1 });
+
+function _taskWeight(t) {
+  const sev = t && (t.severity || (t.priority === 'high' ? 'critical' : (t.priority === 'medium' ? 'warning' : (t.priority === 'low' ? 'low' : 'info'))));
+  return _SEVERITY_WEIGHT[sev] || _SEVERITY_WEIGHT[t && t.priority] || 1;
+}
+
+function _nodeCapacity(nodeId) {
+  try {
+    const raw = JSON.parse(process.env.LIKU_PERIPHERAL_NODE_CAPACITY || '{}');
+    const c = Number(raw && raw[nodeId]);
+    return Number.isFinite(c) && c > 0 ? c : 1;
+  } catch { return 1; }
+}
+
+/**
+ * Pick the best target node: LOWEST weighted-load / capacity score. Deterministic
+ * (tie broken by nodeId). Avoids `exclude` (the stale assignee) when another node
+ * exists. @private
+ */
+function _bestTarget(load, exclude) {
   const nodes = Object.keys(load).sort();
-  let best = null; let bestLoad = Infinity;
+  let best = null; let bestScore = Infinity;
   for (const n of nodes) {
     if (exclude && n === exclude && nodes.length > 1) continue;
-    if (load[n] < bestLoad) { bestLoad = load[n]; best = n; }
+    const score = load[n] / _nodeCapacity(n);
+    if (score < bestScore) { bestScore = score; best = n; }
   }
   if (!best && exclude) best = exclude; // exclude was the only known node
   return best;
@@ -374,11 +400,13 @@ function _leastLoaded(load, exclude) {
 /**
  * Rebalance stale / unclaimed open tasks across the fleet. A task is a candidate
  * when it is OPEN, currently UNOWNED (no live claim), and either UNASSIGNED or its
- * assignment is older than `staleMs` (the assignee never claimed it). Each such
- * task is (advisorily) reassigned to the least-loaded known node. Cluster off →
- * inert. Best-effort / non-fatal.
+ * assignment is older than `staleMs` (the assignee never claimed it). Candidates
+ * are placed HIGHEST-SEVERITY-FIRST onto the node with the lowest weighted-load /
+ * capacity score (fairness weighting). Rebalancing only rewrites the advisory
+ * ASSIGNMENT intent — it NEVER claims for another node and NEVER actuates, so it
+ * can never create double ownership. Cluster off → inert. Best-effort / non-fatal.
  * @param {{ now?:number, staleMs?:number, maxAgeMs?:number }} [opts]
- * @returns {{ rebalanced:Array<{taskId:string, from:string|null, to:string}>, local?:boolean }}
+ * @returns {{ rebalanced:Array<{taskId:string, from:string|null, to:string, weight:number}>, local?:boolean }}
  */
 function rebalance(opts = {}) {
   if (!enabled()) return { rebalanced: [] };
@@ -392,17 +420,20 @@ function rebalance(opts = {}) {
   catch { assignments = []; }
   const assignByTask = {};
   for (const a of assignments) if (a && a.taskId) assignByTask[a.taskId] = a;
-  // Known nodes + per-node load. Load = open tasks a node OWNS or is ASSIGNED.
+  // Known nodes + per-node WEIGHTED load. Load = Σ severity-weight of open tasks a
+  // node OWNS or is ASSIGNED (heavier tasks consume more of a node's capacity).
   const load = { [coord.nodeId()]: 0 };
   for (const a of assignments) { if (a.assignee && !(a.assignee in load)) load[a.assignee] = 0; if (a.assignedBy && !(a.assignedBy in load)) load[a.assignedBy] = 0; }
   for (const t of tasks) {
     if (!t.id || !_isOpenStatus(t.status)) continue;
+    const w = _taskWeight(t);
     const owner = taskOwner(t.id, now);
-    if (owner) { if (!(owner in load)) load[owner] = 0; load[owner] += 1; continue; }
+    if (owner) { load[owner] = (load[owner] || 0) + w; continue; }
     const a = assignByTask[t.id];
-    if (a && a.assignee) { if (!(a.assignee in load)) load[a.assignee] = 0; load[a.assignee] += 1; }
+    if (a && a.assignee) load[a.assignee] = (load[a.assignee] || 0) + w;
   }
-  const rebalanced = [];
+  // Candidate stale tasks, HIGHEST SEVERITY FIRST (deterministic tiebreak by id).
+  const candidates = [];
   for (const t of tasks) {
     if (!t.id || !_isOpenStatus(t.status)) continue;
     if (taskOwner(t.id, now)) continue; // actively owned → leave it
@@ -410,14 +441,18 @@ function rebalance(opts = {}) {
     const assignedAtMs = a ? (Date.parse(a.assignedAt || a.updatedAt) || 0) : 0;
     const isStale = a ? (now - assignedAtMs) >= staleMs : true; // unassigned counts as stale
     if (!isStale) continue;
-    const staleAssignee = a ? a.assignee : null;
-    const target = _leastLoaded(load, staleAssignee);
+    candidates.push({ t, staleAssignee: a ? a.assignee : null, weight: _taskWeight(t) });
+  }
+  candidates.sort((x, y) => (y.weight - x.weight) || String(x.t.id).localeCompare(String(y.t.id)));
+  const rebalanced = [];
+  for (const c of candidates) {
+    const target = _bestTarget(load, c.staleAssignee);
     if (!target) continue;
-    if (target === staleAssignee) continue; // nowhere better to move it
-    assignTask(t.id, target, { now });
-    if (staleAssignee && staleAssignee in load) load[staleAssignee] = Math.max(0, load[staleAssignee] - 1);
-    load[target] = (load[target] || 0) + 1;
-    rebalanced.push({ taskId: t.id, from: staleAssignee, to: target });
+    if (target === c.staleAssignee) continue; // nowhere better to move it
+    assignTask(c.t.id, target, { now });
+    if (c.staleAssignee && c.staleAssignee in load) load[c.staleAssignee] = Math.max(0, load[c.staleAssignee] - c.weight);
+    load[target] = (load[target] || 0) + c.weight;
+    rebalanced.push({ taskId: c.t.id, from: c.staleAssignee, to: target, weight: c.weight });
   }
   return { rebalanced };
 }

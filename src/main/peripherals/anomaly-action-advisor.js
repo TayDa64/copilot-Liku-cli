@@ -478,6 +478,26 @@ const _DEESCALATE = Object.freeze({
 });
 
 /**
+ * Phase 32 — PARTIAL-recovery STEP-BACK-ONE-RUNG mapping. Instead of clearing the
+ * current elevated action in one jump, propose stepping DOWN a single rung so a
+ * device recovers its posture gradually: unpair → rotate-token, rotate-token →
+ * reduce-schedule, reduce-schedule → clear-schedule (bottom rung → clear). Enabled
+ * via `opts.stepBack` or `LIKU_PERIPHERAL_AUTOHEAL_STEPBACK=1` (default OFF →
+ * Phase-31 clear-current behaviour). Each step is human-gated; `stepback-*` confirms
+ * perform only a PURE advisory posture update (they NEVER re-pair/rotate/actuate). @private
+ */
+const _STEPBACK = Object.freeze({
+  'reduce-schedule': { action: 'clear-schedule', toRung: null, reason: (id, m) => `${id} healthy for ${m}m → step back: clear its reduce-schedule cap`, directive: (id) => `liku peripherals remove-schedule ${id}` },
+  'rotate-token': { action: 'stepback-reduce-schedule', toRung: 'reduce-schedule', reason: (id, m) => `${id} healthy for ${m}m → step back ONE rung: rotate-token → reduce-schedule`, directive: (id) => `liku peripherals anomaly-action confirm <id>   # step ${id} down to reduce-schedule` },
+  'unpair': { action: 'stepback-rotate-token', toRung: 'rotate-token', reason: (id, m) => `${id} healthy for ${m}m → step back ONE rung: unpair → rotate-token`, directive: (id) => `liku peripherals pair ${id}` }
+});
+
+function _stepBackEnabled(opts) {
+  if (opts && opts.stepBack === true) return true;
+  return String(process.env.LIKU_PERIPHERAL_AUTOHEAL_STEPBACK || '').trim() === '1';
+}
+
+/**
  * Propose DE-ESCALATIONS for devices that have RECOVERED (no anomaly for
  * `recoveryMs`) but still carry an elevated heal action. Steps DOWN the current
  * rung: reduce-schedule → clear-schedule, rotate-token → clear-rotate-token
@@ -500,7 +520,8 @@ function proposeDeescalations(opts = {}, now = Date.now()) {
     if (!last || (now - last) < recoveryMs) continue; // not recovered yet
     const active = _activeElevatedAction(deviceId, st.proposed);
     if (!active) continue; // nothing elevated to step down
-    const map = _DEESCALATE[active];
+    const stepBack = _stepBackEnabled(opts);
+    const map = (stepBack ? _STEPBACK : _DEESCALATE)[active];
     if (!map) continue;
     const key = `deescalate:${deviceId}`;
     const existing = st.proposed[key];
@@ -512,6 +533,8 @@ function proposeDeescalations(opts = {}, now = Date.now()) {
       deviceId,
       action: map.action,
       fromAction: active,
+      toRung: map.toRung !== undefined ? map.toRung : null,
+      mode: stepBack ? 'step-back' : 'clear',
       type: 'de-escalation',
       severity: 'info',
       recoveredForMs: now - last,
@@ -556,6 +579,32 @@ function resetDevice(deviceId) {
 }
 
 /**
+ * Phase 32 — PARTIAL step-back: lower a device's RECORDED elevated posture by ONE
+ * rung (e.g. unpair → rotate-token) without clearing it entirely. PURE advisory
+ * state — it NEVER re-pairs, rotates a token, or actuates anything; it only updates
+ * the recorded "current elevated action" so a subsequent recovery cycle can step
+ * back further. Removes the open de-escalation proposal so the next rung can be
+ * proposed. Used by PAL on a `stepback-*` de-escalation confirm.
+ * @param {string} deviceId
+ * @param {string} toRung the lower rung to record (e.g. 'rotate-token' | 'reduce-schedule')
+ */
+function stepBackDevice(deviceId, toRung) {
+  if (!enabled()) return { ok: false, reason: 'disabled' };
+  if (!deviceId || !toRung) return { ok: false, reason: 'invalid' };
+  const st = _load();
+  const p = st.proposed[deviceId];
+  if (p) {
+    p.action = toRung;
+    p.status = 'confirmed';
+    p.steppedBackAt = new Date().toISOString();
+  }
+  const deKey = `deescalate:${deviceId}`;
+  if (st.proposed[deKey]) delete st.proposed[deKey]; // allow the next step-back cycle
+  _save(st);
+  return { ok: true, deviceId, steppedBackTo: toRung };
+}
+
+/**
  * SAFE auto-clear: dismiss purely-advisory OPEN (proposed, not confirmed)
  * escalation suggestions for RECOVERED devices. This only removes a suggestion —
  * it NEVER removes a confirmed restriction and NEVER actuates — so it is a
@@ -594,5 +643,5 @@ module.exports = {
   FLAG, STORE_FILE, POLICIES_FILE, ACTION_LADDER,
   enabled, recordAnomaly, proposeActions, proposeFleetAction, listProposed, confirm, dismiss, clear,
   setPolicy, getPolicy, listPolicies, clearPolicies,
-  proposeDeescalations, autoClearRecovered, resetDevice
+  proposeDeescalations, autoClearRecovered, resetDevice, stepBackDevice
 };

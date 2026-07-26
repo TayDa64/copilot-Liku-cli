@@ -32,6 +32,7 @@
  *   liku peripherals cron [--at <ISO>]  Cron device schedules → advisory human-gated tasks
  *   liku peripherals cron [propose <dev> <act> "<cron>"|confirm <id>|dismiss <id>|rules|tick|remove <id>]
  *   liku peripherals self-heal [--at <ISO>]  Run one periodic self-healing pass (rebalance + expiry + de-escalation)
+ *   liku peripherals self-heal status        Last-run metrics + per-step timings (pure observation)
  *   liku peripherals pair <id>          Pair / commission a device (real when HIL off)
  *   liku peripherals unpair <id>        Tear down a device's pairing (re-pairable)
  *   liku peripherals token [status|rotate <id>|revoke <id>|rotate-all|action <id> <action>|action-rotate <id> <action>|identity-rotate <id>]
@@ -451,6 +452,8 @@ async function run(args, flags) {
             if (res.action === 'reduce-schedule' && res.executed.multiDevice) log(dim(`  multi-device coordinated cap: ${(res.executed.devices || []).map((d) => `${d.deviceId}≤${d.proposedMaxW}W`).join(', ')}`));
             else if (res.action === 'reduce-schedule' && res.executed.rule) log(dim(`  schedule capped ${res.executed.rule.fromHour}:00→${res.executed.rule.toHour}:00 ≤${res.executed.rule.maxW}W`));
             if (res.action === 'clear-schedule') log(dim(`  temporary restriction cleared for ${res.deviceId} (recovered) → ${(res.executed.removed || []).join(', ') || 'none'}`));
+            if (res.action === 'clear-rotate-token') log(dim(`  heal ladder reset for ${res.deviceId} (recovered) — advisory only, nothing actuated`));
+            if (res.action === 'stepback-rotate-token' || res.action === 'stepback-reduce-schedule') log(dim(`  ${res.deviceId} stepped back one rung → ${res.executed.steppedBackTo} (advisory posture; nothing actuated)`));
             if (res.action === 'rotate-all') log(dim(`  fleet rotated ${(res.executed.rotated || []).length} token(s)`));
           } else {
             success(`Action ${res.action}${res.deviceId ? ` for ${res.deviceId}` : ''} confirmed (advisory).`);
@@ -778,6 +781,22 @@ async function run(args, flags) {
       // Phase 31: run ONE periodic self-healing pass (rebalance + schedule-expiry
       // notify + recovery de-escalation + opt-in safe auto-clear). Strictly advisory:
       // it only invokes already-human-gated actions on a cadence.
+      // Phase 32: `self-heal status` shows the last-run metrics + per-step timings.
+      const op = (args[1] || '').toLowerCase();
+      if (op === 'status') {
+        const st = pal.getSelfHealStatus();
+        if (flags.json) return { success: true, ...st };
+        log(highlight('Self-heal status'));
+        if (!st.lastRun) { log(dim('  no runs yet (run: liku peripherals self-heal)')); return { success: true, ...st }; }
+        const lr = st.lastRun;
+        log(`  last run: ${dim(lr.at)}  (${lr.durationMs}ms)`);
+        log(`  counts: rebalanced ${lr.counts.rebalanced}, expiry ${lr.counts.expiryTasks}, de-escalations ${lr.counts.deescalations}, auto-cleared ${lr.counts.autoCleared}`);
+        const tm = lr.timings || {};
+        log(`  timings: rebalance ${tm.rebalance || 0}ms, expiry ${tm.expiry || 0}ms, de-escalation ${tm.deescalation || 0}ms, auto-clear ${tm.autoClear || 0}ms`);
+        const to = st.totals || {};
+        log(dim(`  totals: ${to.runs || 0} runs, ${to.rebalanced || 0} rebalanced, ${to.expiryTasks || 0} expiry, ${to.deescalations || 0} de-escalations, ${to.autoCleared || 0} auto-cleared`));
+        return { success: true, ...st };
+      }
       const EventEmitter = require('events');
       const { SupervisorAgent, attachScheduleExpiryNotifier, attachSelfHealingScheduler } = require('../../main/agents');
       const orch = new EventEmitter();
@@ -790,11 +809,11 @@ async function run(args, flags) {
       sh.detach(); expiry.detach();
       if (flags.json) return { success: true, ...res };
       if (!res.ran) { log(dim('  self-heal is inert (peripherals disabled)')); return { success: true, ...res }; }
-      success(`Self-heal tick @ ${at.toISOString().slice(0, 16)}`);
+      success(`Self-heal tick @ ${at.toISOString().slice(0, 16)}  (${res.durationMs}ms)`);
       log(`  rebalanced: ${res.rebalanced.length} task(s)`);
       log(`  schedule-expiry tasks: ${res.expiryTasks}`);
       log(`  de-escalations proposed: ${res.deescalations.length}`);
-      for (const d of res.deescalations) log(dim(`    ${d.deviceId}: ${d.fromAction} → ${d.action}  (${d.directive})`));
+      for (const d of res.deescalations) log(dim(`    ${d.deviceId}: ${d.fromAction} → ${d.action}${d.mode === 'step-back' ? ' [step-back]' : ''}  (${d.directive})`));
       if ((res.autoCleared || []).length) log(dim(`  auto-cleared ${res.autoCleared.length} advisory suggestion(s)`));
       return { success: true, ...res };
     }
@@ -900,7 +919,7 @@ async function run(args, flags) {
 
     default:
       error(`Unknown subcommand: ${sub}`);
-      log('Usage: liku peripherals [scan|list|status [id]|power [--history|--trend|--anomalies|--forecast [--seasonal] [--exclude-anomalous] [--special-days]]|anomalies [--attributed]|anomaly-action [confirm|dismiss <id>|policy [set <device> reduce=N rotate=N unpair=N]|recovery]|schedules|sweep-schedules|schedule-expiry|locks [--record]|coordination [lease|release <id>|sweep|claim|release-task <task>|assign <task> <node>|handoff <task> [node]|renew <task>|rebalance]|cron [propose|confirm|dismiss|rules|tick|remove]|self-heal|suggestions|apply-schedule <id>|remove-schedule <device> [--from N] [--to N]|pair <id>|unpair <id>|token [rotate|revoke|rotate-all|action <id> <action>|action-rotate <id> <action>|identity-rotate <id>]|tasks [--escalated|--pending|--severity <p>|--anomaly]|notifications|channels|simulate <id> <k=v>|execute <id> <action>|confirm <id> <action> [--execute]|drivers]');
+      log('Usage: liku peripherals [scan|list|status [id]|power [--history|--trend|--anomalies|--forecast [--seasonal] [--exclude-anomalous] [--special-days]]|anomalies [--attributed]|anomaly-action [confirm|dismiss <id>|policy [set <device> reduce=N rotate=N unpair=N]|recovery]|schedules|sweep-schedules|schedule-expiry|locks [--record]|coordination [lease|release <id>|sweep|claim|release-task <task>|assign <task> <node>|handoff <task> [node]|renew <task>|rebalance]|cron [propose|confirm|dismiss|rules|tick|remove]|self-heal [status]|suggestions|apply-schedule <id>|remove-schedule <device> [--from N] [--to N]|pair <id>|unpair <id>|token [rotate|revoke|rotate-all|action <id> <action>|action-rotate <id> <action>|identity-rotate <id>]|tasks [--escalated|--pending|--severity <p>|--anomaly]|notifications|channels|simulate <id> <k=v>|execute <id> <action>|confirm <id> <action> [--execute]|drivers]');
       return { success: false };
   }
 }

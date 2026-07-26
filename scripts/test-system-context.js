@@ -5052,6 +5052,238 @@ test('reduce-schedule de-escalation carries its fromAction (regression + provena
   delete process.env.LIKU_ENABLE_PERIPHERALS;
 });
 
+// ── Phase 32: self-heal observability + fairness rebalance + step-back-one-rung ──
+
+test('self-heal tick records last-run metrics + per-step timings (observability)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  process.env.LIKU_PERIPHERAL_AUTOHEAL_RECOVERY_MS = '1000';
+  delete process.env.LIKU_CLUSTER_DIR;
+  const schedule = require('../src/main/peripherals/power-schedule');
+  const advisor = require('../src/main/peripherals/power-schedule-advisor');
+  const actions = require('../src/main/peripherals/anomaly-action-advisor');
+  const status = require('../src/main/peripherals/self-heal-status');
+  const { attachScheduleExpiryNotifier } = require('../src/main/agents/schedule-expiry-notifier');
+  const { attachSelfHealingScheduler } = require('../src/main/agents/self-healing-scheduler');
+  advisor.clear(); actions.clear(); status.clear();
+  try { fs.rmSync(schedule.CONFIRMED_FILE); } catch { /* ignore */ }
+  const base = new Date(2026, 6, 26, 12, 0, 0).getTime();
+  actions.recordAnomaly({ device: 'rec', type: 'spike' }, base);
+  advisor.createConfirmedSchedule('rec', { maxW: 100, fromHour: 0, toHour: 24 });
+  const sup = { receiveNotification() {}, createPeripheralTask(n) { return { id: n.id, status: 'pending-review', autonomousAction: false }; } };
+  const orch = new (require('events').EventEmitter)();
+  orch.agents = new Map([['supervisor', sup]]);
+  const ex = attachScheduleExpiryNotifier(orch, { getSupervisor: () => sup, now: () => base });
+  const sh = attachSelfHealingScheduler(orch, { scheduleExpiryTick: ex.tick, now: () => base });
+  const res = sh.tick(base + 5000);
+  sh.detach(); ex.detach();
+  assert.strictEqual(typeof res.durationMs, 'number', 'tick reports a duration');
+  assert.ok(res.timings && typeof res.timings.rebalance === 'number' && typeof res.timings.deescalation === 'number', 'per-step timings present');
+  const lr = sh.getLastRun();
+  assert.ok(lr && lr.counts && lr.counts.deescalations >= 1 && lr.timings, 'in-memory last-run captured');
+  const st = status.read();
+  assert.ok(st.lastRun && st.totals.runs >= 1 && st.totals.deescalations >= 1, 'persisted status recorded');
+  advisor.clear(); actions.clear(); status.clear();
+  try { fs.rmSync(schedule.CONFIRMED_FILE); } catch { /* ignore */ }
+  delete process.env.LIKU_PERIPHERAL_AUTOHEAL_RECOVERY_MS;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('PAL getSelfHealStatus reads persisted totals (accumulates across runs)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const status = require('../src/main/peripherals/self-heal-status');
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  status.clear();
+  status.record({ at: new Date().toISOString(), durationMs: 5, timings: { rebalance: 1 }, counts: { rebalanced: 2, expiryTasks: 1, deescalations: 0, autoCleared: 0 } });
+  let st = pal.getSelfHealStatus();
+  assert.strictEqual(st.enabled, true);
+  assert.strictEqual(st.totals.runs, 1);
+  assert.strictEqual(st.totals.rebalanced, 2);
+  assert.strictEqual(st.lastRun.durationMs, 5);
+  status.record({ at: new Date().toISOString(), durationMs: 3, timings: {}, counts: { rebalanced: 3, expiryTasks: 0, deescalations: 1, autoCleared: 0 } });
+  st = pal.getSelfHealStatus();
+  assert.strictEqual(st.totals.runs, 2, 'runs accumulate');
+  assert.strictEqual(st.totals.rebalanced, 5, 'counts fold cumulatively');
+  status.clear();
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('self-heal status recording is pure observation (a failing store never breaks the tick)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const { attachSelfHealingScheduler } = require('../src/main/agents/self-healing-scheduler');
+  const orch = new (require('events').EventEmitter)();
+  const fakePal = { isPeripheralsEnabled: () => true, rebalanceClusterTasks: () => ({ rebalanced: [] }) };
+  const fakeAdvisor = { proposeDeescalations: () => [], autoClearRecovered: () => ({ cleared: [] }) };
+  const badStatus = { record() { throw new Error('disk full'); } };
+  const sh = attachSelfHealingScheduler(orch, { pal: fakePal, actionAdvisor: fakeAdvisor, statusStore: badStatus, now: () => 1000 });
+  const res = sh.tick(1000);
+  assert.strictEqual(res.ran, true, 'tick still completes when status recording throws');
+  assert.ok(res.timings, 'timings still produced');
+  sh.detach();
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('fairness rebalance places the highest-severity task first, onto the less-loaded node', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const clusterDir = require('path').join(TMP_HOME, 'p32fair');
+  process.env.LIKU_CLUSTER_DIR = clusterDir;
+  const ct = require('../src/main/peripherals/cluster-tasks');
+  const t0 = Date.now();
+  process.env.LIKU_NODE_ID = 'nodeB';
+  ct.publishTask({ id: 'heavy', device: { id: 'd' }, priority: 'high', status: 'pending-review' });
+  ct.claimTask('heavy', { ttlMs: 300000, now: t0 }); // nodeB carries a heavy (weight 3) task
+  process.env.LIKU_NODE_ID = 'nodeA';
+  ct.publishTask({ id: 'crit', device: { id: 'd' }, priority: 'high', status: 'pending-review' });
+  ct.publishTask({ id: 'infoX', device: { id: 'd' }, priority: 'low', status: 'pending-review' });
+  const res = ct.rebalance({ now: t0 + 1000, staleMs: 500 });
+  assert.strictEqual(res.rebalanced[0].taskId, 'crit', 'highest-severity task rebalanced first');
+  assert.strictEqual(res.rebalanced[0].weight, 3, 'critical weight');
+  assert.strictEqual(res.rebalanced[0].to, 'nodeA', 'placed on the less-loaded node (not the heavy nodeB)');
+  assert.strictEqual(res.rebalanced[1].weight, 1, 'lower-severity task follows');
+  delete process.env.LIKU_NODE_ID;
+  delete process.env.LIKU_CLUSTER_DIR;
+  try { fs.rmSync(clusterDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('fairness rebalance respects node CAPACITY (a high-capacity node absorbs more)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const clusterDir = require('path').join(TMP_HOME, 'p32cap');
+  process.env.LIKU_CLUSTER_DIR = clusterDir;
+  process.env.LIKU_PERIPHERAL_NODE_CAPACITY = JSON.stringify({ bignode: 10 });
+  const ct = require('../src/main/peripherals/cluster-tasks');
+  const t0 = Date.now();
+  process.env.LIKU_NODE_ID = 'nodeA';
+  ct.publishTask({ id: 'aload', device: { id: 'd' }, priority: 'low', status: 'pending-review' });
+  ct.claimTask('aload', { ttlMs: 300000, now: t0 }); // nodeA load 1
+  process.env.LIKU_NODE_ID = 'bignode';
+  ct.publishTask({ id: 'bload', device: { id: 'd' }, priority: 'high', status: 'pending-review' });
+  ct.claimTask('bload', { ttlMs: 300000, now: t0 }); // bignode load 3 but capacity 10
+  process.env.LIKU_NODE_ID = 'nodeA';
+  ct.publishTask({ id: 'newt', device: { id: 'd' }, priority: 'high', status: 'pending-review' });
+  const res = ct.rebalance({ now: t0 + 1000, staleMs: 500 });
+  const mv = res.rebalanced.find((r) => r.taskId === 'newt');
+  assert.strictEqual(mv.to, 'bignode', 'higher-capacity node preferred despite higher raw load (0.3 < 1.0 score)');
+  delete process.env.LIKU_PERIPHERAL_NODE_CAPACITY;
+  delete process.env.LIKU_NODE_ID;
+  delete process.env.LIKU_CLUSTER_DIR;
+  try { fs.rmSync(clusterDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('fairness rebalance stays advisory (assignment only, no double ownership)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const clusterDir = require('path').join(TMP_HOME, 'p32adv');
+  process.env.LIKU_CLUSTER_DIR = clusterDir;
+  const ct = require('../src/main/peripherals/cluster-tasks');
+  const t0 = Date.now();
+  process.env.LIKU_NODE_ID = 'nodeB';
+  ct.publishTask({ id: 'heavy2', device: { id: 'd' }, priority: 'high', status: 'pending-review' });
+  ct.claimTask('heavy2', { ttlMs: 300000, now: t0 });
+  process.env.LIKU_NODE_ID = 'nodeA';
+  ct.publishTask({ id: 'crit2', device: { id: 'd' }, priority: 'high', status: 'pending-review' });
+  ct.rebalance({ now: t0 + 1000, staleMs: 500 });
+  assert.strictEqual(ct.taskOwner('heavy2', t0 + 1000), 'nodeB', 'owned task ownership unchanged');
+  assert.strictEqual(ct.taskOwner('crit2', t0 + 1000), null, 'rebalanced task is only ASSIGNED, never owned by rebalancer');
+  assert.strictEqual(ct.assignmentFor('crit2'), 'nodeA', 'assignment intent rewritten');
+  delete process.env.LIKU_NODE_ID;
+  delete process.env.LIKU_CLUSTER_DIR;
+  try { fs.rmSync(clusterDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('step-back-one-rung: unpair → stepback-rotate-token; confirm is a pure advisory posture update', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  process.env.LIKU_PERIPHERAL_AUTOHEAL_STEPBACK = '1';
+  process.env.LIKU_PERIPHERAL_AUTOHEAL_ESCALATION_COOLDOWN_MS = '0';
+  delete process.env.LIKU_CLUSTER_DIR;
+  const actions = require('../src/main/peripherals/anomaly-action-advisor');
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  actions.clear();
+  const base = new Date(2026, 6, 26, 12, 0, 0).getTime();
+  for (let i = 0; i < 10; i++) actions.recordAnomaly({ device: 'devU', type: 'spike' }, base);
+  actions.confirm(actions.proposeActions({}, base).find((p) => p.deviceId === 'devU').id);
+  const de = actions.proposeDeescalations({ recoveryMs: 1000 }, base + 5000).find((x) => x.deviceId === 'devU');
+  assert.strictEqual(de.action, 'stepback-rotate-token');
+  assert.strictEqual(de.fromAction, 'unpair');
+  assert.strictEqual(de.toRung, 'rotate-token');
+  assert.strictEqual(de.mode, 'step-back');
+  assert.strictEqual(de.requiresHuman, true);
+  const conf = pal.confirmAnomalyAction(de.id);
+  assert.strictEqual(conf.ok, true);
+  assert.strictEqual(conf.executed.steppedBackTo, 'rotate-token', 'advisory posture update; nothing actuated');
+  actions.clear();
+  delete process.env.LIKU_PERIPHERAL_AUTOHEAL_STEPBACK;
+  delete process.env.LIKU_PERIPHERAL_AUTOHEAL_ESCALATION_COOLDOWN_MS;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('step-back chains ONE rung per recovery cycle (unpair → rotate-token → reduce-schedule → clear)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  process.env.LIKU_PERIPHERAL_AUTOHEAL_STEPBACK = '1';
+  process.env.LIKU_PERIPHERAL_AUTOHEAL_ESCALATION_COOLDOWN_MS = '0';
+  delete process.env.LIKU_CLUSTER_DIR;
+  const actions = require('../src/main/peripherals/anomaly-action-advisor');
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  actions.clear();
+  const base = new Date(2026, 6, 26, 12, 0, 0).getTime();
+  for (let i = 0; i < 10; i++) actions.recordAnomaly({ device: 'devC', type: 'spike' }, base);
+  actions.confirm(actions.proposeActions({}, base).find((p) => p.deviceId === 'devC').id);
+  let de = actions.proposeDeescalations({ recoveryMs: 1000 }, base + 5000).find((x) => x.deviceId === 'devC');
+  assert.strictEqual(de.action, 'stepback-rotate-token', 'rung 1: unpair → rotate-token');
+  pal.confirmAnomalyAction(de.id);
+  de = actions.proposeDeescalations({ recoveryMs: 1000 }, base + 6000).find((x) => x.deviceId === 'devC');
+  assert.strictEqual(de.action, 'stepback-reduce-schedule', 'rung 2: rotate-token → reduce-schedule');
+  pal.confirmAnomalyAction(de.id);
+  de = actions.proposeDeescalations({ recoveryMs: 1000 }, base + 7000).find((x) => x.deviceId === 'devC');
+  assert.strictEqual(de.action, 'clear-schedule', 'rung 3: reduce-schedule → clear');
+  actions.clear();
+  delete process.env.LIKU_PERIPHERAL_AUTOHEAL_STEPBACK;
+  delete process.env.LIKU_PERIPHERAL_AUTOHEAL_ESCALATION_COOLDOWN_MS;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('step-back is OFF by default → single-jump clear-current behaviour is preserved', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  process.env.LIKU_PERIPHERAL_AUTOHEAL_ESCALATION_COOLDOWN_MS = '0';
+  delete process.env.LIKU_PERIPHERAL_AUTOHEAL_STEPBACK;
+  delete process.env.LIKU_CLUSTER_DIR;
+  const actions = require('../src/main/peripherals/anomaly-action-advisor');
+  actions.clear();
+  const base = new Date(2026, 6, 26, 12, 0, 0).getTime();
+  for (let i = 0; i < 10; i++) actions.recordAnomaly({ device: 'devR2', type: 'spike' }, base);
+  actions.confirm(actions.proposeActions({}, base).find((p) => p.deviceId === 'devR2').id);
+  const de = actions.proposeDeescalations({ recoveryMs: 1000 }, base + 5000).find((x) => x.deviceId === 'devR2');
+  assert.strictEqual(de.action, 'repair', 'default clears the current rung in one jump (Phase 31)');
+  assert.strictEqual(de.mode, 'clear');
+  actions.clear();
+  delete process.env.LIKU_PERIPHERAL_AUTOHEAL_ESCALATION_COOLDOWN_MS;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('stepBackDevice is a pure advisory rung lowering (inert when disabled)', () => {
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+  const actions = require('../src/main/peripherals/anomaly-action-advisor');
+  assert.strictEqual(actions.stepBackDevice('x', 'rotate-token').ok, false, 'inert when disabled');
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  process.env.LIKU_PERIPHERAL_AUTOHEAL_ESCALATION_COOLDOWN_MS = '0';
+  delete process.env.LIKU_CLUSTER_DIR;
+  actions.clear();
+  const base = new Date(2026, 6, 26, 12, 0, 0).getTime();
+  for (let i = 0; i < 10; i++) actions.recordAnomaly({ device: 'devQ', type: 'spike' }, base);
+  actions.confirm(actions.proposeActions({}, base).find((p) => p.deviceId === 'devQ').id);
+  const r = actions.stepBackDevice('devQ', 'rotate-token');
+  assert.strictEqual(r.ok, true);
+  assert.strictEqual(r.steppedBackTo, 'rotate-token');
+  // Recorded rung is now rotate-token → step-back proposes the next rung down.
+  process.env.LIKU_PERIPHERAL_AUTOHEAL_STEPBACK = '1';
+  const de = actions.proposeDeescalations({ recoveryMs: 1 }, base + 100000).find((x) => x.deviceId === 'devQ');
+  assert.strictEqual(de.action, 'stepback-reduce-schedule', 'posture lowered → next rung proposed');
+  actions.clear();
+  delete process.env.LIKU_PERIPHERAL_AUTOHEAL_STEPBACK;
+  delete process.env.LIKU_PERIPHERAL_AUTOHEAL_ESCALATION_COOLDOWN_MS;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
 console.log(`\n${pass} checks passed.`);
 if (process.exitCode) { console.error('FAILED'); }
 else { console.log('OK'); }

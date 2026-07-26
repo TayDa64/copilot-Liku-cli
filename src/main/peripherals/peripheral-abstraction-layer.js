@@ -769,6 +769,12 @@ function confirmAnomalyAction(id, opts = {}) {
       // recorded anomaly state so the heal ladder starts fresh. It NEVER rotates a
       // token, unpairs, or actuates anything.
       executed = { enabled: true, ...anomalyActionAdvisor().resetDevice(res.deviceId) };
+    } else if (execute && (res.action === 'stepback-rotate-token' || res.action === 'stepback-reduce-schedule')) {
+      // Phase 32: human-approved PARTIAL step-back (one rung). PURE advisory posture
+      // update (records the lower rung) — it NEVER re-pairs, rotates a token, or
+      // actuates anything. Any real re-pair is left to the human via the directive.
+      const toRung = res.action === 'stepback-rotate-token' ? 'rotate-token' : 'reduce-schedule';
+      executed = { enabled: true, ...anomalyActionAdvisor().stepBackDevice(res.deviceId, toRung) };
     }
     // NOTE: a `repair` de-escalation (unpair rung) is deliberately NOT auto-executed
     // — re-pairing is security-sensitive, so the confirm only surfaces the directive
@@ -826,6 +832,13 @@ function autoClearRecovered(opts = {}) {
   if (!isPeripheralsEnabled()) return { enabled: false, cleared: [] };
   try { return { enabled: true, ...anomalyActionAdvisor().autoClearRecovered(opts) }; }
   catch { return { enabled: true, cleared: [] }; }
+}
+
+/** Phase 32 — last-run metrics + cumulative totals for the periodic self-heal tick (pure observation). */
+function getSelfHealStatus() {
+  if (!isPeripheralsEnabled()) return { enabled: false, lastRun: null, totals: {} };
+  try { return { enabled: true, ...require('./self-heal-status').read() }; }
+  catch { return { enabled: true, lastRun: null, totals: {} }; }
 }
 
 /** Phase 22 — mint a PER-ACTION (least-privilege) capability token for a device. */
@@ -1167,6 +1180,7 @@ module.exports = {
   getExpiringSchedules,
   getDeescalations,
   autoClearRecovered,
+  getSelfHealStatus,
   issueActionToken,
   verifyDeviceToken,
   rotateAllTokens,

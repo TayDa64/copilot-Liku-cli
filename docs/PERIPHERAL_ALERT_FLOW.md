@@ -1277,6 +1277,74 @@ pure advisory ladder reset (clears occurrences + closes the confirmed proposal).
 - **single-machine-unchanged** — the tick's rebalance step is inert without a cluster
   dir; the self-heal + de-escalation logic is byte-compatible single-machine.
 
+## Phase 32 — self-heal observability + fairness rebalancing + step-back-one-rung
+
+### Self-heal tick observability
+
+The self-healing tick now records per-step timings + counts. Each step (`rebalance`,
+`expiry`, `deescalation`, `autoClear`) is wall-clock timed and the tick result carries
+`durationMs` + `timings`. A tiny `self-heal-status` store (`~/.liku/self-heal-status.json`,
+atomic + flag-gated) persists the LAST run plus small cumulative totals so the metrics
+survive across processes. The scheduler handle also exposes `getLastRun()` (in-memory).
+
+PURE OBSERVATION: reading the clock / recording status NEVER changes what a step does and
+is best-effort (a failing status write is swallowed — the tick still completes). PAL:
+`getSelfHealStatus()`. CLI: `self-heal status` (last-run counts + per-step timings + totals).
+
+### Fairness-weighted rebalancing
+
+`cluster-tasks.rebalance` now scores targets by **severity-weighted load ÷ capacity**:
+
+- **Task weight** by severity/priority — `critical/high = 3`, `warning/medium = 2`,
+  `info/low = 1`. A node's load is the Σ of the weights of the open tasks it owns / is
+  assigned (a heavy task consumes more of a node's capacity than an info task).
+- **Node capacity** — `LIKU_PERIPHERAL_NODE_CAPACITY` (JSON `{ nodeId: weight }`,
+  default 1) scales how much weighted load a node can carry.
+- **Target score** = `weightedLoad / capacity` (LOWER = better target; deterministic
+  tiebreak by nodeId). Candidate tasks are placed **highest-severity-first**, so a
+  critical task gets first pick of the most-available (lowest-scored) node.
+
+Still strictly advisory — it only rewrites assignment intent (never claims for another
+node, never actuates), so it can never create double ownership. Cluster off → inert.
+
+### Partial-recovery step-back-one-rung
+
+De-escalation can now step DOWN the ladder ONE rung at a time (partial recovery) instead
+of clearing the current elevated action in one jump. Enabled via `opts.stepBack` or
+`LIKU_PERIPHERAL_AUTOHEAL_STEPBACK=1` (default OFF → Phase-31 clear-current behaviour):
+
+| Elevated rung | Step-back action | Confirm behaviour |
+| --- | --- | --- |
+| `unpair` | `stepback-rotate-token` | PAL performs a **pure advisory posture update** (`stepBackDevice` records the lower rung); re-pair is NOT auto-executed — the directive `liku peripherals pair <device>` is surfaced for a human |
+| `rotate-token` | `stepback-reduce-schedule` | PAL performs a **pure advisory posture update** (records `reduce-schedule` as the current rung) |
+| `reduce-schedule` | `clear-schedule` | PAL removes the restriction (human-gated, as today) |
+
+Each step is `requiresHuman` (`autonomousAction:false`) and carries `fromAction` + `toRung`
++ `mode:'step-back'` provenance. Confirming a `stepback-*` action lowers only the RECORDED
+posture (advisory state) so the next recovery cycle proposes the next rung down — it NEVER
+re-pairs, rotates a token, or actuates anything.
+
+### New environment variables (all default OFF / inert single-machine)
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `LIKU_PERIPHERAL_NODE_CAPACITY` | `{}` (all=1) | JSON `{nodeId: weight}` — node capacity for fairness-weighted rebalancing |
+| `LIKU_PERIPHERAL_AUTOHEAL_STEPBACK` | `0` (off) | Step back de-escalation ONE rung at a time (vs clear current) |
+
+### Phase 32 safety invariants
+
+- **observability-is-pure** — recording tick metrics/timings never changes tick behaviour,
+  never actuates, and is best-effort (a failing status write never aborts the tick).
+- **fairness-stays-advisory** — weighted rebalancing only rewrites assignment intent;
+  ownership still comes from the claim, so it can never create double ownership.
+- **step-back-stays-gated** — every step-back is proposal → explicit human confirmation;
+  `stepback-*` confirms perform only a pure advisory posture update and NEVER re-pair,
+  rotate a token, or actuate; re-pair is left to the human via the directive.
+- **step-back-is-genuine-recovery** — step-back proposals trigger only after the full
+  recovery window with no fresh anomalies.
+- **single-machine-unchanged** — fairness weighting + status persistence are byte-compatible
+  single-machine; the rebalance step is inert without a cluster dir.
+
 ## If a human decides to act
 
 Any physical response still travels the full PAL safety chain — the alert path

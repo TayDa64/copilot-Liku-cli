@@ -51,6 +51,8 @@ function attachSelfHealingScheduler(orchestrator, options = {}) {
   const actionAdvisor = options.actionAdvisor || require('../peripherals/anomaly-action-advisor');
   const scheduleExpiryTick = typeof options.scheduleExpiryTick === 'function' ? options.scheduleExpiryTick : null;
   const now = typeof options.now === 'function' ? options.now : () => Date.now();
+  const statusStore = options.statusStore || require('../peripherals/self-heal-status');
+  let _lastRun = null;
 
   function _enabled() {
     if (pal && typeof pal.isPeripheralsEnabled === 'function') { try { return !!pal.isPeripheralsEnabled(); } catch { /* fall through */ } }
@@ -61,23 +63,43 @@ function attachSelfHealingScheduler(orchestrator, options = {}) {
     if (!_enabled()) return { ran: false };
     const at = when instanceof Date ? when.getTime() : (Number.isFinite(when) ? when : now());
     const result = { ran: true, at, rebalanced: [], expiryTasks: 0, deescalations: [], autoCleared: [] };
+    // Per-step timings (Phase 32 observability). PURE measurement — reading the
+    // clock never changes what a step does. Wall-clock ms per step.
+    const timings = { rebalance: 0, expiry: 0, deescalation: 0, autoClear: 0 };
+    const started = Date.now();
     // 1) Task inbox rebalancing (advisory; inert single-machine).
+    let s = Date.now();
     try { const rb = pal.rebalanceClusterTasks({ now: at }); result.rebalanced = (rb && rb.rebalanced) || []; }
     catch { /* best-effort */ }
+    timings.rebalance = Date.now() - s;
     // 2) Schedule-expiry notifications (advisory human-gated tasks; never extends).
+    s = Date.now();
     if (scheduleExpiryTick) {
       try { const ex = scheduleExpiryTick(at); result.expiryTasks = (ex && Array.isArray(ex.created)) ? ex.created.length : 0; }
       catch { /* best-effort */ }
     }
+    timings.expiry = Date.now() - s;
     // 3) Recovery de-escalation proposals (human-gated step-downs).
+    s = Date.now();
     try {
       const de = actionAdvisor.proposeDeescalations({}, at) || [];
       result.deescalations = de;
       for (const d of de) { try { orchestrator.emit('supervisor:deescalation', d); } catch { /* non-fatal */ } }
     } catch { /* best-effort */ }
+    timings.deescalation = Date.now() - s;
     // 4) Opt-in SAFE auto-clear of purely-advisory suggestions (never a restriction).
+    s = Date.now();
     try { const ac = actionAdvisor.autoClearRecovered({}, at); result.autoCleared = (ac && ac.cleared) || []; }
     catch { /* best-effort */ }
+    timings.autoClear = Date.now() - s;
+    result.timings = timings;
+    result.durationMs = Date.now() - started;
+    // Phase 32: record last-run observability (best-effort, pure observation).
+    _lastRun = {
+      at: new Date(at).toISOString(), durationMs: result.durationMs, timings,
+      counts: { rebalanced: result.rebalanced.length, expiryTasks: result.expiryTasks, deescalations: result.deescalations.length, autoCleared: result.autoCleared.length }
+    };
+    try { statusStore.record(_lastRun); } catch { /* observability is best-effort */ }
     if (typeof options.onTick === 'function') { try { options.onTick(result); } catch { /* non-fatal */ } }
     return result;
   }
@@ -93,6 +115,7 @@ function attachSelfHealingScheduler(orchestrator, options = {}) {
 
   return {
     tick,
+    getLastRun() { return _lastRun; },
     detach() { if (timer) { clearInterval(timer); timer = null; } }
   };
 }
