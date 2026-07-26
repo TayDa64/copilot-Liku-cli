@@ -1213,6 +1213,70 @@ interval. PAL: `getExpiringSchedules()`. CLI: `schedule-expiry`.
 - **single-machine-unchanged** — rebalancing and cluster policy sharing are inert when
   `LIKU_CLUSTER_DIR` is unset; expiry/recovery logic is byte-compatible.
 
+## Phase 31 — periodic self-healing tick + ladder de-escalation
+
+### Periodic self-healing tick
+
+`self-healing-scheduler` runs the Phase 29–30 operational-polish actions on a single
+low-frequency cadence so a live system keeps itself tidy without manual invocation:
+
+```
+ selfHealingScheduler.tick(now)
+   → cluster-tasks.rebalance()                       (advisory reassign of stale tasks)
+   → scheduleExpiryNotifier.tick()                   (surface lapsing caps as tasks)
+   → anomaly-action-advisor.proposeDeescalations()   (recovery step-downs)
+   → anomaly-action-advisor.autoClearRecovered()     (opt-in safe advisory clear)
+```
+
+Every sub-action is ALREADY advisory / human-gated / pure-observation — the scheduler
+only invokes them on a cadence. It introduces NO new actuation path, NEVER calls the
+LLM, and NEVER confirms a proposal on a human's behalf. TIMER-FREE by default
+(`tick(now)` on demand); an optional background interval
+(`LIKU_PERIPHERAL_SELF_HEAL_INTERVAL_MS` or `options.selfHealIntervalMs`) is OFF unless
+requested and is unref'd. Best-effort + non-blocking: each step is wrapped so one
+failing step never aborts the others. Flag-gated (`LIKU_ENABLE_PERIPHERALS`); wired into
+`createAgentSystem` (`selfHealingScheduler`). CLI: `self-heal [--at <ISO>]`.
+
+### Ladder de-escalation on recovery
+
+`proposeDeescalations` now steps DOWN the FULL anomaly→action ladder when a device has
+RECOVERED (anomaly-free for `LIKU_PERIPHERAL_AUTOHEAL_RECOVERY_MS`, default 1h):
+
+| Elevated rung | De-escalation action | Confirm behaviour |
+| --- | --- | --- |
+| `reduce-schedule` | `clear-schedule` | PAL removes the restriction (human-gated) |
+| `rotate-token` | `clear-rotate-token` | PAL performs a **pure advisory ladder reset** (`resetDevice` — clears recorded anomaly state; NEVER re-rotates/actuates) |
+| `unpair` | `repair` | **NOT auto-executed** — re-pairing is security-sensitive; the confirm only surfaces the directive `liku peripherals pair <device>` for a human to run |
+
+Every de-escalation is a `requiresHuman` proposal (`autonomousAction:false`) carrying a
+`fromAction` provenance field, deduplicated one-per-device, and confirmed through the
+existing `PAL.confirmAnomalyAction` flow. NO de-escalation ever auto-executes a token
+rotation, unpair, or physical/security-sensitive operation. `resetDevice(deviceId)` is a
+pure advisory ladder reset (clears occurrences + closes the confirmed proposal).
+
+### New environment variables (all default OFF / inert single-machine)
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `LIKU_PERIPHERAL_SELF_HEAL_INTERVAL_MS` | unset (off) | Optional background self-heal tick interval (unref'd; timer-free by default) |
+
+(Ladder de-escalation reuses the existing `LIKU_PERIPHERAL_AUTOHEAL_RECOVERY_MS` window.)
+
+### Phase 31 safety invariants
+
+- **tick-is-a-cadence-not-an-action** — the self-healing tick only invokes already
+  advisory / human-gated actions on a schedule; it introduces no new actuation path,
+  never calls the LLM, and never confirms a proposal for a human.
+- **tick-is-best-effort** — each sub-action is isolated; a failing step never aborts the
+  others and the tick never throws.
+- **higher-rung-de-escalation-stays-gated** — rotate-token / unpair step-downs are
+  proposal → explicit human confirmation; `clear-rotate-token` performs only a pure
+  advisory ladder reset and `repair` is NEVER auto-executed.
+- **recovery-is-genuine** — de-escalation of any rung triggers only after a device has
+  been anomaly-free for the full recovery window.
+- **single-machine-unchanged** — the tick's rebalance step is inert without a cluster
+  dir; the self-heal + de-escalation logic is byte-compatible single-machine.
+
 ## If a human decides to act
 
 Any physical response still travels the full PAL safety chain — the alert path

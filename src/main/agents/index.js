@@ -22,6 +22,7 @@ const { attachPeripheralAlertConsumer, buildSupervisorNotification } = require('
 const { attachPowerAnomalyConsumer, buildAnomalyNotification } = require('./power-anomaly-consumer');
 const { attachCronScheduler } = require('./cron-scheduler');
 const { attachScheduleExpiryNotifier, buildExpiryNotification } = require('./schedule-expiry-notifier');
+const { attachSelfHealingScheduler } = require('./self-healing-scheduler');
 const { AgentStateManager } = require('./state-manager');
 const { TraceWriter } = require('./trace-writer');
 
@@ -41,6 +42,7 @@ module.exports = {
   attachCronScheduler,
   attachScheduleExpiryNotifier,
   buildExpiryNotification,
+  attachSelfHealingScheduler,
   AgentStateManager,
   TraceWriter,
   
@@ -138,8 +140,21 @@ module.exports = {
       });
     } catch { /* schedule-expiry integration is best-effort */ }
 
+    // Pillar 3 (Phase 31): self-healing scheduler. A single low-frequency tick that
+    // runs the operational-polish actions (rebalance + schedule-expiry notify +
+    // recovery de-escalation + opt-in safe auto-clear). TIMER-FREE by default — a
+    // caller invokes selfHealingScheduler.tick(now). Strictly advisory: it only
+    // invokes already-human-gated actions on a cadence; NO new actuation path.
+    let selfHealingScheduler = null;
+    try {
+      selfHealingScheduler = attachSelfHealingScheduler(orchestrator, {
+        scheduleExpiryTick: scheduleExpiryNotifier ? scheduleExpiryNotifier.tick : null,
+        intervalMs: options.selfHealIntervalMs // OFF unless explicitly provided
+      });
+    } catch { /* self-healing integration is best-effort */ }
+
     // Return object with orchestrator, stateManager, and peripheral integration
-    return { orchestrator, stateManager, traceWriter, peripheralMonitor, peripheralAlertConsumer, powerAnomalyConsumer, cronScheduler, scheduleExpiryNotifier };
+    return { orchestrator, stateManager, traceWriter, peripheralMonitor, peripheralAlertConsumer, powerAnomalyConsumer, cronScheduler, scheduleExpiryNotifier, selfHealingScheduler };
   },
   
   // Recovery function for checkpoint restoration

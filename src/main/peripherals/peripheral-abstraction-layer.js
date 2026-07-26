@@ -763,7 +763,16 @@ function confirmAnomalyAction(id, opts = {}) {
       // restriction is human-gated; THIS confirmation is the gate. Non-actuating
       // (a device simply regains its normal, unrestricted operation envelope).
       executed = { enabled: true, ...scheduleAdvisor().removeConfirmedSchedule(res.deviceId) };
+    } else if (execute && res.action === 'clear-rotate-token') {
+      // Phase 31: human-approved DE-ESCALATION of the rotate-token rung on
+      // recovery. This is a PURE advisory ladder RESET — it clears the device's
+      // recorded anomaly state so the heal ladder starts fresh. It NEVER rotates a
+      // token, unpairs, or actuates anything.
+      executed = { enabled: true, ...anomalyActionAdvisor().resetDevice(res.deviceId) };
     }
+    // NOTE: a `repair` de-escalation (unpair rung) is deliberately NOT auto-executed
+    // — re-pairing is security-sensitive, so the confirm only surfaces the directive
+    // (`liku peripherals pair <device>`) for a human to run.
     return { enabled: true, ...res, executed };
   } catch (err) { return { enabled: true, ok: false, reason: err.message }; }
 }

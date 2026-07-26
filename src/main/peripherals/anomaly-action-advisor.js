@@ -452,10 +452,39 @@ function _hasTemporaryRestriction(deviceId, proposed) {
 }
 
 /**
+ * Phase 31 — the CURRENT elevated (confirmed) ladder action for a device, or
+ * null. Escalation is monotonic, so the device's confirmed proposal reflects the
+ * last rung a human approved. Falls back to a confirmed reduce-schedule rule. @private
+ */
+function _activeElevatedAction(deviceId, proposed) {
+  const p = proposed[deviceId];
+  if (p && p.status === 'confirmed' && (p.action === 'unpair' || p.action === 'rotate-token' || p.action === 'reduce-schedule')) return p.action;
+  if (_hasTemporaryRestriction(deviceId, proposed)) return 'reduce-schedule';
+  return null;
+}
+
+/**
+ * Phase 31 — de-escalation mapping: for each elevated rung, the human-gated
+ * step-down proposal to surface on recovery. `clear-schedule` removes the power
+ * restriction (PAL-executed on confirm). `clear-rotate-token` is a pure advisory
+ * ladder RESET (recovery acknowledged — never re-actuates). `repair` proposes
+ * re-pairing an unpaired device (security-sensitive → NEVER auto-executed; the
+ * confirm just surfaces the directive for a human to run). @private
+ */
+const _DEESCALATE = Object.freeze({
+  'reduce-schedule': { action: 'clear-schedule', reason: (id, m) => `${id} healthy for ${m}m → propose clearing its temporary reduce-schedule`, directive: (id) => `liku peripherals remove-schedule ${id}` },
+  'rotate-token': { action: 'clear-rotate-token', reason: (id, m) => `${id} healthy for ${m}m → propose clearing the elevated rotate-token posture (reset the heal ladder)`, directive: (id) => `liku peripherals anomaly-action confirm <id>   # resets ${id}'s heal ladder` },
+  'unpair': { action: 'repair', reason: (id, m) => `${id} healthy for ${m}m → propose RE-PAIRING the previously unpaired device`, directive: (id) => `liku peripherals pair ${id}` }
+});
+
+/**
  * Propose DE-ESCALATIONS for devices that have RECOVERED (no anomaly for
- * `recoveryMs`) but still carry a temporary reduce-schedule restriction. Each is
- * a human-gated `clear-schedule` proposal (removing a restriction requires
- * explicit confirmation). Deduplicated: one open de-escalation per device.
+ * `recoveryMs`) but still carry an elevated heal action. Steps DOWN the current
+ * rung: reduce-schedule → clear-schedule, rotate-token → clear-rotate-token
+ * (advisory ladder reset), unpair → repair (re-pair suggestion). Every proposal is
+ * human-gated (proposal → explicit confirm); NONE auto-executes a token rotation,
+ * unpair, or physical/security-sensitive operation. Deduplicated: one open
+ * de-escalation per device.
  * @param {{ recoveryMs?:number }} [opts]
  * @param {number} [now]
  * @returns {object[]} de-escalation proposals
@@ -469,20 +498,25 @@ function proposeDeescalations(opts = {}, now = Date.now()) {
   for (const [deviceId, occs] of Object.entries(st.occurrences)) {
     const last = _lastAnomalyAt(occs);
     if (!last || (now - last) < recoveryMs) continue; // not recovered yet
-    if (!_hasTemporaryRestriction(deviceId, st.proposed)) continue; // nothing to step down
+    const active = _activeElevatedAction(deviceId, st.proposed);
+    if (!active) continue; // nothing elevated to step down
+    const map = _DEESCALATE[active];
+    if (!map) continue;
     const key = `deescalate:${deviceId}`;
     const existing = st.proposed[key];
     if (existing && existing.status === 'proposed') { out.push(existing); continue; }
     if (existing && (existing.status === 'confirmed' || existing.status === 'dismissed')) continue;
+    const minutes = Math.round((now - last) / 60000);
     const suggestion = {
       id: `deesc-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
       deviceId,
-      action: 'clear-schedule',
+      action: map.action,
+      fromAction: active,
       type: 'de-escalation',
       severity: 'info',
       recoveredForMs: now - last,
-      reason: `${deviceId} healthy for ${Math.round((now - last) / 60000)}m → propose clearing its temporary reduce-schedule`,
-      directive: `liku peripherals remove-schedule ${deviceId}`,
+      reason: map.reason(deviceId, minutes),
+      directive: map.directive(deviceId),
       status: 'proposed',
       proposed: true,
       requiresHuman: true,
@@ -496,6 +530,29 @@ function proposeDeescalations(opts = {}, now = Date.now()) {
   }
   if (changed) _save(st);
   return out;
+}
+
+/**
+ * Phase 31 — advisory ladder RESET for a recovered device. Clears the device's
+ * recorded anomaly occurrences and closes its confirmed elevated proposal so the
+ * heal ladder starts fresh. PURE advisory state — it NEVER actuates, rotates a
+ * token, unpairs, or touches a schedule. Used by PAL on a `clear-rotate-token`
+ * de-escalation confirm.
+ * @param {string} deviceId
+ */
+function resetDevice(deviceId) {
+  if (!enabled()) return { ok: false, reason: 'disabled' };
+  if (!deviceId) return { ok: false, reason: 'no-device' };
+  const st = _load();
+  delete st.occurrences[deviceId];
+  if (st.proposed[deviceId] && st.proposed[deviceId].status === 'confirmed') {
+    st.proposed[deviceId].status = 'cleared';
+    st.proposed[deviceId].clearedAt = new Date().toISOString();
+  }
+  const deKey = `deescalate:${deviceId}`;
+  if (st.proposed[deKey]) delete st.proposed[deKey]; // allow a future recovery cycle
+  _save(st);
+  return { ok: true, deviceId, reset: true };
 }
 
 /**
@@ -537,5 +594,5 @@ module.exports = {
   FLAG, STORE_FILE, POLICIES_FILE, ACTION_LADDER,
   enabled, recordAnomaly, proposeActions, proposeFleetAction, listProposed, confirm, dismiss, clear,
   setPolicy, getPolicy, listPolicies, clearPolicies,
-  proposeDeescalations, autoClearRecovered
+  proposeDeescalations, autoClearRecovered, resetDevice
 };

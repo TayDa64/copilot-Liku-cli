@@ -31,6 +31,7 @@
  *                                       Cross-host lease + task coordination (cluster mode)
  *   liku peripherals cron [--at <ISO>]  Cron device schedules → advisory human-gated tasks
  *   liku peripherals cron [propose <dev> <act> "<cron>"|confirm <id>|dismiss <id>|rules|tick|remove <id>]
+ *   liku peripherals self-heal [--at <ISO>]  Run one periodic self-healing pass (rebalance + expiry + de-escalation)
  *   liku peripherals pair <id>          Pair / commission a device (real when HIL off)
  *   liku peripherals unpair <id>        Tear down a device's pairing (re-pairable)
  *   liku peripherals token [status|rotate <id>|revoke <id>|rotate-all|action <id> <action>|action-rotate <id> <action>|identity-rotate <id>]
@@ -773,6 +774,30 @@ async function run(args, flags) {
       return { success: true, rules: rules.rules, tasks: due.tasks };
     }
 
+    case 'self-heal': {
+      // Phase 31: run ONE periodic self-healing pass (rebalance + schedule-expiry
+      // notify + recovery de-escalation + opt-in safe auto-clear). Strictly advisory:
+      // it only invokes already-human-gated actions on a cadence.
+      const EventEmitter = require('events');
+      const { SupervisorAgent, attachScheduleExpiryNotifier, attachSelfHealingScheduler } = require('../../main/agents');
+      const orch = new EventEmitter();
+      orch.agents = new Map();
+      orch.agents.set('supervisor', new SupervisorAgent({}));
+      const expiry = attachScheduleExpiryNotifier(orch, {});
+      const sh = attachSelfHealingScheduler(orch, { scheduleExpiryTick: expiry.tick });
+      const at = flags.at ? new Date(flags.at) : new Date();
+      const res = sh.tick(at);
+      sh.detach(); expiry.detach();
+      if (flags.json) return { success: true, ...res };
+      if (!res.ran) { log(dim('  self-heal is inert (peripherals disabled)')); return { success: true, ...res }; }
+      success(`Self-heal tick @ ${at.toISOString().slice(0, 16)}`);
+      log(`  rebalanced: ${res.rebalanced.length} task(s)`);
+      log(`  schedule-expiry tasks: ${res.expiryTasks}`);
+      log(`  de-escalations proposed: ${res.deescalations.length}`);
+      for (const d of res.deescalations) log(dim(`    ${d.deviceId}: ${d.fromAction} → ${d.action}  (${d.directive})`));
+      if ((res.autoCleared || []).length) log(dim(`  auto-cleared ${res.autoCleared.length} advisory suggestion(s)`));
+      return { success: true, ...res };
+    }
     case 'simulate': {
       // Hardware-in-the-loop helper: inject a simulated sensor reading so the
       // monitor/alert pipeline can be exercised without physical hardware.
@@ -875,7 +900,7 @@ async function run(args, flags) {
 
     default:
       error(`Unknown subcommand: ${sub}`);
-      log('Usage: liku peripherals [scan|list|status [id]|power [--history|--trend|--anomalies|--forecast [--seasonal] [--exclude-anomalous] [--special-days]]|anomalies [--attributed]|anomaly-action [confirm|dismiss <id>|policy [set <device> reduce=N rotate=N unpair=N]|recovery]|schedules|sweep-schedules|schedule-expiry|locks [--record]|coordination [lease|release <id>|sweep|claim|release-task <task>|assign <task> <node>|handoff <task> [node]|renew <task>|rebalance]|cron [propose|confirm|dismiss|rules|tick|remove]|suggestions|apply-schedule <id>|remove-schedule <device> [--from N] [--to N]|pair <id>|unpair <id>|token [rotate|revoke|rotate-all|action <id> <action>|action-rotate <id> <action>|identity-rotate <id>]|tasks [--escalated|--pending|--severity <p>|--anomaly]|notifications|channels|simulate <id> <k=v>|execute <id> <action>|confirm <id> <action> [--execute]|drivers]');
+      log('Usage: liku peripherals [scan|list|status [id]|power [--history|--trend|--anomalies|--forecast [--seasonal] [--exclude-anomalous] [--special-days]]|anomalies [--attributed]|anomaly-action [confirm|dismiss <id>|policy [set <device> reduce=N rotate=N unpair=N]|recovery]|schedules|sweep-schedules|schedule-expiry|locks [--record]|coordination [lease|release <id>|sweep|claim|release-task <task>|assign <task> <node>|handoff <task> [node]|renew <task>|rebalance]|cron [propose|confirm|dismiss|rules|tick|remove]|self-heal|suggestions|apply-schedule <id>|remove-schedule <device> [--from N] [--to N]|pair <id>|unpair <id>|token [rotate|revoke|rotate-all|action <id> <action>|action-rotate <id> <action>|identity-rotate <id>]|tasks [--escalated|--pending|--severity <p>|--anomaly]|notifications|channels|simulate <id> <k=v>|execute <id> <action>|confirm <id> <action> [--execute]|drivers]');
       return { success: false };
   }
 }

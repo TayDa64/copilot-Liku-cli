@@ -4868,6 +4868,190 @@ test('PAL exposes Phase 30 rebalance / expiry / de-escalation accessors', () => 
   delete process.env.LIKU_ENABLE_PERIPHERALS;
 });
 
+// ── Phase 31: periodic self-healing tick + ladder de-escalation on recovery ──
+
+test('self-healing tick runs rebalance + expiry + de-escalation when enabled', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  process.env.LIKU_PERIPHERAL_AUTOHEAL_RECOVERY_MS = '1000';
+  delete process.env.LIKU_CLUSTER_DIR;
+  const schedule = require('../src/main/peripherals/power-schedule');
+  const advisor = require('../src/main/peripherals/power-schedule-advisor');
+  const actions = require('../src/main/peripherals/anomaly-action-advisor');
+  const { attachScheduleExpiryNotifier } = require('../src/main/agents/schedule-expiry-notifier');
+  const { attachSelfHealingScheduler } = require('../src/main/agents/self-healing-scheduler');
+  advisor.clear(); actions.clear();
+  try { fs.rmSync(schedule.CONFIRMED_FILE); } catch { /* ignore */ }
+  const base = new Date(2026, 6, 26, 12, 0, 0).getTime();
+  advisor.createConfirmedSchedule('exp', { maxW: 150, fromHour: 0, toHour: 24, expiresAt: new Date(base + 30 * 60000).toISOString() });
+  actions.recordAnomaly({ device: 'rec', type: 'spike' }, base);
+  advisor.createConfirmedSchedule('rec', { maxW: 100, fromHour: 0, toHour: 24 });
+  const supervisor = { receiveNotification() {}, createPeripheralTask(n) { return { id: n.id, status: 'pending-review', autonomousAction: false }; } };
+  const orch = new (require('events').EventEmitter)();
+  orch.agents = new Map([['supervisor', supervisor]]);
+  const expiry = attachScheduleExpiryNotifier(orch, { getSupervisor: () => supervisor, now: () => base });
+  const sh = attachSelfHealingScheduler(orch, { scheduleExpiryTick: expiry.tick, now: () => base });
+  const res = sh.tick(base + 5000);
+  sh.detach(); expiry.detach();
+  assert.strictEqual(res.ran, true, 'tick ran');
+  assert.ok(res.expiryTasks >= 1, 'expiry notifier surfaced the lapsing cap');
+  assert.ok(res.deescalations.some((d) => d.deviceId === 'rec' && d.action === 'clear-schedule'), 'recovery de-escalation proposed');
+  advisor.clear(); actions.clear();
+  try { fs.rmSync(schedule.CONFIRMED_FILE); } catch { /* ignore */ }
+  delete process.env.LIKU_PERIPHERAL_AUTOHEAL_RECOVERY_MS;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('self-healing tick is inert when peripherals are disabled', () => {
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+  const { attachSelfHealingScheduler } = require('../src/main/agents/self-healing-scheduler');
+  const orch = new (require('events').EventEmitter)();
+  const sh = attachSelfHealingScheduler(orch, {});
+  assert.strictEqual(sh.tick().ran, false, 'tick is a no-op when disabled');
+  sh.detach();
+});
+
+test('self-healing tick is best-effort (a failing sub-action never aborts the others)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const { attachSelfHealingScheduler } = require('../src/main/agents/self-healing-scheduler');
+  const orch = new (require('events').EventEmitter)();
+  const failingPal = { isPeripheralsEnabled: () => true, rebalanceClusterTasks() { throw new Error('boom'); } };
+  const failingAdvisor = { proposeDeescalations() { throw new Error('boom'); }, autoClearRecovered() { return { cleared: [] }; } };
+  const sh = attachSelfHealingScheduler(orch, {
+    pal: failingPal, actionAdvisor: failingAdvisor,
+    scheduleExpiryTick: () => { throw new Error('boom'); }, now: () => 1000
+  });
+  const res = sh.tick(1000);
+  assert.strictEqual(res.ran, true, 'tick still completes despite failures');
+  assert.deepStrictEqual(res.rebalanced, []);
+  assert.strictEqual(res.expiryTasks, 0);
+  assert.deepStrictEqual(res.deescalations, []);
+  sh.detach();
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('self-healing scheduler exposes no actuation / confirm surface', () => {
+  const { attachSelfHealingScheduler } = require('../src/main/agents/self-healing-scheduler');
+  const orch = new (require('events').EventEmitter)();
+  const sh = attachSelfHealingScheduler(orch, {});
+  assert.strictEqual(typeof sh.tick, 'function');
+  assert.strictEqual(typeof sh.detach, 'function');
+  assert.strictEqual(typeof sh.execute, 'undefined');
+  assert.strictEqual(typeof sh.perform, 'undefined');
+  assert.strictEqual(typeof sh.confirm, 'undefined');
+  sh.detach();
+});
+
+test('rotate-token rung de-escalates to clear-rotate-token; confirm resets the ladder (advisory)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  process.env.LIKU_PERIPHERAL_AUTOHEAL_ESCALATION_COOLDOWN_MS = '0';
+  delete process.env.LIKU_CLUSTER_DIR;
+  const actions = require('../src/main/peripherals/anomaly-action-advisor');
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  actions.clear();
+  const base = new Date(2026, 6, 26, 12, 0, 0).getTime();
+  for (let i = 0; i < 6; i++) actions.recordAnomaly({ device: 'devT', type: 'spike' }, base);
+  const props = actions.proposeActions({}, base);
+  const rt = props.find((p) => p.deviceId === 'devT');
+  assert.strictEqual(rt.action, 'rotate-token', 'device reached the rotate-token rung');
+  actions.confirm(rt.id); // human confirmed the elevated action
+  const de = actions.proposeDeescalations({ recoveryMs: 1000 }, base + 5000);
+  const d = de.find((x) => x.deviceId === 'devT');
+  assert.strictEqual(d.action, 'clear-rotate-token');
+  assert.strictEqual(d.fromAction, 'rotate-token');
+  assert.strictEqual(d.requiresHuman, true);
+  // Confirm the de-escalation → PAL performs a PURE advisory ladder reset.
+  const conf = pal.confirmAnomalyAction(d.id);
+  assert.strictEqual(conf.ok, true);
+  assert.strictEqual(conf.executed.reset, true, 'ladder reset on confirm (no actuation)');
+  actions.clear();
+  delete process.env.LIKU_PERIPHERAL_AUTOHEAL_ESCALATION_COOLDOWN_MS;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('unpair rung de-escalates to repair; confirm does NOT auto-execute (advisory directive only)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  process.env.LIKU_PERIPHERAL_AUTOHEAL_ESCALATION_COOLDOWN_MS = '0';
+  delete process.env.LIKU_CLUSTER_DIR;
+  const actions = require('../src/main/peripherals/anomaly-action-advisor');
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  actions.clear();
+  const base = new Date(2026, 6, 26, 12, 0, 0).getTime();
+  for (let i = 0; i < 10; i++) actions.recordAnomaly({ device: 'devU', type: 'spike' }, base);
+  const props = actions.proposeActions({}, base);
+  const up = props.find((p) => p.deviceId === 'devU');
+  assert.strictEqual(up.action, 'unpair', 'device reached the unpair rung');
+  actions.confirm(up.id);
+  const de = actions.proposeDeescalations({ recoveryMs: 1000 }, base + 5000);
+  const d = de.find((x) => x.deviceId === 'devU');
+  assert.strictEqual(d.action, 'repair');
+  assert.strictEqual(d.fromAction, 'unpair');
+  assert.ok(d.directive.includes('pair devU'), 're-pair directive surfaced for the human');
+  // Confirm → repair is NOT auto-executed (security-sensitive); directive-only.
+  const conf = pal.confirmAnomalyAction(d.id);
+  assert.strictEqual(conf.ok, true);
+  assert.strictEqual(conf.executed, null, 're-pair never auto-executes');
+  actions.clear();
+  delete process.env.LIKU_PERIPHERAL_AUTOHEAL_ESCALATION_COOLDOWN_MS;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('higher-rung de-escalation only triggers on genuine recovery', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  process.env.LIKU_PERIPHERAL_AUTOHEAL_ESCALATION_COOLDOWN_MS = '0';
+  delete process.env.LIKU_CLUSTER_DIR;
+  const actions = require('../src/main/peripherals/anomaly-action-advisor');
+  actions.clear();
+  const base = new Date(2026, 6, 26, 12, 0, 0).getTime();
+  for (let i = 0; i < 6; i++) actions.recordAnomaly({ device: 'devG', type: 'spike' }, base);
+  actions.confirm(actions.proposeActions({}, base).find((p) => p.deviceId === 'devG').id);
+  // Only 2s since last anomaly but recovery window is large → NOT recovered.
+  const de = actions.proposeDeescalations({ recoveryMs: 100000 }, base + 2000);
+  assert.ok(!de.some((x) => x.deviceId === 'devG'), 'no de-escalation while still recently anomalous');
+  actions.clear();
+  delete process.env.LIKU_PERIPHERAL_AUTOHEAL_ESCALATION_COOLDOWN_MS;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('resetDevice is a pure advisory ladder reset (clears recorded anomaly state)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  process.env.LIKU_PERIPHERAL_AUTOHEAL_ESCALATION_COOLDOWN_MS = '0';
+  delete process.env.LIKU_CLUSTER_DIR;
+  const actions = require('../src/main/peripherals/anomaly-action-advisor');
+  actions.clear();
+  const base = new Date(2026, 6, 26, 12, 0, 0).getTime();
+  for (let i = 0; i < 6; i++) actions.recordAnomaly({ device: 'devZ', type: 'spike' }, base);
+  actions.confirm(actions.proposeActions({}, base).find((p) => p.deviceId === 'devZ').id);
+  const r = actions.resetDevice('devZ');
+  assert.strictEqual(r.ok, true);
+  assert.strictEqual(r.reset, true);
+  // Occurrences cleared → the device no longer escalates or de-escalates.
+  assert.deepStrictEqual(actions.proposeActions({}, base), []);
+  assert.deepStrictEqual(actions.proposeDeescalations({ recoveryMs: 1 }, base + 10000), []);
+  actions.clear();
+  delete process.env.LIKU_PERIPHERAL_AUTOHEAL_ESCALATION_COOLDOWN_MS;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('reduce-schedule de-escalation carries its fromAction (regression + provenance)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_CLUSTER_DIR;
+  const schedule = require('../src/main/peripherals/power-schedule');
+  const advisor = require('../src/main/peripherals/power-schedule-advisor');
+  const actions = require('../src/main/peripherals/anomaly-action-advisor');
+  advisor.clear(); actions.clear();
+  try { fs.rmSync(schedule.CONFIRMED_FILE); } catch { /* ignore */ }
+  const base = new Date(2026, 6, 26, 12, 0, 0).getTime();
+  actions.recordAnomaly({ device: 'devS', type: 'spike' }, base);
+  advisor.createConfirmedSchedule('devS', { maxW: 100, fromHour: 0, toHour: 24 });
+  const de = actions.proposeDeescalations({ recoveryMs: 1000 }, base + 5000);
+  const d = de.find((x) => x.deviceId === 'devS');
+  assert.strictEqual(d.action, 'clear-schedule');
+  assert.strictEqual(d.fromAction, 'reduce-schedule');
+  advisor.clear(); actions.clear();
+  try { fs.rmSync(schedule.CONFIRMED_FILE); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
 console.log(`\n${pass} checks passed.`);
 if (process.exitCode) { console.error('FAILED'); }
 else { console.log('OK'); }
