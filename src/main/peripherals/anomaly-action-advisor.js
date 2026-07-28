@@ -596,6 +596,8 @@ function resetDevice(deviceId) {
   const deKey = `deescalate:${deviceId}`;
   if (st.proposed[deKey]) delete st.proposed[deKey]; // allow a future recovery cycle
   _save(st);
+  // Phase 34: PURE-OBSERVATION history (best-effort; never affects the state above).
+  try { require('./deescalation-history').record({ deviceId, from: 'rotate-token', to: null, kind: 'clear' }); } catch { /* observability is best-effort */ }
   return { ok: true, deviceId, reset: true };
 }
 
@@ -614,14 +616,18 @@ function stepBackDevice(deviceId, toRung, now = Date.now()) {
   if (!deviceId || !toRung) return { ok: false, reason: 'invalid' };
   const st = _load();
   const p = st.proposed[deviceId];
+  const fromAction = p ? p.action : null;
+  const atMs = Number.isFinite(now) ? now : Date.now();
   if (p) {
     p.action = toRung;
     p.status = 'confirmed';
-    p.steppedBackAt = new Date(Number.isFinite(now) ? now : Date.now()).toISOString();
+    p.steppedBackAt = new Date(atMs).toISOString();
   }
   const deKey = `deescalate:${deviceId}`;
   if (st.proposed[deKey]) delete st.proposed[deKey]; // allow the next step-back cycle
   _save(st);
+  // Phase 34: PURE-OBSERVATION history (best-effort; never affects the state above).
+  try { require('./deescalation-history').record({ deviceId, from: fromAction, to: toRung, kind: 'step-back', at: atMs }); } catch { /* observability is best-effort */ }
   return { ok: true, deviceId, steppedBackTo: toRung };
 }
 

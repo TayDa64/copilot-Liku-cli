@@ -31,6 +31,8 @@
 
 'use strict';
 
+const { AgentRole } = require('./base-agent');
+
 const DEFAULT_INTERVAL_MS = 300000; // 5 min production cadence (when the flag is on)
 
 /**
@@ -51,6 +53,39 @@ function _resolveIntervalMs(options) {
 function _staleThresholdMs() {
   const v = Number(process.env.LIKU_PERIPHERAL_SELF_HEAL_STALE_MS);
   return Number.isFinite(v) && v > 0 ? v : 900000; // 15 min
+}
+
+/** Whether a stalled tick should ALSO surface a human-gated Supervisor task (default OFF). @private */
+function _tickHealthTasksEnabled(options) {
+  if (options && options.tickHealthTasks === true) return true;
+  return String(process.env.LIKU_PERIPHERAL_SELF_HEAL_TICK_HEALTH_TASKS || '').trim() === '1';
+}
+
+/**
+ * Phase 34 — build a bounded, ADVISORY notification for a stalled self-heal tick.
+ * Shaped like a peripheral alert so it reuses the Supervisor's task machinery
+ * (dedupe/coalesce/cooldown) with NO actuation surface. The stall is a health
+ * signal, not a device event: `requiresHuman:false`, `autonomousAction:false`, and
+ * a synthetic read-only (Class C) device so nothing can ever be actuated from it.
+ */
+function buildTickHealthNotification(ev) {
+  const e = ev || {};
+  const gapMs = Number(e.gapMs) || 0;
+  return {
+    id: `self-heal-health-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    at: new Date().toISOString(),
+    source: 'self-heal',
+    kind: 'tick-health',
+    device: { id: 'self-heal', class: 'C', kind: 'health' },
+    breach: { metric: 'tick-health', level: 'stale', value: gapMs, threshold: Number(e.staleMs) || null },
+    severity: 'warning',
+    advisory: e.advisory || `self-heal tick stalled for ${Math.round(gapMs / 1000)}s`,
+    requiresHuman: false,
+    autonomousAction: false,
+    safety: 'physical-actions-require-pal-gating',
+    anomalyType: null,
+    dedupeKey: 'self-heal:tick-health'
+  };
 }
 
 /**
@@ -74,6 +109,11 @@ function attachSelfHealingScheduler(orchestrator, options = {}) {
   const scheduleExpiryTick = typeof options.scheduleExpiryTick === 'function' ? options.scheduleExpiryTick : null;
   const now = typeof options.now === 'function' ? options.now : () => Date.now();
   const statusStore = options.statusStore || require('../peripherals/self-heal-status');
+  const getSupervisor = typeof options.getSupervisor === 'function'
+    ? options.getSupervisor
+    : () => (orchestrator.agents && typeof orchestrator.agents.get === 'function'
+        ? orchestrator.agents.get(AgentRole.SUPERVISOR)
+        : null);
   let _lastRun = null;
 
   function _enabled() {
@@ -133,7 +173,29 @@ function attachSelfHealingScheduler(orchestrator, options = {}) {
       const staleMs = _staleThresholdMs();
       if (gapMs > staleMs) {
         result.tickHealth = { wasStale: true, gapMs, staleMs };
-        try { orchestrator.emit('self-heal:tick-health', { source: 'self-heal', kind: 'tick-health', advisory: `self-heal tick resumed after ${Math.round(gapMs / 1000)}s stall`, gapMs, staleMs, requiresHuman: false, autonomousAction: false }); } catch { /* non-fatal */ }
+        const ev = { source: 'self-heal', kind: 'tick-health', advisory: `self-heal tick resumed after ${Math.round(gapMs / 1000)}s stall`, gapMs, staleMs, requiresHuman: false, autonomousAction: false };
+        try { orchestrator.emit('self-heal:tick-health', ev); } catch { /* non-fatal */ }
+        // Phase 34: OPTIONALLY surface the stall as a bounded, human-gated Supervisor
+        // task/notification (default OFF). Reuses the Supervisor's own dedupe/coalesce
+        // + cooldown (dedupeKey 'self-heal:tick-health') — no new spam control. Strictly
+        // advisory: the notification is a Class C health signal that NEVER actuates.
+        if (_tickHealthTasksEnabled(options)) {
+          try {
+            const notification = buildTickHealthNotification(ev);
+            const supervisor = getSupervisor();
+            if (supervisor && typeof supervisor.receiveNotification === 'function') { try { supervisor.receiveNotification(notification); } catch { /* non-fatal */ } }
+            try { orchestrator.emit('supervisor:notification', notification); } catch { /* non-fatal */ }
+            try { require('../peripherals/cluster-tasks').publishNotification(notification); } catch { /* non-fatal */ }
+            let task = null;
+            if (supervisor && typeof supervisor.createPeripheralTask === 'function') task = supervisor.createPeripheralTask(notification, { source: 'self-heal' });
+            if (task) {
+              result.tickHealthTask = task;
+              try { orchestrator.emit('supervisor:task', task); } catch { /* non-fatal */ }
+              try { orchestrator.emit('self-heal:tick-health-task', task); } catch { /* non-fatal */ }
+              try { require('../peripherals/cluster-tasks').publishTask(task); } catch { /* non-fatal */ }
+            }
+          } catch { /* best-effort */ }
+        }
       }
     }
     if (typeof options.onTick === 'function') { try { options.onTick(result); } catch { /* non-fatal */ } }
@@ -156,4 +218,4 @@ function attachSelfHealingScheduler(orchestrator, options = {}) {
   };
 }
 
-module.exports = { attachSelfHealingScheduler };
+module.exports = { attachSelfHealingScheduler, buildTickHealthNotification };

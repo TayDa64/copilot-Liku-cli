@@ -848,6 +848,27 @@ function getSelfHealHealth(opts = {}) {
   catch { return { enabled: true, ran: false, stale: false }; }
 }
 
+/** Phase 34 — de-escalation / step-back history + metrics (pure observation). */
+function getDeescalationHistory() {
+  if (!isPeripheralsEnabled()) return { enabled: false, devices: {}, totals: {} };
+  try { return { enabled: true, ...require('./deescalation-history').read() }; }
+  catch { return { enabled: true, devices: {}, totals: {} }; }
+}
+
+/** Phase 34 — per-device step-back state incl. cooldown remaining (pure observation). */
+function getDeescalationState(deviceId, opts = {}) {
+  if (!isPeripheralsEnabled()) return { enabled: false, known: false };
+  try { return { enabled: true, ...require('./deescalation-history').deviceState(deviceId, opts) }; }
+  catch { return { enabled: true, known: false }; }
+}
+
+/** Phase 34 — publish THIS node's health score (0..1) for fairness-weighted rebalancing (advisory). */
+function publishNodeHealth(score, opts = {}) {
+  if (!isPeripheralsEnabled()) return { enabled: false, published: false };
+  try { return { enabled: true, ...clusterTasks().publishNodeHealth(score, opts) }; }
+  catch (err) { return { enabled: true, published: false, reason: err.message }; }
+}
+
 /** Phase 22 — mint a PER-ACTION (least-privilege) capability token for a device. */
 function issueActionToken(id, action, opts = {}) {
   if (!isPeripheralsEnabled()) return { enabled: false };
@@ -1189,6 +1210,9 @@ module.exports = {
   autoClearRecovered,
   getSelfHealStatus,
   getSelfHealHealth,
+  getDeescalationHistory,
+  getDeescalationState,
+  publishNodeHealth,
   issueActionToken,
   verifyDeviceToken,
   rotateAllTokens,

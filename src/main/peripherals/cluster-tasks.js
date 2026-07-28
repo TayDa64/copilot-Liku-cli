@@ -396,17 +396,56 @@ function _minResidencyMs(opts) {
   return Number.isFinite(v) && v >= 0 ? v : 0;
 }
 
+// Phase 34: OPTIONAL node-health signal. A node may publish a simple health score
+// (0..1, 1 = healthy) to the shared `node-health` kind; when
+// `LIKU_PERIPHERAL_REBALANCE_USE_HEALTH=1` the rebalance score becomes
+// weightedLoad / (capacity · healthFactor), so a less-healthy node is a WORSE
+// target (higher score). Default OFF / no data → factor 1 → Phase-33 behaviour.
+function _useHealth(opts) {
+  if (opts && opts.useHealth === true) return true;
+  return String(process.env.LIKU_PERIPHERAL_REBALANCE_USE_HEALTH || '').trim() === '1';
+}
+
+function _healthFactor(nodeId, opts) {
+  if (!_useHealth(opts)) return 1;
+  try {
+    const coord = _coord();
+    if (!coord.clusterEnabled()) return 1;
+    const rec = coord.getShared('node-health', nodeId);
+    const score = rec && Number(rec.score);
+    if (!Number.isFinite(score)) return 1;
+    return Math.min(1, Math.max(0.01, score)); // clamp so a 0 score never divides by zero
+  } catch { return 1; }
+}
+
 /**
- * Pick the best target node: LOWEST weighted-load / capacity score. Deterministic
- * (tie broken by nodeId). Avoids `exclude` (the stale assignee) when another node
- * exists. @private
+ * Publish THIS node's health score (0..1, 1 = healthy) to the shared cluster
+ * store so peers can weight it into rebalancing. Cluster off → inert. Advisory
+ * observation only — it never actuates. @param {number} score
  */
-function _bestTarget(load, exclude) {
+function publishNodeHealth(score, opts = {}) {
+  if (!enabled()) return { published: false };
+  const coord = _coord();
+  if (!coord.clusterEnabled()) return { published: false, local: true };
+  const s = Math.min(1, Math.max(0, Number(score)));
+  if (!Number.isFinite(s)) return { published: false, reason: 'invalid-score' };
+  try {
+    const ok = coord.putShared('node-health', coord.nodeId(), { score: s, at: new Date(Number.isFinite(opts.now) ? opts.now : Date.now()).toISOString() });
+    return { published: !!ok, nodeId: coord.nodeId(), score: s };
+  } catch { return { published: false }; }
+}
+
+/**
+ * Pick the best target node: LOWEST weighted-load / (capacity · healthFactor)
+ * score. Deterministic (tie broken by nodeId). Avoids `exclude` (the stale
+ * assignee) when another node exists. @private
+ */
+function _bestTarget(load, exclude, opts) {
   const nodes = Object.keys(load).sort();
   let best = null; let bestScore = Infinity;
   for (const n of nodes) {
     if (exclude && n === exclude && nodes.length > 1) continue;
-    const score = load[n] / _nodeCapacity(n);
+    const score = load[n] / (_nodeCapacity(n) * _healthFactor(n, opts));
     if (score < bestScore) { bestScore = score; best = n; }
   }
   if (!best && exclude) best = exclude; // exclude was the only known node
@@ -464,7 +503,7 @@ function rebalance(opts = {}) {
   const minResidencyMs = _minResidencyMs(opts);
   const rebalanced = [];
   for (const c of candidates) {
-    const target = _bestTarget(load, c.staleAssignee);
+    const target = _bestTarget(load, c.staleAssignee, opts);
     if (!target) continue;
     if (target === c.staleAssignee) continue; // nowhere better to move it
     // Phase 33 ANTI-FLAP: for an already-assigned task, hold it unless the target
@@ -473,8 +512,8 @@ function rebalance(opts = {}) {
     if (c.staleAssignee) {
       if (minResidencyMs > 0 && c.assignedAtMs && (now - c.assignedAtMs) < minResidencyMs) continue;
       if (hysteresis > 0) {
-        const curScore = (load[c.staleAssignee] || 0) / _nodeCapacity(c.staleAssignee);
-        const tgtScore = (load[target] || 0) / _nodeCapacity(target);
+        const curScore = (load[c.staleAssignee] || 0) / (_nodeCapacity(c.staleAssignee) * _healthFactor(c.staleAssignee, opts));
+        const tgtScore = (load[target] || 0) / (_nodeCapacity(target) * _healthFactor(target, opts));
         if ((curScore - tgtScore) < hysteresis) continue; // improvement too small → don't flap
       }
     }
@@ -506,5 +545,5 @@ module.exports = {
   listTasks, listNotifications, peerHasOpenTaskFor, sweep,
   claimTask, renewClaim, releaseTask, taskOwner, isOwnedByPeer,
   assignTask, assignmentFor, releaseAssignment, myAssignments, handoffTask, startAutoRenew,
-  rebalance
+  rebalance, publishNodeHealth
 };

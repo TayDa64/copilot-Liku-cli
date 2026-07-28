@@ -1416,6 +1416,61 @@ human confirmation; nothing security-sensitive is auto-executed.
 - **single-machine-unchanged** — all new knobs default OFF; interval is timer-free by default;
   hysteresis/residency/cooldown reduce to prior behaviour and the cognitive fragment stays 262 BPE.
 
+## Phase 34 — tick-health tasks + de-escalation observability + node-health fairness
+
+### Tick-health → optional Supervisor task/notification
+
+When the self-heal tick detects a stall (gap since the previous run > staleness threshold)
+and `LIKU_PERIPHERAL_SELF_HEAL_TICK_HEALTH_TASKS=1`, it OPTIONALLY surfaces the stall as a
+bounded, human-gated Supervisor notification + task via the existing pipeline
+(`receiveNotification` → `createPeripheralTask` → `supervisor:task` + `cluster-tasks.publishTask`).
+`buildTickHealthNotification()` produces an ADVISORY notification: a synthetic read-only
+(Class C) `self-heal` device, `requiresHuman:false`, `autonomousAction:false`, dedupeKey
+`self-heal:tick-health`. Dedup + cooldown REUSE the Supervisor's own coalesce/cooldown (two
+stalls coalesce into ONE task — no new spam control). Default OFF; a stalled tick is still
+only a status signal and NEVER an actuation path. Emits `self-heal:tick-health-task` too.
+
+### Light de-escalation observability
+
+`deescalation-history.js` (`~/.liku/deescalation-history.json`, atomic + flag-gated) records
+per-device step-back / clear activity as PURE OBSERVATION: `lastStepBackAt`, `lastFrom`,
+`lastTo`, `stepBackCount`, `clearCount`, a bounded transition log, plus fleet `totals`.
+`anomaly-action-advisor.stepBackDevice` records a `step-back` transition and `resetDevice`
+records a `clear` — both best-effort and AFTER the state change, so recording NEVER alters
+proposal or confirmation behaviour. `deviceState(id,{now,cooldownMs})` reports the remaining
+step-back cooldown. PAL: `getDeescalationHistory()`, `getDeescalationState()`. CLI:
+`self-heal history`.
+
+### Optional node-health/latency signal in fairness scoring
+
+A node may publish a simple health score (0..1, 1 = healthy) to the shared `node-health`
+store via `cluster-tasks.publishNodeHealth(score)` (PAL `publishNodeHealth`, CLI
+`coordination health <score>`). When `LIKU_PERIPHERAL_REBALANCE_USE_HEALTH=1`, the rebalance
+target score becomes `weightedLoad / (capacity · healthFactor)` (healthFactor clamped to
+0.01..1), so a LESS-healthy node is a WORSE target. Default OFF / no data / cluster off →
+factor 1 → Phase-33 scoring byte-identical. Still hysteresis/min-residency protected and
+strictly advisory (assignment intent only → no double ownership; unassigned tasks always place).
+
+### New environment variables (all default OFF / inert single-machine)
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `LIKU_PERIPHERAL_SELF_HEAL_TICK_HEALTH_TASKS` | `0` (off) | Surface a stalled self-heal tick as a human-gated Supervisor task |
+| `LIKU_PERIPHERAL_REBALANCE_USE_HEALTH` | `0` (off) | Fold the shared node-health score into fairness rebalance scoring |
+
+### Phase 34 safety invariants
+
+- **tick-health-task-is-advisory** — the tick-health task path is optional (default OFF), the
+  notification is a Class C health signal (`requiresHuman:false`, `autonomousAction:false`), and
+  it reuses the Supervisor's existing dedup/cooldown; a stalled tick never becomes an actuation path.
+- **deescalation-observability-is-pure** — history is recorded best-effort AFTER the state change
+  and never alters what a de-escalation proposes or how a confirmation behaves.
+- **node-health-is-optional-and-advisory** — the health signal is default OFF, deterministic, and
+  only reweights rebalance scoring; rebalancing stays assignment-intent-only (no double ownership),
+  unassigned tasks always place (no stranding), and scoring is byte-identical when unset.
+- **single-machine-unchanged** — all Phase-34 stores/signals are flag-gated + cluster-gated; the
+  single-machine path and the 262 BPE cognitive fragment are unchanged.
+
 ## If a human decides to act
 
 Any physical response still travels the full PAL safety chain — the alert path

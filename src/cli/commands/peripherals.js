@@ -27,12 +27,13 @@
  *   liku peripherals schedule-expiry    Confirmed caps about to lapse / just lapsed (advisory)
  *   liku peripherals locks [--record]   Lock observability: metrics, per-file, trends
  *   liku peripherals coordination [status|lease <id>|release <id>|sweep|claim <task>|release-task <task>
- *                                 |assign <task> <node>|handoff <task> [node]|renew <task>|rebalance]
+ *                                 |assign <task> <node>|handoff <task> [node]|renew <task>|rebalance|health <score>]
  *                                       Cross-host lease + task coordination (cluster mode)
  *   liku peripherals cron [--at <ISO>]  Cron device schedules → advisory human-gated tasks
  *   liku peripherals cron [propose <dev> <act> "<cron>"|confirm <id>|dismiss <id>|rules|tick|remove <id>]
  *   liku peripherals self-heal [--at <ISO>]  Run one periodic self-healing pass (rebalance + expiry + de-escalation)
  *   liku peripherals self-heal status        Last-run metrics + per-step timings (pure observation)
+ *   liku peripherals self-heal history        De-escalation / step-back history + metrics (pure observation)
  *   liku peripherals pair <id>          Pair / commission a device (real when HIL off)
  *   liku peripherals unpair <id>        Tear down a device's pairing (re-pairable)
  *   liku peripherals token [status|rotate <id>|revoke <id>|rotate-all|action <id> <action>|action-rotate <id> <action>|identity-rotate <id>]
@@ -668,6 +669,16 @@ async function run(args, flags) {
         for (const m of moves) log(dim(`  ${m.taskId}: ${m.from || '(unassigned)'} → ${m.to}`));
         return { success: true, ...res };
       }
+      if (op === 'health') {
+        // Phase 34: publish THIS node's health score (0..1) for fairness rebalancing.
+        const score = Number(args[2]);
+        if (!Number.isFinite(score)) { error('Usage: liku peripherals coordination health <score 0..1>'); return { success: false }; }
+        const res = pal.publishNodeHealth(score);
+        if (flags.json) return { success: !!res.published, ...res };
+        if (res.published) success(`Published node health ${res.score} for ${res.nodeId}.`);
+        else log(dim(`  node health not published${res.local ? ' (single-machine/local)' : ''}`));
+        return { success: !!res.published, ...res };
+      }
       if (op === 'sweep') {
         // Phase 25: best-effort cluster GC — expire stale token records + prune leases.
         const res = pal.sweepCluster();
@@ -803,6 +814,20 @@ async function run(args, flags) {
         log(dim(`  totals: ${to.runs || 0} runs, ${to.rebalanced || 0} rebalanced, ${to.expiryTasks || 0} expiry, ${to.deescalations || 0} de-escalations, ${to.autoCleared || 0} auto-cleared`));
         return { success: true, ...st, health };
       }
+      if (op === 'history') {
+        // Phase 34: pure-observation de-escalation / step-back history + metrics.
+        const h = pal.getDeescalationHistory();
+        if (flags.json) return { success: true, ...h };
+        const devices = Object.entries(h.devices || {});
+        log(highlight(`De-escalation history (${devices.length} device(s)):`));
+        const to = h.totals || {};
+        log(dim(`  totals: ${to.stepBacks || 0} step-backs, ${to.clears || 0} clears`));
+        for (const [dev, d] of devices) {
+          log(`  ${highlight(dev)} step-backs ${d.stepBackCount || 0}, clears ${d.clearCount || 0}${d.lastStepBackAt ? dim(`  last ${d.lastStepBackAt}`) : ''}`);
+          for (const tr of (d.transitions || []).slice(-5)) log(dim(`     ${tr.at}  ${tr.from || '?'} → ${tr.to || '(clear)'} [${tr.kind}]`));
+        }
+        return { success: true, ...h };
+      }
       const EventEmitter = require('events');
       const { SupervisorAgent, attachScheduleExpiryNotifier, attachSelfHealingScheduler } = require('../../main/agents');
       const orch = new EventEmitter();
@@ -925,7 +950,7 @@ async function run(args, flags) {
 
     default:
       error(`Unknown subcommand: ${sub}`);
-      log('Usage: liku peripherals [scan|list|status [id]|power [--history|--trend|--anomalies|--forecast [--seasonal] [--exclude-anomalous] [--special-days]]|anomalies [--attributed]|anomaly-action [confirm|dismiss <id>|policy [set <device> reduce=N rotate=N unpair=N]|recovery]|schedules|sweep-schedules|schedule-expiry|locks [--record]|coordination [lease|release <id>|sweep|claim|release-task <task>|assign <task> <node>|handoff <task> [node]|renew <task>|rebalance]|cron [propose|confirm|dismiss|rules|tick|remove]|self-heal [status]|suggestions|apply-schedule <id>|remove-schedule <device> [--from N] [--to N]|pair <id>|unpair <id>|token [rotate|revoke|rotate-all|action <id> <action>|action-rotate <id> <action>|identity-rotate <id>]|tasks [--escalated|--pending|--severity <p>|--anomaly]|notifications|channels|simulate <id> <k=v>|execute <id> <action>|confirm <id> <action> [--execute]|drivers]');
+      log('Usage: liku peripherals [scan|list|status [id]|power [--history|--trend|--anomalies|--forecast [--seasonal] [--exclude-anomalous] [--special-days]]|anomalies [--attributed]|anomaly-action [confirm|dismiss <id>|policy [set <device> reduce=N rotate=N unpair=N]|recovery]|schedules|sweep-schedules|schedule-expiry|locks [--record]|coordination [lease|release <id>|sweep|claim|release-task <task>|assign <task> <node>|handoff <task> [node]|renew <task>|rebalance|health <score>]|cron [propose|confirm|dismiss|rules|tick|remove]|self-heal [status|history]|suggestions|apply-schedule <id>|remove-schedule <device> [--from N] [--to N]|pair <id>|unpair <id>|token [rotate|revoke|rotate-all|action <id> <action>|action-rotate <id> <action>|identity-rotate <id>]|tasks [--escalated|--pending|--severity <p>|--anomaly]|notifications|channels|simulate <id> <k=v>|execute <id> <action>|confirm <id> <action> [--execute]|drivers]');
       return { success: false };
   }
 }
