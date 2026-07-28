@@ -34,6 +34,7 @@
  *   liku peripherals self-heal [--at <ISO>]  Run one periodic self-healing pass (rebalance + expiry + de-escalation)
  *   liku peripherals self-heal status        Last-run metrics + per-step timings (pure observation)
  *   liku peripherals self-heal history        De-escalation / step-back history + metrics (pure observation)
+ *   liku peripherals fleet                    Unified fleet observability aggregate (pure observation)
  *   liku peripherals pair <id>          Pair / commission a device (real when HIL off)
  *   liku peripherals unpair <id>        Tear down a device's pairing (re-pairable)
  *   liku peripherals token [status|rotate <id>|revoke <id>|rotate-all|action <id> <action>|action-rotate <id> <action>|identity-rotate <id>]
@@ -338,6 +339,38 @@ async function run(args, flags) {
       if (res.ok) success(`Removed ${res.removed.length} confirmed schedule rule(s) for ${id}${res.removed.length ? ` (${res.removed.join(', ')})` : ''}; tombstoned fleet-wide.`);
       else error(`Could not remove schedule for ${id}: ${res.reason || 'unknown'}`);
       return { success: !!res.ok, ...res };
+    }
+
+    case 'fleet': {
+      // Phase 36: UNIFIED FLEET OBSERVABILITY — one read-only aggregate view.
+      const f = pal.getFleetObservability();
+      if (flags.json) return { success: true, ...f };
+      if (!f.enabled) { log(dim('  peripherals disabled')); return { success: true, ...f }; }
+      log(highlight(`Fleet observability (${f.mode})`));
+      if (f.selfHeal) {
+        const lr = f.selfHeal.lastRun;
+        const h = f.selfHeal.health || {};
+        log(`  self-heal: ${lr ? `last ${lr.at} (${lr.durationMs}ms)` : 'no runs'}`);
+        if (h.ran && h.stale) error(`    ⚠ tick STALE (age ${Math.round((h.lastRunAgeMs || 0) / 1000)}s)`);
+        else if (h.ran) log(dim(`    tick healthy (age ${Math.round((h.lastRunAgeMs || 0) / 1000)}s)`));
+      }
+      if (f.nodeHealth) {
+        const nh = f.nodeHealth;
+        log(`  node-health: local ${nh.local ? nh.local.score : '?'}${nh.tickHealth && nh.tickHealth.mode === 'cluster' ? `  (${nh.tickHealth.stalled}/${nh.tickHealth.nodes} nodes stalled)` : ''}`);
+        for (const p of (nh.peers || []).slice(0, 5)) log(dim(`    peer ${p.nodeId}: ${p.score}`));
+      }
+      if (f.deescalation) {
+        const de = f.deescalation;
+        log(`  de-escalation: ${de.trends && de.trends.recent ? de.trends.recent.stepBacks : 0} recent step-backs, ${(de.flapping || []).length} flapping`);
+        for (const d of (de.flapping || []).slice(0, 5)) error(`    ⚠ flapping: ${d.deviceId} (${d.recentStepBacks} step-backs)`);
+      }
+      if (f.locks) {
+        log(`  locks: ${f.locks.nodes} node(s), contention ${Math.round((f.locks.contentionRate || 0) * 1000) / 10}%`);
+        for (const file of (f.locks.files || []).slice(0, 3)) log(dim(`    ${file.file}: ${file.contended}/${file.acquired} (${Math.round(file.contentionRate * 1000) / 10}%)`));
+      }
+      if (f.power) log(`  power: ${f.power.currentW}W / ${f.power.budgetW}W${f.power.overBudget ? ' (OVER)' : ''}${f.power.anomalies ? `  anomalies ${f.power.anomalies}` : ''}`);
+      if (f.anomalies && f.anomalies.count) log(`  fleet anomalies: ${f.anomalies.count} (top ${f.anomalies.topDevice || '?'})`);
+      return { success: true, ...f };
     }
 
     case 'sweep-schedules': {
@@ -970,7 +1003,7 @@ async function run(args, flags) {
 
     default:
       error(`Unknown subcommand: ${sub}`);
-      log('Usage: liku peripherals [scan|list|status [id]|power [--history|--trend|--anomalies|--forecast [--seasonal] [--exclude-anomalous] [--special-days]]|anomalies [--attributed]|anomaly-action [confirm|dismiss <id>|policy [set <device> reduce=N rotate=N unpair=N]|recovery]|schedules|sweep-schedules|schedule-expiry|locks [--record]|coordination [lease|release <id>|sweep|claim|release-task <task>|assign <task> <node>|handoff <task> [node]|renew <task>|rebalance|health <score>]|cron [propose|confirm|dismiss|rules|tick|remove]|self-heal [status|history]|suggestions|apply-schedule <id>|remove-schedule <device> [--from N] [--to N]|pair <id>|unpair <id>|token [rotate|revoke|rotate-all|action <id> <action>|action-rotate <id> <action>|identity-rotate <id>]|tasks [--escalated|--pending|--severity <p>|--anomaly]|notifications|channels|simulate <id> <k=v>|execute <id> <action>|confirm <id> <action> [--execute]|drivers]');
+      log('Usage: liku peripherals [scan|list|status [id]|power [--history|--trend|--anomalies|--forecast [--seasonal] [--exclude-anomalous] [--special-days]]|anomalies [--attributed]|anomaly-action [confirm|dismiss <id>|policy [set <device> reduce=N rotate=N unpair=N]|recovery]|schedules|sweep-schedules|schedule-expiry|locks [--record]|coordination [lease|release <id>|sweep|claim|release-task <task>|assign <task> <node>|handoff <task> [node]|renew <task>|rebalance|health <score>]|cron [propose|confirm|dismiss|rules|tick|remove]|self-heal [status|history [--trends]]|fleet|suggestions|apply-schedule <id>|remove-schedule <device> [--from N] [--to N]|pair <id>|unpair <id>|token [rotate|revoke|rotate-all|action <id> <action>|action-rotate <id> <action>|identity-rotate <id>]|tasks [--escalated|--pending|--severity <p>|--anomaly]|notifications|channels|simulate <id> <k=v>|execute <id> <action>|confirm <id> <action> [--execute]|drivers]');
       return { success: false };
   }
 }

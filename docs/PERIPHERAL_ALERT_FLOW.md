@@ -1531,6 +1531,68 @@ live per-file view. PURE OBSERVATION. PAL: `getLockClusterTrends()`. CLI: `locks
 - **single-machine-unchanged** — every Phase-35 signal/store is flag-gated + cluster-gated; the
   single-machine path and the 262 BPE cognitive fragment are unchanged.
 
+## Phase 36 — multi-signal health + recovery ack/mirror + flapping + fleet view
+
+### Multi-signal node-health
+
+`deriveNodeHealth()` is single-signal by default (lock CONTENTION RATE only — byte-compatible with
+Phase 35). When `LIKU_PERIPHERAL_NODE_HEALTH_MULTI=1` (or `opts.multi`) it ALSO folds a self-heal TICK
+signal: `penalty = 0.6·contentionRate + 0.4·tickPenalty`, `health = 1 − penalty` (clamped 0..1), where
+`tickPenalty = 1` for a stalled tick else `min(1, durationMs / LIKU_PERIPHERAL_NODE_HEALTH_LATENCY_BUDGET_MS)`
+(default budget 5s). Deterministic, bounded, PURE OBSERVATION of local counters. When auto-publish is on
+(`LIKU_PERIPHERAL_NODE_HEALTH_AUTO=1`) the self-heal tick publishes the multi-signal score for peers to
+weight in fairness rebalancing — still opt-in, advisory, no double ownership.
+
+### Tick-health recovery: notification acknowledge + cluster status mirror
+
+On a stall the tick mirrors `{stalled:true}` to the shared `tick-health` kind (`cluster-tasks.publishTickHealth`);
+on RECOVERY (a healthy tick after a stall) it mirrors `{stalled:false}` and — when
+`LIKU_PERIPHERAL_SELF_HEAL_TICK_HEALTH_AUTOCLEAR=1` — resolves the tick-health task AND ACKNOWLEDGES the
+corresponding tick-health notification (`source:'self-heal', kind:'tick-health'`) via the existing HIL
+`acknowledgeNotification`. `cluster-tasks.clusterTickHealth()` reports which nodes are currently stalled.
+STRICTLY scoped to the tick-health path — never touches other tasks/notifications and never actuates.
+
+### De-escalation flapping alerts
+
+`deescalation-history.flapping({now,windowMs,threshold})` flags a device that stepped back ≥ threshold
+times within the window (`LIKU_PERIPHERAL_DEESC_FLAP_THRESHOLD` default 3, `LIKU_PERIPHERAL_DEESC_FLAP_WINDOW_MS`
+default 1h) — a deterministic, PURE-OBSERVATION detector. When `LIKU_PERIPHERAL_DEESC_FLAP_ALERTS=1` the
+self-heal tick surfaces each flapping device as a bounded, human-gated advisory Supervisor task
+(`buildFlappingNotification`: Class C, `autonomousAction:false`, dedupeKey `<device>:deescalation:flapping`).
+It NEVER changes de-escalation or recovery behaviour. PAL: `getDeescalationFlapping()`.
+
+### Unified fleet observability surface
+
+`PAL.getFleetObservability()` composes a single READ-ONLY aggregate: self-heal last-run + tick health;
+node-health (this node's derived score + fleet tick-health + peer scores); de-escalation trends +
+flapping + cluster rollup; lock cluster trends; and a compact power/anomaly summary. Pure composition of
+existing getters — it never actuates or mutates state, and is useful both single-machine and in cluster
+mode. CLI: `fleet`.
+
+### New environment variables (all default OFF / conservative)
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `LIKU_PERIPHERAL_NODE_HEALTH_MULTI` | `0` (off) | Fold the self-heal tick signal into node-health (multi-signal) |
+| `LIKU_PERIPHERAL_NODE_HEALTH_LATENCY_BUDGET_MS` | `5000` | Tick latency fully penalised at/above this in multi-signal health |
+| `LIKU_PERIPHERAL_DEESC_FLAP_THRESHOLD` | `3` | Step-backs in the window to count as flapping |
+| `LIKU_PERIPHERAL_DEESC_FLAP_WINDOW_MS` | `3600000` (1h) | Flapping detection window |
+| `LIKU_PERIPHERAL_DEESC_FLAP_ALERTS` | `0` (off) | Surface flapping devices as advisory Supervisor tasks |
+
+### Phase 36 safety invariants
+
+- **multi-signal-health-is-deterministic-and-advisory** — the score is a bounded, deterministic function
+  of local counters (default single-signal is byte-compatible); it only reweights fairness (opt-in),
+  never creates double ownership, and unassigned tasks always place.
+- **recovery-handling-stays-scoped** — recovery ack/resolve + cluster mirror touch ONLY the tick-health
+  task/notification (`source:'self-heal'`), reuse the existing HIL resolve/acknowledge, and never actuate.
+- **flapping-alerts-are-pure-advisory** — flapping detection is read-only and its optional task is a
+  Class C advisory that NEVER changes de-escalation, recovery, or any actuation path.
+- **fleet-view-is-read-only** — `getFleetObservability` is a pure composition of existing getters; it
+  never mutates state or actuates.
+- **single-machine-unchanged** — every Phase-36 signal/store/mirror is flag-gated + cluster-gated; the
+  single-machine path and the 262 BPE cognitive fragment are unchanged.
+
 ## If a human decides to act
 
 Any physical response still travels the full PAL safety chain — the alert path

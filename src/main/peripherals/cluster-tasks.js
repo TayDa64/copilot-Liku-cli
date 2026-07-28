@@ -436,13 +436,15 @@ function publishNodeHealth(score, opts = {}) {
 }
 
 /**
- * Phase 35 — AUTO-DERIVE a node-health score (0..1) from real, already-tracked
- * operational signals. Deterministic + bounded: currently the advisory file-lock
- * CONTENTION RATE (contended / acquired) — a busier / more-contended node is less
- * healthy. `health = 1 − contentionRate` (clamped 0..1). PURE OBSERVATION of local
- * metrics — it reads counters and NEVER changes locking or actuates.
- * @param {{ now?:number }} [opts]
- * @returns {{ score:number, contentionRate:number, acquired:number, contended:number }}
+ * Phase 35/36 — AUTO-DERIVE a node-health score (0..1) from real, already-tracked
+ * operational signals. Deterministic + bounded. By DEFAULT (single-signal) it uses
+ * only the advisory file-lock CONTENTION RATE (`health = 1 − contentionRate`) —
+ * byte-compatible with Phase 35. When MULTI-SIGNAL is enabled (`opts.multi` or
+ * `LIKU_PERIPHERAL_NODE_HEALTH_MULTI=1`) it ALSO folds a self-heal TICK signal
+ * (a stalled tick, or a tick slower than the latency budget) so a struggling node
+ * scores lower: `penalty = 0.6·contention + 0.4·tick`, `health = 1 − penalty`.
+ * PURE OBSERVATION of local counters — reads only, never actuates.
+ * @param {{ now?:number, metrics?:object, tick?:object, multi?:boolean }} [opts]
  */
 function deriveNodeHealth(opts = {}) {
   let m = { acquired: 0, contended: 0 };
@@ -451,8 +453,33 @@ function deriveNodeHealth(opts = {}) {
   const acquired = Number(m.acquired) || 0;
   const contended = Number(m.contended) || 0;
   const contentionRate = acquired > 0 ? Math.min(1, contended / acquired) : 0;
-  const score = Math.min(1, Math.max(0, 1 - contentionRate));
-  return { score: Math.round(score * 1000) / 1000, contentionRate: Math.round(contentionRate * 1000) / 1000, acquired, contended };
+  const multi = (opts && opts.multi === true) || String(process.env.LIKU_PERIPHERAL_NODE_HEALTH_MULTI || '').trim() === '1';
+  if (!multi) {
+    const score = Math.min(1, Math.max(0, 1 - contentionRate));
+    return { score: Math.round(score * 1000) / 1000, contentionRate: Math.round(contentionRate * 1000) / 1000, acquired, contended, signals: { contention: Math.round(contentionRate * 1000) / 1000 } };
+  }
+  // Multi-signal: fold the self-heal TICK latency / stall indicator.
+  let tickPenalty = 0;
+  let tick = (opts && opts.tick && typeof opts.tick === 'object') ? opts.tick : null;
+  if (!tick) { try { const st = require('./self-heal-status').read(); tick = { durationMs: st.lastRun ? st.lastRun.durationMs : 0, stalled: !!st.stalled }; } catch { tick = null; } }
+  if (tick) {
+    if (tick.stalled) tickPenalty = 1;
+    else { const budget = _healthLatencyBudgetMs(); tickPenalty = budget > 0 ? Math.min(1, (Number(tick.durationMs) || 0) / budget) : 0; }
+  }
+  const penalty = Math.min(1, 0.6 * contentionRate + 0.4 * tickPenalty);
+  const score = Math.min(1, Math.max(0, 1 - penalty));
+  return {
+    score: Math.round(score * 1000) / 1000,
+    contentionRate: Math.round(contentionRate * 1000) / 1000,
+    tickPenalty: Math.round(tickPenalty * 1000) / 1000,
+    acquired, contended,
+    signals: { contention: Math.round(contentionRate * 1000) / 1000, tick: Math.round(tickPenalty * 1000) / 1000 }
+  };
+}
+
+function _healthLatencyBudgetMs() {
+  const v = Number(process.env.LIKU_PERIPHERAL_NODE_HEALTH_LATENCY_BUDGET_MS);
+  return Number.isFinite(v) && v > 0 ? v : 5000; // a tick slower than 5s is fully penalised
 }
 
 /** Phase 35 — derive + publish this node's health in one call (best-effort, cluster-gated). */
@@ -462,6 +489,37 @@ function publishDerivedNodeHealth(opts = {}) {
   if (!coord.clusterEnabled()) return { published: false, local: true };
   const d = deriveNodeHealth(opts);
   return { ...publishNodeHealth(d.score, opts), derived: true, contentionRate: d.contentionRate };
+}
+
+// ── Phase 36: TICK-HEALTH cluster status mirror (pure observation) ──────────
+// Mirror this node's self-heal tick-health state (stalled true/false) to the
+// shared `tick-health` kind so peers can see when a node's cadence has stalled or
+// recovered. Cluster off → inert. Advisory observation only — never actuates.
+
+function publishTickHealth(stalled, opts = {}) {
+  if (!enabled()) return { published: false };
+  const coord = _coord();
+  if (!coord.clusterEnabled()) return { published: false, local: true };
+  try {
+    const at = new Date(Number.isFinite(opts.now) ? opts.now : Date.now()).toISOString();
+    const rec = { stalled: !!stalled, at };
+    if (stalled) rec.stalledAt = at; else rec.recoveredAt = at;
+    const ok = coord.putShared('tick-health', coord.nodeId(), rec);
+    return { published: !!ok, nodeId: coord.nodeId(), stalled: !!stalled };
+  } catch { return { published: false }; }
+}
+
+/** Cluster-wide per-node tick-health state (which nodes are currently stalled). */
+function clusterTickHealth(opts = {}) {
+  if (!enabled()) return { mode: 'single-machine', nodes: 0, stalled: 0, perNode: [] };
+  const coord = _coord();
+  if (!coord.clusterEnabled()) return { mode: 'single-machine', nodes: 0, stalled: 0, perNode: [] };
+  try {
+    const now = Number.isFinite(opts.now) ? opts.now : Date.now();
+    const recs = coord.listShared('tick-health', { now, maxAgeMs: Number.isFinite(opts.maxAgeMs) ? opts.maxAgeMs : 3600000 });
+    const perNode = recs.map((r) => ({ nodeId: r.nodeId, stalled: !!r.stalled, at: r.at }));
+    return { mode: 'cluster', nodes: perNode.length, stalled: perNode.filter((n) => n.stalled).length, perNode };
+  } catch { return { mode: 'cluster', nodes: 0, stalled: 0, perNode: [] }; }
 }
 
 /**
@@ -574,5 +632,6 @@ module.exports = {
   listTasks, listNotifications, peerHasOpenTaskFor, sweep,
   claimTask, renewClaim, releaseTask, taskOwner, isOwnedByPeer,
   assignTask, assignmentFor, releaseAssignment, myAssignments, handoffTask, startAutoRenew,
-  rebalance, publishNodeHealth, deriveNodeHealth, publishDerivedNodeHealth
+  rebalance, publishNodeHealth, deriveNodeHealth, publishDerivedNodeHealth,
+  publishTickHealth, clusterTickHealth
 };

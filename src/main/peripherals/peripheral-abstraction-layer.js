@@ -904,6 +904,53 @@ function getLockClusterTrends(opts = {}) {
   catch { return { enabled: true, files: [] }; }
 }
 
+/** Phase 36 — de-escalation FLAPPING detection (pure observation). */
+function getDeescalationFlapping(opts = {}) {
+  if (!isPeripheralsEnabled()) return { enabled: false, devices: [] };
+  try { return { enabled: true, ...require('./deescalation-history').flapping(opts) }; }
+  catch { return { enabled: true, devices: [] }; }
+}
+
+/** Phase 36 — cluster-wide per-node tick-health (which nodes are currently stalled). */
+function getClusterTickHealth(opts = {}) {
+  if (!isPeripheralsEnabled()) return { enabled: false, nodes: 0, stalled: 0, perNode: [] };
+  try { return { enabled: true, ...clusterTasks().clusterTickHealth(opts) }; }
+  catch { return { enabled: true, nodes: 0, stalled: 0, perNode: [] }; }
+}
+
+/**
+ * Phase 36 — UNIFIED FLEET OBSERVABILITY: one coherent, READ-ONLY aggregate of the
+ * major health/trend views (self-heal, node-health, de-escalation trends/flapping,
+ * lock cluster trends, and a compact power/anomaly summary). PURE OBSERVATION —
+ * composition of existing getters; it never actuates and never mutates state.
+ * Useful both single-machine and in cluster mode.
+ * @param {{ now?:number }} [opts]
+ */
+function getFleetObservability(opts = {}) {
+  if (!isPeripheralsEnabled()) return { enabled: false };
+  const now = Number.isFinite(opts.now) ? opts.now : Date.now();
+  const out = { enabled: true, mode: coordination().clusterEnabled() ? 'cluster' : 'single-machine', at: new Date(now).toISOString() };
+  // Self-heal last-run + tick health.
+  try { const st = require('./self-heal-status'); out.selfHeal = { lastRun: st.read().lastRun, health: st.health({ now }) }; } catch { out.selfHeal = null; }
+  // Node health: this node's derived score + fleet tick-health + peer scores.
+  try {
+    const ct = clusterTasks();
+    out.nodeHealth = { local: ct.deriveNodeHealth({ now }), tickHealth: ct.clusterTickHealth({ now }) };
+    try { out.nodeHealth.peers = coordination().clusterEnabled() ? coordination().listShared('node-health', { now, maxAgeMs: 3600000 }).map((r) => ({ nodeId: r.nodeId, score: r.score })) : []; } catch { out.nodeHealth.peers = []; }
+  } catch { out.nodeHealth = null; }
+  // De-escalation trends + flapping + cluster rollup.
+  try {
+    const dh = require('./deescalation-history');
+    out.deescalation = { trends: dh.trends({ now }), flapping: dh.flapping({ now }).devices, rollup: dh.clusterRollup({ now }) };
+  } catch { out.deescalation = null; }
+  // Lock cluster trends.
+  try { out.locks = lockHistory().clusterFileTrends({ limit: 5 }); } catch { out.locks = null; }
+  // Compact power + anomaly summary (best-effort).
+  try { const ps = powerStatus(); out.power = { budgetW: ps.budgetW, currentW: ps.currentW, overBudget: ps.overBudget, anomalies: ps.anomalies }; } catch { out.power = null; }
+  try { const ca = getClusterAnomalies({ now }); out.anomalies = { nodes: ca.nodes, count: (ca.anomalies || []).length, topDevice: (ca.topDevices && ca.topDevices[0]) ? ca.topDevices[0].id : null }; } catch { out.anomalies = null; }
+  return out;
+}
+
 /** Phase 22 — mint a PER-ACTION (least-privilege) capability token for a device. */
 function issueActionToken(id, action, opts = {}) {
   if (!isPeripheralsEnabled()) return { enabled: false };
@@ -1252,6 +1299,9 @@ module.exports = {
   publishDerivedNodeHealth,
   getDeescalationTrends,
   getDeescalationRollup,
+  getDeescalationFlapping,
+  getClusterTickHealth,
+  getFleetObservability,
   getLockClusterTrends,
   issueActionToken,
   verifyDeviceToken,

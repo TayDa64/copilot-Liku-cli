@@ -150,6 +150,42 @@ function _summaryTtlMs() {
   return Number.isFinite(v) && v > 0 ? v : 3600000; // 1h
 }
 
+// Phase 36: FLAPPING detection — a device stepping back too many times in a short
+// window is "flapping" (its posture is oscillating). PURE OBSERVATION: reports a
+// deterministic threshold breach; NEVER changes de-escalation behaviour.
+function _flapWindowMs(opts) {
+  if (opts && Number.isFinite(opts.windowMs) && opts.windowMs > 0) return opts.windowMs;
+  const v = Number(process.env.LIKU_PERIPHERAL_DEESC_FLAP_WINDOW_MS);
+  return Number.isFinite(v) && v > 0 ? v : 3600000; // 1h
+}
+function _flapThreshold(opts) {
+  if (opts && Number.isFinite(opts.threshold) && opts.threshold > 0) return Math.floor(opts.threshold);
+  const v = Number(process.env.LIKU_PERIPHERAL_DEESC_FLAP_THRESHOLD);
+  return Number.isFinite(v) && v >= 1 ? Math.floor(v) : 3; // ≥3 step-backs in the window
+}
+
+/**
+ * Detect devices that stepped back ≥ threshold times within the window (flapping).
+ * PURE OBSERVATION — reads only.
+ * @param {{ now?:number, windowMs?:number, threshold?:number }} [opts]
+ * @returns {{ windowMs:number, threshold:number, devices:Array<{deviceId,recentStepBacks,lastStepBackAt}> }}
+ */
+function flapping(opts = {}) {
+  const st = read();
+  const now = Number.isFinite(opts.now) ? opts.now : Date.now();
+  const windowMs = _flapWindowMs(opts);
+  const threshold = _flapThreshold(opts);
+  const cutoff = now - windowMs;
+  const devices = [];
+  for (const [deviceId, d] of Object.entries(st.devices || {})) {
+    const trans = Array.isArray(d.transitions) ? d.transitions : [];
+    const recentStepBacks = trans.filter((t) => t.kind !== 'clear' && Number.isFinite(Date.parse(t.at)) && Date.parse(t.at) >= cutoff).length;
+    if (recentStepBacks >= threshold) devices.push({ deviceId, recentStepBacks, lastStepBackAt: d.lastStepBackAt || null });
+  }
+  devices.sort((a, b) => b.recentStepBacks - a.recentStepBacks || String(a.deviceId).localeCompare(String(b.deviceId)));
+  return { windowMs, threshold, devices };
+}
+
 /** Publish a COMPACT per-node de-escalation summary to the shared store (cluster-gated). */
 function publishSummary(opts = {}) {
   if (!enabled()) return false;
@@ -194,4 +230,4 @@ function sweepSummary(now = Date.now()) {
   } catch { return { removed: [] }; }
 }
 
-module.exports = { FLAG, STORE_FILE, enabled, read, record, deviceState, clear, trends, publishSummary, clusterRollup, sweepSummary };
+module.exports = { FLAG, STORE_FILE, enabled, read, record, deviceState, clear, trends, flapping, publishSummary, clusterRollup, sweepSummary };

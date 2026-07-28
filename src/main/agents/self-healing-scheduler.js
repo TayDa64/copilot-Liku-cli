@@ -73,6 +73,37 @@ function _nodeHealthAutoEnabled(options) {
   return String(process.env.LIKU_PERIPHERAL_NODE_HEALTH_AUTO || '').trim() === '1';
 }
 
+/** Whether flapping de-escalation devices should surface a human-gated advisory task (default OFF). @private */
+function _flapAlertsEnabled(options) {
+  if (options && options.flapAlerts === true) return true;
+  return String(process.env.LIKU_PERIPHERAL_DEESC_FLAP_ALERTS || '').trim() === '1';
+}
+
+/**
+ * Phase 36 — build a bounded, ADVISORY notification for a FLAPPING device (its
+ * de-escalation posture is oscillating). Class C synthetic device, `requiresHuman`
+ * true (a human should review why it keeps stepping back) but `autonomousAction`
+ * false — it NEVER actuates and never changes de-escalation behaviour.
+ */
+function buildFlappingNotification(deviceId, info = {}) {
+  const n = Number(info.recentStepBacks) || 0;
+  return {
+    id: `deesc-flap-${deviceId}-${Date.now()}`,
+    at: new Date().toISOString(),
+    source: 'self-heal',
+    kind: 'deescalation-flapping',
+    device: { id: deviceId, class: 'C', kind: 'health' },
+    breach: { metric: 'deescalation-flapping', level: 'flapping', value: n, threshold: Number(info.threshold) || null },
+    severity: 'warning',
+    advisory: `${deviceId} is flapping: ${n} step-backs in the recent window — review its heal posture`,
+    requiresHuman: true,
+    autonomousAction: false,
+    safety: 'physical-actions-require-pal-gating',
+    anomalyType: null,
+    dedupeKey: `${deviceId}:deescalation:flapping`
+  };
+}
+
 /**
  * Phase 34 — build a bounded, ADVISORY notification for a stalled self-heal tick.
  * Shaped like a peripheral alert so it reuses the Supervisor's task machinery
@@ -191,6 +222,8 @@ function attachSelfHealingScheduler(orchestrator, options = {}) {
       result.tickHealth = { wasStale: true, gapMs, staleMs };
       const ev = { source: 'self-heal', kind: 'tick-health', advisory: `self-heal tick resumed after ${Math.round(gapMs / 1000)}s stall`, gapMs, staleMs, requiresHuman: false, autonomousAction: false };
       try { orchestrator.emit('self-heal:tick-health', ev); } catch { /* non-fatal */ }
+      // Phase 36: mirror this node's STALLED state to the cluster (pure observation).
+      try { require('../peripherals/cluster-tasks').publishTickHealth(true, { now: at }); } catch { /* non-fatal */ }
       // Phase 34: OPTIONALLY surface the stall as a bounded, human-gated Supervisor
       // task/notification (default OFF). Reuses the Supervisor's own dedupe/coalesce
       // + cooldown (dedupeKey 'self-heal:tick-health') — no new spam control. Strictly
@@ -213,16 +246,20 @@ function attachSelfHealingScheduler(orchestrator, options = {}) {
         } catch { /* best-effort */ }
       }
     } else if (prevStalled) {
-      // Phase 35: RECOVERY — a healthy tick ran after a stall. Optionally auto-clear
-      // (resolve) the advisory tick-health task so a stale stall warning does not
-      // linger in the inbox. STRICTLY scoped to the tick-health task (device.id
-      // 'self-heal') — it never touches any other task type and never actuates.
+      // Phase 35/36: RECOVERY — a healthy tick ran after a stall. Optionally auto-clear
+      // (resolve) the advisory tick-health task AND acknowledge its notification so a
+      // stale stall warning does not linger, and mirror the RECOVERED state to the
+      // cluster. STRICTLY scoped to the tick-health path (device.id / source 'self-heal')
+      // — it never touches any other task/notification type and never actuates.
       result.tickHealthRecovered = true;
       try { orchestrator.emit('self-heal:tick-health-recovered', { source: 'self-heal', kind: 'tick-health', advisory: 'self-heal tick recovered', requiresHuman: false, autonomousAction: false }); } catch { /* non-fatal */ }
+      // Phase 36: mirror the RECOVERED state to the cluster (pure observation).
+      try { require('../peripherals/cluster-tasks').publishTickHealth(false, { now: at }); } catch { /* non-fatal */ }
       if (_tickHealthAutoClearEnabled(options)) {
         try {
           const supervisor = getSupervisor();
           const resolved = [];
+          const acked = [];
           if (supervisor && typeof supervisor.getPeripheralTasks === 'function' && typeof supervisor.resolvePeripheralTask === 'function') {
             for (const t of supervisor.getPeripheralTasks()) {
               if (t && t.device && t.device.id === 'self-heal' && t.status === 'pending-review') {
@@ -232,9 +269,43 @@ function attachSelfHealingScheduler(orchestrator, options = {}) {
               }
             }
           }
+          // Phase 36: also ACKNOWLEDGE the corresponding tick-health notification.
+          if (supervisor && typeof supervisor.getNotifications === 'function' && typeof supervisor.acknowledgeNotification === 'function') {
+            for (const n of supervisor.getNotifications()) {
+              if (n && n.source === 'self-heal' && n.kind === 'tick-health' && !n.acknowledged) {
+                supervisor.acknowledgeNotification(n.id);
+                acked.push(n.id);
+              }
+            }
+          }
           result.tickHealthCleared = resolved;
+          result.tickHealthAcked = acked;
         } catch { /* best-effort */ }
       }
+    }
+    // Phase 36: OPTIONALLY surface FLAPPING de-escalation devices as bounded,
+    // human-gated advisory tasks (default OFF). Pure observation of the de-escalation
+    // history → the existing task pipeline. NEVER changes de-escalation behaviour.
+    if (_flapAlertsEnabled(options)) {
+      try {
+        const hist = require('../peripherals/deescalation-history');
+        const flap = hist.flapping({ now: at });
+        result.flapping = flap.devices || [];
+        if ((flap.devices || []).length) {
+          const supervisor = getSupervisor();
+          const flapTasks = [];
+          for (const d of flap.devices) {
+            const notification = buildFlappingNotification(d.deviceId, { recentStepBacks: d.recentStepBacks, threshold: flap.threshold });
+            if (supervisor && typeof supervisor.receiveNotification === 'function') { try { supervisor.receiveNotification(notification); } catch { /* non-fatal */ } }
+            try { orchestrator.emit('supervisor:notification', notification); } catch { /* non-fatal */ }
+            try { require('../peripherals/cluster-tasks').publishNotification(notification); } catch { /* non-fatal */ }
+            let task = null;
+            if (supervisor && typeof supervisor.createPeripheralTask === 'function') task = supervisor.createPeripheralTask(notification, { source: 'self-heal-flapping' });
+            if (task) { flapTasks.push(task); try { orchestrator.emit('supervisor:task', task); } catch { /* non-fatal */ } try { orchestrator.emit('self-heal:flapping-task', task); } catch { /* non-fatal */ } }
+          }
+          if (flapTasks.length) result.flappingTasks = flapTasks;
+        }
+      } catch { /* best-effort */ }
     }
     // Phase 35: OPTIONALLY auto-derive + publish this node's health each cadence
     // (default OFF) so peers can weight it into fairness rebalancing. Pure
@@ -262,4 +333,4 @@ function attachSelfHealingScheduler(orchestrator, options = {}) {
   };
 }
 
-module.exports = { attachSelfHealingScheduler, buildTickHealthNotification };
+module.exports = { attachSelfHealingScheduler, buildTickHealthNotification, buildFlappingNotification };

@@ -22,7 +22,7 @@ const { attachPeripheralAlertConsumer, buildSupervisorNotification } = require('
 const { attachPowerAnomalyConsumer, buildAnomalyNotification } = require('./power-anomaly-consumer');
 const { attachCronScheduler } = require('./cron-scheduler');
 const { attachScheduleExpiryNotifier, buildExpiryNotification } = require('./schedule-expiry-notifier');
-const { attachSelfHealingScheduler, buildTickHealthNotification } = require('./self-healing-scheduler');
+const { attachSelfHealingScheduler, buildTickHealthNotification, buildFlappingNotification } = require('./self-healing-scheduler');
 const { AgentStateManager } = require('./state-manager');
 const { TraceWriter } = require('./trace-writer');
 
@@ -44,6 +44,7 @@ module.exports = {
   buildExpiryNotification,
   attachSelfHealingScheduler,
   buildTickHealthNotification,
+  buildFlappingNotification,
   AgentStateManager,
   TraceWriter,
   
