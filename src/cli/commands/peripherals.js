@@ -601,6 +601,12 @@ async function run(args, flags) {
         const ct = cluster.totals || {};
         log(`    total: ${ct.acquired || 0} acquired, ${ct.contended || 0} contended, ${ct.steals || 0} steals  (rate ${Math.round((cluster.contentionRate || 0) * 1000) / 10}%)`);
         for (const n of cluster.perNode || []) log(dim(`    ${n.nodeId}${n.live ? ' (live)' : ''}: ${n.metrics.acquired} acq, ${n.metrics.contended} cont`));
+        // Phase 35: cluster-wide per-file contention trend view.
+        const ctrend = pal.getLockClusterTrends({ limit: 5 });
+        if ((ctrend.files || []).length) {
+          log(highlight('    cluster hot files:'));
+          for (const f of ctrend.files) log(dim(`      ${f.file}  ${f.contended} cont / ${f.acquired} acq (${Math.round(f.contentionRate * 1000) / 10}%)`));
+        }
       }
       return { success: true, live, perFile, trends, alerts: lockAlerts.alerts, cluster };
     }
@@ -816,6 +822,20 @@ async function run(args, flags) {
       }
       if (op === 'history') {
         // Phase 34: pure-observation de-escalation / step-back history + metrics.
+        // Phase 35: --trends shows windowed rates + a cluster-wide rollup.
+        if (flags.trends) {
+          const tr = pal.getDeescalationTrends();
+          const rollup = pal.getDeescalationRollup();
+          if (flags.json) return { success: true, trends: tr, rollup };
+          log(highlight(`De-escalation trends (window ${Math.round((tr.windowMs || 0) / 3600000)}h, ${tr.deviceCount || 0} device(s)):`));
+          log(dim(`  recent: ${tr.recent ? tr.recent.stepBacks : 0} step-backs, ${tr.recent ? tr.recent.clears : 0} clears`));
+          for (const d of (tr.devices || []).slice(0, 10)) {
+            log(`  ${highlight(d.deviceId)} recent ${d.recentStepBacks}sb/${d.recentClears}clr  rate ${d.ratePerHour}/h${d.cooldownRemainingMs ? dim(`  cooldown ${Math.round(d.cooldownRemainingMs / 1000)}s`) : ''}`);
+          }
+          log(highlight(`  cluster rollup (${rollup.mode}, ${rollup.nodes} node(s)):`));
+          log(dim(`    totals: ${(rollup.totals || {}).stepBacks || 0} step-backs, ${(rollup.totals || {}).clears || 0} clears`));
+          return { success: true, trends: tr, rollup };
+        }
         const h = pal.getDeescalationHistory();
         if (flags.json) return { success: true, ...h };
         const devices = Object.entries(h.devices || {});

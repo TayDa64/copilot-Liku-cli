@@ -65,6 +65,9 @@ function record(t) {
     st.devices[t.deviceId] = dev;
     if (!fs.existsSync(LIKU_HOME)) fs.mkdirSync(LIKU_HOME, { recursive: true, mode: 0o700 });
     atomicWriteFileSync(STORE_FILE, JSON.stringify({ updatedAt: new Date().toISOString(), devices: st.devices, totals: st.totals }, null, 2), { mode: 0o600 });
+    // Phase 35: mirror a compact per-node summary to the cluster (best-effort,
+    // cluster-gated) so peers see fleet-wide de-escalation activity. Pure observation.
+    try { publishSummary({ at: atMs }); } catch { /* best-effort */ }
     return true;
   } catch { return false; }
 }
@@ -98,4 +101,97 @@ function clear() {
   catch { return false; }
 }
 
-module.exports = { FLAG, STORE_FILE, enabled, read, record, deviceState, clear };
+// ── Phase 35: TRENDS + CLUSTER ROLLUP (pure observation) ────────────────────
+
+function _trendWindowMs(opts) {
+  if (opts && Number.isFinite(opts.windowMs) && opts.windowMs > 0) return opts.windowMs;
+  const v = Number(process.env.LIKU_PERIPHERAL_DEESC_TREND_WINDOW_MS);
+  return Number.isFinite(v) && v > 0 ? v : 24 * 3600 * 1000; // 24h
+}
+
+/**
+ * Trend/aggregate view of step-back / clear activity: per-device counts within a
+ * window, a recent transition RATE (per hour), remaining step-back cooldown, and
+ * fleet totals. PURE OBSERVATION — reads only.
+ * @param {{ now?:number, windowMs?:number, cooldownMs?:number }} [opts]
+ */
+function trends(opts = {}) {
+  const st = read();
+  const now = Number.isFinite(opts.now) ? opts.now : Date.now();
+  const windowMs = _trendWindowMs(opts);
+  const cooldownMs = Number.isFinite(opts.cooldownMs) && opts.cooldownMs > 0 ? opts.cooldownMs : 0;
+  const cutoff = now - windowMs;
+  const devices = [];
+  let recentStepBacks = 0; let recentClears = 0;
+  for (const [deviceId, d] of Object.entries(st.devices || {})) {
+    const trans = Array.isArray(d.transitions) ? d.transitions : [];
+    const recent = trans.filter((t) => { const at = Date.parse(t.at); return Number.isFinite(at) && at >= cutoff; });
+    const rs = recent.filter((t) => t.kind !== 'clear').length;
+    const rc = recent.filter((t) => t.kind === 'clear').length;
+    recentStepBacks += rs; recentClears += rc;
+    const lastMs = d.lastStepBackAt ? Date.parse(d.lastStepBackAt) : 0;
+    const cooldownRemainingMs = (cooldownMs > 0 && lastMs) ? Math.max(0, cooldownMs - (now - lastMs)) : 0;
+    const hours = windowMs / 3600000;
+    devices.push({
+      deviceId,
+      stepBackCount: d.stepBackCount || 0, clearCount: d.clearCount || 0,
+      recentStepBacks: rs, recentClears: rc,
+      ratePerHour: hours > 0 ? Math.round((recent.length / hours) * 1000) / 1000 : 0,
+      lastStepBackAt: d.lastStepBackAt || null, lastTo: d.lastTo || null,
+      cooldownRemainingMs
+    });
+  }
+  devices.sort((a, b) => (b.recentStepBacks + b.recentClears) - (a.recentStepBacks + a.recentClears) || String(a.deviceId).localeCompare(String(b.deviceId)));
+  return { windowMs, deviceCount: devices.length, devices, totals: { ...st.totals }, recent: { stepBacks: recentStepBacks, clears: recentClears } };
+}
+
+function _summaryTtlMs() {
+  const v = Number(process.env.LIKU_PERIPHERAL_DEESC_SUMMARY_TTL_MS);
+  return Number.isFinite(v) && v > 0 ? v : 3600000; // 1h
+}
+
+/** Publish a COMPACT per-node de-escalation summary to the shared store (cluster-gated). */
+function publishSummary(opts = {}) {
+  if (!enabled()) return false;
+  try {
+    const coord = require('./coordination');
+    if (!coord.clusterEnabled()) return false;
+    const st = read();
+    return coord.putShared('deescalation-summary', coord.nodeId(), {
+      totals: st.totals, deviceCount: Object.keys(st.devices || {}).length,
+      at: new Date(Number.isFinite(opts.now) ? opts.now : Date.now()).toISOString()
+    });
+  } catch { return false; }
+}
+
+/** Cluster-wide rollup of de-escalation activity (merges peer summaries). Cluster off → this node only. */
+function clusterRollup(opts = {}) {
+  const local = read();
+  const base = { mode: 'single-machine', nodes: 1, totals: { ...local.totals }, perNode: [{ nodeId: 'local', totals: local.totals, deviceCount: Object.keys(local.devices || {}).length }] };
+  try {
+    const coord = require('./coordination');
+    if (!coord.clusterEnabled()) return base;
+    const now = Number.isFinite(opts.now) ? opts.now : Date.now();
+    const recs = coord.listShared('deescalation-summary', { now, maxAgeMs: Number.isFinite(opts.maxAgeMs) ? opts.maxAgeMs : _summaryTtlMs() });
+    const totals = { stepBacks: 0, clears: 0 };
+    const perNode = [];
+    for (const r of recs) {
+      const t = (r && r.totals) || {};
+      totals.stepBacks += Number(t.stepBacks) || 0;
+      totals.clears += Number(t.clears) || 0;
+      perNode.push({ nodeId: r.nodeId, totals: t, deviceCount: Number(r.deviceCount) || 0 });
+    }
+    return { mode: 'cluster', nodes: perNode.length, totals, perNode };
+  } catch { return base; }
+}
+
+/** GC stale de-escalation summaries (best-effort, cluster-gated). */
+function sweepSummary(now = Date.now()) {
+  try {
+    const coord = require('./coordination');
+    if (!coord.clusterEnabled()) return { removed: [] };
+    return { removed: coord.sweepShared('deescalation-summary', _summaryTtlMs(), now).removed };
+  } catch { return { removed: [] }; }
+}
+
+module.exports = { FLAG, STORE_FILE, enabled, read, record, deviceState, clear, trends, publishSummary, clusterRollup, sweepSummary };

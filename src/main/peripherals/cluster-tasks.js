@@ -436,6 +436,35 @@ function publishNodeHealth(score, opts = {}) {
 }
 
 /**
+ * Phase 35 — AUTO-DERIVE a node-health score (0..1) from real, already-tracked
+ * operational signals. Deterministic + bounded: currently the advisory file-lock
+ * CONTENTION RATE (contended / acquired) — a busier / more-contended node is less
+ * healthy. `health = 1 − contentionRate` (clamped 0..1). PURE OBSERVATION of local
+ * metrics — it reads counters and NEVER changes locking or actuates.
+ * @param {{ now?:number }} [opts]
+ * @returns {{ score:number, contentionRate:number, acquired:number, contended:number }}
+ */
+function deriveNodeHealth(opts = {}) {
+  let m = { acquired: 0, contended: 0 };
+  if (opts && opts.metrics && typeof opts.metrics === 'object') m = opts.metrics;
+  else { try { m = require('../../shared/atomic-file').getLockMetrics() || m; } catch { /* best-effort */ } }
+  const acquired = Number(m.acquired) || 0;
+  const contended = Number(m.contended) || 0;
+  const contentionRate = acquired > 0 ? Math.min(1, contended / acquired) : 0;
+  const score = Math.min(1, Math.max(0, 1 - contentionRate));
+  return { score: Math.round(score * 1000) / 1000, contentionRate: Math.round(contentionRate * 1000) / 1000, acquired, contended };
+}
+
+/** Phase 35 — derive + publish this node's health in one call (best-effort, cluster-gated). */
+function publishDerivedNodeHealth(opts = {}) {
+  if (!enabled()) return { published: false };
+  const coord = _coord();
+  if (!coord.clusterEnabled()) return { published: false, local: true };
+  const d = deriveNodeHealth(opts);
+  return { ...publishNodeHealth(d.score, opts), derived: true, contentionRate: d.contentionRate };
+}
+
+/**
  * Pick the best target node: LOWEST weighted-load / (capacity · healthFactor)
  * score. Deterministic (tie broken by nodeId). Avoids `exclude` (the stale
  * assignee) when another node exists. @private
@@ -545,5 +574,5 @@ module.exports = {
   listTasks, listNotifications, peerHasOpenTaskFor, sweep,
   claimTask, renewClaim, releaseTask, taskOwner, isOwnedByPeer,
   assignTask, assignmentFor, releaseAssignment, myAssignments, handoffTask, startAutoRenew,
-  rebalance, publishNodeHealth
+  rebalance, publishNodeHealth, deriveNodeHealth, publishDerivedNodeHealth
 };

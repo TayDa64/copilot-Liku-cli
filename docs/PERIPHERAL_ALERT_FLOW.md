@@ -1471,6 +1471,66 @@ strictly advisory (assignment intent only → no double ownership; unassigned ta
 - **single-machine-unchanged** — all Phase-34 stores/signals are flag-gated + cluster-gated; the
   single-machine path and the 262 BPE cognitive fragment are unchanged.
 
+## Phase 35 — auto-health + tick-health recovery auto-clear + trends/rollups
+
+### Auto-derived node-health + tick-health recovery auto-clear
+
+`cluster-tasks.deriveNodeHealth()` derives a bounded health score (0..1) from a real, already-tracked
+operational signal — the advisory file-lock CONTENTION RATE (`health = 1 − contended/acquired`,
+clamped). `publishDerivedNodeHealth()` derives + publishes it. When `LIKU_PERIPHERAL_NODE_HEALTH_AUTO=1`
+the self-heal tick auto-publishes this node's derived health each cadence, so peers weight a busier
+node lower in fairness rebalancing (still opt-in via `LIKU_PERIPHERAL_REBALANCE_USE_HEALTH`). Derivation
+is deterministic, bounded, and PURE OBSERVATION of local counters. PAL: `deriveNodeHealth()`,
+`publishDerivedNodeHealth()`.
+
+When a self-heal tick detects a stall it records `stalled:true` (in `self-heal-status.json`). If a
+subsequent HEALTHY tick runs, it detects RECOVERY (`prev.stalled && !isStalledNow`) and, when
+`LIKU_PERIPHERAL_SELF_HEAL_TICK_HEALTH_AUTOCLEAR=1`, RESOLVES the advisory tick-health Supervisor task
+via the existing `resolvePeripheralTask('acknowledged')` so a stale stall warning does not linger.
+Auto-clear is STRICTLY scoped to the `self-heal` (Class C) tick-health task — it never touches any
+other task type and never actuates. Emits `self-heal:tick-health-recovered`. Default OFF.
+
+### De-escalation history trends + cluster rollup
+
+`deescalation-history.trends({now,windowMs,cooldownMs})` gives a per-device windowed view: recent
+step-back/clear counts, a transition RATE per hour, remaining step-back cooldown, and fleet totals.
+`publishSummary()` mirrors a compact per-node summary to the shared `deescalation-summary` store (on
+each `record()`, cluster-gated), and `clusterRollup()` merges peer summaries into fleet totals +
+per-node breakdown (GC via `sweepSummary`). All PURE OBSERVATION — never alters proposal, confirmation,
+or de-escalation behaviour. PAL: `getDeescalationTrends()`, `getDeescalationRollup()`. CLI:
+`self-heal history --trends`.
+
+### Persisted lock-trend history + cluster observability
+
+Lock-trend history is already durable (rolling `~/.liku/lock-history.jsonl`; `fileTrends`/`alerts` read
+it each call and survive restarts). Phase 35 adds `lock-history.clusterFileTrends()` — a cluster-wide
+per-file contention TREND view that aggregates every node's latest mirrored `lock-metrics` snapshot
+(the same shared files that survive restarts) into fleet-wide per-file acquire/contended totals +
+contention rate (hottest first) plus a per-node contention-rate breakdown. Single-machine → this node's
+live per-file view. PURE OBSERVATION. PAL: `getLockClusterTrends()`. CLI: `locks` (cluster hot files).
+
+### New environment variables (all default OFF / inert single-machine)
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `LIKU_PERIPHERAL_NODE_HEALTH_AUTO` | `0` (off) | Self-heal tick auto-derives + publishes node-health each cadence |
+| `LIKU_PERIPHERAL_SELF_HEAL_TICK_HEALTH_AUTOCLEAR` | `0` (off) | Auto-resolve the tick-health task on a recovery tick |
+| `LIKU_PERIPHERAL_DEESC_TREND_WINDOW_MS` | `86400000` (24h) | De-escalation trend window |
+| `LIKU_PERIPHERAL_DEESC_SUMMARY_TTL_MS` | `3600000` (1h) | Cluster de-escalation summary freshness / GC |
+
+### Phase 35 safety invariants
+
+- **auto-health-is-deterministic-and-advisory** — the derived score is a bounded, deterministic
+  function of local lock-contention counters; it only reweights fairness scoring (still opt-in),
+  never creates double ownership, and unassigned tasks always place (no stranding).
+- **tick-health-autoclear-is-scoped** — auto-clear resolves ONLY the Class C `self-heal` tick-health
+  task (via the existing human-in-the-loop resolve), never any other task type and never an actuation
+  path; it is default OFF.
+- **trends-and-rollups-are-pure** — de-escalation trends/rollup and lock cluster-trends are read-only
+  views that never alter proposal, confirmation, de-escalation, or locking behaviour.
+- **single-machine-unchanged** — every Phase-35 signal/store is flag-gated + cluster-gated; the
+  single-machine path and the 262 BPE cognitive fragment are unchanged.
+
 ## If a human decides to act
 
 Any physical response still travels the full PAL safety chain — the alert path

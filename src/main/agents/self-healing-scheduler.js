@@ -61,6 +61,18 @@ function _tickHealthTasksEnabled(options) {
   return String(process.env.LIKU_PERIPHERAL_SELF_HEAL_TICK_HEALTH_TASKS || '').trim() === '1';
 }
 
+/** Whether a recovery (healthy tick after a stall) should auto-clear the tick-health task (default OFF). @private */
+function _tickHealthAutoClearEnabled(options) {
+  if (options && options.tickHealthAutoClear === true) return true;
+  return String(process.env.LIKU_PERIPHERAL_SELF_HEAL_TICK_HEALTH_AUTOCLEAR || '').trim() === '1';
+}
+
+/** Whether the tick should auto-derive + publish this node's health each cadence (default OFF). @private */
+function _nodeHealthAutoEnabled(options) {
+  if (options && options.nodeHealthAuto === true) return true;
+  return String(process.env.LIKU_PERIPHERAL_NODE_HEALTH_AUTO || '').trim() === '1';
+}
+
 /**
  * Phase 34 — build a bounded, ADVISORY notification for a stalled self-heal tick.
  * Shaped like a peripheral alert so it reuses the Supervisor's task machinery
@@ -127,7 +139,8 @@ function attachSelfHealingScheduler(orchestrator, options = {}) {
     // Phase 33: TICK-HEALTH — detect a STALL gap (the interval was late / stopped)
     // by comparing this run to the persisted previous run. Advisory only.
     let prevAt = null;
-    try { const prev = statusStore.read(); if (prev && prev.lastRun && prev.lastRun.at) prevAt = Date.parse(prev.lastRun.at); } catch { /* best-effort */ }
+    let prevStalled = false;
+    try { const prev = statusStore.read(); if (prev) { if (prev.lastRun && prev.lastRun.at) prevAt = Date.parse(prev.lastRun.at); prevStalled = !!prev.stalled; } } catch { /* best-effort */ }
     const result = { ran: true, at, rebalanced: [], expiryTasks: 0, deescalations: [], autoCleared: [] };
     // Per-step timings (Phase 32 observability). PURE measurement — reading the
     // clock never changes what a step does. Wall-clock ms per step.
@@ -160,43 +173,74 @@ function attachSelfHealingScheduler(orchestrator, options = {}) {
     timings.autoClear = Date.now() - s;
     result.timings = timings;
     result.durationMs = Date.now() - started;
+    // Phase 35: determine the stall state of THIS run BEFORE persisting it, so the
+    // recovery detector can compare the previous run's stall flag on the next tick.
+    const gapMs = prevAt != null ? (at - prevAt) : null;
+    const staleMs = _staleThresholdMs();
+    const isStalledNow = gapMs != null && gapMs > staleMs;
     // Phase 32: record last-run observability (best-effort, pure observation).
     _lastRun = {
       at: new Date(at).toISOString(), durationMs: result.durationMs, timings,
-      counts: { rebalanced: result.rebalanced.length, expiryTasks: result.expiryTasks, deescalations: result.deescalations.length, autoCleared: result.autoCleared.length }
+      counts: { rebalanced: result.rebalanced.length, expiryTasks: result.expiryTasks, deescalations: result.deescalations.length, autoCleared: result.autoCleared.length },
+      stalled: isStalledNow
     };
     try { statusStore.record(_lastRun); } catch { /* observability is best-effort */ }
-    // Phase 33: emit an ADVISORY tick-health signal when the gap since the previous
-    // run exceeded the stale threshold (the cadence had stalled). Never actuates.
-    if (prevAt != null) {
-      const gapMs = at - prevAt;
-      const staleMs = _staleThresholdMs();
-      if (gapMs > staleMs) {
-        result.tickHealth = { wasStale: true, gapMs, staleMs };
-        const ev = { source: 'self-heal', kind: 'tick-health', advisory: `self-heal tick resumed after ${Math.round(gapMs / 1000)}s stall`, gapMs, staleMs, requiresHuman: false, autonomousAction: false };
-        try { orchestrator.emit('self-heal:tick-health', ev); } catch { /* non-fatal */ }
-        // Phase 34: OPTIONALLY surface the stall as a bounded, human-gated Supervisor
-        // task/notification (default OFF). Reuses the Supervisor's own dedupe/coalesce
-        // + cooldown (dedupeKey 'self-heal:tick-health') — no new spam control. Strictly
-        // advisory: the notification is a Class C health signal that NEVER actuates.
-        if (_tickHealthTasksEnabled(options)) {
-          try {
-            const notification = buildTickHealthNotification(ev);
-            const supervisor = getSupervisor();
-            if (supervisor && typeof supervisor.receiveNotification === 'function') { try { supervisor.receiveNotification(notification); } catch { /* non-fatal */ } }
-            try { orchestrator.emit('supervisor:notification', notification); } catch { /* non-fatal */ }
-            try { require('../peripherals/cluster-tasks').publishNotification(notification); } catch { /* non-fatal */ }
-            let task = null;
-            if (supervisor && typeof supervisor.createPeripheralTask === 'function') task = supervisor.createPeripheralTask(notification, { source: 'self-heal' });
-            if (task) {
-              result.tickHealthTask = task;
-              try { orchestrator.emit('supervisor:task', task); } catch { /* non-fatal */ }
-              try { orchestrator.emit('self-heal:tick-health-task', task); } catch { /* non-fatal */ }
-              try { require('../peripherals/cluster-tasks').publishTask(task); } catch { /* non-fatal */ }
-            }
-          } catch { /* best-effort */ }
-        }
+    // Phase 33/34: on a STALL, emit an ADVISORY tick-health signal + (optional)
+    // human-gated Supervisor task. Never actuates.
+    if (isStalledNow) {
+      result.tickHealth = { wasStale: true, gapMs, staleMs };
+      const ev = { source: 'self-heal', kind: 'tick-health', advisory: `self-heal tick resumed after ${Math.round(gapMs / 1000)}s stall`, gapMs, staleMs, requiresHuman: false, autonomousAction: false };
+      try { orchestrator.emit('self-heal:tick-health', ev); } catch { /* non-fatal */ }
+      // Phase 34: OPTIONALLY surface the stall as a bounded, human-gated Supervisor
+      // task/notification (default OFF). Reuses the Supervisor's own dedupe/coalesce
+      // + cooldown (dedupeKey 'self-heal:tick-health') — no new spam control. Strictly
+      // advisory: the notification is a Class C health signal that NEVER actuates.
+      if (_tickHealthTasksEnabled(options)) {
+        try {
+          const notification = buildTickHealthNotification(ev);
+          const supervisor = getSupervisor();
+          if (supervisor && typeof supervisor.receiveNotification === 'function') { try { supervisor.receiveNotification(notification); } catch { /* non-fatal */ } }
+          try { orchestrator.emit('supervisor:notification', notification); } catch { /* non-fatal */ }
+          try { require('../peripherals/cluster-tasks').publishNotification(notification); } catch { /* non-fatal */ }
+          let task = null;
+          if (supervisor && typeof supervisor.createPeripheralTask === 'function') task = supervisor.createPeripheralTask(notification, { source: 'self-heal' });
+          if (task) {
+            result.tickHealthTask = task;
+            try { orchestrator.emit('supervisor:task', task); } catch { /* non-fatal */ }
+            try { orchestrator.emit('self-heal:tick-health-task', task); } catch { /* non-fatal */ }
+            try { require('../peripherals/cluster-tasks').publishTask(task); } catch { /* non-fatal */ }
+          }
+        } catch { /* best-effort */ }
       }
+    } else if (prevStalled) {
+      // Phase 35: RECOVERY — a healthy tick ran after a stall. Optionally auto-clear
+      // (resolve) the advisory tick-health task so a stale stall warning does not
+      // linger in the inbox. STRICTLY scoped to the tick-health task (device.id
+      // 'self-heal') — it never touches any other task type and never actuates.
+      result.tickHealthRecovered = true;
+      try { orchestrator.emit('self-heal:tick-health-recovered', { source: 'self-heal', kind: 'tick-health', advisory: 'self-heal tick recovered', requiresHuman: false, autonomousAction: false }); } catch { /* non-fatal */ }
+      if (_tickHealthAutoClearEnabled(options)) {
+        try {
+          const supervisor = getSupervisor();
+          const resolved = [];
+          if (supervisor && typeof supervisor.getPeripheralTasks === 'function' && typeof supervisor.resolvePeripheralTask === 'function') {
+            for (const t of supervisor.getPeripheralTasks()) {
+              if (t && t.device && t.device.id === 'self-heal' && t.status === 'pending-review') {
+                supervisor.resolvePeripheralTask(t.id, 'acknowledged');
+                resolved.push(t.id);
+                try { require('../peripherals/cluster-tasks').updateTaskStatus(t.id, 'acknowledged'); } catch { /* non-fatal */ }
+              }
+            }
+          }
+          result.tickHealthCleared = resolved;
+        } catch { /* best-effort */ }
+      }
+    }
+    // Phase 35: OPTIONALLY auto-derive + publish this node's health each cadence
+    // (default OFF) so peers can weight it into fairness rebalancing. Pure
+    // observation of local operational metrics → shared store. Best-effort.
+    if (_nodeHealthAutoEnabled(options)) {
+      try { const r = require('../peripherals/cluster-tasks').publishDerivedNodeHealth({ now: at }); if (r) result.nodeHealth = r.score; } catch { /* best-effort */ }
     }
     if (typeof options.onTick === 'function') { try { options.onTick(result); } catch { /* non-fatal */ } }
     return result;

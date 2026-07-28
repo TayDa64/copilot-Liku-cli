@@ -5681,6 +5681,218 @@ test('publishNodeHealth is inert single-machine + clamps the score', () => {
   delete process.env.LIKU_ENABLE_PERIPHERALS;
 });
 
+// ── Phase 35: auto-health + tick-health recovery auto-clear + trends/rollups ──
+
+test('deriveNodeHealth is deterministic + bounded (health = 1 − contentionRate)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const ct = require('../src/main/peripherals/cluster-tasks');
+  assert.strictEqual(ct.deriveNodeHealth({ metrics: { acquired: 0, contended: 0 } }).score, 1, 'no contention → fully healthy');
+  assert.strictEqual(ct.deriveNodeHealth({ metrics: { acquired: 100, contended: 50 } }).score, 0.5, 'half contended → 0.5');
+  const heavy = ct.deriveNodeHealth({ metrics: { acquired: 10, contended: 40 } });
+  assert.ok(heavy.score >= 0 && heavy.score <= 1, 'score is bounded 0..1');
+  assert.strictEqual(heavy.score, 0, 'over-contended clamps to 0');
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('auto-derived node-health influences fairness (unhealthy node avoided)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const clusterDir = require('path').join(TMP_HOME, 'p35autohealth');
+  process.env.LIKU_CLUSTER_DIR = clusterDir;
+  const ct = require('../src/main/peripherals/cluster-tasks');
+  const t0 = Date.now();
+  process.env.LIKU_NODE_ID = 'nodeA';
+  ct.publishTask({ id: 'ha', device: { id: 'd' }, priority: 'high', status: 'pending-review' });
+  ct.claimTask('ha', { ttlMs: 300000, now: t0 });
+  ct.publishDerivedNodeHealth({ metrics: { acquired: 100, contended: 80 } }); // nodeA derived score 0.2
+  process.env.LIKU_NODE_ID = 'nodeB';
+  ct.publishTask({ id: 'hb', device: { id: 'd' }, priority: 'high', status: 'pending-review' });
+  ct.claimTask('hb', { ttlMs: 300000, now: t0 });
+  process.env.LIKU_NODE_ID = 'nodeA';
+  ct.publishTask({ id: 'newt', device: { id: 'd' }, priority: 'high', status: 'pending-review' });
+  const res = ct.rebalance({ now: t0 + 1000, staleMs: 500, useHealth: true });
+  assert.strictEqual(res.rebalanced.find((r) => r.taskId === 'newt').to, 'nodeB', 'derived-unhealthy nodeA avoided');
+  delete process.env.LIKU_NODE_ID;
+  delete process.env.LIKU_CLUSTER_DIR;
+  try { fs.rmSync(clusterDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('tick-health task is auto-cleared after a recovery tick (flag ON)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  process.env.LIKU_PERIPHERAL_SELF_HEAL_STALE_MS = '1000';
+  process.env.LIKU_PERIPHERAL_SELF_HEAL_TICK_HEALTH_TASKS = '1';
+  process.env.LIKU_PERIPHERAL_SELF_HEAL_TICK_HEALTH_AUTOCLEAR = '1';
+  const status = require('../src/main/peripherals/self-heal-status');
+  const { SupervisorAgent } = require('../src/main/agents');
+  const { attachSelfHealingScheduler } = require('../src/main/agents/self-healing-scheduler');
+  status.clear();
+  const sup = new SupervisorAgent({});
+  const orch = new (require('events').EventEmitter)();
+  const fakePal = { isPeripheralsEnabled: () => true, rebalanceClusterTasks: () => ({ rebalanced: [] }) };
+  const fakeAdvisor = { proposeDeescalations: () => [], autoClearRecovered: () => ({ cleared: [] }) };
+  const sh = attachSelfHealingScheduler(orch, { pal: fakePal, actionAdvisor: fakeAdvisor, getSupervisor: () => sup });
+  const base = 3000000;
+  status.record({ at: new Date(base).toISOString(), durationMs: 1, timings: {}, counts: {}, stalled: false });
+  // Stall tick → creates the tick-health task.
+  const r1 = sh.tick(base + 5000);
+  assert.strictEqual(r1.tickHealth.wasStale, true);
+  assert.strictEqual(sup.getPendingPeripheralTasks().filter((t) => t.device.id === 'self-heal').length, 1, 'tick-health task created');
+  // Recovery tick (healthy gap) → auto-clears it.
+  const r2 = sh.tick(base + 5100);
+  assert.strictEqual(r2.tickHealthRecovered, true, 'recovery detected');
+  assert.ok((r2.tickHealthCleared || []).length >= 1, 'a tick-health task was cleared');
+  assert.strictEqual(sup.getPendingPeripheralTasks().filter((t) => t.device.id === 'self-heal').length, 0, 'no lingering tick-health task');
+  sh.detach(); status.clear();
+  delete process.env.LIKU_PERIPHERAL_SELF_HEAL_TICK_HEALTH_AUTOCLEAR;
+  delete process.env.LIKU_PERIPHERAL_SELF_HEAL_TICK_HEALTH_TASKS;
+  delete process.env.LIKU_PERIPHERAL_SELF_HEAL_STALE_MS;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('tick-health auto-clear ONLY touches the tick-health task (other tasks untouched)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  process.env.LIKU_PERIPHERAL_SELF_HEAL_STALE_MS = '1000';
+  process.env.LIKU_PERIPHERAL_SELF_HEAL_TICK_HEALTH_TASKS = '1';
+  process.env.LIKU_PERIPHERAL_SELF_HEAL_TICK_HEALTH_AUTOCLEAR = '1';
+  const status = require('../src/main/peripherals/self-heal-status');
+  const { SupervisorAgent } = require('../src/main/agents');
+  const { attachSelfHealingScheduler } = require('../src/main/agents/self-healing-scheduler');
+  status.clear();
+  const sup = new SupervisorAgent({});
+  // A normal (non-tick-health) task the human must still review.
+  sup.createPeripheralTask({ id: 'n1', device: { id: 'heater', class: 'A' }, breach: { metric: 'power', level: 'over-budget' }, severity: 'critical', requiresHuman: true, autonomousAction: false }, { source: 'power-anomaly' });
+  const orch = new (require('events').EventEmitter)();
+  const fakePal = { isPeripheralsEnabled: () => true, rebalanceClusterTasks: () => ({ rebalanced: [] }) };
+  const fakeAdvisor = { proposeDeescalations: () => [], autoClearRecovered: () => ({ cleared: [] }) };
+  const sh = attachSelfHealingScheduler(orch, { pal: fakePal, actionAdvisor: fakeAdvisor, getSupervisor: () => sup });
+  const base = 4000000;
+  status.record({ at: new Date(base).toISOString(), durationMs: 1, timings: {}, counts: {}, stalled: false });
+  sh.tick(base + 5000); // stall → tick-health task
+  sh.tick(base + 5100); // recovery → auto-clear tick-health only
+  const heater = sup.getPeripheralTasks().find((t) => t.device.id === 'heater');
+  assert.strictEqual(heater.status, 'pending-review', 'the heater task is NOT auto-cleared');
+  assert.strictEqual(sup.getPendingPeripheralTasks().filter((t) => t.device.id === 'self-heal').length, 0, 'tick-health task cleared');
+  sh.detach(); status.clear();
+  delete process.env.LIKU_PERIPHERAL_SELF_HEAL_TICK_HEALTH_AUTOCLEAR;
+  delete process.env.LIKU_PERIPHERAL_SELF_HEAL_TICK_HEALTH_TASKS;
+  delete process.env.LIKU_PERIPHERAL_SELF_HEAL_STALE_MS;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('tick-health auto-clear is OFF by default (task lingers)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  process.env.LIKU_PERIPHERAL_SELF_HEAL_STALE_MS = '1000';
+  process.env.LIKU_PERIPHERAL_SELF_HEAL_TICK_HEALTH_TASKS = '1';
+  delete process.env.LIKU_PERIPHERAL_SELF_HEAL_TICK_HEALTH_AUTOCLEAR;
+  const status = require('../src/main/peripherals/self-heal-status');
+  const { SupervisorAgent } = require('../src/main/agents');
+  const { attachSelfHealingScheduler } = require('../src/main/agents/self-healing-scheduler');
+  status.clear();
+  const sup = new SupervisorAgent({});
+  const orch = new (require('events').EventEmitter)();
+  const fakePal = { isPeripheralsEnabled: () => true, rebalanceClusterTasks: () => ({ rebalanced: [] }) };
+  const fakeAdvisor = { proposeDeescalations: () => [], autoClearRecovered: () => ({ cleared: [] }) };
+  const sh = attachSelfHealingScheduler(orch, { pal: fakePal, actionAdvisor: fakeAdvisor, getSupervisor: () => sup });
+  const base = 5000000;
+  status.record({ at: new Date(base).toISOString(), durationMs: 1, timings: {}, counts: {}, stalled: false });
+  sh.tick(base + 5000);
+  const r2 = sh.tick(base + 5100);
+  assert.strictEqual(r2.tickHealthRecovered, true, 'recovery still detected');
+  assert.strictEqual(r2.tickHealthCleared, undefined, 'but nothing auto-cleared by default');
+  assert.strictEqual(sup.getPendingPeripheralTasks().filter((t) => t.device.id === 'self-heal').length, 1, 'task lingers');
+  sh.detach(); status.clear();
+  delete process.env.LIKU_PERIPHERAL_SELF_HEAL_TICK_HEALTH_TASKS;
+  delete process.env.LIKU_PERIPHERAL_SELF_HEAL_STALE_MS;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('de-escalation trends report windowed counts + rates + cooldown (pure observation)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const hist = require('../src/main/peripherals/deescalation-history');
+  hist.clear();
+  const base = new Date(2026, 6, 26, 12, 0, 0).getTime();
+  hist.record({ deviceId: 'dT', from: 'unpair', to: 'rotate-token', kind: 'step-back', at: base });
+  hist.record({ deviceId: 'dT', from: 'rotate-token', to: 'reduce-schedule', kind: 'step-back', at: base + 1000 });
+  hist.record({ deviceId: 'dT', from: null, to: null, kind: 'clear', at: base + 2000 });
+  const before = hist.read().devices.dT.stepBackCount;
+  const tr = hist.trends({ now: base + 3000, windowMs: 3600000, cooldownMs: 100000 });
+  assert.strictEqual(tr.deviceCount, 1);
+  const d = tr.devices.find((x) => x.deviceId === 'dT');
+  assert.strictEqual(d.recentStepBacks, 2);
+  assert.strictEqual(d.recentClears, 1);
+  assert.ok(d.ratePerHour > 0 && d.cooldownRemainingMs > 0, 'rate + cooldown computed');
+  assert.strictEqual(tr.recent.stepBacks, 2);
+  // Pure observation: reading trends did not change the store.
+  assert.strictEqual(hist.read().devices.dT.stepBackCount, before);
+  hist.clear();
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('de-escalation cluster rollup merges peer summaries', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const clusterDir = require('path').join(TMP_HOME, 'p35deescrollup');
+  process.env.LIKU_CLUSTER_DIR = clusterDir;
+  const coordination = require('../src/main/peripherals/coordination');
+  const hist = require('../src/main/peripherals/deescalation-history');
+  process.env.LIKU_NODE_ID = 'nodeA';
+  coordination.putShared('deescalation-summary', 'nodeA', { totals: { stepBacks: 3, clears: 1 }, deviceCount: 2 });
+  process.env.LIKU_NODE_ID = 'nodeB';
+  coordination.putShared('deescalation-summary', 'nodeB', { totals: { stepBacks: 5, clears: 2 }, deviceCount: 3 });
+  const roll = hist.clusterRollup({});
+  assert.strictEqual(roll.mode, 'cluster');
+  assert.strictEqual(roll.nodes, 2);
+  assert.strictEqual(roll.totals.stepBacks, 8, 'step-backs summed across nodes');
+  assert.strictEqual(roll.totals.clears, 3);
+  delete process.env.LIKU_NODE_ID;
+  delete process.env.LIKU_CLUSTER_DIR;
+  try { fs.rmSync(clusterDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('lock cluster file-trends aggregate per-file contention across nodes (durable/pure)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const clusterDir = require('path').join(TMP_HOME, 'p35locktrend');
+  process.env.LIKU_CLUSTER_DIR = clusterDir;
+  process.env.LIKU_NODE_ID = 'nA';
+  const p = require('path');
+  const mdir = p.join(clusterDir, 'lock-metrics');
+  fs.mkdirSync(mdir, { recursive: true });
+  fs.writeFileSync(p.join(mdir, 'nA.json'), JSON.stringify({ nodeId: 'nA', at: new Date().toISOString(), metrics: { acquired: 10, contended: 2 }, perFile: { 'store.json': { acquired: 10, contended: 2, steals: 0 } } }));
+  fs.writeFileSync(p.join(mdir, 'nB.json'), JSON.stringify({ nodeId: 'nB', at: new Date().toISOString(), metrics: { acquired: 20, contended: 10 }, perFile: { 'store.json': { acquired: 20, contended: 10, steals: 1 } } }));
+  const lockHistory = require('../src/main/peripherals/lock-history');
+  const ct = lockHistory.clusterFileTrends();
+  assert.strictEqual(ct.mode, 'cluster');
+  assert.ok(ct.nodes >= 2);
+  const sf = ct.files.find((f) => f.file === 'store.json');
+  assert.strictEqual(sf.acquired, 30, 'per-file acquired summed across nodes');
+  assert.strictEqual(sf.contended, 12, 'per-file contended summed across nodes');
+  assert.ok(Math.abs(sf.contentionRate - 12 / 30) < 0.01, 'cluster contention rate');
+  delete process.env.LIKU_NODE_ID;
+  delete process.env.LIKU_CLUSTER_DIR;
+  try { fs.rmSync(clusterDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('lock cluster file-trends fall back to this node single-machine (pure observation)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_CLUSTER_DIR;
+  const lockHistory = require('../src/main/peripherals/lock-history');
+  const ct = lockHistory.clusterFileTrends();
+  assert.strictEqual(ct.mode, 'single-machine', 'single-machine view when no cluster dir');
+  assert.ok(Array.isArray(ct.files));
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('PAL exposes Phase 35 trend / rollup / derived-health accessors', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  assert.strictEqual(pal.deriveNodeHealth({ metrics: { acquired: 100, contended: 50 } }).score, 0.5);
+  assert.ok(Array.isArray(pal.getDeescalationTrends().devices));
+  assert.ok(typeof pal.getDeescalationRollup().totals === 'object');
+  assert.ok(Array.isArray(pal.getLockClusterTrends().files));
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
 console.log(`\n${pass} checks passed.`);
 if (process.exitCode) { console.error('FAILED'); }
 else { console.log('OK'); }

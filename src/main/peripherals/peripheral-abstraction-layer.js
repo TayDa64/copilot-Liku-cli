@@ -869,6 +869,41 @@ function publishNodeHealth(score, opts = {}) {
   catch (err) { return { enabled: true, published: false, reason: err.message }; }
 }
 
+/** Phase 35 — auto-derive this node's health (0..1) from real lock-contention metrics (pure observation). */
+function deriveNodeHealth(opts = {}) {
+  if (!isPeripheralsEnabled()) return { enabled: false, score: 1 };
+  try { return { enabled: true, ...clusterTasks().deriveNodeHealth(opts) }; }
+  catch { return { enabled: true, score: 1 }; }
+}
+
+/** Phase 35 — derive + publish this node's health for peers to weight (advisory, cluster-gated). */
+function publishDerivedNodeHealth(opts = {}) {
+  if (!isPeripheralsEnabled()) return { enabled: false, published: false };
+  try { return { enabled: true, ...clusterTasks().publishDerivedNodeHealth(opts) }; }
+  catch (err) { return { enabled: true, published: false, reason: err.message }; }
+}
+
+/** Phase 35 — de-escalation trend/aggregate view (pure observation). */
+function getDeescalationTrends(opts = {}) {
+  if (!isPeripheralsEnabled()) return { enabled: false, devices: [] };
+  try { return { enabled: true, ...require('./deescalation-history').trends(opts) }; }
+  catch { return { enabled: true, devices: [] }; }
+}
+
+/** Phase 35 — cluster-wide de-escalation rollup (pure observation). */
+function getDeescalationRollup(opts = {}) {
+  if (!isPeripheralsEnabled()) return { enabled: false, nodes: 0, totals: {} };
+  try { return { enabled: true, ...require('./deescalation-history').clusterRollup(opts) }; }
+  catch { return { enabled: true, nodes: 0, totals: {} }; }
+}
+
+/** Phase 35 — cluster-wide per-file lock contention trend view (pure observation). */
+function getLockClusterTrends(opts = {}) {
+  if (!isPeripheralsEnabled()) return { enabled: false, files: [] };
+  try { return { enabled: true, ...lockHistory().clusterFileTrends(opts) }; }
+  catch { return { enabled: true, files: [] }; }
+}
+
 /** Phase 22 — mint a PER-ACTION (least-privilege) capability token for a device. */
 function issueActionToken(id, action, opts = {}) {
   if (!isPeripheralsEnabled()) return { enabled: false };
@@ -1213,6 +1248,11 @@ module.exports = {
   getDeescalationHistory,
   getDeescalationState,
   publishNodeHealth,
+  deriveNodeHealth,
+  publishDerivedNodeHealth,
+  getDeescalationTrends,
+  getDeescalationRollup,
+  getLockClusterTrends,
   issueActionToken,
   verifyDeviceToken,
   rotateAllTokens,

@@ -254,4 +254,62 @@ function alerts(opts = {}) {
   return { acquireThreshold, rateThreshold, alerts: out };
 }
 
-module.exports = { FLAG, HISTORY_FILE, enabled, record, query, trends, fileTrends, alerts, clusterAggregate, clear };
+/**
+ * Phase 35 — CLUSTER-WIDE per-file contention TREND view. Aggregates every node's
+ * latest mirrored lock snapshot (the same shared `lock-metrics` files that survive
+ * restarts) into fleet-wide per-file acquire/contended totals + contention rate,
+ * hottest first, plus a per-node contention-rate breakdown. Single-machine (cluster
+ * off) → this node's live per-file view. PURE OBSERVATION.
+ * @param {{ limit?:number }} [opts]
+ */
+function clusterFileTrends(opts = {}) {
+  const limit = Number.isFinite(opts.limit) && opts.limit > 0 ? Math.floor(opts.limit) : 10;
+  const perFile = {};
+  const perNode = [];
+  const dir = coordination.clusterDir();
+  const clustered = coordination.clusterEnabled() && dir;
+  const foldSnap = (nodeId, at, files, live) => {
+    let nAcq = 0; let nCont = 0;
+    for (const [file, m] of Object.entries(files || {})) {
+      const acc = perFile[file] || (perFile[file] = { acquired: 0, contended: 0, steals: 0 });
+      acc.acquired += Number(m.acquired) || 0;
+      acc.contended += Number(m.contended) || 0;
+      acc.steals += Number(m.steals) || 0;
+      nAcq += Number(m.acquired) || 0; nCont += Number(m.contended) || 0;
+    }
+    perNode.push({ nodeId, at, contentionRate: nAcq > 0 ? Math.round(nCont / nAcq * 1000) / 1000 : 0, live: !!live });
+  };
+  const seen = new Set();
+  if (clustered) {
+    const mdir = path.join(dir, 'lock-metrics');
+    try {
+      if (fs.existsSync(mdir)) {
+        for (const f of fs.readdirSync(mdir)) {
+          if (!f.endsWith('.json')) continue;
+          let snap;
+          try { snap = JSON.parse(fs.readFileSync(path.join(mdir, f), 'utf-8')); } catch { snap = null; }
+          if (!snap || !snap.perFile) continue;
+          seen.add(snap.nodeId);
+          foldSnap(snap.nodeId, snap.at, snap.perFile);
+        }
+      }
+    } catch { /* best-effort */ }
+  }
+  // Fold in this node's LIVE per-file counters if not already mirrored.
+  if (!seen.has(coordination.nodeId())) {
+    try { foldSnap(coordination.nodeId(), new Date().toISOString(), getPerFileLockMetrics(), true); } catch { /* best-effort */ }
+  }
+  const files = Object.entries(perFile)
+    .map(([file, m]) => ({ file, ...m, contentionRate: m.acquired > 0 ? Math.round(m.contended / m.acquired * 1000) / 1000 : 0 }))
+    .sort((a, b) => b.contended - a.contended || b.contentionRate - a.contentionRate || b.acquired - a.acquired)
+    .slice(0, limit);
+  return {
+    mode: clustered ? 'cluster' : 'single-machine',
+    nodes: perNode.length,
+    files,
+    perNode,
+    contentionRate: (() => { let a = 0; let c = 0; for (const m of Object.values(perFile)) { a += m.acquired; c += m.contended; } return a > 0 ? Math.round(c / a * 1000) / 1000 : 0; })()
+  };
+}
+
+module.exports = { FLAG, HISTORY_FILE, enabled, record, query, trends, fileTrends, alerts, clusterAggregate, clusterFileTrends, clear };

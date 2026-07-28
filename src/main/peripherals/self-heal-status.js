@@ -34,15 +34,16 @@ const _EMPTY = Object.freeze({
 
 /** Read the persisted status (corruption-tolerant). Returns a safe default. */
 function read() {
-  if (!enabled()) return { ..._EMPTY, totals: { ..._EMPTY.totals } };
+  if (!enabled()) return { ..._EMPTY, totals: { ..._EMPTY.totals }, stalled: false };
   try {
-    if (!fs.existsSync(STATUS_FILE)) return { ..._EMPTY, totals: { ..._EMPTY.totals } };
+    if (!fs.existsSync(STATUS_FILE)) return { ..._EMPTY, totals: { ..._EMPTY.totals }, stalled: false };
     const raw = JSON.parse(fs.readFileSync(STATUS_FILE, 'utf-8'));
     return {
       lastRun: (raw && typeof raw.lastRun === 'object') ? raw.lastRun : null,
-      totals: (raw && typeof raw.totals === 'object') ? { ..._EMPTY.totals, ...raw.totals } : { ..._EMPTY.totals }
+      totals: (raw && typeof raw.totals === 'object') ? { ..._EMPTY.totals, ...raw.totals } : { ..._EMPTY.totals },
+      stalled: !!(raw && raw.stalled)
     };
-  } catch { return { ..._EMPTY, totals: { ..._EMPTY.totals } }; }
+  } catch { return { ..._EMPTY, totals: { ..._EMPTY.totals }, stalled: false }; }
 }
 
 /**
@@ -73,7 +74,7 @@ function record(run) {
       }
     };
     if (!fs.existsSync(LIKU_HOME)) fs.mkdirSync(LIKU_HOME, { recursive: true, mode: 0o700 });
-    atomicWriteFileSync(STATUS_FILE, JSON.stringify({ updatedAt: new Date().toISOString(), lastRun, totals }, null, 2), { mode: 0o600 });
+    atomicWriteFileSync(STATUS_FILE, JSON.stringify({ updatedAt: new Date().toISOString(), lastRun, totals, stalled: !!run.stalled }, null, 2), { mode: 0o600 });
     return true;
   } catch { return false; }
 }
