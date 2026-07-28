@@ -31,6 +31,28 @@
 
 'use strict';
 
+const DEFAULT_INTERVAL_MS = 300000; // 5 min production cadence (when the flag is on)
+
+/**
+ * Resolve the background tick interval (ms), or 0 for OFF. Precedence: explicit
+ * `options.intervalMs` → `LIKU_PERIPHERAL_SELF_HEAL_INTERVAL_MS` → a default
+ * production cadence when `LIKU_PERIPHERAL_SELF_HEAL=1` → OFF. Default is OFF
+ * (timer-free) so single-machine + tests are unaffected unless opted in. @private
+ */
+function _resolveIntervalMs(options) {
+  if (options && Number.isFinite(Number(options.intervalMs)) && Number(options.intervalMs) > 0) return Number(options.intervalMs);
+  const env = Number(process.env.LIKU_PERIPHERAL_SELF_HEAL_INTERVAL_MS);
+  if (Number.isFinite(env) && env > 0) return env;
+  if (String(process.env.LIKU_PERIPHERAL_SELF_HEAL || '').trim() === '1') return DEFAULT_INTERVAL_MS;
+  return 0;
+}
+
+/** Stale-gap threshold for the tick-health advisory (ms). @private */
+function _staleThresholdMs() {
+  const v = Number(process.env.LIKU_PERIPHERAL_SELF_HEAL_STALE_MS);
+  return Number.isFinite(v) && v > 0 ? v : 900000; // 15 min
+}
+
 /**
  * Attach a self-healing scheduler to an orchestrator. Returns a `tick(now)` you
  * invoke (CLI / external scheduler) to run one operational-polish pass.
@@ -62,6 +84,10 @@ function attachSelfHealingScheduler(orchestrator, options = {}) {
   function tick(when) {
     if (!_enabled()) return { ran: false };
     const at = when instanceof Date ? when.getTime() : (Number.isFinite(when) ? when : now());
+    // Phase 33: TICK-HEALTH — detect a STALL gap (the interval was late / stopped)
+    // by comparing this run to the persisted previous run. Advisory only.
+    let prevAt = null;
+    try { const prev = statusStore.read(); if (prev && prev.lastRun && prev.lastRun.at) prevAt = Date.parse(prev.lastRun.at); } catch { /* best-effort */ }
     const result = { ran: true, at, rebalanced: [], expiryTasks: 0, deescalations: [], autoCleared: [] };
     // Per-step timings (Phase 32 observability). PURE measurement — reading the
     // clock never changes what a step does. Wall-clock ms per step.
@@ -100,14 +126,22 @@ function attachSelfHealingScheduler(orchestrator, options = {}) {
       counts: { rebalanced: result.rebalanced.length, expiryTasks: result.expiryTasks, deescalations: result.deescalations.length, autoCleared: result.autoCleared.length }
     };
     try { statusStore.record(_lastRun); } catch { /* observability is best-effort */ }
+    // Phase 33: emit an ADVISORY tick-health signal when the gap since the previous
+    // run exceeded the stale threshold (the cadence had stalled). Never actuates.
+    if (prevAt != null) {
+      const gapMs = at - prevAt;
+      const staleMs = _staleThresholdMs();
+      if (gapMs > staleMs) {
+        result.tickHealth = { wasStale: true, gapMs, staleMs };
+        try { orchestrator.emit('self-heal:tick-health', { source: 'self-heal', kind: 'tick-health', advisory: `self-heal tick resumed after ${Math.round(gapMs / 1000)}s stall`, gapMs, staleMs, requiresHuman: false, autonomousAction: false }); } catch { /* non-fatal */ }
+      }
+    }
     if (typeof options.onTick === 'function') { try { options.onTick(result); } catch { /* non-fatal */ } }
     return result;
   }
 
   let timer = null;
-  const intervalMs = Number.isFinite(Number(options.intervalMs)) && Number(options.intervalMs) > 0
-    ? Number(options.intervalMs)
-    : (Number(process.env.LIKU_PERIPHERAL_SELF_HEAL_INTERVAL_MS) || 0);
+  const intervalMs = _resolveIntervalMs(options);
   if (intervalMs > 0) {
     timer = setInterval(() => { try { tick(); } catch { /* best-effort */ } }, intervalMs);
     if (timer && typeof timer.unref === 'function') timer.unref(); // never keep the process alive
@@ -115,7 +149,9 @@ function attachSelfHealingScheduler(orchestrator, options = {}) {
 
   return {
     tick,
+    intervalMs,
     getLastRun() { return _lastRun; },
+    getHealth(opts) { try { return statusStore.health(opts); } catch { return { ran: false, stale: false }; } },
     detach() { if (timer) { clearInterval(timer); timer = null; } }
   };
 }

@@ -785,17 +785,23 @@ async function run(args, flags) {
       const op = (args[1] || '').toLowerCase();
       if (op === 'status') {
         const st = pal.getSelfHealStatus();
-        if (flags.json) return { success: true, ...st };
+        const health = pal.getSelfHealHealth();
+        if (flags.json) return { success: true, ...st, health };
         log(highlight('Self-heal status'));
-        if (!st.lastRun) { log(dim('  no runs yet (run: liku peripherals self-heal)')); return { success: true, ...st }; }
+        if (!st.lastRun) { log(dim('  no runs yet (run: liku peripherals self-heal; or set LIKU_PERIPHERAL_SELF_HEAL=1 to auto-run)')); return { success: true, ...st, health }; }
         const lr = st.lastRun;
         log(`  last run: ${dim(lr.at)}  (${lr.durationMs}ms)`);
+        if (health.ran) {
+          const ageM = Math.round((health.lastRunAgeMs || 0) / 1000);
+          if (health.stale) error(`  ⚠ tick STALE — last ran ${ageM}s ago (> ${Math.round(health.staleMs / 1000)}s threshold)`);
+          else log(`  health: OK (last ran ${ageM}s ago)`);
+        }
         log(`  counts: rebalanced ${lr.counts.rebalanced}, expiry ${lr.counts.expiryTasks}, de-escalations ${lr.counts.deescalations}, auto-cleared ${lr.counts.autoCleared}`);
         const tm = lr.timings || {};
         log(`  timings: rebalance ${tm.rebalance || 0}ms, expiry ${tm.expiry || 0}ms, de-escalation ${tm.deescalation || 0}ms, auto-clear ${tm.autoClear || 0}ms`);
         const to = st.totals || {};
         log(dim(`  totals: ${to.runs || 0} runs, ${to.rebalanced || 0} rebalanced, ${to.expiryTasks || 0} expiry, ${to.deescalations || 0} de-escalations, ${to.autoCleared || 0} auto-cleared`));
-        return { success: true, ...st };
+        return { success: true, ...st, health };
       }
       const EventEmitter = require('events');
       const { SupervisorAgent, attachScheduleExpiryNotifier, attachSelfHealingScheduler } = require('../../main/agents');

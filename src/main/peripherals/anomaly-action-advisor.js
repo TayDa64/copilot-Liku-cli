@@ -498,6 +498,17 @@ function _stepBackEnabled(opts) {
 }
 
 /**
+ * Phase 33 — cooldown between SUCCESSIVE step-back rungs for the same device, so
+ * the ladder is not walked down too fast. 0 = off. NEVER paces the final
+ * `clear-schedule` (clearing a restriction is always allowed when appropriate). @private
+ */
+function _stepBackCooldownMs(opts) {
+  if (opts && Number.isFinite(opts.stepBackCooldownMs) && opts.stepBackCooldownMs >= 0) return opts.stepBackCooldownMs;
+  const v = Number(process.env.LIKU_PERIPHERAL_AUTOHEAL_STEPBACK_COOLDOWN_MS);
+  return Number.isFinite(v) && v >= 0 ? v : 0;
+}
+
+/**
  * Propose DE-ESCALATIONS for devices that have RECOVERED (no anomaly for
  * `recoveryMs`) but still carry an elevated heal action. Steps DOWN the current
  * rung: reduce-schedule → clear-schedule, rotate-token → clear-rotate-token
@@ -527,6 +538,16 @@ function proposeDeescalations(opts = {}, now = Date.now()) {
     const existing = st.proposed[key];
     if (existing && existing.status === 'proposed') { out.push(existing); continue; }
     if (existing && (existing.status === 'confirmed' || existing.status === 'dismissed')) continue;
+    // Phase 33: STEP-BACK COOLDOWN. Pace successive step-back rungs for the same
+    // device (based on the last recorded step-back). NEVER paces the final
+    // `clear-schedule` (clearing a restriction is always allowed) — only the
+    // intermediate `stepback-*` rungs are throttled.
+    if (stepBack && map.action !== 'clear-schedule') {
+      const cooldownMs = _stepBackCooldownMs(opts);
+      const p = st.proposed[deviceId];
+      const lastStep = p && p.steppedBackAt ? Date.parse(p.steppedBackAt) : 0;
+      if (cooldownMs > 0 && lastStep && (now - lastStep) < cooldownMs) continue; // too soon → hold this rung
+    }
     const minutes = Math.round((now - last) / 60000);
     const suggestion = {
       id: `deesc-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
@@ -588,7 +609,7 @@ function resetDevice(deviceId) {
  * @param {string} deviceId
  * @param {string} toRung the lower rung to record (e.g. 'rotate-token' | 'reduce-schedule')
  */
-function stepBackDevice(deviceId, toRung) {
+function stepBackDevice(deviceId, toRung, now = Date.now()) {
   if (!enabled()) return { ok: false, reason: 'disabled' };
   if (!deviceId || !toRung) return { ok: false, reason: 'invalid' };
   const st = _load();
@@ -596,7 +617,7 @@ function stepBackDevice(deviceId, toRung) {
   if (p) {
     p.action = toRung;
     p.status = 'confirmed';
-    p.steppedBackAt = new Date().toISOString();
+    p.steppedBackAt = new Date(Number.isFinite(now) ? now : Date.now()).toISOString();
   }
   const deKey = `deescalate:${deviceId}`;
   if (st.proposed[deKey]) delete st.proposed[deKey]; // allow the next step-back cycle

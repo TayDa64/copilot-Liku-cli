@@ -380,6 +380,22 @@ function _nodeCapacity(nodeId) {
   } catch { return 1; }
 }
 
+// Phase 33: ANTI-FLAPPING. Two deterministic guards stop a task bouncing between
+// nodes on small load changes: (1) a HYSTERESIS margin — an ALREADY-assigned task
+// only moves when the best target's score is better than its current assignee's
+// score by at least this margin; (2) a MIN-RESIDENCY window — a task placed less
+// than this long ago is left to settle. Both default OFF (0) → Phase-32 behaviour.
+function _hysteresis(opts) {
+  if (opts && Number.isFinite(opts.hysteresis) && opts.hysteresis >= 0) return opts.hysteresis;
+  const v = Number(process.env.LIKU_PERIPHERAL_REBALANCE_HYSTERESIS);
+  return Number.isFinite(v) && v >= 0 ? v : 0;
+}
+function _minResidencyMs(opts) {
+  if (opts && Number.isFinite(opts.minResidencyMs) && opts.minResidencyMs >= 0) return opts.minResidencyMs;
+  const v = Number(process.env.LIKU_PERIPHERAL_REBALANCE_MIN_RESIDENCY_MS);
+  return Number.isFinite(v) && v >= 0 ? v : 0;
+}
+
 /**
  * Pick the best target node: LOWEST weighted-load / capacity score. Deterministic
  * (tie broken by nodeId). Avoids `exclude` (the stale assignee) when another node
@@ -441,14 +457,27 @@ function rebalance(opts = {}) {
     const assignedAtMs = a ? (Date.parse(a.assignedAt || a.updatedAt) || 0) : 0;
     const isStale = a ? (now - assignedAtMs) >= staleMs : true; // unassigned counts as stale
     if (!isStale) continue;
-    candidates.push({ t, staleAssignee: a ? a.assignee : null, weight: _taskWeight(t) });
+    candidates.push({ t, staleAssignee: a ? a.assignee : null, assignedAtMs, weight: _taskWeight(t) });
   }
   candidates.sort((x, y) => (y.weight - x.weight) || String(x.t.id).localeCompare(String(y.t.id)));
+  const hysteresis = _hysteresis(opts);
+  const minResidencyMs = _minResidencyMs(opts);
   const rebalanced = [];
   for (const c of candidates) {
     const target = _bestTarget(load, c.staleAssignee);
     if (!target) continue;
     if (target === c.staleAssignee) continue; // nowhere better to move it
+    // Phase 33 ANTI-FLAP: for an already-assigned task, hold it unless the target
+    // is meaningfully better (hysteresis margin) AND it has served a minimum
+    // residency. UNASSIGNED tasks always place (no current node → no flap risk).
+    if (c.staleAssignee) {
+      if (minResidencyMs > 0 && c.assignedAtMs && (now - c.assignedAtMs) < minResidencyMs) continue;
+      if (hysteresis > 0) {
+        const curScore = (load[c.staleAssignee] || 0) / _nodeCapacity(c.staleAssignee);
+        const tgtScore = (load[target] || 0) / _nodeCapacity(target);
+        if ((curScore - tgtScore) < hysteresis) continue; // improvement too small → don't flap
+      }
+    }
     assignTask(c.t.id, target, { now });
     if (c.staleAssignee && c.staleAssignee in load) load[c.staleAssignee] = Math.max(0, load[c.staleAssignee] - c.weight);
     load[target] = (load[target] || 0) + c.weight;

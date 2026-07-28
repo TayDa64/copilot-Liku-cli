@@ -1345,6 +1345,77 @@ re-pairs, rotates a token, or actuates anything.
 - **single-machine-unchanged** — fairness weighting + status persistence are byte-compatible
   single-machine; the rebalance step is inert without a cluster dir.
 
+## Phase 33 — self-heal production wiring + anti-flap + step-back cooldown
+
+### Self-heal production wiring + tick-health alerts
+
+The self-healing scheduler now AUTO-STARTS its unref'd background interval as part of
+`createAgentSystem` when the production flag is on. Interval precedence:
+`options.intervalMs` → `LIKU_PERIPHERAL_SELF_HEAL_INTERVAL_MS` → a default 5-minute cadence
+when `LIKU_PERIPHERAL_SELF_HEAL=1` → OFF (timer-free). Default is OFF so single-machine +
+tests are unaffected unless opted in; the timer is `unref`'d so it never keeps the process
+alive, and the tick stays best-effort + flag-gated (inert when peripherals are disabled).
+
+**Tick-health** = last-run age vs a staleness threshold (`LIKU_PERIPHERAL_SELF_HEAL_STALE_MS`,
+default 15 min). `self-heal-status.health()` reports `{ ran, lastRunAt, lastRunAgeMs, stale }`
+(PURE OBSERVATION — never actuates). When a tick runs after a gap larger than the threshold
+(the cadence had stalled), the scheduler emits an ADVISORY `self-heal:tick-health` event
+(`requiresHuman:false`, `autonomousAction:false`) — a status signal, never an actuation path.
+PAL: `getSelfHealHealth()`. CLI: `self-heal status` shows a `⚠ tick STALE` indicator.
+
+### Rebalance anti-flapping (hysteresis + min-residency)
+
+Two deterministic guards stop tasks bouncing between nodes on small load changes (both
+default OFF → Phase-32 behaviour byte-identical):
+
+- **Hysteresis margin** (`LIKU_PERIPHERAL_REBALANCE_HYSTERESIS`, default 0) — an
+  ALREADY-assigned task only moves when the best target's score is better than its current
+  assignee's score by at least this margin (`curScore − tgtScore ≥ margin`).
+- **Min-residency** (`LIKU_PERIPHERAL_REBALANCE_MIN_RESIDENCY_MS`, default 0) — a task placed
+  less than this long ago is left to settle before being considered again.
+
+UNASSIGNED tasks always place (no current node → no flap risk), so anti-flapping never
+strands a task. Rebalancing stays strictly advisory (assignment intent only → no double
+ownership). Opts (`hysteresis`, `minResidencyMs`) override the env for tests.
+
+### Step-back cooldown between rungs
+
+A configurable cooldown paces SUCCESSIVE step-back rungs for the same device
+(`LIKU_PERIPHERAL_AUTOHEAL_STEPBACK_COOLDOWN_MS`, default 0 = off; `opts.stepBackCooldownMs`
+override). After a recorded step-back (`steppedBackAt`), the next intermediate `stepback-*`
+rung is held until the cooldown elapses. The cooldown NEVER paces the final `clear-schedule`
+(clearing a reduce-schedule restriction is always allowed when appropriate) and never blocks
+a genuine recovery — it only slows the descent. All step-backs remain proposal → explicit
+human confirmation; nothing security-sensitive is auto-executed.
+
+### New environment variables (all default OFF / inert single-machine)
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `LIKU_PERIPHERAL_SELF_HEAL` | `0` (off) | Auto-start the self-heal tick at a 5-min production cadence |
+| `LIKU_PERIPHERAL_SELF_HEAL_STALE_MS` | `900000` (15m) | Tick-health staleness threshold (last-run age / stall-gap) |
+| `LIKU_PERIPHERAL_REBALANCE_HYSTERESIS` | `0` (off) | Min score improvement to move an already-assigned task |
+| `LIKU_PERIPHERAL_REBALANCE_MIN_RESIDENCY_MS` | `0` (off) | Min residency before a placed task is reconsidered |
+| `LIKU_PERIPHERAL_AUTOHEAL_STEPBACK_COOLDOWN_MS` | `0` (off) | Cooldown between successive step-back rungs (never paces clear-schedule) |
+
+(`LIKU_PERIPHERAL_SELF_HEAL_INTERVAL_MS` from Phase 31 also feeds the interval precedence.)
+
+### Phase 33 safety invariants
+
+- **production-wiring-is-best-effort** — auto-start uses an unref'd interval that never keeps
+  the process alive; the tick is best-effort, flag-gated, inert when disabled, and adds no
+  actuation path (a missed/late tick is only a status signal).
+- **tick-health-is-advisory** — health/staleness is pure observation; the `self-heal:tick-health`
+  event is advisory (`requiresHuman:false`, never actuates).
+- **anti-flap-never-strands** — hysteresis/min-residency only DELAY moving an already-assigned
+  task; unassigned tasks always place, so no task is permanently stranded and no double
+  ownership is created (assignment intent only).
+- **step-back-cooldown-never-blocks-recovery** — the cooldown paces only intermediate
+  `stepback-*` rungs; it never blocks `clear-schedule` and never suppresses genuine recovery;
+  every step-back stays human-gated with no security-sensitive auto-execution.
+- **single-machine-unchanged** — all new knobs default OFF; interval is timer-free by default;
+  hysteresis/residency/cooldown reduce to prior behaviour and the cognitive fragment stays 262 BPE.
+
 ## If a human decides to act
 
 Any physical response still travels the full PAL safety chain — the alert path

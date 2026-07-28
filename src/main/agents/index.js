@@ -145,11 +145,14 @@ module.exports = {
     // recovery de-escalation + opt-in safe auto-clear). TIMER-FREE by default — a
     // caller invokes selfHealingScheduler.tick(now). Strictly advisory: it only
     // invokes already-human-gated actions on a cadence; NO new actuation path.
+    // Phase 33: PRODUCTION AUTO-START — when LIKU_PERIPHERAL_SELF_HEAL=1 (or an
+    // explicit interval), the scheduler starts its own unref'd interval here so the
+    // tick runs automatically with normal system startup (still best-effort, flag-gated).
     let selfHealingScheduler = null;
     try {
       selfHealingScheduler = attachSelfHealingScheduler(orchestrator, {
         scheduleExpiryTick: scheduleExpiryNotifier ? scheduleExpiryNotifier.tick : null,
-        intervalMs: options.selfHealIntervalMs // OFF unless explicitly provided
+        intervalMs: options.selfHealIntervalMs // else env LIKU_PERIPHERAL_SELF_HEAL_INTERVAL_MS / LIKU_PERIPHERAL_SELF_HEAL=1
       });
     } catch { /* self-healing integration is best-effort */ }
 

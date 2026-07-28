@@ -5284,6 +5284,185 @@ test('stepBackDevice is a pure advisory rung lowering (inert when disabled)', ()
   delete process.env.LIKU_ENABLE_PERIPHERALS;
 });
 
+// ── Phase 33: self-heal production wiring + tick-health + anti-flap + step-back cooldown ──
+
+test('self-heal interval auto-resolves (production flag → default cadence; option > env > flag)', () => {
+  const { attachSelfHealingScheduler } = require('../src/main/agents/self-healing-scheduler');
+  const orch = new (require('events').EventEmitter)();
+  delete process.env.LIKU_PERIPHERAL_SELF_HEAL;
+  delete process.env.LIKU_PERIPHERAL_SELF_HEAL_INTERVAL_MS;
+  let sh = attachSelfHealingScheduler(orch, {});
+  assert.strictEqual(sh.intervalMs, 0, 'timer-free by default'); sh.detach();
+  process.env.LIKU_PERIPHERAL_SELF_HEAL = '1';
+  sh = attachSelfHealingScheduler(orch, {});
+  assert.strictEqual(sh.intervalMs, 300000, 'production flag → 5 min cadence'); sh.detach();
+  process.env.LIKU_PERIPHERAL_SELF_HEAL_INTERVAL_MS = '60000';
+  sh = attachSelfHealingScheduler(orch, {});
+  assert.strictEqual(sh.intervalMs, 60000, 'env interval overrides the flag default'); sh.detach();
+  sh = attachSelfHealingScheduler(orch, { intervalMs: 12345 });
+  assert.strictEqual(sh.intervalMs, 12345, 'explicit option wins'); sh.detach();
+  delete process.env.LIKU_PERIPHERAL_SELF_HEAL;
+  delete process.env.LIKU_PERIPHERAL_SELF_HEAL_INTERVAL_MS;
+});
+
+test('tick-health reports last-run age + staleness (pure observation)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  process.env.LIKU_PERIPHERAL_SELF_HEAL_STALE_MS = '1000';
+  const status = require('../src/main/peripherals/self-heal-status');
+  status.clear();
+  let h = status.health();
+  assert.strictEqual(h.ran, false, 'never-run tick is not "stale"');
+  assert.strictEqual(h.stale, false);
+  const base = Date.now();
+  status.record({ at: new Date(base).toISOString(), durationMs: 1, timings: {}, counts: { rebalanced: 0, expiryTasks: 0, deescalations: 0, autoCleared: 0 } });
+  h = status.health({ now: base + 500 });
+  assert.strictEqual(h.stale, false, 'fresh run is healthy');
+  assert.strictEqual(h.lastRunAgeMs, 500);
+  h = status.health({ now: base + 2000 });
+  assert.strictEqual(h.stale, true, 'stale once past the threshold');
+  status.clear();
+  delete process.env.LIKU_PERIPHERAL_SELF_HEAL_STALE_MS;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('tick emits an ADVISORY tick-health signal after a stall gap', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  process.env.LIKU_PERIPHERAL_SELF_HEAL_STALE_MS = '1000';
+  const status = require('../src/main/peripherals/self-heal-status');
+  const { attachSelfHealingScheduler } = require('../src/main/agents/self-healing-scheduler');
+  status.clear();
+  const orch = new (require('events').EventEmitter)();
+  let ev = null;
+  orch.on('self-heal:tick-health', (e) => { ev = e; });
+  const fakePal = { isPeripheralsEnabled: () => true, rebalanceClusterTasks: () => ({ rebalanced: [] }) };
+  const fakeAdvisor = { proposeDeescalations: () => [], autoClearRecovered: () => ({ cleared: [] }) };
+  const sh = attachSelfHealingScheduler(orch, { pal: fakePal, actionAdvisor: fakeAdvisor });
+  const base = 1000000;
+  status.record({ at: new Date(base).toISOString(), durationMs: 1, timings: {}, counts: {} });
+  const res = sh.tick(base + 5000); // gap 5000 > stale 1000
+  assert.ok(res.tickHealth && res.tickHealth.wasStale === true, 'stall detected on the result');
+  assert.ok(ev && ev.kind === 'tick-health' && ev.requiresHuman === false && ev.autonomousAction === false, 'advisory-only tick-health event');
+  status.clear(); sh.detach();
+  delete process.env.LIKU_PERIPHERAL_SELF_HEAL_STALE_MS;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('PAL getSelfHealHealth surfaces staleness', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  process.env.LIKU_PERIPHERAL_SELF_HEAL_STALE_MS = '1000';
+  const status = require('../src/main/peripherals/self-heal-status');
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  status.clear();
+  status.record({ at: new Date(Date.now() - 5000).toISOString(), durationMs: 1, timings: {}, counts: {} });
+  const h = pal.getSelfHealHealth();
+  assert.strictEqual(h.enabled, true);
+  assert.strictEqual(h.stale, true, 'a 5s-old run is stale vs a 1s threshold');
+  status.clear();
+  delete process.env.LIKU_PERIPHERAL_SELF_HEAL_STALE_MS;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('rebalance HYSTERESIS holds an assigned task when the improvement is too small', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const clusterDir = require('path').join(TMP_HOME, 'p33hys');
+  process.env.LIKU_CLUSTER_DIR = clusterDir;
+  const ct = require('../src/main/peripherals/cluster-tasks');
+  const t0 = Date.now();
+  process.env.LIKU_NODE_ID = 'nodeA';
+  ct.publishTask({ id: 'h1', device: { id: 'd' }, priority: 'low', status: 'pending-review' });
+  ct.assignTask('h1', 'nodeC'); // assigned to nodeC (load 1); nodeA is 0 → only 1 better
+  const res = ct.rebalance({ now: t0 + 100000, staleMs: 1000, hysteresis: 5 });
+  assert.strictEqual(res.rebalanced.length, 0, 'improvement (1) < margin (5) → task held (no flap)');
+  assert.strictEqual(ct.assignmentFor('h1'), 'nodeC', 'assignment unchanged');
+  delete process.env.LIKU_NODE_ID;
+  delete process.env.LIKU_CLUSTER_DIR;
+  try { fs.rmSync(clusterDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('rebalance HYSTERESIS still moves an assigned task when the improvement clears the margin', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const clusterDir = require('path').join(TMP_HOME, 'p33hys2');
+  process.env.LIKU_CLUSTER_DIR = clusterDir;
+  const ct = require('../src/main/peripherals/cluster-tasks');
+  const t0 = Date.now();
+  process.env.LIKU_NODE_ID = 'nodeC';
+  ct.publishTask({ id: 'heavyC', device: { id: 'd' }, priority: 'high', status: 'pending-review' });
+  ct.claimTask('heavyC', { ttlMs: 300000, now: t0 }); // nodeC carries weight 3
+  process.env.LIKU_NODE_ID = 'nodeA';
+  ct.publishTask({ id: 'h2', device: { id: 'd' }, priority: 'low', status: 'pending-review' });
+  ct.assignTask('h2', 'nodeC'); // nodeC load = 3 (owned) + 1 (assigned) = 4; nodeA = 0
+  const res = ct.rebalance({ now: t0 + 100000, staleMs: 1000, hysteresis: 2 });
+  assert.strictEqual(res.rebalanced.length, 1, 'improvement (4) >= margin (2) → moved');
+  assert.strictEqual(res.rebalanced[0].taskId, 'h2');
+  assert.strictEqual(res.rebalanced[0].to, 'nodeA');
+  delete process.env.LIKU_NODE_ID;
+  delete process.env.LIKU_CLUSTER_DIR;
+  try { fs.rmSync(clusterDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('rebalance MIN-RESIDENCY leaves a freshly-placed task to settle', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const clusterDir = require('path').join(TMP_HOME, 'p33res');
+  process.env.LIKU_CLUSTER_DIR = clusterDir;
+  const ct = require('../src/main/peripherals/cluster-tasks');
+  const t0 = Date.now();
+  process.env.LIKU_NODE_ID = 'nodeA';
+  ct.publishTask({ id: 'r1', device: { id: 'd' }, priority: 'high', status: 'pending-review' });
+  ct.assignTask('r1', 'nodeC'); // assignedAt ≈ t0 (young)
+  // Stale by staleMs (age 2000 ≥ 1000) but YOUNG by residency (age 2000 < 10000) → hold.
+  const res = ct.rebalance({ now: t0 + 2000, staleMs: 1000, minResidencyMs: 10000 });
+  assert.strictEqual(res.rebalanced.length, 0, 'recently-placed task not moved again yet');
+  delete process.env.LIKU_NODE_ID;
+  delete process.env.LIKU_CLUSTER_DIR;
+  try { fs.rmSync(clusterDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('rebalance hysteresis never strands an UNASSIGNED task (always placed)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const clusterDir = require('path').join(TMP_HOME, 'p33unassigned');
+  process.env.LIKU_CLUSTER_DIR = clusterDir;
+  const ct = require('../src/main/peripherals/cluster-tasks');
+  const t0 = Date.now();
+  process.env.LIKU_NODE_ID = 'nodeA';
+  ct.publishTask({ id: 'u1', device: { id: 'd' }, priority: 'low', status: 'pending-review' });
+  const res = ct.rebalance({ now: t0 + 1000, staleMs: 500, hysteresis: 100, minResidencyMs: 100000 });
+  assert.strictEqual(res.rebalanced.length, 1, 'unassigned tasks bypass hysteresis/residency (no current node → no flap)');
+  assert.strictEqual(res.rebalanced[0].to, 'nodeA');
+  delete process.env.LIKU_NODE_ID;
+  delete process.env.LIKU_CLUSTER_DIR;
+  try { fs.rmSync(clusterDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('step-back COOLDOWN paces successive rungs but never blocks clear-schedule', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  process.env.LIKU_PERIPHERAL_AUTOHEAL_ESCALATION_COOLDOWN_MS = '0';
+  delete process.env.LIKU_CLUSTER_DIR;
+  const actions = require('../src/main/peripherals/anomaly-action-advisor');
+  actions.clear();
+  const base = new Date(2026, 6, 26, 12, 0, 0).getTime();
+  for (let i = 0; i < 10; i++) actions.recordAnomaly({ device: 'devX', type: 'spike' }, base);
+  actions.confirm(actions.proposeActions({}, base).find((p) => p.deviceId === 'devX').id);
+  // Recorded step-back to rotate-token at `base` (controlled clock).
+  actions.stepBackDevice('devX', 'rotate-token', base);
+  // Within cooldown → the next intermediate rung is held.
+  let de = actions.proposeDeescalations({ recoveryMs: 1, stepBack: true, stepBackCooldownMs: 100000 }, base + 50).find((x) => x.deviceId === 'devX');
+  assert.strictEqual(de, undefined, 'successive step-back paced by cooldown');
+  // After cooldown → the next rung is proposed.
+  de = actions.proposeDeescalations({ recoveryMs: 1, stepBack: true, stepBackCooldownMs: 100000 }, base + 200000).find((x) => x.deviceId === 'devX');
+  assert.strictEqual(de.action, 'stepback-reduce-schedule', 'next rung proposed once cooldown elapses');
+  // Step down to reduce-schedule with a FRESH stamp; clear-schedule is NOT paced.
+  actions.stepBackDevice('devX', 'reduce-schedule', base + 200000);
+  de = actions.proposeDeescalations({ recoveryMs: 1, stepBack: true, stepBackCooldownMs: 100000 }, base + 200050).find((x) => x.deviceId === 'devX');
+  assert.strictEqual(de.action, 'clear-schedule', 'clearing a restriction is never blocked by the cooldown');
+  actions.clear();
+  delete process.env.LIKU_PERIPHERAL_AUTOHEAL_ESCALATION_COOLDOWN_MS;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
 console.log(`\n${pass} checks passed.`);
 if (process.exitCode) { console.error('FAILED'); }
 else { console.log('OK'); }

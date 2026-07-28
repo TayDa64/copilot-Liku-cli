@@ -841,6 +841,13 @@ function getSelfHealStatus() {
   catch { return { enabled: true, lastRun: null, totals: {} }; }
 }
 
+/** Phase 33 — tick-health: last-run age + whether the self-heal tick is stale (pure observation). */
+function getSelfHealHealth(opts = {}) {
+  if (!isPeripheralsEnabled()) return { enabled: false, ran: false, stale: false };
+  try { return { enabled: true, ...require('./self-heal-status').health(opts) }; }
+  catch { return { enabled: true, ran: false, stale: false }; }
+}
+
 /** Phase 22 — mint a PER-ACTION (least-privilege) capability token for a device. */
 function issueActionToken(id, action, opts = {}) {
   if (!isPeripheralsEnabled()) return { enabled: false };
@@ -1181,6 +1188,7 @@ module.exports = {
   getDeescalations,
   autoClearRecovered,
   getSelfHealStatus,
+  getSelfHealHealth,
   issueActionToken,
   verifyDeviceToken,
   rotateAllTokens,
