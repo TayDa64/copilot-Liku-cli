@@ -59,7 +59,7 @@ function isHilEnabled() {
 // (e.g. mqtt) are used only when they report isAvailable() — otherwise the mock
 // remains the default. All drivers share the same interface:
 //   id, isAvailable(), discover(), perform(device, action, params), start(emit)
-const DRIVER_IDS = Object.freeze(['mock', 'mqtt', 'serial', 'ble', 'zigbee', 'ros2', 'matter']);
+const DRIVER_IDS = Object.freeze(['mock', 'mqtt', 'serial', 'ble', 'zigbee', 'ros2', 'matter', 'thread', 'zwave', 'usbhid', 'knx']);
 const _driverCache = {};
 function _driver(id) {
   if (!(id in _driverCache)) {
@@ -71,6 +71,10 @@ function _driver(id) {
       else if (id === 'zigbee') _driverCache[id] = require('./drivers/zigbee-driver');
       else if (id === 'ros2') _driverCache[id] = require('./drivers/ros2-driver');
       else if (id === 'matter') _driverCache[id] = require('./drivers/matter-driver');
+      else if (id === 'thread') _driverCache[id] = require('./drivers/thread-driver');
+      else if (id === 'zwave') _driverCache[id] = require('./drivers/zwave-driver');
+      else if (id === 'usbhid') _driverCache[id] = require('./drivers/usbhid-driver');
+      else if (id === 'knx') _driverCache[id] = require('./drivers/knx-driver');
       else _driverCache[id] = null;
     } catch { _driverCache[id] = null; }
   }
@@ -404,6 +408,43 @@ function pairDevice(id) {
     const rec = drv.pair(id);
     return { enabled: true, ok: !!(rec && rec.state === 'paired'), ...rec };
   } catch (err) { return { enabled: true, ok: false, reason: `pair-failed: ${err.message}` }; }
+}
+
+/**
+ * Phase 37 — richer commissioning entry point. Routes to a driver's explicit
+ * `commission(deviceId, { code })` when it supports one (Matter), otherwise falls
+ * back to `pairDevice`. Real commissioning only happens when HIL is off; HIL is a
+ * virtual commission. Never actuates — the PAL still gates any physical action.
+ * @param {string} id
+ * @param {{ code?:string }} [opts]
+ */
+function commissionDevice(id, opts = {}) {
+  if (!isPeripheralsEnabled()) return { enabled: false };
+  const device = registry().get(id);
+  let drv = device ? driverFor(device) : null;
+  if (!drv || typeof drv.commission !== 'function') {
+    for (const d of availableDrivers()) {
+      if (typeof d.commission !== 'function' || typeof d.discover !== 'function') continue;
+      try { if (d.discover().some((dev) => dev.id === id)) { drv = d; break; } } catch { /* ignore */ }
+    }
+  }
+  if (drv && typeof drv.commission === 'function') {
+    try { return { enabled: true, ...drv.commission(id, opts) }; }
+    catch (err) { return { enabled: true, ok: false, reason: `commission-failed: ${err.message}` }; }
+  }
+  // Fall back to the standard pairing path for drivers without explicit commissioning.
+  return pairDevice(id);
+}
+
+/** Phase 37 — discover commissionable devices across drivers that support it (Matter). */
+function getCommissionableDevices() {
+  if (!isPeripheralsEnabled()) return { enabled: false, devices: [] };
+  const out = [];
+  for (const d of availableDrivers()) {
+    if (typeof d.discoverCommissionable !== 'function') continue;
+    try { for (const n of d.discoverCommissionable()) out.push({ driver: d.DRIVER_ID, ...n }); } catch { /* non-fatal */ }
+  }
+  return { enabled: true, devices: out };
 }
 
 /** Aggregate pairing / commissioning status across all available drivers. */
@@ -1273,6 +1314,8 @@ module.exports = {
   getPowerForecast,
   getForecastWarnings,
   pairDevice,
+  commissionDevice,
+  getCommissionableDevices,
   unpairDevice,
   getPairingStatus,
   getTokenStatus,

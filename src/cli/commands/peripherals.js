@@ -210,6 +210,25 @@ async function run(args, flags) {
       return { success: !!res.ok, ...res };
     }
 
+    case 'commission': {
+      // Phase 37: richer commissioning (Matter): discover → commission → pair.
+      const op = (args[1] || '').toLowerCase();
+      if (op === 'discover') {
+        const res = pal.getCommissionableDevices();
+        if (flags.json) return { success: true, ...res };
+        log(highlight(`Commissionable devices (${(res.devices || []).length}):`));
+        for (const d of res.devices || []) log(`  ${highlight(d.id || d.nodeId || '?')} [${d.driver}]${d.hil ? ' (HIL)' : ''}`);
+        return { success: true, ...res };
+      }
+      const id = args[1];
+      if (!id) { error('Usage: liku peripherals commission <id> [--code <setup-code>] | commission discover'); return { success: false }; }
+      const res = pal.commissionDevice(id, flags.code ? { code: String(flags.code) } : {});
+      if (flags.json) return { success: !!res.ok, ...res };
+      if (res.ok) success(`${id} commissioned${res.simulated ? ' (HIL simulation)' : ''}${res.commissioned ? ' → operational' : ''}.`);
+      else log(dim(`${id} state: ${res.state || 'unknown'}${res.reason ? ` (${res.reason})` : ''}`));
+      return { success: !!res.ok, ...res };
+    }
+
     case 'unpair': {
       // Tear down a device's pairing / commissioning (re-pairable). Never actuates.
       const id = args[1];
@@ -1003,7 +1022,7 @@ async function run(args, flags) {
 
     default:
       error(`Unknown subcommand: ${sub}`);
-      log('Usage: liku peripherals [scan|list|status [id]|power [--history|--trend|--anomalies|--forecast [--seasonal] [--exclude-anomalous] [--special-days]]|anomalies [--attributed]|anomaly-action [confirm|dismiss <id>|policy [set <device> reduce=N rotate=N unpair=N]|recovery]|schedules|sweep-schedules|schedule-expiry|locks [--record]|coordination [lease|release <id>|sweep|claim|release-task <task>|assign <task> <node>|handoff <task> [node]|renew <task>|rebalance|health <score>]|cron [propose|confirm|dismiss|rules|tick|remove]|self-heal [status|history [--trends]]|fleet|suggestions|apply-schedule <id>|remove-schedule <device> [--from N] [--to N]|pair <id>|unpair <id>|token [rotate|revoke|rotate-all|action <id> <action>|action-rotate <id> <action>|identity-rotate <id>]|tasks [--escalated|--pending|--severity <p>|--anomaly]|notifications|channels|simulate <id> <k=v>|execute <id> <action>|confirm <id> <action> [--execute]|drivers]');
+      log('Usage: liku peripherals [scan|list|status [id]|power [--history|--trend|--anomalies|--forecast [--seasonal] [--exclude-anomalous] [--special-days]]|anomalies [--attributed]|anomaly-action [confirm|dismiss <id>|policy [set <device> reduce=N rotate=N unpair=N]|recovery]|schedules|sweep-schedules|schedule-expiry|locks [--record]|coordination [lease|release <id>|sweep|claim|release-task <task>|assign <task> <node>|handoff <task> [node]|renew <task>|rebalance|health <score>]|cron [propose|confirm|dismiss|rules|tick|remove]|self-heal [status|history [--trends]]|fleet|suggestions|apply-schedule <id>|remove-schedule <device> [--from N] [--to N]|pair <id>|unpair <id>|commission <id> [--code <c>]|token [rotate|revoke|rotate-all|action <id> <action>|action-rotate <id> <action>|identity-rotate <id>]|tasks [--escalated|--pending|--severity <p>|--anomaly]|notifications|channels|simulate <id> <k=v>|execute <id> <action>|confirm <id> <action> [--execute]|drivers]');
       return { success: false };
   }
 }

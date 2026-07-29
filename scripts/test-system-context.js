@@ -6117,6 +6117,300 @@ test('getFleetObservability works single-machine + PAL Phase 36 accessors are re
   delete process.env.LIKU_ENABLE_PERIPHERALS;
 });
 
+// ---------------------------------------------------------------------------
+// Phase 37 — device-surface expansion: Matter commissioning + Thread / Z-Wave /
+// USB-HID / KNX drivers. Each new driver inherits the DCP → class gate →
+// pending/confirm safety chain from the PAL and is HIL-isolated.
+// ---------------------------------------------------------------------------
+
+test('Matter commissioning: HIL virtual commission marks device paired (no real fabric)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  process.env.LIKU_PERIPHERAL_HIL = '1';
+  delete process.env.LIKU_MATTER_FABRIC;
+  process.env.LIKU_MATTER_DEVICES = JSON.stringify([
+    { id: 'mt-comm-hil', name: 'Plug', class: 'B', kind: 'switch', capabilities: ['on', 'off'], powerW: 6, setupCode: '20202021' }
+  ]);
+  const matter = require('../src/main/peripherals/drivers/matter-driver');
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  pal.scan();
+  const disc = pal.getCommissionableDevices();
+  assert.strictEqual(disc.enabled, true, 'commissionable discovery enabled');
+  assert.ok(disc.devices.some((d) => d.driver === 'matter'), 'matter contributes commissionable devices in HIL');
+  const res = pal.commissionDevice('mt-comm-hil', { code: '20202021' });
+  assert.strictEqual(res.enabled, true);
+  assert.strictEqual(res.ok, true, 'HIL commission succeeded');
+  assert.strictEqual(res.simulated, true, 'HIL commission is virtual');
+  delete process.env.LIKU_PERIPHERAL_HIL;
+  delete process.env.LIKU_MATTER_DEVICES;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('Matter commissioning: real fake-lib path invokes commissionNode + resolves endpoint', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_PERIPHERAL_HIL;
+  process.env.LIKU_MATTER_FABRIC = 'fabric-1';
+  process.env.LIKU_MATTER_DEVICES = JSON.stringify([
+    { id: 'mt-comm-r1', name: 'Plug', class: 'B', kind: 'switch', capabilities: ['on', 'off'], powerW: 8, nodeId: '3003', endpoint: 1, setupCode: 'MT:CODE' }
+  ]);
+  const matter = require('../src/main/peripherals/drivers/matter-driver');
+  const fake = makeFakeMatter([{ nodeId: '3003' }]);
+  const commissioned = [];
+  fake.lib.CommissioningController.prototype.commissionNode = function (code, opts) { commissioned.push({ code, opts }); return Promise.resolve({ nodeId: (opts && opts.nodeId) || '3003' }); };
+  matter._setMatterLibForTest(fake.lib);
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  pal.scan();
+  const res = pal.commissionDevice('mt-comm-r1', { code: 'MT:CODE' });
+  assert.strictEqual(res.ok, true, 'real commission succeeded');
+  assert.ok(commissioned.length >= 1, 'commissionNode invoked on the controller');
+  assert.strictEqual(commissioned[0].code, 'MT:CODE', 'setup code forwarded');
+  matter._setMatterLibForTest(null);
+  delete process.env.LIKU_MATTER_FABRIC;
+  delete process.env.LIKU_MATTER_DEVICES;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+/** Generic fake mesh transport lib: emits inbound + records outbound sends. */
+function makeFakeMesh(spec) {
+  const EventEmitter = require('events');
+  const created = [];
+  const sent = [];
+  const Ctor = spec.ctorName || 'Controller';
+  const cls = class extends EventEmitter {
+    constructor() { super(); created.push(this); }
+    start() { return Promise.resolve(); }
+    stop() {}
+  };
+  // Attach resolve/send hooks used by the driver transport.
+  cls.prototype.getDeviceByAddr = function (addr) { return { getEndpoint: () => ({ send: (a, p) => { sent.push({ addr, act: a, params: p }); return Promise.resolve(); } }) }; };
+  cls.prototype.getNode = function (id) { return { command: (a, p) => { sent.push({ id, act: a, params: p }); return Promise.resolve(); }, setValue: (a, p) => { sent.push({ id, act: a, params: p }); return Promise.resolve(); } }; };
+  cls.prototype.write = function (ga, value) { sent.push({ ga, value }); };
+  const lib = { [Ctor]: cls };
+  return { lib, created, sent, push: (event, msg) => { for (const c of created) c.emit(event, msg); } };
+}
+
+test('Thread driver: Class B real fake-lib actuation dispatches through mesh send', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_PERIPHERAL_HIL;
+  process.env.LIKU_THREAD_BORDER_ROUTER = '/dev/fake-thread';
+  process.env.LIKU_THREAD_DEVICES = JSON.stringify([
+    { id: 'th-plug-r1', name: 'Plug', class: 'B', kind: 'switch', capabilities: ['on', 'off'], powerW: 9, address: 'fd00::1', endpoint: 1 }
+  ]);
+  const th = require('../src/main/peripherals/drivers/thread-driver');
+  const fake = makeFakeMesh({ ctorName: 'BorderRouter' });
+  th._setThreadLibForTest(fake.lib);
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  pal.scan();
+  assert.ok(pal.listDrivers().drivers.includes('thread'), 'thread available via border router');
+  const stop = pal.startStreaming();
+  const rB = pal.execute('th-plug-r1', 'on');
+  assert.strictEqual(rB.ok, true, 'Class B real thread command succeeded');
+  assert.ok(fake.sent.some((s) => s.act === 'on'), 'mesh send dispatched');
+  stop();
+  th._setThreadLibForTest(null);
+  delete process.env.LIKU_THREAD_BORDER_ROUTER;
+  delete process.env.LIKU_THREAD_DEVICES;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('Thread driver: Class A confirm-gated even when connected (safety chain inherited)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_PERIPHERAL_HIL;
+  process.env.LIKU_THREAD_BORDER_ROUTER = '/dev/fake-thread';
+  process.env.LIKU_THREAD_DEVICES = JSON.stringify([
+    { id: 'th-lock-r1', name: 'Lock', class: 'A', kind: 'lock', capabilities: ['lock', 'unlock'], powerW: 3, address: 'fd00::2', endpoint: 1 }
+  ]);
+  const th = require('../src/main/peripherals/drivers/thread-driver');
+  const fake = makeFakeMesh({ ctorName: 'BorderRouter' });
+  th._setThreadLibForTest(fake.lib);
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  pal.scan();
+  const stop = pal.startStreaming();
+  const rA = pal.execute('th-lock-r1', 'unlock');
+  assert.strictEqual(rA.pending, true, 'Class A gated despite connection');
+  assert.ok(!fake.sent.some((s) => s.act === 'unlock'), 'no send before confirm');
+  pal.authorize('th-lock-r1', 'unlock');
+  const rA2 = pal.execute('th-lock-r1', 'unlock');
+  assert.strictEqual(rA2.ok, true, 'confirmed Class A dispatches');
+  assert.ok(fake.sent.some((s) => s.act === 'unlock'), 'send after confirm');
+  stop();
+  th._setThreadLibForTest(null);
+  delete process.env.LIKU_THREAD_BORDER_ROUTER;
+  delete process.env.LIKU_THREAD_DEVICES;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('Thread driver: HIL path is isolated (no real lib touched) and safety-gated', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  process.env.LIKU_PERIPHERAL_HIL = '1';
+  delete process.env.LIKU_THREAD_BORDER_ROUTER;
+  process.env.LIKU_THREAD_DEVICES = JSON.stringify([
+    { id: 'th-led-hil', name: 'LED', class: 'B', kind: 'light', capabilities: ['on', 'off'], powerW: 4 },
+    { id: 'th-lock-hil', name: 'Lock', class: 'A', kind: 'lock', capabilities: ['lock', 'unlock'], powerW: 5 }
+  ]);
+  const th = require('../src/main/peripherals/drivers/thread-driver');
+  const fake = makeFakeMesh({ ctorName: 'BorderRouter' });
+  th._setThreadLibForTest(fake.lib);
+  assert.strictEqual(th.isAvailable(), true, 'available in HIL without a border router');
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  pal.scan();
+  const rB = pal.execute('th-led-hil', 'on');
+  assert.strictEqual(rB.ok, true);
+  assert.strictEqual(rB.result.simulated, true, 'HIL executed Class B');
+  const rA = pal.execute('th-lock-hil', 'unlock');
+  assert.strictEqual(rA.pending, true, 'Class A gated in HIL');
+  assert.strictEqual(fake.created.length, 0, 'no real controller constructed in HIL');
+  assert.strictEqual(fake.sent.length, 0, 'no real send in HIL');
+  th._setThreadLibForTest(null);
+  delete process.env.LIKU_PERIPHERAL_HIL;
+  delete process.env.LIKU_THREAD_DEVICES;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('Z-Wave driver: Class B real fake-lib actuation dispatches; Class A confirm-gated', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_PERIPHERAL_HIL;
+  process.env.LIKU_ZWAVE_CONTROLLER = '/dev/fake-zwave';
+  process.env.LIKU_ZWAVE_DEVICES = JSON.stringify([
+    { id: 'zw-plug-r1', name: 'Plug', class: 'B', kind: 'switch', capabilities: ['on', 'off'], powerW: 10, nodeId: 5 },
+    { id: 'zw-lock-r1', name: 'Lock', class: 'A', kind: 'lock', capabilities: ['lock', 'unlock'], powerW: 3, nodeId: 6 }
+  ]);
+  const zw = require('../src/main/peripherals/drivers/zwave-driver');
+  const fake = makeFakeMesh({ ctorName: 'Driver' });
+  zw._setZwaveLibForTest(fake.lib);
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  pal.scan();
+  assert.ok(pal.listDrivers().drivers.includes('zwave'), 'zwave available via controller');
+  const stop = pal.startStreaming();
+  assert.strictEqual(pal.execute('zw-plug-r1', 'on').ok, true, 'Class B dispatched');
+  assert.ok(fake.sent.some((s) => s.act === 'on'), 'zwave command sent');
+  const rA = pal.execute('zw-lock-r1', 'unlock');
+  assert.strictEqual(rA.pending, true, 'Class A gated');
+  pal.authorize('zw-lock-r1', 'unlock');
+  assert.strictEqual(pal.execute('zw-lock-r1', 'unlock').ok, true, 'confirmed dispatches');
+  stop();
+  zw._setZwaveLibForTest(null);
+  delete process.env.LIKU_ZWAVE_CONTROLLER;
+  delete process.env.LIKU_ZWAVE_DEVICES;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('Z-Wave driver: HIL isolated (no real Driver constructed) and gated', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  process.env.LIKU_PERIPHERAL_HIL = '1';
+  delete process.env.LIKU_ZWAVE_CONTROLLER;
+  process.env.LIKU_ZWAVE_DEVICES = JSON.stringify([
+    { id: 'zw-lock-hil', name: 'Lock', class: 'A', kind: 'lock', capabilities: ['lock', 'unlock'], powerW: 5 }
+  ]);
+  const zw = require('../src/main/peripherals/drivers/zwave-driver');
+  const fake = makeFakeMesh({ ctorName: 'Driver' });
+  zw._setZwaveLibForTest(fake.lib);
+  assert.strictEqual(zw.isAvailable(), true, 'available in HIL');
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  pal.scan();
+  assert.strictEqual(pal.execute('zw-lock-hil', 'unlock').pending, true, 'Class A gated in HIL');
+  assert.strictEqual(fake.created.length, 0, 'no real Driver in HIL');
+  zw._setZwaveLibForTest(null);
+  delete process.env.LIKU_PERIPHERAL_HIL;
+  delete process.env.LIKU_ZWAVE_DEVICES;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('USB-HID driver: LOCAL (REMOTE=false) — real fake node-hid write dispatched', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_PERIPHERAL_HIL;
+  process.env.LIKU_USBHID_ENABLE = '1';
+  process.env.LIKU_USBHID_DEVICES = JSON.stringify([
+    { id: 'hid-relay-01', name: 'Relay', class: 'B', kind: 'switch', capabilities: ['on', 'off'], powerW: 2, path: 'usb:001' }
+  ]);
+  const usb = require('../src/main/peripherals/drivers/usbhid-driver');
+  assert.strictEqual(usb.REMOTE, false, 'USB-HID is a LOCAL bus (no signed token required)');
+  const writes = [];
+  const fakeLib = { HID: function () { return { write: (r) => writes.push(r), close: () => {} }; } };
+  usb._setUsbHidLibForTest(fakeLib);
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  pal.scan();
+  assert.ok(pal.listDrivers().drivers.includes('usbhid'), 'usbhid available when enabled');
+  const stop = pal.startStreaming();
+  assert.strictEqual(pal.execute('hid-relay-01', 'on').ok, true, 'Class B HID write dispatched');
+  assert.ok(writes.length >= 1, 'HID report written to the device');
+  stop();
+  usb._setUsbHidLibForTest(null);
+  delete process.env.LIKU_USBHID_ENABLE;
+  delete process.env.LIKU_USBHID_DEVICES;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('USB-HID driver: HIL isolated (no real HID handle opened) and gated', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  process.env.LIKU_PERIPHERAL_HIL = '1';
+  delete process.env.LIKU_USBHID_ENABLE;
+  process.env.LIKU_USBHID_DEVICES = JSON.stringify([
+    { id: 'hid-lock-hil', name: 'Lock', class: 'A', kind: 'lock', capabilities: ['lock', 'unlock'], powerW: 4 }
+  ]);
+  const usb = require('../src/main/peripherals/drivers/usbhid-driver');
+  let opened = 0;
+  usb._setUsbHidLibForTest({ HID: function () { opened++; return { write() {}, close() {} }; } });
+  assert.strictEqual(usb.isAvailable(), true, 'available in HIL');
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  pal.scan();
+  assert.strictEqual(pal.execute('hid-lock-hil', 'unlock').pending, true, 'Class A gated in HIL');
+  assert.strictEqual(opened, 0, 'no real HID handle opened in HIL');
+  usb._setUsbHidLibForTest(null);
+  delete process.env.LIKU_PERIPHERAL_HIL;
+  delete process.env.LIKU_USBHID_DEVICES;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('KNX driver: real fake-lib group-write dispatched; Class A confirm-gated', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_PERIPHERAL_HIL;
+  process.env.LIKU_KNX_GATEWAY = '10.0.0.9';
+  process.env.LIKU_KNX_DEVICES = JSON.stringify([
+    { id: 'knx-light-r1', name: 'Light', class: 'B', kind: 'light', capabilities: ['on', 'off'], powerW: 7, groupAddress: '1/0/1' },
+    { id: 'knx-lock-r1', name: 'Lock', class: 'A', kind: 'lock', capabilities: ['lock', 'unlock'], powerW: 3, groupAddress: '1/0/2' }
+  ]);
+  const knx = require('../src/main/peripherals/drivers/knx-driver');
+  // KNX createController calls `lib.Connection(opts)` WITHOUT `new`, so provide a
+  // factory that returns a connection object with a `write(ga, value)` method.
+  const EventEmitter = require('events');
+  const knxSent = [];
+  const conn = new EventEmitter();
+  conn.write = (ga, value) => { knxSent.push({ ga, value }); };
+  const fakeLib = { Connection: () => conn };
+  knx._setKnxLibForTest(fakeLib);
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  pal.scan();
+  assert.ok(pal.listDrivers().drivers.includes('knx'), 'knx available via gateway');
+  const stop = pal.startStreaming();
+  assert.strictEqual(pal.execute('knx-light-r1', 'on').ok, true, 'Class B group-write dispatched');
+  assert.ok(knxSent.some((s) => s.ga === '1/0/1'), 'KNX group write to the light GA');
+  assert.strictEqual(pal.execute('knx-lock-r1', 'unlock').pending, true, 'Class A gated');
+  pal.authorize('knx-lock-r1', 'unlock');
+  assert.strictEqual(pal.execute('knx-lock-r1', 'unlock').ok, true, 'confirmed dispatches');
+  stop();
+  knx._setKnxLibForTest(null);
+  delete process.env.LIKU_KNX_GATEWAY;
+  delete process.env.LIKU_KNX_DEVICES;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('New Phase 37 drivers participate in aggregate pairing status', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  process.env.LIKU_PERIPHERAL_HIL = '1';
+  process.env.LIKU_THREAD_DEVICES = JSON.stringify([{ id: 'th-pair-01', name: 'P', class: 'B', kind: 'switch', capabilities: ['on', 'off'], powerW: 3 }]);
+  require('../src/main/peripherals/drivers/thread-driver');
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  pal.scan();
+  const pr = pal.pairDevice('th-pair-01');
+  assert.strictEqual(pr.enabled, true, 'pairing routed to thread driver');
+  const status = pal.getPairingStatus();
+  assert.strictEqual(status.enabled, true);
+  assert.ok(Object.prototype.hasOwnProperty.call(status.devices || status.byDevice || {}, 'th-pair-01') || JSON.stringify(status).includes('th-pair-01'), 'thread device appears in pairing status');
+  delete process.env.LIKU_PERIPHERAL_HIL;
+  delete process.env.LIKU_THREAD_DEVICES;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
 console.log(`\n${pass} checks passed.`);
 if (process.exitCode) { console.error('FAILED'); }
 else { console.log('OK'); }

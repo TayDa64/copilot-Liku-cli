@@ -87,6 +87,7 @@ function loadDeviceConfig() {
         capabilities: Array.isArray(d.capabilities) ? d.capabilities.map((c) => String(c)) : [],
         nodeId: d.nodeId != null ? String(d.nodeId) : undefined,
         endpoint: Number.isFinite(Number(d.endpoint)) ? Number(d.endpoint) : undefined,
+        commissioningCode: d.commissioningCode ? String(d.commissioningCode) : (d.setupCode ? String(d.setupCode) : undefined),
         powerW: Number.isFinite(Number(d.powerW)) ? Number(d.powerW) : undefined,
         driver: DRIVER_ID
       }));
@@ -108,6 +109,7 @@ class MatterController {
     this.emit = null;         // reading sink (set by start())
     this.wanted = new Map();  // deviceId → cfg (for inbound report routing)
     this.endpoints = new Map(); // deviceId → resolved endpoint (cache)
+    this.commissioned = new Set(); // Phase 37: deviceIds that completed commissionNode
     // Phase 16: fabric commissioning state machine (retry + backoff).
     this.pairing = createPairingState({
       maxAttempts: Number(process.env.LIKU_MATTER_PAIR_MAX_ATTEMPTS),
@@ -164,13 +166,55 @@ class MatterController {
   commission(cfg) {
     if (!cfg) return null;
     this.ensureWanted(cfg);
+    // Phase 37: richer commissioning — if a setup/pairing code is available and the
+    // node has not been commissioned onto the fabric yet, run commissionNode FIRST,
+    // then resolve the operational endpoint (both drive the pairing state machine).
+    const code = cfg.commissioningCode || cfg.setupCode;
+    if (code && !this.commissioned.has(cfg.id)) this.commissionNode(cfg, code);
     this._resolveEndpoint(cfg);
     return this.pairing.get(cfg.id);
+  }
+
+  /**
+   * Phase 37 — COMMISSION a node onto the fabric with a setup/pairing code
+   * (discover → commission). Idempotent; degrades to "not commissioned" rather than
+   * throwing. The subsequent endpoint resolution completes the pair → operational
+   * step. Returns true once commissionNode has been dispatched.
+   */
+  commissionNode(cfg, code) {
+    if (!cfg || this.commissioned.has(cfg.id)) return this.commissioned.has(cfg.id);
+    if (!this.controller) return false;
+    try {
+      let r = null;
+      if (typeof this.controller.commissionNode === 'function') r = this.controller.commissionNode(code, { nodeId: cfg.nodeId });
+      else if (typeof this.controller.commission === 'function') r = this.controller.commission(code, { nodeId: cfg.nodeId });
+      else if (typeof this.controller.pairDevice === 'function') r = this.controller.pairDevice(code);
+      if (r && typeof r.then === 'function') r.then(() => {}).catch(() => {});
+      this.commissioned.add(cfg.id);
+      return true;
+    } catch { return false; }
+  }
+
+  /**
+   * Phase 37 — DISCOVER commissionable nodes on the network (setup/announce phase).
+   * Falls back to declared devices carrying a setup code. Pure discovery — no fabric
+   * mutation.
+   */
+  discoverCommissionable() {
+    const out = [];
+    try {
+      if (this.controller && typeof this.controller.discoverCommissionableNodes === 'function') {
+        const nodes = this.controller.discoverCommissionableNodes() || [];
+        for (const n of nodes) out.push({ nodeId: n && n.nodeId != null ? String(n.nodeId) : undefined, discriminator: n && n.discriminator, commissionable: true });
+      }
+    } catch { /* best-effort */ }
+    return out;
   }
 
   /** Tear down a device's commissioning + requeue it for re-pairing. */
   unpair(id) {
     this.endpoints.delete(id);
+    this.commissioned.delete(id);
     if (this.pairing) this.pairing.requeue(id);
   }
 
@@ -309,10 +353,40 @@ function pair(deviceId) { return _pairing.pair(deviceId); }
 function unpair(deviceId) { return _pairing.unpair(deviceId); }
 function pairingStatus() { return _pairing.pairingStatus(); }
 
+/**
+ * Phase 37 — RICHER COMMISSIONING: discover → commission (with a setup code) →
+ * pair → operational. HIL is virtual (no fabric touched). The PAL still gates any
+ * subsequent physical action through DCP → class gate → pending/confirm.
+ * @param {string} deviceId
+ * @param {{ code?:string }} [opts]
+ */
+function commission(deviceId, opts = {}) {
+  const cfg = loadDeviceConfig().find((d) => d.id === deviceId);
+  if (!cfg) return { ok: false, reason: 'unknown-device' };
+  if (hil.isEnabled()) return { ok: true, state: 'paired', commissioned: true, simulated: true, hil: true };
+  const ctrl = _ensureController();
+  if (!ctrl) return { ok: false, reason: 'not-connected' };
+  const code = opts.code || cfg.commissioningCode;
+  const state = ctrl.commission({ ...cfg, commissioningCode: code });
+  const paired = !!(state && state.state === 'paired');
+  return { ok: paired, state: state ? state.state : 'unpaired', commissioned: ctrl.commissioned.has(cfg.id) };
+}
+
+/** Phase 37 — discover commissionable Matter nodes (declared devices in HIL). */
+function discoverCommissionable() {
+  if (hil.isEnabled()) return loadDeviceConfig().map((d) => ({ id: d.id, nodeId: d.nodeId, commissionable: true, hil: true }));
+  const ctrl = _ensureController();
+  return ctrl ? ctrl.discoverCommissionable() : [];
+}
+
+/** Phase 37 — per-device commissioning/pairing status (alias of pairingStatus). */
+function commissioningStatus() { return _pairing.pairingStatus(); }
+
 module.exports = {
   DRIVER_ID, REMOTE, SUPPORTS_HIL,
   isAvailable, discover, perform, start, loadDeviceConfig,
   pair, unpair, pairingStatus,
+  commission, discoverCommissionable, commissioningStatus,
   // test seam only
   _setMatterLibForTest
 };

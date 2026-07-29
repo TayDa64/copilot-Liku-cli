@@ -1740,3 +1740,60 @@ driver stays local/in-process and needs no wire format.
 - **Cognitive budget unchanged.** `sensor.*`/`hardware.*.alert` facts are
   evidence-excluded from the default fragment; the default prompt stays
   byte-identical.
+
+## Phase 37 — device-surface expansion (Matter commissioning + Thread / Z-Wave / USB-HID / KNX)
+
+Phase 37 broadens the *real* driver surface. All new drivers are built on a shared
+factory (`src/main/peripherals/drivers/mesh-driver-factory.js` → `createMeshDriver(spec)`)
+so they expose the identical safe driver interface (`isAvailable / discover / perform /
+start / pair / unpair / pairingStatus / loadDeviceConfig / _set<X>LibForTest`) as
+BLE / Zigbee / Matter / ROS2. Because the PAL runs `isPhysicalActionAllowed`
+(DCP `evaluateCommand` → class A/B/C gate → pending/confirm) BEFORE `driver.perform()`,
+every new driver inherits the full safety chain automatically.
+
+New drivers:
+
+- **Thread** (`thread-driver.js`, REMOTE) — bridges a Thread border router; outbound
+  mesh `send`, inbound telemetry → `PAL.ingestSensorReading`.
+- **Z-Wave** (`zwave-driver.js`, REMOTE) — controller/node model (`getNode` →
+  `command`/`setValue`).
+- **USB-HID** (`usbhid-driver.js`, **LOCAL — `REMOTE=false`, no signed token**) —
+  opens a node-hid handle per device and writes a small HID report.
+- **KNX** (`knx-driver.js`, REMOTE) — group-address writes over an IP tunnel gateway.
+
+Matter is enriched with real commissioning: `commissionNode(code)` (idempotent, tracked
+in a `commissioned` Set), `discoverCommissionable()`, and driver-level
+`commission(deviceId,{code})` / `commissioningStatus()`. The PAL exposes
+`commissionDevice(id,{code})` (routes to a driver's `commission` when supported, else
+falls back to `pairDevice`) and `getCommissionableDevices()`. CLI:
+`liku peripherals commission <id> [--code <setup-code>]` and `commission discover`.
+
+### Phase 37 env vars
+
+| Var | Purpose |
+| --- | --- |
+| `LIKU_THREAD_DEVICES` / `LIKU_THREAD_BORDER_ROUTER` | Thread device configs / border router transport |
+| `LIKU_ZWAVE_DEVICES` / `LIKU_ZWAVE_CONTROLLER` | Z-Wave device configs / serial controller |
+| `LIKU_USBHID_DEVICES` / `LIKU_USBHID_ENABLE` | USB-HID device configs / local-bus enable flag |
+| `LIKU_KNX_DEVICES` / `LIKU_KNX_GATEWAY` | KNX device configs / IP tunnel gateway |
+| `LIKU_<DRIVER>_PAIR_MAX_ATTEMPTS` / `_BACKOFF_MS` | Per-driver pairing retry/backoff |
+| Matter config `commissioningCode` / `setupCode` | Matter setup code for `commission` |
+
+Availability follows the established rule: devices declared **AND** (HIL on **OR** a
+transport configured). USB-HID additionally requires `LIKU_USBHID_ENABLE=1`.
+
+### Phase 37 safety invariants
+
+- **New drivers inherit the safety chain.** Thread / Z-Wave / USB-HID / KNX flow
+  through DCP → class gate → pending/confirm; Class A stays confirm-gated even when
+  the real transport is connected (proven by fake-lib tests).
+- **HIL is fully isolated.** With `LIKU_PERIPHERAL_HIL=1` no real controller is
+  constructed and no real send/write occurs (asserted per driver); pairing and
+  commissioning are virtual.
+- **USB-HID is LOCAL, not remote.** `REMOTE=false` → no signed capability token is
+  required, but it still passes through the identical class gate + confirm flow.
+- **Commissioning never actuates.** `commissionNode` only onboards a node onto the
+  fabric/mesh; any subsequent physical action is still gated. HIL commission is a
+  virtual pair. Discovery is read-only.
+- **Cognitive budget unchanged.** No new facts are injected into the default
+  fragment; the default prompt stays byte-identical.
