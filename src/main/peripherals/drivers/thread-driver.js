@@ -25,6 +25,7 @@ const driver = createMeshDriver({
   envDevices: 'LIKU_THREAD_DEVICES',
   envTransport: 'LIKU_THREAD_BORDER_ROUTER',
   pairEnvPrefix: 'LIKU_THREAD_PAIR',
+  liveEnv: 'LIKU_THREAD_LIVE',
   resultPrefix: 'thread',
   loadLib() { try { return require('openthread'); } catch { return null; } },
   extraFields: (d) => ({
@@ -98,6 +99,7 @@ const driver = createMeshDriver({
 
 module.exports = {
   ...driver,
-  // test seam only
-  _setThreadLibForTest: driver._setLibForTest
+  // test seams only
+  _setThreadLibForTest: driver._setLibForTest,
+  _setThreadLiveLibForTest: driver._setLiveLibForTest
 };

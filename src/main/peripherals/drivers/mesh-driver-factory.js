@@ -55,10 +55,30 @@ function createMeshDriver(spec) {
   } = spec;
 
   let _injectedLib = null;
+  let _liveLib = null;
   let _controller = null;
 
   function _setLibForTest(lib) { _injectedLib = lib; _controller = null; }
-  function _loadLib() { if (_injectedLib) return _injectedLib; try { return loadLib ? loadLib() : null; } catch { return null; } }
+  // Phase 39 — simulate a REAL installed transport library for tests of the live
+  // gate: it is used ONLY when the live flag is enabled (unlike _injectedLib which
+  // always bypasses the gate, standing in for a mocked transport).
+  function _setLiveLibForTest(lib) { _liveLib = lib; _controller = null; }
+  /**
+   * Phase 39 — LIVE-HARDWARE opt-in gate. Touching a real transport library
+   * (openthread / zwave-js / knx / node-hid) requires an EXPLICIT opt-in so that a
+   * library merely being installed never causes live I/O. Default OFF. Enabled via
+   * the global `LIKU_PERIPHERAL_LIVE=1` or a per-driver `spec.liveEnv` flag.
+   */
+  function _liveEnabled() {
+    if (String(process.env.LIKU_PERIPHERAL_LIVE || '').trim() === '1') return true;
+    return !!(spec.liveEnv && String(process.env[spec.liveEnv] || '').trim() === '1');
+  }
+  function _loadLib() {
+    if (_injectedLib) return _injectedLib;   // explicit test double — always allowed
+    if (!_liveEnabled()) return null;        // real hardware libs require opt-in
+    if (_liveLib) return _liveLib;           // simulated real lib (live-gate tests)
+    try { return loadLib ? loadLib() : null; } catch { return null; }
+  }
   function transportConfigured() { return !!String(process.env[envTransport] || '').trim(); }
 
   /** Parse declared device config from env (safe, never throws). */
@@ -261,7 +281,9 @@ function createMeshDriver(spec) {
     pair: (id) => _pairing.pair(id),
     unpair: (id) => _pairing.unpair(id),
     pairingStatus: () => _pairing.pairingStatus(),
-    _setLibForTest
+    isLiveEnabled: _liveEnabled,
+    _setLibForTest,
+    _setLiveLibForTest
   };
 }
 

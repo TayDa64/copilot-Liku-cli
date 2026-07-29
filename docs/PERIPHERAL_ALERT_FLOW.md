@@ -1880,3 +1880,79 @@ node is interviewed and no HID handle is opened in HIL.
   cluster mode, so the single-machine node-health path is unchanged.
 - **Cognitive budget unchanged.** No new facts injected; the default prompt stays
   byte-identical (262 BPE).
+
+## Phase 39 — long-horizon forecasting + hardened live-device gate + fleet trends
+
+Phase 39 closes three high-value gaps with pure-observation / opt-in additions; no
+new autonomous actuation is introduced and every real path still runs after
+`isPhysicalActionAllowed`.
+
+### Weekly / multi-day forecast + special-day awareness (power-forecast.js)
+
+- `multiDayForecast({ horizonDays, excludeAnomalous })` — a days-ahead view built by
+  wrapping the existing day-of-week × hour baselines. Per upcoming day it reports
+  `predictedMeanW`/`predictedPeakW`/`peakHour`, a confidence label (from how much of
+  the day is backed by a real dow×hour baseline), and `special` (holiday). Capped at
+  `MAX_HORIZON_DAYS` (14).
+- `weeklyProfile()` — per-day-of-week daily mean/peak summary.
+- `isSpecialDay(dateKey)` — holiday-override + opt-in auto-detected special day check.
+- The short-horizon `forecast()` / `seasonalForecast()` APIs are UNCHANGED
+  (byte-identical). All output is pure observation → only feeds human-gated schedule
+  suggestions; nothing auto-applies. Surfaced via `PAL.getMultiDayForecast` /
+  `PAL.getWeeklyProfile`.
+
+### Hardened live-hardware gate (mesh-driver-factory.js)
+
+- Touching a REAL transport library (openthread / zwave-js / knx / node-hid) now
+  requires an EXPLICIT opt-in, so a library merely being installed never causes live
+  I/O. Default OFF → the real path returns `not-connected`.
+- Enable globally with `LIKU_PERIPHERAL_LIVE=1` or per-driver `LIKU_THREAD_LIVE` /
+  `LIKU_ZWAVE_LIVE` / `LIKU_KNX_LIVE` / `LIKU_USBHID_LIVE`. `driver.isLiveEnabled()`
+  reports the state.
+- The injected test double (`_set<X>LibForTest`) still bypasses the gate for mocks;
+  a new `_set<X>LiveLibForTest` simulates a REAL installed lib that is used ONLY when
+  the live flag is on. HIL always takes precedence — when `LIKU_PERIPHERAL_HIL=1`
+  nothing real is touched even if the live flag is set. Class A stays confirm-gated on
+  the live path.
+
+### Fleet-aware fairness + snapshot trends
+
+- `publishNodeHealth` / `publishDerivedNodeHealth` now also publish the derived
+  `signals` (contention/tick/lease). `deriveNodeHealth` folds a lease signal when
+  opted in (Phase 38).
+- Rebalance `_healthFactor` OPTIONALLY folds a peer's published lease-contention
+  signal deeper (`LIKU_PERIPHERAL_REBALANCE_LEASE_AWARE=1` or `opts.leaseAware`): a
+  high-contention peer gets up to a 50% extra penalty, so it is a worse target.
+  Advisory, hysteresis + min-residency protected, default OFF, ownership untouched
+  (no double ownership), inert single-machine.
+- `fleet-snapshot.trends({ limit })` — pure-observation trend view over the persisted
+  snapshot ring (latest/oldest/delta for node-health, flapping, current power,
+  anomalies + a time series). Surfaced via `PAL.getFleetSnapshotTrends`. Read-only.
+
+### Phase 39 env vars
+
+| Var | Purpose |
+| --- | --- |
+| `LIKU_PERIPHERAL_FORECAST_HORIZON_DAYS` | Multi-day forecast horizon (default 7, cap 14) |
+| `LIKU_PERIPHERAL_FORECAST_HOLIDAYS` (existing) | Comma list of special/holiday dates (tagged + excludable) |
+| `LIKU_PERIPHERAL_FORECAST_AUTO_SPECIAL` (existing) | Opt-in data-driven special-day detection |
+| `LIKU_PERIPHERAL_LIVE` | GLOBAL opt-in for real-hardware transport libraries |
+| `LIKU_THREAD_LIVE` / `LIKU_ZWAVE_LIVE` / `LIKU_KNX_LIVE` / `LIKU_USBHID_LIVE` | Per-driver live opt-in |
+| `LIKU_PERIPHERAL_REBALANCE_LEASE_AWARE` | Opt-in: fold peer lease-contention into fairness weighting |
+
+### Phase 39 safety invariants
+
+- **Long-horizon forecasts never actuate.** Multi-day / weekly views are pure
+  observation and only inform human-gated suggestions; short-horizon APIs unchanged.
+- **Live paths cannot bypass the safety chain.** The real lib is loaded only after an
+  explicit opt-in AND only via `perform()` → after DCP → class gate → pending/confirm.
+  Class A stays `pending` (no live send) until confirm. HIL takes precedence over live.
+- **Fairness enrichment stays advisory.** Lease-aware weighting only changes the
+  advisory rebalance target (hysteresis + min-residency protected); it never rewrites
+  exclusive ownership and cannot strand or double-own a task. Default OFF, inert
+  single-machine.
+- **Snapshot trends are pure observation.** `trends()` reads the ring and never writes.
+- **Single-machine byte-compatible.** Lease-aware fairness + lease metrics are
+  cluster-only; the single-machine path is unchanged.
+- **Cognitive budget unchanged.** No new facts injected; the default prompt stays
+  byte-identical (262 BPE).

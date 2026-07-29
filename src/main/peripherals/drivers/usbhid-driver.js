@@ -27,6 +27,7 @@ const driver = createMeshDriver({
   envDevices: 'LIKU_USBHID_DEVICES',
   envTransport: 'LIKU_USBHID_ENABLE',
   pairEnvPrefix: 'LIKU_USBHID_PAIR',
+  liveEnv: 'LIKU_USBHID_LIVE',
   resultPrefix: 'usbhid',
   loadLib() { try { return require('node-hid'); } catch { return null; } },
   extraFields: (d) => ({
@@ -91,6 +92,7 @@ const driver = createMeshDriver({
 
 module.exports = {
   ...driver,
-  // test seam only
-  _setUsbHidLibForTest: driver._setLibForTest
+  // test seams only
+  _setUsbHidLibForTest: driver._setLibForTest,
+  _setUsbHidLiveLibForTest: driver._setLiveLibForTest
 };

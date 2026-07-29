@@ -402,6 +402,103 @@ function seasonalForecast(opts = {}) {
   return { ok: true, horizon, basis: 'dow-seasonal', samples: samples.length, overallMean, horizonHours: boundedHorizon, excludedAnomalous: !!opts.excludeAnomalous };
 }
 
+// ── Phase 39: WEEKLY / MULTI-DAY horizon + stronger special-day awareness ────
+// Longer-horizon, PURE-OBSERVATION views built by wrapping the existing day-of-week
+// × hour baselines. Never actuates; only informs human-gated schedule suggestions.
+// The short-horizon forecast()/seasonalForecast() APIs are untouched (byte-identical).
+const MAX_HORIZON_DAYS = 14;
+
+/** True if a calendar date (YYYY-MM-DD) is a known special/holiday day. PURE. */
+function isSpecialDay(dateKey, opts = {}) {
+  if (!dateKey) return false;
+  const holidays = _holidaySet();
+  if (holidays && holidays.has(dateKey)) return true;
+  const auto = (opts && opts.autoSpecial === true) || String(process.env.LIKU_PERIPHERAL_FORECAST_AUTO_SPECIAL || '').trim() === '1';
+  if (auto) {
+    const samples = Array.isArray(opts.samples) ? opts.samples : _loadSamples(opts);
+    if (detectSpecialDays({ samples }).dates.some((d) => d.date === dateKey)) return true;
+  }
+  return false;
+}
+
+/**
+ * WEEKLY PROFILE — a per-day-of-week daily summary (mean + peak total draw across
+ * the day + sample count), so an operator sees the weekly load shape at a glance.
+ * PURE OBSERVATION. Honours `excludeAnomalous` to keep special days out.
+ * @returns {{ [dow:number]: { meanW:number, peakW:number, hours:number, count:number } }}
+ */
+function weeklyProfile(opts = {}) {
+  if (!enabled()) return {};
+  const samples = _filterSamples(_loadSamples(opts), opts);
+  const dowB = dowHourlyBaselines({ samples });
+  const out = {};
+  for (const [d, hours] of Object.entries(dowB)) {
+    const entries = Object.values(hours);
+    if (!entries.length) continue;
+    const meanW = _round(entries.reduce((a, b) => a + b.mean, 0) / entries.length);
+    const peakW = _round(Math.max(...entries.map((b) => b.peak)));
+    const count = entries.reduce((a, b) => a + b.count, 0);
+    out[Number(d)] = { meanW, peakW, hours: entries.length, count };
+  }
+  return out;
+}
+
+/**
+ * MULTI-DAY forecast — a days-ahead view built by wrapping the day-of-week × hour
+ * baselines. For each upcoming DAY it reports the predicted mean/peak draw, the
+ * peak hour, a confidence label (from how much of the day is backed by a real
+ * dow×hour baseline), and whether that calendar date is a known special/holiday
+ * day (atypical → treat its baseline with care). PURE OBSERVATION — advisory only;
+ * never actuates. Short-horizon APIs are unchanged.
+ * @param {{ samples?:object[], sinceMs?:number, horizonDays?:number, now?:number, excludeAnomalous?:boolean }} [opts]
+ */
+function multiDayForecast(opts = {}) {
+  if (!enabled()) return { ok: false, days: [], basis: 'disabled', samples: 0 };
+  const samples = _filterSamples(_loadSamples(opts), opts);
+  const minSamples = Number(process.env.LIKU_PERIPHERAL_FORECAST_MIN_SAMPLES) || 6;
+  if (samples.length < minSamples) return { ok: false, days: [], basis: 'insufficient-history', samples: samples.length };
+  const horizonDays = Number.isFinite(opts.horizonDays) ? opts.horizonDays
+    : (Number(process.env.LIKU_PERIPHERAL_FORECAST_HORIZON_DAYS) || 7);
+  const boundedDays = Math.max(1, Math.min(MAX_HORIZON_DAYS, Math.floor(horizonDays)));
+  const dowB = dowHourlyBaselines({ samples });
+  const groupB = _dowGroupBaselines(samples);
+  const hourB = hourlyBaselines({ samples });
+  const totals = samples.map((s) => Number(s.totalW) || 0);
+  const overallMean = _round(totals.reduce((a, b) => a + b, 0) / totals.length);
+  const dowMin = Number(process.env.LIKU_PERIPHERAL_FORECAST_DOW_MIN) || 2;
+  const groupMin = Number(process.env.LIKU_PERIPHERAL_FORECAST_GROUP_MIN) || 2;
+  const holidays = _holidaySet();
+  const now = Number.isFinite(opts.now) ? opts.now : Date.now();
+  const days = [];
+  for (let d = 1; d <= boundedDays; d++) {
+    const future = new Date(now + d * 86400000);
+    const dow = future.getDay();
+    const dateKey = _dateKey(future.toISOString());
+    let sumMean = 0; let peakW = 0; let peakHour = 0; let usedDow = 0;
+    for (let hour = 0; hour < 24; hour++) {
+      const db = dowB[dow] && dowB[dow][hour];
+      const gb = groupB[_dowGroup(dow)] && groupB[_dowGroup(dow)][hour];
+      const hb = hourB[hour];
+      let mean; let peak;
+      if (db && db.count >= dowMin) { mean = db.mean; peak = db.peak; usedDow++; }
+      else if (gb && gb.count >= groupMin) { mean = gb.mean; peak = gb.peak; }
+      else if (hb) { mean = hb.mean; peak = hb.peak; }
+      else { mean = overallMean; peak = overallMean; }
+      sumMean += mean;
+      if (peak > peakW) { peakW = peak; peakHour = hour; }
+    }
+    const coverage = usedDow / 24;
+    const confidence = coverage >= 0.5 ? 'high' : coverage >= 0.2 ? 'medium' : 'low';
+    days.push({
+      dayAhead: d, date: dateKey, dow, dowGroup: _dowGroup(dow),
+      predictedMeanW: _round(sumMean / 24), predictedPeakW: _round(peakW), peakHour,
+      basis: usedDow > 0 ? 'dow-hour-baseline' : 'fallback', confidence,
+      special: !!(holidays && dateKey && holidays.has(dateKey))
+    });
+  }
+  return { ok: true, days, basis: 'multi-day', horizonDays: boundedDays, samples: samples.length, overallMean };
+}
+
 /**
  * PER-DEVICE forecast warnings — for each upcoming hour whose (seasonal or plain)
  * forecast would exceed the budget, name the device MOST LIKELY to drive it
@@ -436,7 +533,8 @@ function deviceForecastWarnings(opts = {}) {
 }
 
 module.exports = {
-  FLAG, MAX_HORIZON_HOURS, enabled,
+  FLAG, MAX_HORIZON_HOURS, MAX_HORIZON_DAYS, enabled,
   hourlyBaselines, deviceHourlyBaselines, forecast, forecastExceedsBudget, contributorsAtHour,
-  dowHourlyBaselines, seasonalForecast, deviceForecastWarnings, detectSpecialDays
+  dowHourlyBaselines, seasonalForecast, deviceForecastWarnings, detectSpecialDays,
+  weeklyProfile, multiDayForecast, isSpecialDay
 };

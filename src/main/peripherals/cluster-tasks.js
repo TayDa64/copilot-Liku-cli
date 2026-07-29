@@ -412,10 +412,25 @@ function _healthFactor(nodeId, opts) {
     const coord = _coord();
     if (!coord.clusterEnabled()) return 1;
     const rec = coord.getShared('node-health', nodeId);
-    const score = rec && Number(rec.score);
+    let score = rec && Number(rec.score);
     if (!Number.isFinite(score)) return 1;
+    // Phase 39 — OPT-IN deeper lease folding. A peer that publishes a high
+    // lease-contention signal (losing coordination races) is an even WORSE target,
+    // so dampen its health factor further (bounded, advisory). Default OFF → the
+    // Phase-34 blended-score behaviour is unchanged.
+    if (_leaseAwareFairness(opts) && rec && rec.signals && Number.isFinite(Number(rec.signals.lease))) {
+      const lease = Math.min(1, Math.max(0, Number(rec.signals.lease)));
+      score = score * (1 - 0.5 * lease); // up to a 50% extra penalty at full contention
+    }
     return Math.min(1, Math.max(0.01, score)); // clamp so a 0 score never divides by zero
   } catch { return 1; }
+}
+
+// Phase 39: OPT-IN lease-aware fairness — fold a peer's published lease-contention
+// signal into target selection (deeper than the blended score). Advisory, default OFF.
+function _leaseAwareFairness(opts) {
+  if (opts && opts.leaseAware === true) return true;
+  return String(process.env.LIKU_PERIPHERAL_REBALANCE_LEASE_AWARE || '').trim() === '1';
 }
 
 /**
@@ -430,7 +445,11 @@ function publishNodeHealth(score, opts = {}) {
   const s = Math.min(1, Math.max(0, Number(score)));
   if (!Number.isFinite(s)) return { published: false, reason: 'invalid-score' };
   try {
-    const ok = coord.putShared('node-health', coord.nodeId(), { score: s, at: new Date(Number.isFinite(opts.now) ? opts.now : Date.now()).toISOString() });
+    // Phase 39 — also publish the derived SIGNALS (contention/tick/lease) when
+    // provided, so peers can weight lease contention explicitly in fairness.
+    const rec = { score: s, at: new Date(Number.isFinite(opts.now) ? opts.now : Date.now()).toISOString() };
+    if (opts.signals && typeof opts.signals === 'object') rec.signals = opts.signals;
+    const ok = coord.putShared('node-health', coord.nodeId(), rec);
     return { published: !!ok, nodeId: coord.nodeId(), score: s };
   } catch { return { published: false }; }
 }
@@ -505,7 +524,7 @@ function publishDerivedNodeHealth(opts = {}) {
   const coord = _coord();
   if (!coord.clusterEnabled()) return { published: false, local: true };
   const d = deriveNodeHealth(opts);
-  return { ...publishNodeHealth(d.score, opts), derived: true, contentionRate: d.contentionRate };
+  return { ...publishNodeHealth(d.score, { ...opts, signals: d.signals }), derived: true, contentionRate: d.contentionRate };
 }
 
 // ── Phase 36: TICK-HEALTH cluster status mirror (pure observation) ──────────

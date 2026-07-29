@@ -549,6 +549,20 @@ function getDeviceForecastWarnings(opts = {}) {
   } catch { return { enabled: true, warnings: [] }; }
 }
 
+/** Phase 39 — weekly / multi-day forecast horizon (pure observation, advisory only). */
+function getMultiDayForecast(opts = {}) {
+  if (!isPeripheralsEnabled()) return { enabled: false, ok: false, days: [] };
+  try { return { enabled: true, ...powerForecast().multiDayForecast(opts) }; }
+  catch { return { enabled: true, ok: false, days: [] }; }
+}
+
+/** Phase 39 — per-day-of-week weekly load profile (pure observation). */
+function getWeeklyProfile(opts = {}) {
+  if (!isPeripheralsEnabled()) return { enabled: false, profile: {} };
+  try { return { enabled: true, profile: powerForecast().weeklyProfile(opts) }; }
+  catch { return { enabled: true, profile: {} }; }
+}
+
 /** Phase 23 — propose a multi-hour coordinated schedule from the forecast bands. */
 function getMultiHourProposal(opts = {}) {
   if (!isPeripheralsEnabled()) return { enabled: false, proposal: null };
@@ -1003,6 +1017,13 @@ function getFleetSnapshot() {
   catch { return { enabled: true, latest: null, recent: [] }; }
 }
 
+/** Phase 39 — trend view over recent persisted fleet snapshots (pure observation). */
+function getFleetSnapshotTrends(opts = {}) {
+  if (!isPeripheralsEnabled()) return { enabled: false, points: 0, series: [] };
+  try { return { enabled: true, ...require('./fleet-snapshot').trends(opts) }; }
+  catch { return { enabled: true, points: 0, series: [] }; }
+}
+
 /** Phase 22 — mint a PER-ACTION (least-privilege) capability token for a device. */
 function issueActionToken(id, action, opts = {}) {
   if (!isPeripheralsEnabled()) return { enabled: false };
@@ -1357,6 +1378,7 @@ module.exports = {
   getClusterTickHealth,
   getFleetObservability,
   getFleetSnapshot,
+  getFleetSnapshotTrends,
   getLockClusterTrends,
   issueActionToken,
   verifyDeviceToken,
@@ -1365,6 +1387,8 @@ module.exports = {
   rotateDeviceIdentity,
   getSeasonalForecast,
   getDeviceForecastWarnings,
+  getMultiDayForecast,
+  getWeeklyProfile,
   getMultiHourProposal,
   getSpecialDays,
   sweepCluster,

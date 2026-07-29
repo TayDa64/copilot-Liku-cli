@@ -69,6 +69,7 @@ const driver = createMeshDriver({
   envDevices: 'LIKU_KNX_DEVICES',
   envTransport: 'LIKU_KNX_GATEWAY',
   pairEnvPrefix: 'LIKU_KNX_PAIR',
+  liveEnv: 'LIKU_KNX_LIVE',
   resultPrefix: 'knx',
   loadLib() { try { return require('knx'); } catch { return null; } },
   extraFields: (d) => ({
@@ -120,6 +121,7 @@ module.exports = {
   _encodeDpt: encodeDpt,
   _decodeDpt: decodeDpt,
   _knxValue: knxValue,
-  // test seam only
-  _setKnxLibForTest: driver._setLibForTest
+  // test seams only
+  _setKnxLibForTest: driver._setLibForTest,
+  _setKnxLiveLibForTest: driver._setLiveLibForTest
 };

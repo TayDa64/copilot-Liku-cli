@@ -6787,6 +6787,356 @@ test('Ops: fleet-observability snapshot persists a compact snapshot when opted i
   delete process.env.LIKU_ENABLE_PERIPHERALS;
 });
 
+// ---------------------------------------------------------------------------
+// Phase 39 — weekly/multi-day forecast + special-day awareness, opt-in live-hardware
+// gate for the new drivers, fleet-aware fairness enrichment, and snapshot trends.
+// ---------------------------------------------------------------------------
+
+/** Build synthetic per-hour power samples across N days for forecast tests. */
+function makeForecastSamples(days, startMs, perHourW) {
+  const out = [];
+  for (let d = 0; d < days; d++) {
+    for (let h = 0; h < 24; h++) {
+      const at = new Date(startMs + d * 86400000 + h * 3600000).toISOString();
+      out.push({ at, totalW: perHourW(d, h), overBudget: false });
+    }
+  }
+  return out;
+}
+
+test('Forecast: multi-day horizon is pure observation + honours the day cap; short-horizon APIs unchanged', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const pf = require('../src/main/peripherals/power-forecast');
+  const start = new Date(2026, 0, 5, 0, 0, 0).getTime(); // a Monday
+  const samples = makeForecastSamples(14, start, (d, h) => (h >= 8 && h <= 18 ? 800 : 200));
+  const now = start + 14 * 86400000;
+  // Short-horizon forecast + seasonal still work and are byte-identical in shape.
+  const short = pf.forecast({ samples, now, horizonHours: 3 });
+  assert.strictEqual(short.ok, true);
+  assert.strictEqual(short.horizon.length, 3, 'short horizon unchanged');
+  const seasonal = pf.seasonalForecast({ samples, now, horizonHours: 3 });
+  assert.strictEqual(seasonal.ok, true);
+  // Multi-day horizon.
+  const md = pf.multiDayForecast({ samples, now, horizonDays: 7 });
+  assert.strictEqual(md.ok, true);
+  assert.strictEqual(md.days.length, 7, '7-day horizon');
+  assert.ok(md.days.every((x) => x.predictedMeanW > 0 && x.predictedPeakW >= x.predictedMeanW), 'per-day mean/peak sane');
+  // Cap at MAX_HORIZON_DAYS.
+  const capped = pf.multiDayForecast({ samples, now, horizonDays: 99 });
+  assert.strictEqual(capped.days.length, pf.MAX_HORIZON_DAYS, 'horizon capped at MAX_HORIZON_DAYS');
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('Forecast: weekly profile + special-day tagging (holiday override excluded from baseline)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const pf = require('../src/main/peripherals/power-forecast');
+  const start = new Date(2026, 0, 5, 0, 0, 0).getTime();
+  const samples = makeForecastSamples(14, start, (d, h) => (h >= 8 && h <= 18 ? 700 : 150));
+  const now = start + 14 * 86400000;
+  const wp = pf.weeklyProfile({ samples });
+  assert.ok(Object.keys(wp).length >= 5, 'weekly profile has per-dow entries');
+  assert.ok(Object.values(wp).every((e) => e.meanW > 0 && e.peakW >= e.meanW), 'profile mean/peak sane');
+  // Tag a specific upcoming date as a holiday via the override list.
+  const future = new Date(now + 86400000);
+  const key = `${future.getFullYear()}-${String(future.getMonth() + 1).padStart(2, '0')}-${String(future.getDate()).padStart(2, '0')}`;
+  process.env.LIKU_PERIPHERAL_FORECAST_HOLIDAYS = key;
+  assert.strictEqual(pf.isSpecialDay(key), true, 'override date is special');
+  const md = pf.multiDayForecast({ samples, now, horizonDays: 3 });
+  assert.ok(md.days.some((x) => x.date === key && x.special === true), 'multi-day tags the holiday date special');
+  delete process.env.LIKU_PERIPHERAL_FORECAST_HOLIDAYS;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('Forecast: multi-day requires sufficient history (advisory, not premature); PAL accessors advisory', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const pf = require('../src/main/peripherals/power-forecast');
+  const thin = pf.multiDayForecast({ samples: [{ at: new Date().toISOString(), totalW: 100 }], horizonDays: 7 });
+  assert.strictEqual(thin.ok, false);
+  assert.strictEqual(thin.basis, 'insufficient-history');
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  const acc = pal.getMultiDayForecast({ samples: [], horizonDays: 3 });
+  assert.strictEqual(acc.enabled, true, 'PAL multi-day accessor returns advisory-only shape');
+  const wp = pal.getWeeklyProfile({ samples: [] });
+  assert.strictEqual(wp.enabled, true);
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('Live gate: Thread real transport is OPT-IN (default OFF does not touch the real lib)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_PERIPHERAL_HIL;
+  delete process.env.LIKU_PERIPHERAL_LIVE;
+  delete process.env.LIKU_THREAD_LIVE;
+  process.env.LIKU_THREAD_BORDER_ROUTER = '/dev/fake-thread';
+  process.env.LIKU_THREAD_DATASET = '0e08';
+  process.env.LIKU_THREAD_DEVICES = JSON.stringify([
+    { id: 'th-live', name: 'Plug', class: 'B', kind: 'switch', capabilities: ['on', 'off'], powerW: 5, address: 'fd00::1', joinerEui64: 'AA' }
+  ]);
+  const th = require('../src/main/peripherals/drivers/thread-driver');
+  const fake = makeFakeThread();
+  th._setThreadLiveLibForTest(fake.lib); // simulate a REAL installed lib (gated)
+  assert.strictEqual(th.isLiveEnabled(), false, 'live disabled by default');
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  pal.scan();
+  const stop = pal.startStreaming();
+  const r = pal.execute('th-live', 'on');
+  assert.strictEqual(r.ok, false, 'no real controller when live is OFF');
+  assert.strictEqual(r.reason, 'not-connected');
+  assert.strictEqual(fake.created.length, 0, 'real lib never touched when live OFF');
+  // Opt in → the live path now dispatches.
+  process.env.LIKU_THREAD_LIVE = '1';
+  assert.strictEqual(th.isLiveEnabled(), true, 'per-driver live flag enables it');
+  const r2 = pal.execute('th-live', 'on');
+  assert.strictEqual(r2.ok, true, 'live path dispatches once opted in');
+  assert.strictEqual(fake.created.length, 1, 'real controller constructed only after opt-in');
+  assert.ok(fake.sent.some((s) => s.act === 'on'));
+  stop();
+  th._setThreadLiveLibForTest(null); th._setThreadLibForTest(null);
+  delete process.env.LIKU_THREAD_LIVE;
+  delete process.env.LIKU_THREAD_BORDER_ROUTER;
+  delete process.env.LIKU_THREAD_DATASET;
+  delete process.env.LIKU_THREAD_DEVICES;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('Live gate: global LIKU_PERIPHERAL_LIVE enables Z-Wave live path; Class A stays confirm-gated', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_PERIPHERAL_HIL;
+  process.env.LIKU_PERIPHERAL_LIVE = '1';
+  process.env.LIKU_ZWAVE_CONTROLLER = '/dev/fake-zwave';
+  process.env.LIKU_ZWAVE_DEVICES = JSON.stringify([
+    { id: 'zw-live-lock', name: 'Lock', class: 'A', kind: 'lock', capabilities: ['lock', 'unlock'], powerW: 3, nodeId: 4 }
+  ]);
+  const zw = require('../src/main/peripherals/drivers/zwave-driver');
+  const fake = makeFakeZwave();
+  zw._setZwaveLiveLibForTest(fake.lib);
+  assert.strictEqual(zw.isLiveEnabled(), true, 'global live flag enables it');
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  pal.scan();
+  const stop = pal.startStreaming();
+  const rA = pal.execute('zw-live-lock', 'unlock');
+  assert.strictEqual(rA.pending, true, 'Class A gated even on the live path');
+  assert.ok(!fake.sent.some((s) => s.valueId && s.valueId.commandClass === 98), 'no unlock dispatched before confirm');
+  pal.authorize('zw-live-lock', 'unlock');
+  assert.strictEqual(pal.execute('zw-live-lock', 'unlock').ok, true, 'confirmed Class A dispatches on live path');
+  assert.ok(fake.sent.some((s) => s.valueId.commandClass === 98 && s.value === 0), 'live Door Lock unlock after confirm');
+  stop();
+  zw._setZwaveLiveLibForTest(null); zw._setZwaveLibForTest(null);
+  delete process.env.LIKU_PERIPHERAL_LIVE;
+  delete process.env.LIKU_ZWAVE_CONTROLLER;
+  delete process.env.LIKU_ZWAVE_DEVICES;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('Live gate: HIL takes precedence over live (no real lib touched when HIL on)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  process.env.LIKU_PERIPHERAL_HIL = '1';
+  process.env.LIKU_KNX_LIVE = '1'; // live opted in, but HIL must win
+  process.env.LIKU_KNX_DEVICES = JSON.stringify([
+    { id: 'knx-live-hil', name: 'Light', class: 'B', kind: 'light', capabilities: ['on', 'off'], powerW: 6, groupAddress: '3/0/1' }
+  ]);
+  const knx = require('../src/main/peripherals/drivers/knx-driver');
+  const EventEmitter = require('events');
+  const writes = [];
+  const conn = new EventEmitter(); conn.write = (ga, v) => writes.push({ ga, v });
+  knx._setKnxLiveLibForTest({ Connection: () => conn });
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  pal.scan();
+  const r = pal.execute('knx-live-hil', 'on');
+  assert.strictEqual(r.result.simulated, true, 'HIL simulated the action');
+  assert.strictEqual(writes.length, 0, 'no live write when HIL on (HIL precedence)');
+  knx._setKnxLiveLibForTest(null); knx._setKnxLibForTest(null);
+  delete process.env.LIKU_PERIPHERAL_HIL;
+  delete process.env.LIKU_KNX_LIVE;
+  delete process.env.LIKU_KNX_DEVICES;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('Live gate: USB-HID live path is opt-in (LOCAL bus, still class-gated)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_PERIPHERAL_HIL;
+  delete process.env.LIKU_PERIPHERAL_LIVE;
+  process.env.LIKU_USBHID_ENABLE = '1';
+  process.env.LIKU_USBHID_DEVICES = JSON.stringify([
+    { id: 'hid-live', name: 'Relay', class: 'B', kind: 'switch', capabilities: ['on', 'off'], powerW: 2, path: 'usb:live' }
+  ]);
+  const usb = require('../src/main/peripherals/drivers/usbhid-driver');
+  const writes = [];
+  const fakeLive = { HID: function () { return { write: (r) => writes.push(r), on: () => {}, close: () => {} }; } };
+  usb._setUsbHidLiveLibForTest(fakeLive);
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  pal.scan();
+  let stop = pal.startStreaming();
+  assert.strictEqual(pal.execute('hid-live', 'on').ok, false, 'no live HID handle when live OFF');
+  assert.strictEqual(writes.length, 0, 'real HID not touched when live OFF');
+  stop();
+  process.env.LIKU_USBHID_LIVE = '1';
+  assert.strictEqual(usb.isLiveEnabled(), true);
+  stop = pal.startStreaming();
+  assert.strictEqual(pal.execute('hid-live', 'on').ok, true, 'live HID write once opted in');
+  assert.ok(writes.length >= 1, 'HID report written on the live path');
+  stop();
+  usb._setUsbHidLiveLibForTest(null); usb._setUsbHidLibForTest(null);
+  delete process.env.LIKU_USBHID_LIVE;
+  delete process.env.LIKU_USBHID_ENABLE;
+  delete process.env.LIKU_USBHID_DEVICES;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('Fairness: opt-in lease-aware weighting steers away from a high-contention peer (advisory)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  // Control scenario (health-only): equal health → deterministic tie to nodeA.
+  const dirCtrl = require('path').join(TMP_HOME, 'p39fairctrl');
+  process.env.LIKU_CLUSTER_DIR = dirCtrl;
+  const ct = require('../src/main/peripherals/cluster-tasks');
+  let t0 = Date.now();
+  process.env.LIKU_NODE_ID = 'nodeA';
+  ct.publishTask({ id: 'ca', device: { id: 'd' }, priority: 'high', status: 'pending-review' });
+  ct.claimTask('ca', { ttlMs: 300000, now: t0 });
+  ct.publishNodeHealth(0.9, { signals: { contention: 0, tick: 0, lease: 0.8 } });
+  process.env.LIKU_NODE_ID = 'nodeB';
+  ct.publishTask({ id: 'cb', device: { id: 'd' }, priority: 'high', status: 'pending-review' });
+  ct.claimTask('cb', { ttlMs: 300000, now: t0 });
+  ct.publishNodeHealth(0.9, { signals: { contention: 0, tick: 0, lease: 0 } });
+  process.env.LIKU_NODE_ID = 'nodeA';
+  ct.publishTask({ id: 'cnew', device: { id: 'd' }, priority: 'high', status: 'pending-review' });
+  const ctrl = ct.rebalance({ now: t0 + 1000, staleMs: 500, useHealth: true });
+  assert.strictEqual(ctrl.rebalanced.find((r) => r.taskId === 'cnew').to, 'nodeA', 'health-only → equal score → tie → nodeA');
+  try { fs.rmSync(dirCtrl, { recursive: true, force: true }); } catch { /* ignore */ }
+  // Lease-aware scenario (fresh cluster): the contended nodeA is a worse target.
+  const dirLease = require('path').join(TMP_HOME, 'p39fairlease');
+  process.env.LIKU_CLUSTER_DIR = dirLease;
+  t0 = Date.now();
+  process.env.LIKU_NODE_ID = 'nodeA';
+  ct.publishTask({ id: 'la', device: { id: 'd' }, priority: 'high', status: 'pending-review' });
+  ct.claimTask('la', { ttlMs: 300000, now: t0 });
+  ct.publishNodeHealth(0.9, { signals: { contention: 0, tick: 0, lease: 0.8 } });
+  process.env.LIKU_NODE_ID = 'nodeB';
+  ct.publishTask({ id: 'lb', device: { id: 'd' }, priority: 'high', status: 'pending-review' });
+  ct.claimTask('lb', { ttlMs: 300000, now: t0 });
+  ct.publishNodeHealth(0.9, { signals: { contention: 0, tick: 0, lease: 0 } });
+  process.env.LIKU_NODE_ID = 'nodeA';
+  ct.publishTask({ id: 'lnew', device: { id: 'd' }, priority: 'high', status: 'pending-review' });
+  const lease = ct.rebalance({ now: t0 + 1000, staleMs: 500, useHealth: true, leaseAware: true });
+  assert.strictEqual(lease.rebalanced.find((r) => r.taskId === 'lnew').to, 'nodeB', 'lease-aware → avoid contended nodeA');
+  // Ownership untouched (advisory only — no double ownership).
+  assert.strictEqual(ct.taskOwner('la', t0 + 1000), 'nodeA');
+  assert.strictEqual(ct.taskOwner('lnew', t0 + 1000), null);
+  delete process.env.LIKU_NODE_ID;
+  delete process.env.LIKU_CLUSTER_DIR;
+  try { fs.rmSync(dirLease, { recursive: true, force: true }); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('Fairness: lease-aware weighting is inert single-machine + default OFF (byte-compatible)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_CLUSTER_DIR; // single-machine
+  const ct = require('../src/main/peripherals/cluster-tasks');
+  // Single-machine rebalance is inert regardless of the new flag.
+  const res = ct.rebalance({ useHealth: true, leaseAware: true });
+  assert.ok(res.local === true || (res.rebalanced && res.rebalanced.length === 0), 'single-machine rebalance inert');
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('Snapshot trends: <2 snapshots → null trend; ≥2 → deltas + series (pure observation)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  process.env.LIKU_PERIPHERAL_FLEET_SNAPSHOT = '1';
+  const snap = require('../src/main/peripherals/fleet-snapshot');
+  snap.clear();
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  pal.scan();
+  pal.getFleetObservability({ now: Date.now() });
+  const t1 = pal.getFleetSnapshotTrends();
+  assert.strictEqual(t1.enabled, true);
+  assert.strictEqual(t1.trend, null, 'a single snapshot yields no trend yet');
+  // A second snapshot → deltas become available.
+  pal.getFleetObservability({ now: Date.now() + 60000 });
+  const t2 = pal.getFleetSnapshotTrends();
+  assert.ok(t2.points >= 2, 'two snapshots recorded');
+  assert.ok(t2.nodeHealthScore && 'delta' in t2.nodeHealthScore, 'node-health delta present');
+  assert.ok(Array.isArray(t2.series) && t2.series.length >= 2, 'time series returned');
+  snap.clear();
+  delete process.env.LIKU_PERIPHERAL_FLEET_SNAPSHOT;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('Snapshot trends: pure observation — trends never persist or mutate the ring', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  process.env.LIKU_PERIPHERAL_FLEET_SNAPSHOT = '1';
+  const snap = require('../src/main/peripherals/fleet-snapshot');
+  snap.clear();
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  pal.scan();
+  pal.getFleetObservability();
+  pal.getFleetObservability();
+  const before = snap.read().totals.snapshots;
+  snap.trends(); snap.trends(); // reading trends must not write
+  const after = snap.read().totals.snapshots;
+  assert.strictEqual(before, after, 'trends() is read-only (snapshot count unchanged)');
+  snap.clear();
+  delete process.env.LIKU_PERIPHERAL_FLEET_SNAPSHOT;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('Live gate: KNX live path opt-in dispatches an encoded group write (real fake)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_PERIPHERAL_HIL;
+  delete process.env.LIKU_PERIPHERAL_LIVE;
+  delete process.env.LIKU_KNX_LIVE;
+  process.env.LIKU_KNX_GATEWAY = '10.0.0.5';
+  process.env.LIKU_KNX_DEVICES = JSON.stringify([
+    { id: 'knx-live', name: 'Light', class: 'B', kind: 'light', capabilities: ['on', 'off'], powerW: 6, groupAddress: '4/0/1', dpt: '1.001' }
+  ]);
+  const knx = require('../src/main/peripherals/drivers/knx-driver');
+  const EventEmitter = require('events');
+  const writes = [];
+  const conn = new EventEmitter(); conn.write = (ga, v) => writes.push({ ga, v });
+  knx._setKnxLiveLibForTest({ Connection: () => conn });
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  pal.scan();
+  const stop = pal.startStreaming();
+  assert.strictEqual(pal.execute('knx-live', 'on').ok, false, 'no live write when KNX live OFF');
+  assert.strictEqual(writes.length, 0, 'real gateway untouched when live OFF');
+  process.env.LIKU_KNX_LIVE = '1';
+  assert.strictEqual(knx.isLiveEnabled(), true);
+  assert.strictEqual(pal.execute('knx-live', 'on').ok, true, 'live path dispatches once opted in');
+  assert.ok(writes.some((w) => w.ga === '4/0/1' && w.v === 1), 'DPT 1.001 encoded on the live wire');
+  stop();
+  knx._setKnxLiveLibForTest(null); knx._setKnxLibForTest(null);
+  delete process.env.LIKU_KNX_LIVE;
+  delete process.env.LIKU_KNX_GATEWAY;
+  delete process.env.LIKU_KNX_DEVICES;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('Forecast: multi-day excludes auto-detected special days from the baseline (opt-in)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  process.env.LIKU_PERIPHERAL_FORECAST_AUTO_SPECIAL = '1';
+  const pf = require('../src/main/peripherals/power-forecast');
+  const start = new Date(2026, 0, 5, 0, 0, 0).getTime();
+  // 13 normal days + 1 wildly atypical (very high) day → detectSpecialDays flags it.
+  const samples = makeForecastSamples(13, start, (d, h) => (h >= 8 && h <= 18 ? 500 : 150));
+  const specialDayStart = start + 13 * 86400000;
+  for (let h = 0; h < 24; h++) samples.push({ at: new Date(specialDayStart + h * 3600000).toISOString(), totalW: 5000, overBudget: false });
+  const detected = pf.detectSpecialDays({ samples });
+  assert.ok(detected.dates.length >= 1, 'atypical day detected as special');
+  const specialKey = detected.dates[0].date;
+  assert.strictEqual(pf.isSpecialDay(specialKey, { samples, autoSpecial: true }), true, 'auto-special detection flags the date');
+  // With excludeAnomalous, the special day is dropped so the baseline stays normal.
+  const md = pf.multiDayForecast({ samples, now: specialDayStart + 86400000, horizonDays: 3, excludeAnomalous: true });
+  assert.strictEqual(md.ok, true);
+  assert.ok(md.days.every((x) => x.predictedPeakW < 3000), 'special-day spike excluded from the multi-day baseline');
+  delete process.env.LIKU_PERIPHERAL_FORECAST_AUTO_SPECIAL;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('Phase 39 PAL accessors are flag-gated (disabled → inert advisory shapes)', () => {
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  assert.strictEqual(pal.getMultiDayForecast().enabled, false, 'multi-day accessor gated');
+  assert.strictEqual(pal.getWeeklyProfile().enabled, false, 'weekly profile accessor gated');
+  assert.strictEqual(pal.getFleetSnapshotTrends().enabled, false, 'snapshot-trends accessor gated');
+});
+
 console.log(`\n${pass} checks passed.`);
 if (process.exitCode) { console.error('FAILED'); }
 else { console.log('OK'); }

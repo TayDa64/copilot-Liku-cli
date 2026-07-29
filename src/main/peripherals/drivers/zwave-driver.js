@@ -42,6 +42,7 @@ const driver = createMeshDriver({
   envDevices: 'LIKU_ZWAVE_DEVICES',
   envTransport: 'LIKU_ZWAVE_CONTROLLER',
   pairEnvPrefix: 'LIKU_ZWAVE_PAIR',
+  liveEnv: 'LIKU_ZWAVE_LIVE',
   resultPrefix: 'zwave',
   loadLib() { try { return require('zwave-js'); } catch { return null; } },
   extraFields: (d) => ({
@@ -99,6 +100,7 @@ module.exports = {
   ...driver,
   // exposed for unit tests / advanced callers
   _zwaveValueId: zwaveValueId,
-  // test seam only
-  _setZwaveLibForTest: driver._setLibForTest
+  // test seams only
+  _setZwaveLibForTest: driver._setLibForTest,
+  _setZwaveLiveLibForTest: driver._setLiveLibForTest
 };

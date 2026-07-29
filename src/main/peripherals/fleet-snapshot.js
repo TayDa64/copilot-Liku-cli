@@ -102,4 +102,47 @@ function clear() {
   catch { return false; }
 }
 
-module.exports = { enabled, read, record, compact, clear, SNAPSHOT_FILE };
+function _round(n) { return (n == null || !Number.isFinite(Number(n))) ? null : Math.round(Number(n) * 1000) / 1000; }
+function _delta(a, b) { return (a == null || b == null) ? null : _round(Number(a) - Number(b)); }
+
+/**
+ * Phase 39 — SNAPSHOT TRENDS: a pure-observation view over the persisted ring of
+ * recent fleet snapshots (newest-first) so an operator can see how fleet health,
+ * contention, flapping and power evolve over time. Reads only — never actuates,
+ * never mutates. Returns a compact per-metric latest/oldest/delta plus a small
+ * time series. Needs ≥2 snapshots for deltas.
+ * @param {{ limit?:number }} [opts]
+ */
+function trends(opts = {}) {
+  const st = read();
+  const all = Array.isArray(st.recent) ? st.recent : [];
+  const limit = Number.isFinite(opts.limit) && opts.limit > 0 ? Math.floor(opts.limit) : all.length;
+  const recent = all.slice(0, limit);
+  const series = recent.map((s) => ({
+    at: s.at,
+    nodeHealthScore: s.nodeHealthScore ?? null,
+    flapping: (s.deescalation && Number(s.deescalation.flapping)) || 0,
+    currentW: (s.power && s.power.currentW != null) ? s.power.currentW : null,
+    anomalies: (s.anomalies && Number(s.anomalies.count)) || 0,
+    tickStalledNodes: Number(s.tickStalledNodes) || 0
+  }));
+  if (recent.length < 2) return { points: recent.length, trend: null, series };
+  const newest = recent[0];
+  const oldest = recent[recent.length - 1];
+  const oFlap = (oldest.deescalation && Number(oldest.deescalation.flapping)) || 0;
+  const nFlap = (newest.deescalation && Number(newest.deescalation.flapping)) || 0;
+  const oAn = (oldest.anomalies && Number(oldest.anomalies.count)) || 0;
+  const nAn = (newest.anomalies && Number(newest.anomalies.count)) || 0;
+  return {
+    points: recent.length,
+    windowFrom: oldest.at, windowTo: newest.at,
+    nodeHealthScore: { latest: newest.nodeHealthScore ?? null, oldest: oldest.nodeHealthScore ?? null, delta: _delta(newest.nodeHealthScore, oldest.nodeHealthScore) },
+    flapping: { latest: nFlap, oldest: oFlap, delta: nFlap - oFlap },
+    currentW: { latest: (newest.power && newest.power.currentW) ?? null, oldest: (oldest.power && oldest.power.currentW) ?? null, delta: _delta(newest.power && newest.power.currentW, oldest.power && oldest.power.currentW) },
+    anomalies: { latest: nAn, oldest: oAn, delta: nAn - oAn },
+    tickStalledNodes: { latest: Number(newest.tickStalledNodes) || 0, oldest: Number(oldest.tickStalledNodes) || 0 },
+    series
+  };
+}
+
+module.exports = { enabled, read, record, compact, clear, trends, SNAPSHOT_FILE };
