@@ -1797,3 +1797,86 @@ transport configured). USB-HID additionally requires `LIKU_USBHID_ENABLE=1`.
   virtual pair. Discovery is read-only.
 - **Cognitive budget unchanged.** No new facts are injected into the default
   fragment; the default prompt stays byte-identical.
+
+## Phase 38 — deeper real protocol wiring + deferred ops polish
+
+Phase 38 deepens the four Phase-37 drivers with substantially more complete (still
+fake-lib-testable) protocol wiring, then lands the deferred ops-polish items. The
+shared `mesh-driver-factory` gained two OPTIONAL transport hooks so drivers can go
+deeper without inventing parallel patterns:
+
+- `transport.commission(controller, cfg)` — richer, idempotent onboarding run once
+  per device inside `_resolve` BEFORE `transport.resolve` (a `false` return fails the
+  bounded pairing attempt). Used for Thread network/dataset join + joiner commission
+  and Z-Wave node interview.
+- `transport.subscribe(target, cfg, emit)` — per-device inbound subscription wired at
+  `startReports` (and on resolve). Used for USB-HID input reports. Controller-level
+  inbound transports (Thread/Z-Wave/KNX) are unaffected.
+
+Both hooks are HIL-isolated: `start()`/real resolve never run when
+`LIKU_PERIPHERAL_HIL=1`, so no controller is constructed, no network is formed, no
+node is interviewed and no HID handle is opened in HIL.
+
+### Driver deepening
+
+- **Thread** — `commission` brings up the Thread network from the operational dataset
+  (`setActiveDataset` → `formNetwork`/`joinNetwork`, once) then commissions the device
+  as a joiner (EUI-64 + PSKd). Idempotent; the network is not re-formed per command.
+- **Z-Wave** — `commission` interviews the node once (`node.interview()` /
+  `refreshInfo()`); `send` maps a semantic action to a Command Class ValueID:
+  Binary Switch (CC 37), Multilevel Switch (CC 38, brightness 0..99), Door Lock
+  (CC 98). `_zwaveValueId(act, params)` is exported as a pure translation.
+- **KNX** — a tiny dependency-free DPT codec (`_encodeDpt`/`_decodeDpt`): DPT 1.001
+  boolean, DPT 5.001 scaling (0..100% ↔ 0..255), DPT 9.x 2-byte float. `send`
+  encodes the outbound value with the device's `dpt`; inbound telegrams decode.
+- **USB-HID** — real input-report subscription (`target.on('data', …)` → parse bytes
+  → reading) with an optional per-device `reportMap` (byte index → metric name).
+  Still LOCAL (`REMOTE=false`) — no signed token, but identical class-gate + confirm.
+
+### Ops polish
+
+- **Lease-aware node health** — coordination now keeps an in-memory
+  granted/denied lease counter (`getLeaseMetrics`/`resetLeaseMetrics`; cluster-mode
+  only, single-machine never records). `deriveNodeHealth` OPTIONALLY folds this
+  denied-lease rate as a third signal (`penalty = 0.5·contention + 0.3·tick +
+  0.2·lease`). Pure observation, default OFF.
+- **Flapping → step-back suppression** — when a device is flapping,
+  `proposeDeescalations` can OPTIONALLY hold back further INTERMEDIATE `stepback-*`
+  rungs for it. It NEVER suppresses a final `clear-schedule` and never blocks genuine
+  recovery; still human-gated, default OFF.
+- **Persisted fleet-observability snapshot** — `getFleetObservability()` can
+  OPTIONALLY persist a compact, bounded snapshot (atomic write, ring of recent
+  snapshots) so the last fleet posture survives a restart. Read back via
+  `PAL.getFleetSnapshot()`. Double-gated, pure observation.
+
+### Phase 38 env vars
+
+| Var | Purpose |
+| --- | --- |
+| `LIKU_THREAD_DATASET` / `LIKU_THREAD_NETWORK_KEY` | Thread operational dataset / network key for network bring-up |
+| `LIKU_THREAD_JOINER_PSKD` | Default joiner pre-shared key (per-device `pskd`/`joinerEui64` override) |
+| Z-Wave config `nodeId` (existing) | Node addressed for interview + Command Class setValue |
+| KNX config `dpt` | Datapoint Type for encode/decode (e.g. `1.001`, `5.001`, `9.001`) |
+| USB-HID config `reportMap` | Optional `{ byteIndex: metricName }` for input-report parsing |
+| `LIKU_PERIPHERAL_NODE_HEALTH_LEASE=1` | Opt-in: fold lease-contention into multi-signal node health |
+| `LIKU_PERIPHERAL_AUTOHEAL_FLAP_SUPPRESS=1` | Opt-in: suppress intermediate step-back rungs for flapping devices |
+| `LIKU_PERIPHERAL_FLEET_SNAPSHOT=1` | Opt-in: persist compact fleet-observability snapshots |
+| `LIKU_PERIPHERAL_FLEET_SNAPSHOT_MAX` | Max retained snapshots (default 20) |
+
+### Phase 38 safety invariants
+
+- **Deeper real paths cannot bypass the safety chain.** Commissioning (Thread
+  network/joiner, Z-Wave interview) runs inside `_resolve`, which is reached ONLY via
+  `driver.perform()` — which the PAL calls AFTER DCP → class gate → pending/confirm.
+  A Class A action stays `pending` (no commission, no send) until an explicit confirm.
+- **HIL stays fully isolated.** No controller/network/interview/HID-open happens when
+  `LIKU_PERIPHERAL_HIL=1` (asserted per driver).
+- **Flapping suppression never blocks recovery.** It only throttles intermediate
+  `stepback-*` rungs; `clear-schedule` (lifting a restriction) is always allowed.
+- **New health signal + snapshots are pure observation, default OFF.** Lease metrics
+  are in-memory and cluster-only (single-machine health path byte-compatible);
+  snapshots never actuate and never mutate the returned view.
+- **Cluster stays inert without `LIKU_CLUSTER_DIR`.** Lease metrics only record in
+  cluster mode, so the single-machine node-health path is unchanged.
+- **Cognitive budget unchanged.** No new facts injected; the default prompt stays
+  byte-identical (262 BPE).

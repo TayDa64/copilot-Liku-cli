@@ -92,6 +92,8 @@ function createMeshDriver(spec) {
       this.emit = null;
       this.wanted = new Map();   // deviceId → cfg
       this.targets = new Map();  // deviceId → resolved endpoint/node (cache)
+      this.commissioned = new Set();  // deviceId → richer onboarding already done (idempotent)
+      this.subscribed = new Set();    // deviceId → per-device inbound subscription wired
       this.pairing = createPairingState({
         maxAttempts: Number(process.env[`${pairEnvPrefix}_MAX_ATTEMPTS`]),
         baseBackoffMs: Number(process.env[`${pairEnvPrefix}_BACKOFF_MS`])
@@ -113,7 +115,14 @@ function createMeshDriver(spec) {
     }
 
     ensureWanted(cfg) { if (cfg && cfg.id) this.wanted.set(cfg.id, cfg); }
-    startReports(emit, cfgs) { this.emit = emit; for (const c of cfgs || []) this.ensureWanted(c); }
+    startReports(emit, cfgs) {
+      this.emit = emit;
+      for (const c of cfgs || []) this.ensureWanted(c);
+      // For transports with per-device inbound (subscribe), eagerly resolve +
+      // subscribe each declared device so input reports flow without a prior
+      // command. Controller-level inbound transports are unaffected (no-op).
+      if (typeof transport.subscribe === 'function') { for (const c of cfgs || []) { try { this._resolve(c); } catch { /* non-fatal */ } } }
+    }
 
     _resolve(cfg) {
       if (this.targets.has(cfg.id)) return this.targets.get(cfg.id);
@@ -121,16 +130,40 @@ function createMeshDriver(spec) {
       this.pairing.begin(cfg.id);
       try {
         if (!this.controller) { this.pairing.fail(cfg.id, 'no-controller'); return null; }
+        // Optional richer onboarding (Thread network/dataset join, Z-Wave node
+        // interview). Idempotent — runs at most once per device. A commission
+        // step that reports failure fails the pairing attempt (bounded retry).
+        if (typeof transport.commission === 'function' && !this.commissioned.has(cfg.id)) {
+          const ok = transport.commission(this.controller, cfg);
+          if (ok === false) { this.pairing.fail(cfg.id, 'commission-failed'); return null; }
+          this.commissioned.add(cfg.id);
+        }
         const target = transport.resolve(this.controller, cfg);
         if (!target) { this.pairing.fail(cfg.id, 'target-unresolved'); return null; }
         this.pairing.succeed(cfg.id);
         this.targets.set(cfg.id, target);
+        this._subscribe(cfg, target);
         return target;
       } catch (err) { this.pairing.fail(cfg.id, err.message); return null; }
     }
 
+    /** Optional per-device inbound subscription (e.g. USB-HID input reports). */
+    _subscribe(cfg, target) {
+      if (typeof transport.subscribe !== 'function' || this.subscribed.has(cfg.id) || !this.emit) return;
+      try {
+        transport.subscribe(target, cfg, (reading) => {
+          try {
+            if (reading && reading.id && reading.metrics && Object.keys(reading.metrics).length && this.emit) {
+              this.emit({ id: reading.id, metrics: reading.metrics, at: reading.at || new Date().toISOString() });
+            }
+          } catch { /* non-fatal */ }
+        });
+        this.subscribed.add(cfg.id);
+      } catch { /* non-fatal */ }
+    }
+
     commission(cfg) { if (!cfg) return null; this.ensureWanted(cfg); this._resolve(cfg); return this.pairing.get(cfg.id); }
-    unpair(id) { this.targets.delete(id); if (this.pairing) this.pairing.requeue(id); }
+    unpair(id) { this.targets.delete(id); this.commissioned.delete(id); this.subscribed.delete(id); if (this.pairing) this.pairing.requeue(id); }
 
     command(cfg, act, params = {}) {
       this.ensureWanted(cfg);
@@ -152,6 +185,8 @@ function createMeshDriver(spec) {
       try { if (this.controller && typeof this.controller.stop === 'function') this.controller.stop(); } catch { /* ignore */ }
       this.targets.clear();
       this.wanted.clear();
+      this.commissioned.clear();
+      this.subscribed.clear();
       this.emit = null;
     }
   }

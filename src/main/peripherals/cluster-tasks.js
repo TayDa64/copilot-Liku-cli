@@ -466,14 +466,31 @@ function deriveNodeHealth(opts = {}) {
     if (tick.stalled) tickPenalty = 1;
     else { const budget = _healthLatencyBudgetMs(); tickPenalty = budget > 0 ? Math.min(1, (Number(tick.durationMs) || 0) / budget) : 0; }
   }
-  const penalty = Math.min(1, 0.6 * contentionRate + 0.4 * tickPenalty);
+  // Phase 38 — OPTIONAL third signal: cluster LEASE-CONTENTION rate. Off by default;
+  // enabled with `opts.leaseAware` or `LIKU_PERIPHERAL_NODE_HEALTH_LEASE=1`. A node
+  // that is frequently DENIED leases (losing coordination races) scores lower. Pure
+  // observation of an in-memory counter; single-machine never records → rate 0 →
+  // no effect, so the single-machine path stays byte-compatible.
+  const leaseAware = (opts && opts.leaseAware === true) || String(process.env.LIKU_PERIPHERAL_NODE_HEALTH_LEASE || '').trim() === '1';
+  let leaseRate = 0;
+  if (leaseAware) {
+    let lm = (opts && opts.lease && typeof opts.lease === 'object') ? opts.lease : null;
+    if (!lm) { try { lm = require('./coordination').getLeaseMetrics(); } catch { lm = null; } }
+    if (lm) { const g = Number(lm.granted) || 0; const d = Number(lm.denied) || 0; const total = g + d; leaseRate = total > 0 ? Math.min(1, d / total) : 0; }
+  }
+  const penalty = leaseAware
+    ? Math.min(1, 0.5 * contentionRate + 0.3 * tickPenalty + 0.2 * leaseRate)
+    : Math.min(1, 0.6 * contentionRate + 0.4 * tickPenalty);
   const score = Math.min(1, Math.max(0, 1 - penalty));
+  const signals = { contention: Math.round(contentionRate * 1000) / 1000, tick: Math.round(tickPenalty * 1000) / 1000 };
+  if (leaseAware) signals.lease = Math.round(leaseRate * 1000) / 1000;
   return {
     score: Math.round(score * 1000) / 1000,
     contentionRate: Math.round(contentionRate * 1000) / 1000,
     tickPenalty: Math.round(tickPenalty * 1000) / 1000,
+    ...(leaseAware ? { leaseRate: Math.round(leaseRate * 1000) / 1000 } : {}),
     acquired, contended,
-    signals: { contention: Math.round(contentionRate * 1000) / 1000, tick: Math.round(tickPenalty * 1000) / 1000 }
+    signals
   };
 }
 

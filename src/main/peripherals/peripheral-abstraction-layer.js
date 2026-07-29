@@ -989,7 +989,18 @@ function getFleetObservability(opts = {}) {
   // Compact power + anomaly summary (best-effort).
   try { const ps = powerStatus(); out.power = { budgetW: ps.budgetW, currentW: ps.currentW, overBudget: ps.overBudget, anomalies: ps.anomalies }; } catch { out.power = null; }
   try { const ca = getClusterAnomalies({ now }); out.anomalies = { nodes: ca.nodes, count: (ca.anomalies || []).length, topDevice: (ca.topDevices && ca.topDevices[0]) ? ca.topDevices[0].id : null }; } catch { out.anomalies = null; }
+  // Phase 38 — OPT-IN best-effort persistence of a compact snapshot so the last
+  // fleet posture survives a restart. Double-gated (LIKU_PERIPHERAL_FLEET_SNAPSHOT=1);
+  // pure observation — never actuates, never mutates the returned view.
+  try { require('./fleet-snapshot').record(out, { now }); } catch { /* non-fatal */ }
   return out;
+}
+
+/** Phase 38 — read the last persisted fleet-observability snapshot(s) (pure observation, opt-in store). */
+function getFleetSnapshot() {
+  if (!isPeripheralsEnabled()) return { enabled: false, latest: null, recent: [] };
+  try { return { enabled: true, ...require('./fleet-snapshot').read() }; }
+  catch { return { enabled: true, latest: null, recent: [] }; }
 }
 
 /** Phase 22 — mint a PER-ACTION (least-privilege) capability token for a device. */
@@ -1345,6 +1356,7 @@ module.exports = {
   getDeescalationFlapping,
   getClusterTickHealth,
   getFleetObservability,
+  getFleetSnapshot,
   getLockClusterTrends,
   issueActionToken,
   verifyDeviceToken,

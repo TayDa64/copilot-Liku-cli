@@ -6282,11 +6282,14 @@ test('Z-Wave driver: Class B real fake-lib actuation dispatches; Class A confirm
   assert.ok(pal.listDrivers().drivers.includes('zwave'), 'zwave available via controller');
   const stop = pal.startStreaming();
   assert.strictEqual(pal.execute('zw-plug-r1', 'on').ok, true, 'Class B dispatched');
-  assert.ok(fake.sent.some((s) => s.act === 'on'), 'zwave command sent');
+  // Phase 38: real command-class semantics — 'on' → Binary Switch (CC 37) setValue(targetValue,true).
+  assert.ok(fake.sent.some((s) => s.act && s.act.commandClass === 37 && s.params === true), 'zwave Binary Switch setValue dispatched');
   const rA = pal.execute('zw-lock-r1', 'unlock');
   assert.strictEqual(rA.pending, true, 'Class A gated');
   pal.authorize('zw-lock-r1', 'unlock');
   assert.strictEqual(pal.execute('zw-lock-r1', 'unlock').ok, true, 'confirmed dispatches');
+  // 'unlock' → Door Lock (CC 98) setValue(targetMode, 0).
+  assert.ok(fake.sent.some((s) => s.act && s.act.commandClass === 98 && s.params === 0), 'zwave Door Lock unlock dispatched after confirm');
   stop();
   zw._setZwaveLibForTest(null);
   delete process.env.LIKU_ZWAVE_CONTROLLER;
@@ -6408,6 +6411,379 @@ test('New Phase 37 drivers participate in aggregate pairing status', () => {
   assert.ok(Object.prototype.hasOwnProperty.call(status.devices || status.byDevice || {}, 'th-pair-01') || JSON.stringify(status).includes('th-pair-01'), 'thread device appears in pairing status');
   delete process.env.LIKU_PERIPHERAL_HIL;
   delete process.env.LIKU_THREAD_DEVICES;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+// ---------------------------------------------------------------------------
+// Phase 38 — deeper real protocol wiring for the new drivers (Thread commissioning,
+// Z-Wave interview + command classes, KNX DPT codec, USB-HID input reports) + ops
+// polish (lease-aware node health, flapping→step-back suppression, fleet snapshot).
+// ---------------------------------------------------------------------------
+
+/** Fake OpenThread border router: records network form + joiner commissioning. */
+function makeFakeThread() {
+  const EventEmitter = require('events');
+  const created = [];
+  const calls = { setActiveDataset: [], formNetwork: [], joiners: [] };
+  const sent = [];
+  class BorderRouter extends EventEmitter {
+    constructor() { super(); created.push(this); }
+    start() { return Promise.resolve(); }
+    setActiveDataset(ds) { calls.setActiveDataset.push(ds); }
+    formNetwork(o) { calls.formNetwork.push(o); }
+    commissionJoiner(eui, pskd) { calls.joiners.push({ eui, pskd }); return true; }
+    getDeviceByAddr(addr) { return { getEndpoint: () => ({ send: (a, p) => { sent.push({ addr, act: a, params: p }); return Promise.resolve(); } }) }; }
+    stop() {}
+  }
+  return { lib: { BorderRouter }, created, calls, sent };
+}
+
+test('Thread commissioning: real path forms the network once + commissions a joiner, then dispatches', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_PERIPHERAL_HIL;
+  process.env.LIKU_THREAD_BORDER_ROUTER = '/dev/fake-thread';
+  process.env.LIKU_THREAD_DATASET = '0e080000000000010000';
+  process.env.LIKU_THREAD_DEVICES = JSON.stringify([
+    { id: 'th-c1', name: 'Plug', class: 'B', kind: 'switch', capabilities: ['on', 'off'], powerW: 5, address: 'fd00::9', joinerEui64: 'AABBCCDD', pskd: 'J01NME' }
+  ]);
+  const th = require('../src/main/peripherals/drivers/thread-driver');
+  const fake = makeFakeThread();
+  th._setThreadLibForTest(fake.lib);
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  pal.scan();
+  const stop = pal.startStreaming();
+  assert.strictEqual(pal.execute('th-c1', 'on').ok, true, 'Class B dispatched over Thread');
+  assert.strictEqual(fake.calls.formNetwork.length, 1, 'network formed once during commissioning');
+  assert.ok(fake.calls.joiners.some((j) => j.eui === 'AABBCCDD'), 'joiner commissioned with EUI-64');
+  assert.ok(fake.sent.some((s) => s.act === 'on'), 'command dispatched to the endpoint');
+  // Commissioning is idempotent — a second command does NOT re-form the network.
+  pal.execute('th-c1', 'off');
+  assert.strictEqual(fake.calls.formNetwork.length, 1, 'network not re-formed on the next command');
+  stop();
+  th._setThreadLibForTest(null);
+  delete process.env.LIKU_THREAD_BORDER_ROUTER;
+  delete process.env.LIKU_THREAD_DATASET;
+  delete process.env.LIKU_THREAD_DEVICES;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('Thread commissioning: Class A stays confirm-gated — no commissioning/send until confirm', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_PERIPHERAL_HIL;
+  process.env.LIKU_THREAD_BORDER_ROUTER = '/dev/fake-thread';
+  process.env.LIKU_THREAD_DATASET = '0e080000000000010000';
+  process.env.LIKU_THREAD_DEVICES = JSON.stringify([
+    { id: 'th-lock-c1', name: 'Lock', class: 'A', kind: 'lock', capabilities: ['lock', 'unlock'], powerW: 3, address: 'fd00::a', joinerEui64: 'DEADBEEF' }
+  ]);
+  const th = require('../src/main/peripherals/drivers/thread-driver');
+  const fake = makeFakeThread();
+  th._setThreadLibForTest(fake.lib);
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  pal.scan();
+  const stop = pal.startStreaming();
+  const rA = pal.execute('th-lock-c1', 'unlock');
+  assert.strictEqual(rA.pending, true, 'Class A gated before any transport touch');
+  assert.strictEqual(fake.calls.formNetwork.length, 0, 'no commissioning until confirmation');
+  assert.ok(!fake.sent.some((s) => s.act === 'unlock'), 'no send before confirm');
+  pal.authorize('th-lock-c1', 'unlock');
+  assert.strictEqual(pal.execute('th-lock-c1', 'unlock').ok, true, 'confirmed Class A dispatches');
+  assert.strictEqual(fake.calls.formNetwork.length, 1, 'commissioning ran only after confirm');
+  assert.ok(fake.sent.some((s) => s.act === 'unlock'), 'send after confirm');
+  stop();
+  th._setThreadLibForTest(null);
+  delete process.env.LIKU_THREAD_BORDER_ROUTER;
+  delete process.env.LIKU_THREAD_DATASET;
+  delete process.env.LIKU_THREAD_DEVICES;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('Thread commissioning: HIL isolated — no network form / joiner / controller touched', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  process.env.LIKU_PERIPHERAL_HIL = '1';
+  delete process.env.LIKU_THREAD_BORDER_ROUTER;
+  process.env.LIKU_THREAD_DEVICES = JSON.stringify([
+    { id: 'th-hil-1', name: 'LED', class: 'B', kind: 'light', capabilities: ['on', 'off'], powerW: 4, address: 'fd00::b', joinerEui64: 'CAFE' }
+  ]);
+  const th = require('../src/main/peripherals/drivers/thread-driver');
+  const fake = makeFakeThread();
+  th._setThreadLibForTest(fake.lib);
+  assert.strictEqual(th.isAvailable(), true, 'available in HIL without a border router');
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  pal.scan();
+  assert.strictEqual(pal.execute('th-hil-1', 'on').result.simulated, true, 'HIL simulated the action');
+  assert.strictEqual(fake.created.length, 0, 'no real controller constructed in HIL');
+  assert.strictEqual(fake.calls.formNetwork.length, 0, 'no network form in HIL');
+  assert.strictEqual(fake.calls.joiners.length, 0, 'no joiner commissioned in HIL');
+  th._setThreadLibForTest(null);
+  delete process.env.LIKU_PERIPHERAL_HIL;
+  delete process.env.LIKU_THREAD_DEVICES;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+/** Fake zwave-js driver: records node interviews + command-class setValue calls. */
+function makeFakeZwave() {
+  const EventEmitter = require('events');
+  const created = [];
+  const interviews = [];
+  const sent = [];
+  class Driver extends EventEmitter {
+    constructor() { super(); created.push(this); }
+    start() { return Promise.resolve(); }
+    getNode(id) {
+      return {
+        interview: () => { interviews.push(String(id)); return Promise.resolve(); },
+        setValue: (valueId, value) => { sent.push({ id: String(id), valueId, value }); return Promise.resolve(true); }
+      };
+    }
+    stop() {}
+  }
+  return { lib: { Driver }, created, interviews, sent };
+}
+
+test('Z-Wave: node interview runs on commission; command classes map on/brightness/lock correctly', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_PERIPHERAL_HIL;
+  process.env.LIKU_ZWAVE_CONTROLLER = '/dev/fake-zwave';
+  process.env.LIKU_ZWAVE_DEVICES = JSON.stringify([
+    { id: 'zw-sw', name: 'Plug', class: 'B', kind: 'switch', capabilities: ['on', 'off'], powerW: 10, nodeId: 7 },
+    { id: 'zw-dim', name: 'Dimmer', class: 'B', kind: 'light', capabilities: ['brightness', 'on', 'off'], powerW: 8, nodeId: 8 }
+  ]);
+  const zw = require('../src/main/peripherals/drivers/zwave-driver');
+  const fake = makeFakeZwave();
+  zw._setZwaveLibForTest(fake.lib);
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  pal.scan();
+  const stop = pal.startStreaming();
+  assert.strictEqual(pal.execute('zw-sw', 'on').ok, true, 'binary switch dispatched');
+  assert.ok(fake.interviews.includes('7'), 'node 7 interviewed during commissioning');
+  assert.ok(fake.sent.some((s) => s.valueId.commandClass === 37 && s.value === true), 'Binary Switch (CC37) targetValue=true');
+  assert.strictEqual(pal.execute('zw-dim', 'brightness', { level: 50 }).ok, true, 'multilevel dispatched');
+  assert.ok(fake.interviews.includes('8'), 'node 8 interviewed');
+  assert.ok(fake.sent.some((s) => s.valueId.commandClass === 38 && s.value === 50), 'Multilevel Switch (CC38) level=50');
+  stop();
+  zw._setZwaveLibForTest(null);
+  delete process.env.LIKU_ZWAVE_CONTROLLER;
+  delete process.env.LIKU_ZWAVE_DEVICES;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('Z-Wave: HIL isolated — no interview / no real Driver constructed', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  process.env.LIKU_PERIPHERAL_HIL = '1';
+  delete process.env.LIKU_ZWAVE_CONTROLLER;
+  process.env.LIKU_ZWAVE_DEVICES = JSON.stringify([
+    { id: 'zw-hil', name: 'Lock', class: 'A', kind: 'lock', capabilities: ['lock', 'unlock'], powerW: 5, nodeId: 9 }
+  ]);
+  const zw = require('../src/main/peripherals/drivers/zwave-driver');
+  const fake = makeFakeZwave();
+  zw._setZwaveLibForTest(fake.lib);
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  pal.scan();
+  assert.strictEqual(pal.execute('zw-hil', 'unlock').pending, true, 'Class A gated in HIL');
+  assert.strictEqual(fake.created.length, 0, 'no real Driver in HIL');
+  assert.strictEqual(fake.interviews.length, 0, 'no interview in HIL');
+  zw._setZwaveLibForTest(null);
+  delete process.env.LIKU_PERIPHERAL_HIL;
+  delete process.env.LIKU_ZWAVE_DEVICES;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('Z-Wave command-class mapping is a pure translation (unit)', () => {
+  const zw = require('../src/main/peripherals/drivers/zwave-driver');
+  assert.deepStrictEqual(zw._zwaveValueId('on'), { valueId: { commandClass: 37, property: 'targetValue' }, value: true });
+  assert.deepStrictEqual(zw._zwaveValueId('off'), { valueId: { commandClass: 37, property: 'targetValue' }, value: false });
+  assert.deepStrictEqual(zw._zwaveValueId('lock'), { valueId: { commandClass: 98, property: 'targetMode' }, value: 255 });
+  assert.deepStrictEqual(zw._zwaveValueId('unlock'), { valueId: { commandClass: 98, property: 'targetMode' }, value: 0 });
+  assert.deepStrictEqual(zw._zwaveValueId('brightness', { level: 30 }), { valueId: { commandClass: 38, property: 'targetValue' }, value: 30 });
+  assert.strictEqual(zw._zwaveValueId('spin'), null, 'unknown action → no mapping (falls back to raw command)');
+});
+
+test('KNX DPT codec encodes/decodes boolean + scaling + float (unit)', () => {
+  const knx = require('../src/main/peripherals/drivers/knx-driver');
+  assert.strictEqual(knx._encodeDpt('1.001', true), 1, 'DPT 1.001 true → 1');
+  assert.strictEqual(knx._encodeDpt('1.001', false), 0, 'DPT 1.001 false → 0');
+  assert.strictEqual(knx._encodeDpt('5.001', 100), 255, 'DPT 5.001 100% → 255');
+  assert.strictEqual(knx._encodeDpt('5.001', 0), 0, 'DPT 5.001 0% → 0');
+  assert.strictEqual(knx._decodeDpt('5.001', 255), 100, 'DPT 5.001 255 → 100%');
+  assert.strictEqual(knx._decodeDpt('1.001', 1), 1, 'DPT 1.001 decode');
+  assert.strictEqual(typeof knx._encodeDpt('9.001', 21.5), 'number', 'DPT 9.x float encodes to a number');
+});
+
+test('KNX: real send encodes a brightness value via DPT 5.001 (0..255)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_PERIPHERAL_HIL;
+  process.env.LIKU_KNX_GATEWAY = '10.0.0.9';
+  process.env.LIKU_KNX_DEVICES = JSON.stringify([
+    { id: 'knx-dim', name: 'Dimmer', class: 'B', kind: 'light', capabilities: ['brightness', 'on', 'off'], powerW: 6, groupAddress: '2/0/1', dpt: '5.001' }
+  ]);
+  const knx = require('../src/main/peripherals/drivers/knx-driver');
+  const EventEmitter = require('events');
+  const knxSent = [];
+  const conn = new EventEmitter();
+  conn.write = (ga, value) => { knxSent.push({ ga, value }); };
+  knx._setKnxLibForTest({ Connection: () => conn });
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  pal.scan();
+  const stop = pal.startStreaming();
+  assert.strictEqual(pal.execute('knx-dim', 'brightness', { level: 100 }).ok, true, 'brightness dispatched');
+  assert.ok(knxSent.some((s) => s.ga === '2/0/1' && s.value === 255), 'DPT 5.001 encoded 100% → 255 on the wire');
+  stop();
+  knx._setKnxLibForTest(null);
+  delete process.env.LIKU_KNX_GATEWAY;
+  delete process.env.LIKU_KNX_DEVICES;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+/** Fake node-hid: HID() returns an EventEmitter device with write/close. */
+function makeFakeHid() {
+  const EventEmitter = require('events');
+  const opened = [];
+  function HID() { const dev = new EventEmitter(); dev.write = () => {}; dev.close = () => {}; opened.push(dev); return dev; }
+  return { lib: { HID }, opened };
+}
+
+test('USB-HID: input-report subscription parses bytes into a reading (real fake)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_PERIPHERAL_HIL;
+  process.env.LIKU_USBHID_ENABLE = '1';
+  process.env.LIKU_USBHID_DEVICES = JSON.stringify([
+    { id: 'hid-in', name: 'Panel', class: 'C', kind: 'sensor', capabilities: ['read'], powerW: 1, path: 'usb:in', reportMap: { 0: 'buttons', 1: 'x' } }
+  ]);
+  const usb = require('../src/main/peripherals/drivers/usbhid-driver');
+  const fake = makeFakeHid();
+  usb._setUsbHidLibForTest(fake.lib);
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  pal.scan();
+  const readings = [];
+  const off = pal.on('reading', (r) => { if (r.id === 'hid-in') readings.push(r); });
+  const stop = pal.startStreaming(); // eagerly opens + subscribes (subscribe transport)
+  assert.ok(fake.opened.length >= 1, 'device handle opened for the input subscription');
+  fake.opened[0].emit('data', [0x03, 0x2a]);
+  assert.strictEqual(readings.length, 1, 'input report ingested as a reading');
+  assert.strictEqual(readings[0].metrics.buttons, 3, 'reportMap byte0 → buttons');
+  assert.strictEqual(readings[0].metrics.x, 42, 'reportMap byte1 → x');
+  stop(); off();
+  usb._setUsbHidLibForTest(null);
+  delete process.env.LIKU_USBHID_ENABLE;
+  delete process.env.LIKU_USBHID_DEVICES;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('USB-HID: HIL isolated — no device handle opened, no subscription', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  process.env.LIKU_PERIPHERAL_HIL = '1';
+  delete process.env.LIKU_USBHID_ENABLE;
+  process.env.LIKU_USBHID_DEVICES = JSON.stringify([
+    { id: 'hid-hil', name: 'Panel', class: 'C', kind: 'sensor', capabilities: ['read'], powerW: 1, path: 'usb:hil' }
+  ]);
+  const usb = require('../src/main/peripherals/drivers/usbhid-driver');
+  const fake = makeFakeHid();
+  usb._setUsbHidLibForTest(fake.lib);
+  assert.strictEqual(usb.isAvailable(), true, 'available in HIL');
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  pal.scan();
+  const stop = pal.startStreaming();
+  assert.strictEqual(fake.opened.length, 0, 'no device opened in HIL');
+  stop();
+  usb._setUsbHidLibForTest(null);
+  delete process.env.LIKU_PERIPHERAL_HIL;
+  delete process.env.LIKU_USBHID_DEVICES;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('Ops: node-health folds an OPT-IN lease-contention signal (default path unchanged)', () => {
+  const ct = require('../src/main/peripherals/cluster-tasks');
+  // Single-signal (Phase 35) path is byte-compatible: health = 1 − contentionRate.
+  const single = ct.deriveNodeHealth({ metrics: { acquired: 10, contended: 2 } });
+  assert.strictEqual(single.score, 0.8, 'single-signal unchanged');
+  assert.strictEqual(single.signals.lease, undefined, 'no lease signal by default');
+  // Multi-signal WITHOUT lease-aware → no lease folding.
+  const multi = ct.deriveNodeHealth({ multi: true, metrics: { acquired: 10, contended: 0 }, tick: { durationMs: 0, stalled: false } });
+  assert.strictEqual(multi.signals.lease, undefined, 'lease not folded unless opted in');
+  assert.strictEqual(multi.score, 1, 'clean node scores 1');
+  // Multi-signal WITH lease-aware → a denied-lease rate lowers the score.
+  const lease = ct.deriveNodeHealth({ multi: true, leaseAware: true, metrics: { acquired: 10, contended: 0 }, tick: { durationMs: 0, stalled: false }, lease: { granted: 6, denied: 4 } });
+  assert.strictEqual(lease.signals.lease, 0.4, 'lease contention rate = denied/(granted+denied)');
+  assert.strictEqual(lease.leaseRate, 0.4);
+  assert.strictEqual(lease.score, 0.92, 'penalty = 0.2·0.4 = 0.08 → score 0.92');
+});
+
+test('Ops: flapping→step-back suppression is OFF by default (intermediate rung still proposed)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  process.env.LIKU_PERIPHERAL_AUTOHEAL_ESCALATION_COOLDOWN_MS = '0';
+  delete process.env.LIKU_CLUSTER_DIR;
+  const actions = require('../src/main/peripherals/anomaly-action-advisor');
+  const hist = require('../src/main/peripherals/deescalation-history');
+  actions.clear(); hist.clear();
+  const base = new Date(2026, 6, 27, 12, 0, 0).getTime();
+  for (let i = 0; i < 10; i++) actions.recordAnomaly({ device: 'devFlapA', type: 'spike' }, base);
+  actions.confirm(actions.proposeActions({}, base).find((p) => p.deviceId === 'devFlapA').id);
+  for (let i = 0; i < 3; i++) hist.record({ deviceId: 'devFlapA', kind: 'step-back', at: base + i * 1000 });
+  // Default: even though the device is flapping, the intermediate step-back is still proposed.
+  const de = actions.proposeDeescalations({ recoveryMs: 1000, stepBack: true }, base + 5000).find((x) => x.deviceId === 'devFlapA');
+  assert.ok(de && de.action === 'stepback-rotate-token', 'intermediate rung proposed when suppression OFF');
+  actions.clear(); hist.clear();
+  delete process.env.LIKU_PERIPHERAL_AUTOHEAL_ESCALATION_COOLDOWN_MS;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('Ops: flapping→step-back suppression (opt-in) holds intermediate rungs but NEVER clear-schedule', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  process.env.LIKU_PERIPHERAL_AUTOHEAL_ESCALATION_COOLDOWN_MS = '0';
+  delete process.env.LIKU_CLUSTER_DIR;
+  const actions = require('../src/main/peripherals/anomaly-action-advisor');
+  const hist = require('../src/main/peripherals/deescalation-history');
+  actions.clear(); hist.clear();
+  const base = new Date(2026, 6, 27, 13, 0, 0).getTime();
+  // Flapping device elevated to unpair → its step-back is an INTERMEDIATE rung.
+  for (let i = 0; i < 10; i++) actions.recordAnomaly({ device: 'devFlapB', type: 'spike' }, base);
+  actions.confirm(actions.proposeActions({}, base).find((p) => p.deviceId === 'devFlapB').id);
+  for (let i = 0; i < 3; i++) hist.record({ deviceId: 'devFlapB', kind: 'step-back', at: base + i * 1000 });
+  // Non-flapping device also elevated to unpair (control).
+  for (let i = 0; i < 10; i++) actions.recordAnomaly({ device: 'devOkB', type: 'spike' }, base);
+  actions.confirm(actions.proposeActions({}, base).find((p) => p.deviceId === 'devOkB').id);
+  // Flapping device at the BOTTOM rung (reduce-schedule) → step-back = clear-schedule.
+  for (let i = 0; i < 3; i++) actions.recordAnomaly({ device: 'devFlapClear', type: 'spike' }, base);
+  actions.confirm(actions.proposeActions({}, base).find((p) => p.deviceId === 'devFlapClear').id);
+  for (let i = 0; i < 3; i++) hist.record({ deviceId: 'devFlapClear', kind: 'step-back', at: base + i * 1000 });
+  const props = actions.proposeDeescalations({ recoveryMs: 1000, stepBack: true, suppressFlapping: true }, base + 5000);
+  assert.ok(!props.some((x) => x.deviceId === 'devFlapB'), 'flapping device intermediate rung SUPPRESSED');
+  assert.ok(props.some((x) => x.deviceId === 'devOkB' && x.action === 'stepback-rotate-token'), 'non-flapping device still proposed');
+  assert.ok(props.some((x) => x.deviceId === 'devFlapClear' && x.action === 'clear-schedule'), 'clear-schedule NEVER suppressed even when flapping');
+  actions.clear(); hist.clear();
+  delete process.env.LIKU_PERIPHERAL_AUTOHEAL_ESCALATION_COOLDOWN_MS;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('Ops: fleet-observability snapshot persistence is opt-in (default OFF writes nothing)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_PERIPHERAL_FLEET_SNAPSHOT;
+  const snap = require('../src/main/peripherals/fleet-snapshot');
+  snap.clear();
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  pal.scan();
+  pal.getFleetObservability(); // default OFF → no snapshot persisted
+  assert.strictEqual(snap.enabled(), false, 'snapshot store off by default');
+  assert.strictEqual(pal.getFleetSnapshot().latest, null, 'nothing persisted by default');
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('Ops: fleet-observability snapshot persists a compact snapshot when opted in (pure observation)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  process.env.LIKU_PERIPHERAL_FLEET_SNAPSHOT = '1';
+  const snap = require('../src/main/peripherals/fleet-snapshot');
+  snap.clear();
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  pal.scan();
+  const obs = pal.getFleetObservability(); // opt-in → records a compact snapshot
+  assert.strictEqual(obs.enabled, true, 'observability view still returned unchanged');
+  const got = pal.getFleetSnapshot();
+  assert.strictEqual(got.enabled, true);
+  assert.ok(got.latest && typeof got.latest === 'object', 'a snapshot was persisted');
+  assert.ok(typeof got.latest.mode === 'string' && typeof got.latest.power === 'object', 'snapshot is the compact shape');
+  assert.ok(got.totals.snapshots >= 1, 'snapshot counter advanced');
+  snap.clear();
+  delete process.env.LIKU_PERIPHERAL_FLEET_SNAPSHOT;
   delete process.env.LIKU_ENABLE_PERIPHERALS;
 });
 

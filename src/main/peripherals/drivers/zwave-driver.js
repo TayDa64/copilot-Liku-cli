@@ -19,6 +19,23 @@
 
 const { createMeshDriver } = require('./mesh-driver-factory');
 
+// Phase 38 — Z-Wave Command Class mapping. Translate a semantic PAL action into the
+// zwave-js ValueID + target value so `node.setValue(valueId, value)` speaks the
+// right command class. Kept tiny + declarative (Binary Switch, Multilevel Switch,
+// Door Lock); unknown actions fall back to a raw command call. Pure translation —
+// the safety chain (DCP → class gate → confirm) has ALREADY run in the PAL.
+const CC = Object.freeze({ BINARY_SWITCH: 37, MULTILEVEL_SWITCH: 38, DOOR_LOCK: 98 });
+function zwaveValueId(act, params) {
+  const a = String(act || '').toLowerCase();
+  if (a === 'on' || a === 'off') return { valueId: { commandClass: CC.BINARY_SWITCH, property: 'targetValue' }, value: a === 'on' };
+  if (a === 'brightness' || a === 'level' || a === 'dim') {
+    const lvl = Number(params && params.level);
+    return { valueId: { commandClass: CC.MULTILEVEL_SWITCH, property: 'targetValue' }, value: Number.isFinite(lvl) ? Math.max(0, Math.min(99, Math.round(lvl))) : 99 };
+  }
+  if (a === 'lock' || a === 'unlock') return { valueId: { commandClass: CC.DOOR_LOCK, property: 'targetMode' }, value: a === 'lock' ? 255 : 0 };
+  return null;
+}
+
 const driver = createMeshDriver({
   DRIVER_ID: 'zwave',
   REMOTE: true,
@@ -38,6 +55,17 @@ const driver = createMeshDriver({
       if (typeof lib.createController === 'function') return lib.createController({ port });
       return null;
     },
+    // Phase 38 — richer zwave-js onboarding: interview the node once so its command
+    // classes + values are known before we address it. Idempotent per node.
+    commission(controller, cfg) {
+      try {
+        const node = typeof controller.getNode === 'function' ? controller.getNode(cfg.nodeId) : null;
+        if (!node) return true; // resolve() will report target-unresolved
+        if (typeof node.interview === 'function') { const r = node.interview(); if (r && typeof r.then === 'function') r.then(() => {}).catch(() => {}); }
+        else if (typeof node.refreshInfo === 'function') { const r = node.refreshInfo(); if (r && typeof r.then === 'function') r.then(() => {}).catch(() => {}); }
+        return true;
+      } catch { return false; }
+    },
     inboundEvent: 'message',
     extractInbound(msg, wanted) {
       const nodeId = msg && (msg.nodeId != null ? String(msg.nodeId) : (msg.node && msg.node.id != null ? String(msg.node.id) : undefined));
@@ -55,6 +83,11 @@ const driver = createMeshDriver({
       return null;
     },
     send(target, act, params) {
+      // Prefer the command-class ValueID path (real zwave-js semantics).
+      const mapped = zwaveValueId(act, params);
+      if (mapped && typeof target.setValue === 'function') {
+        try { const r = target.setValue(mapped.valueId, mapped.value); if (r && typeof r.then === 'function') r.then(() => {}).catch(() => {}); return true; } catch { return false; }
+      }
       if (typeof target.command === 'function') { const r = target.command(act, params || {}); if (r && typeof r.then === 'function') r.then(() => {}).catch(() => {}); return true; }
       if (typeof target.setValue === 'function') { const r = target.setValue(act, params || {}); if (r && typeof r.then === 'function') r.then(() => {}).catch(() => {}); return true; }
       return false;
@@ -64,6 +97,8 @@ const driver = createMeshDriver({
 
 module.exports = {
   ...driver,
+  // exposed for unit tests / advanced callers
+  _zwaveValueId: zwaveValueId,
   // test seam only
   _setZwaveLibForTest: driver._setLibForTest
 };

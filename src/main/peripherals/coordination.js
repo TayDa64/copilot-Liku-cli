@@ -110,6 +110,26 @@ function _writeHolder(leasePath, holder) {
  */
 function acquireLease(resourceId, opts = {}) {
   if (!clusterEnabled()) return { granted: true, local: true, nodeId: nodeId() };
+  const res = _acquireLeaseCluster(resourceId, opts);
+  try { _recordLease(!!(res && res.granted)); } catch { /* metrics are best-effort */ }
+  return res;
+}
+
+/**
+ * Phase 38 — lightweight, in-memory lease-contention counter (pure observation).
+ * Counts cluster-mode acquire outcomes so `deriveNodeHealth` can optionally fold a
+ * coordination-contention signal. Single-machine never records (short-circuits
+ * above), so the metric stays 0 and the single-machine health path is unchanged.
+ * @private
+ */
+const _leaseMetrics = { granted: 0, denied: 0 };
+function _recordLease(granted) { if (granted) _leaseMetrics.granted++; else _leaseMetrics.denied++; }
+/** Read the lease-contention metrics (best-effort, process-local). */
+function getLeaseMetrics() { return { granted: _leaseMetrics.granted, denied: _leaseMetrics.denied }; }
+/** Reset lease-contention metrics (tests/governance). */
+function resetLeaseMetrics() { _leaseMetrics.granted = 0; _leaseMetrics.denied = 0; }
+
+function _acquireLeaseCluster(resourceId, opts = {}) {
   const res = _safeResource(resourceId);
   if (!res) return { granted: false, reason: 'invalid-resource' };
   const now = Number.isFinite(opts.now) ? opts.now : Date.now();
@@ -337,6 +357,7 @@ function sweepShared(kind, ttlMs, now = Date.now()) {
 module.exports = {
   DEFAULT_TTL_MS, nodeId, clusterDir, clusterEnabled,
   acquireLease, renewLease, releaseLease, whoHolds, canAct, listLeases, status,
+  getLeaseMetrics, resetLeaseMetrics,
   claimOnce, pruneExpiredLeases,
   putShared, getShared, listShared, deleteShared, sweepShared
 };

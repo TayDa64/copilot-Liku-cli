@@ -29,7 +29,9 @@ const driver = createMeshDriver({
   loadLib() { try { return require('openthread'); } catch { return null; } },
   extraFields: (d) => ({
     address: d.address ? String(d.address) : undefined,
-    endpoint: Number.isFinite(Number(d.endpoint)) ? Number(d.endpoint) : undefined
+    endpoint: Number.isFinite(Number(d.endpoint)) ? Number(d.endpoint) : undefined,
+    joinerEui64: d.joinerEui64 || d.eui64 ? String(d.joinerEui64 || d.eui64) : undefined,
+    pskd: d.pskd ? String(d.pskd) : undefined
   }),
   transport: {
     createController(lib) {
@@ -38,6 +40,33 @@ const driver = createMeshDriver({
       if (typeof lib.Controller === 'function') return new lib.Controller(opts);
       if (typeof lib.createController === 'function') return lib.createController(opts);
       return null;
+    },
+    // Phase 38 — richer OpenThread commissioning. Runs at most once per device:
+    // (1) bring up the Thread network on the border router from the operational
+    // dataset / network key (idempotent), then (2) commission this device as a
+    // joiner using its EUI-64 + pre-shared join key (PSKd). All optional — a
+    // controller without these methods simply skips straight to resolve.
+    commission(controller, cfg) {
+      try {
+        // (1) Network bring-up from the active operational dataset (once). The
+        // controller records `_networkUp` so repeated device joins don't re-form.
+        if (!controller._networkUp) {
+          const dataset = String(process.env.LIKU_THREAD_DATASET || '').trim();
+          const networkKey = String(process.env.LIKU_THREAD_NETWORK_KEY || '').trim();
+          if (dataset && typeof controller.setActiveDataset === 'function') controller.setActiveDataset(dataset);
+          if (typeof controller.formNetwork === 'function') controller.formNetwork({ dataset, networkKey });
+          else if (typeof controller.joinNetwork === 'function') controller.joinNetwork({ dataset, networkKey });
+          controller._networkUp = true;
+        }
+        // (2) Commission this device as a joiner (EUI-64 + PSKd), when supported.
+        const eui64 = cfg.joinerEui64 || cfg.eui64;
+        const pskd = cfg.pskd || String(process.env.LIKU_THREAD_JOINER_PSKD || '').trim();
+        if (eui64 && typeof controller.commissionJoiner === 'function') {
+          const r = controller.commissionJoiner(String(eui64), pskd || '*');
+          if (r === false) return false;
+        }
+        return true;
+      } catch { return false; }
     },
     inboundEvent: 'message',
     extractInbound(msg, wanted) {

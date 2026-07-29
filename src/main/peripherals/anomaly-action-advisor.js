@@ -509,6 +509,33 @@ function _stepBackCooldownMs(opts) {
 }
 
 /**
+ * Phase 38 — OPT-IN flapping → step-back SUPPRESSION. When a device is flapping
+ * (oscillating its posture — detected by deescalation-history), optionally hold
+ * back further INTERMEDIATE `stepback-*` proposals for that device so we stop
+ * walking the ladder up/down while it is unstable. Default OFF
+ * (`opts.suppressFlapping` or `LIKU_PERIPHERAL_AUTOHEAL_FLAP_SUPPRESS=1`).
+ *
+ * SAFETY: this ONLY throttles intermediate step-back rungs. It NEVER suppresses a
+ * final `clear-schedule` (lifting a restriction) and NEVER blocks genuine
+ * recovery — a fully-recovered device can always drop its cap. Pure gate on a
+ * proposal; still human-gated, never actuates. @private
+ */
+function _flapSuppressEnabled(opts) {
+  if (opts && opts.suppressFlapping === true) return true;
+  return String(process.env.LIKU_PERIPHERAL_AUTOHEAL_FLAP_SUPPRESS || '').trim() === '1';
+}
+function _isFlapping(deviceId, opts, now) {
+  try {
+    const dh = require('./deescalation-history');
+    const flapOpts = { now };
+    if (opts && Number.isFinite(opts.flapWindowMs)) flapOpts.windowMs = opts.flapWindowMs;
+    if (opts && Number.isFinite(opts.flapThreshold)) flapOpts.threshold = opts.flapThreshold;
+    const res = dh.flapping(flapOpts);
+    return !!(res && Array.isArray(res.devices) && res.devices.some((d) => d.deviceId === deviceId));
+  } catch { return false; }
+}
+
+/**
  * Propose DE-ESCALATIONS for devices that have RECOVERED (no anomaly for
  * `recoveryMs`) but still carry an elevated heal action. Steps DOWN the current
  * rung: reduce-schedule → clear-schedule, rotate-token → clear-rotate-token
@@ -547,6 +574,9 @@ function proposeDeescalations(opts = {}, now = Date.now()) {
       const p = st.proposed[deviceId];
       const lastStep = p && p.steppedBackAt ? Date.parse(p.steppedBackAt) : 0;
       if (cooldownMs > 0 && lastStep && (now - lastStep) < cooldownMs) continue; // too soon → hold this rung
+      // Phase 38: OPT-IN flapping suppression. If this device is flapping, hold
+      // back further intermediate step-back rungs (never the final clear-schedule).
+      if (_flapSuppressEnabled(opts) && _isFlapping(deviceId, opts, now)) continue;
     }
     const minutes = Math.round((now - last) / 60000);
     const suggestion = {

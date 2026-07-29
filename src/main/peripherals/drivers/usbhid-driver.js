@@ -32,7 +32,8 @@ const driver = createMeshDriver({
   extraFields: (d) => ({
     path: d.path ? String(d.path) : undefined,
     vendorId: Number.isFinite(Number(d.vendorId)) ? Number(d.vendorId) : undefined,
-    productId: Number.isFinite(Number(d.productId)) ? Number(d.productId) : undefined
+    productId: Number.isFinite(Number(d.productId)) ? Number(d.productId) : undefined,
+    reportMap: (d.reportMap && typeof d.reportMap === 'object') ? d.reportMap : undefined
   }),
   transport: {
     createController(lib) {
@@ -59,6 +60,25 @@ const driver = createMeshDriver({
     // node-hid emits per-device 'data' events; the generic inbound path is not used
     // (readings are injected via PAL.ingestSensorReading in HIL / by device handlers).
     resolve(controller, cfg) { return controller && typeof controller.open === 'function' ? controller.open(cfg) : null; },
+    // Phase 38 — real INPUT-REPORT subscription. node-hid devices emit 'data'
+    // (a Buffer/byte array) per input report; parse it into metrics and forward
+    // as a reading. Optional per-device `reportMap` (index → metric name) shapes
+    // the bytes; default exposes byte0 as `value`. LOCAL bus, still read-only.
+    subscribe(target, cfg, emit) {
+      if (!target || typeof target.on !== 'function') return;
+      const map = (cfg && cfg.reportMap && typeof cfg.reportMap === 'object') ? cfg.reportMap : null;
+      target.on('data', (buf) => {
+        try {
+          const bytes = Array.isArray(buf) ? buf : (buf && typeof buf.length === 'number' ? Array.from(buf) : []);
+          if (!bytes.length) return;
+          const metrics = {};
+          if (map) { for (const [idx, name] of Object.entries(map)) { const i = Number(idx); if (Number.isFinite(i) && i < bytes.length) metrics[String(name)] = bytes[i]; } }
+          else metrics.value = bytes[0];
+          if (Object.keys(metrics).length) emit({ id: cfg.id, metrics });
+        } catch { /* non-fatal */ }
+      });
+      if (typeof target.on === 'function') { try { target.on('error', () => {}); } catch { /* ignore */ } }
+    },
     send(target, act, params) {
       // Write a small HID report. `params.report` (array of bytes) or a mapped action.
       const report = Array.isArray(params && params.report) ? params.report : [0x00, act === 'on' ? 0x01 : act === 'off' ? 0x00 : 0x02];
