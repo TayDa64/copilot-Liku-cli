@@ -1956,3 +1956,78 @@ new autonomous actuation is introduced and every real path still runs after
   cluster-only; the single-machine path is unchanged.
 - **Cognitive budget unchanged.** No new facts injected; the default prompt stays
   byte-identical (262 BPE).
+
+## Phase 40 — long-horizon scheduling + live smoke harness + fleet degradation alerts
+
+Phase 40 is a comprehensive close-out of the Phase-39 readiness items. All additions
+are pure observation or proposal → explicit human confirmation; no new autonomous
+actuation is introduced.
+
+### Long-horizon scheduling workflow (power-schedule-advisor.js)
+
+- `proposeMultiDaySchedule({ budgetW, samples, horizonDays, minDays, excludeAnomalous })`
+  — uses `multiDayForecast` to find upcoming DAYS whose predicted draw exceeds budget;
+  when the breach recurs across ≥ `minDays` days it proposes ONE restrict-only cap on
+  the modal peak-hour window (per-device caps summing ≤ budget).
+- `proposeWeeklySchedule({ budgetW, samples, excludeAnomalous })` — uses `weeklyProfile`
+  to find the over-budget days-of-week and proposes a cap RESTRICTED to those weekdays
+  (`days:[...dow]`, which power-schedule.js already honours). `confirm()` now carries the
+  `days` field into the confirmed rule.
+- Both are `autonomousAction:false`, `requiresHuman:true`, restrict-only, deduped per
+  window, and confirmed through the SAME `confirm()` rail — nothing is applied until a
+  human confirms. Short-horizon `proposeMultiHourSchedule` is unchanged. Surfaced via
+  `PAL.getMultiDayProposal` / `PAL.getWeeklyProposal`.
+
+### Live-hardware smoke harness (live-smoke.js + scripts/live-peripheral-smoke.js)
+
+- A thin, dedicated CI/operator entry point that exercises the REAL Thread / Z-Wave /
+  KNX / USB-HID paths through the hardened live gate + the full PAL safety chain.
+- Run (simulated live path, no hardware — safe for CI):
+  `LIKU_PERIPHERAL_LIVE_SMOKE=1 npm run smoke:live-peripherals`.
+  Run (REAL hardware): `LIKU_PERIPHERAL_LIVE=1 node scripts/live-peripheral-smoke.js --real`.
+- DEFAULT OFF → a clean no-op (exit 0). Runs in an ISOLATED temp home (no real-home
+  pollution). Every action goes through `PAL.execute`, so DCP → class gate →
+  pending/confirm runs first; the harness ASSERTS Class A stays `pending` until an
+  explicit confirm, only auto-dispatches safe Class B actions, and asserts HIL
+  isolation (with HIL on, no live library is touched).
+
+### Fleet health history + degradation alerts
+
+- `fleet-snapshot.degradation({ healthDrop, flapRise, anomalyRise })` — PURE OBSERVATION
+  over the persisted snapshot ring: flags a decline when node-health drops, flapping
+  rises, a tick stall appears, or anomalies rise past thresholds. Surfaced via
+  `PAL.getFleetDegradation`.
+- `agents/fleet-degradation-notifier.js` — `attachFleetDegradationNotifier(orchestrator)`
+  returns a `tick(now)` that raises a HUMAN-GATED advisory Supervisor task
+  (`autonomousAction:false` on a read-only synthetic `fleet` device) when degradation is
+  detected, deduped per signal-set with a cooldown. DEFAULT OFF (double-gated: requires
+  `LIKU_PERIPHERAL_FLEET_DEGRADE_ALERTS=1` AND the snapshot store enabled). It never
+  actuates, never rebalances, and never suppresses a critical recovery path.
+
+### Phase 40 env vars
+
+| Var | Purpose |
+| --- | --- |
+| `LIKU_PERIPHERAL_SCHED_MULTIDAY_MIN_DAYS` | Min over-budget days before a multi-day proposal (default 3) |
+| `LIKU_PERIPHERAL_LIVE_SMOKE` | Opt-in for the live-hardware smoke harness (simulated path) |
+| `LIKU_PERIPHERAL_FLEET_DEGRADE_ALERTS` | Opt-in for advisory fleet-degradation alerts |
+| `LIKU_PERIPHERAL_FLEET_DEGRADE_HEALTH_DROP` | Node-health drop threshold (default 0.2) |
+| `LIKU_PERIPHERAL_FLEET_DEGRADE_FLAP_RISE` | Flapping-rise threshold (default 2) |
+| `LIKU_PERIPHERAL_FLEET_DEGRADE_ANOMALY_RISE` | Anomaly-rise threshold (default 3) |
+| `LIKU_PERIPHERAL_FLEET_DEGRADE_COOLDOWN_MS` | Per-signature alert dedup cooldown (default 1h) |
+
+### Phase 40 safety invariants
+
+- **Long-horizon proposals never auto-apply.** Multi-day / weekly proposals are
+  restrict-only, `autonomousAction:false`, and written to the confirmed store ONLY after
+  an explicit `confirm()`. Short-horizon behaviour is byte-compatible.
+- **Live smoke harness cannot bypass the safety chain.** Every action runs through
+  `PAL.execute` (post-gate); Class A stays confirm-gated; HIL isolation is asserted; the
+  harness is default-OFF and home-isolated.
+- **Degradation alerts are advisory only.** They raise a human-gated task and NEVER
+  actuate, rebalance, or suppress a critical recovery path. Default OFF; pure observation
+  of the snapshot history.
+- **Single-machine byte-compatible.** All new stores/notifiers are flag-gated and inert
+  when unused; cluster mirroring is best-effort and cluster-gated.
+- **Cognitive budget unchanged.** No new facts injected; the default prompt stays
+  byte-identical (262 BPE).

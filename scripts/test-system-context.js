@@ -7137,6 +7137,266 @@ test('Phase 39 PAL accessors are flag-gated (disabled → inert advisory shapes)
   assert.strictEqual(pal.getFleetSnapshotTrends().enabled, false, 'snapshot-trends accessor gated');
 });
 
+// ---------------------------------------------------------------------------
+// Phase 40 — long-horizon scheduling workflow, live-hardware smoke harness, and
+// fleet health history + advisory degradation alerts.
+// ---------------------------------------------------------------------------
+
+/** Build N days of hourly samples with a heater (peak hours) + steady fridge. */
+function makeMultiDaySamples(days, startMs, peakFrom, peakTo, heaterPeakW, fridgeW) {
+  const out = [];
+  for (let d = 0; d < days; d++) {
+    for (let h = 0; h < 24; h++) {
+      const heater = (h >= peakFrom && h <= peakTo) ? heaterPeakW : 20;
+      const totalW = heater + fridgeW;
+      out.push({ at: new Date(startMs + d * 86400000 + h * 3600000).toISOString(), totalW, overBudget: false, devices: [{ id: 'heater', loadW: heater }, { id: 'fridge', loadW: fridgeW }] });
+    }
+  }
+  return out;
+}
+
+test('Long-horizon: multi-day proposal is advisory + restrict-only + human-gated; confirm never auto-applies', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_CLUSTER_DIR;
+  const advisor = require('../src/main/peripherals/power-schedule-advisor');
+  const schedule = require('../src/main/peripherals/power-schedule');
+  advisor.clear();
+  try { fs.rmSync(schedule.CONFIRMED_FILE); } catch { /* ignore */ }
+  const start = new Date(2026, 0, 5, 0, 0, 0).getTime();
+  const samples = makeMultiDaySamples(14, start, 17, 20, 500, 100); // peak 600W
+  const now = start + 14 * 86400000;
+  const budgetW = 400;
+  const sug = advisor.proposeMultiDaySchedule({ budgetW, samples, horizonDays: 7, now });
+  assert.ok(sug && sug.type === 'multi-day', 'a multi-day proposal was produced');
+  assert.strictEqual(sug.autonomousAction, false, 'advisory only');
+  assert.strictEqual(sug.requiresHuman, true, 'human-gated');
+  assert.ok(sug.daysAffected >= 3, 'breach recurs across multiple days');
+  const capSum = sug.devices.reduce((a, d) => a + d.proposedMaxW, 0);
+  assert.ok(capSum <= budgetW + 1, 'per-device caps sum ≤ budget (restrict-only)');
+  // Nothing is applied until confirm — the confirmed store is empty pre-confirm.
+  assert.strictEqual(advisor.listConfirmedSchedules().length, 0, 'no schedule written before confirm');
+  const res = advisor.confirm(sug.id);
+  assert.strictEqual(res.ok, true, 'confirm activates the proposal');
+  const rules = advisor.listConfirmedSchedules();
+  assert.ok(rules.length >= 1 && rules.every((r) => r.maxW > 0), 'restrict-only rules written on confirm');
+  advisor.clear();
+  try { fs.rmSync(schedule.CONFIRMED_FILE); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('Long-horizon: multi-day proposal requires a RECURRING breach (minDays); premature → null', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const advisor = require('../src/main/peripherals/power-schedule-advisor');
+  advisor.clear();
+  const start = new Date(2026, 0, 5, 0, 0, 0).getTime();
+  const samples = makeMultiDaySamples(14, start, 17, 20, 500, 100);
+  const now = start + 14 * 86400000;
+  // A very high minDays cannot be satisfied by a 7-day horizon → no proposal.
+  const none = advisor.proposeMultiDaySchedule({ budgetW: 400, samples, horizonDays: 7, minDays: 99, now });
+  assert.strictEqual(none, null, 'no proposal when the breach does not recur enough');
+  advisor.clear();
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('Long-horizon: weekly proposal restricts to over-budget weekdays; confirm writes the days field', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_CLUSTER_DIR;
+  const advisor = require('../src/main/peripherals/power-schedule-advisor');
+  const schedule = require('../src/main/peripherals/power-schedule');
+  advisor.clear();
+  try { fs.rmSync(schedule.CONFIRMED_FILE); } catch { /* ignore */ }
+  const start = new Date(2026, 0, 5, 0, 0, 0).getTime();
+  const samples = makeMultiDaySamples(14, start, 17, 20, 500, 100);
+  const sug = advisor.proposeWeeklySchedule({ budgetW: 400, samples, now: start + 14 * 86400000 });
+  assert.ok(sug && sug.type === 'weekly', 'a weekly proposal was produced');
+  assert.ok(Array.isArray(sug.days) && sug.days.length >= 1, 'weekly proposal carries a days restriction');
+  assert.strictEqual(sug.autonomousAction, false, 'advisory only');
+  const res = advisor.confirm(sug.id);
+  assert.strictEqual(res.ok, true);
+  const rules = advisor.listConfirmedSchedules();
+  assert.ok(rules.length >= 1 && rules.every((r) => Array.isArray(r.days) && r.days.length >= 1), 'confirmed rules are day-of-week restricted');
+  advisor.clear();
+  try { fs.rmSync(schedule.CONFIRMED_FILE); } catch { /* ignore */ }
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('Long-horizon: PAL multi-day / weekly proposal accessors are flag-gated + advisory', () => {
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  assert.strictEqual(pal.getMultiDayProposal().enabled, false, 'multi-day proposal accessor gated');
+  assert.strictEqual(pal.getWeeklyProposal().enabled, false, 'weekly proposal accessor gated');
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const en = pal.getMultiDayProposal({ budgetW: 400, samples: [] });
+  assert.strictEqual(en.enabled, true, 'accessor returns advisory-only shape when enabled');
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('Live smoke harness: default OFF is a clean no-op (opt-in)', () => {
+  delete process.env.LIKU_PERIPHERAL_LIVE_SMOKE;
+  delete process.env.LIKU_PERIPHERAL_LIVE;
+  const smoke = require('../src/main/peripherals/live-smoke');
+  assert.strictEqual(smoke.smokeEnabled(), false, 'harness disabled by default');
+  const res = smoke.runSmoke();
+  assert.strictEqual(res.enabled, false, 'no-op unless opted in');
+  assert.strictEqual(res.ok, true, 'a skipped harness is a clean pass');
+});
+
+test('Live smoke harness: simulated live paths pass all safety checks (gated + HIL-isolated)', () => {
+  const smoke = require('../src/main/peripherals/live-smoke');
+  const res = smoke.runSmoke({ force: true, simulated: true });
+  assert.strictEqual(res.enabled, true);
+  assert.strictEqual(res.results.length, 4, 'all four drivers exercised');
+  assert.strictEqual(res.ok, true, 'every driver passes every safety check');
+  for (const r of res.results) {
+    const names = r.checks.map((c) => c.name);
+    assert.ok(names.includes('classA-gated') && r.checks.find((c) => c.name === 'classA-gated').ok, `${r.driver}: Class A gated`);
+    assert.ok(r.checks.find((c) => c.name === 'classA-no-send-before-confirm').ok, `${r.driver}: no send before confirm`);
+    assert.ok(r.checks.find((c) => c.name === 'hil-no-live-touch').ok, `${r.driver}: HIL isolated`);
+  }
+  // Harness leaves no lingering enable/live env behind.
+  assert.ok(!process.env.LIKU_ENABLE_PERIPHERALS, 'harness cleans up peripherals flag');
+});
+
+test('Fleet degradation: <2 snapshots → not degraded; a health drop over the window is detected', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  process.env.LIKU_PERIPHERAL_FLEET_SNAPSHOT = '1';
+  const snap = require('../src/main/peripherals/fleet-snapshot');
+  snap.clear();
+  const mkObs = (score) => ({ at: new Date().toISOString(), mode: 'single-machine', nodeHealth: { local: { score }, tickHealth: { stalled: 0 } }, deescalation: { flapping: [], rollup: { totals: {} } }, power: { budgetW: 100, currentW: 10, overBudget: false, anomalies: 0 }, anomalies: { count: 0 } });
+  snap.record(mkObs(0.95)); // oldest (healthy)
+  assert.strictEqual(snap.degradation().degraded, false, 'a single snapshot cannot show degradation');
+  snap.record(mkObs(0.5)); // newest (unhealthy) → health dropped 0.45
+  const deg = snap.degradation();
+  assert.strictEqual(deg.degraded, true, 'health drop detected');
+  assert.ok(deg.signals.some((s) => s.name === 'node-health-drop'), 'the drop is attributed to node-health');
+  assert.strictEqual(deg.severity, 'high', 'a sharp (≥0.4) drop is high severity');
+  snap.clear();
+  delete process.env.LIKU_PERIPHERAL_FLEET_SNAPSHOT;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('Fleet degradation notifier: raises ONE human-gated advisory task (deduped, never actuates)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const { attachFleetDegradationNotifier } = require('../src/main/agents/fleet-degradation-notifier');
+  const base = new Date(2026, 6, 28, 12, 0, 0).getTime();
+  const created = [];
+  const supervisor = {
+    receiveNotification() {},
+    createPeripheralTask(n) { const t = { id: n.id, source: 'fleet-degradation', status: 'pending-review', requiresHuman: n.requiresHuman, autonomousAction: n.autonomousAction, dedupeKey: n.dedupeKey }; created.push(t); return t; }
+  };
+  // Inject a fake snapshot store reporting a degradation.
+  const fakeSnap = { enabled: () => true, degradation: () => ({ degraded: true, severity: 'warning', signals: [{ name: 'node-health-drop', from: 0.9, to: 0.6, delta: -0.3 }], points: 3 }) };
+  const orch = new (require('events').EventEmitter)();
+  const notifier = attachFleetDegradationNotifier(orch, { enabled: true, snapshot: fakeSnap, getSupervisor: () => supervisor, now: () => base, cooldownMs: 3600000 });
+  const r1 = notifier.tick(base);
+  assert.strictEqual(r1.created.length, 1, 'one advisory degradation task created');
+  assert.strictEqual(r1.created[0].autonomousAction, false, 'task never actuates');
+  assert.strictEqual(r1.created[0].requiresHuman, true, 'task is human-gated');
+  // Deduped within the cooldown window.
+  const r2 = notifier.tick(base + 60000);
+  assert.strictEqual(r2.created.length, 0, 'deduped within cooldown');
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('Fleet degradation notifier: default OFF + inert when the snapshot store is disabled', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_PERIPHERAL_FLEET_DEGRADE_ALERTS;
+  const { attachFleetDegradationNotifier } = require('../src/main/agents/fleet-degradation-notifier');
+  const created = [];
+  const supervisor = { receiveNotification() {}, createPeripheralTask(n) { created.push(n); return { id: n.id }; } };
+  const degradingSnap = { enabled: () => true, degradation: () => ({ degraded: true, severity: 'high', signals: [{ name: 'tick-stall' }], points: 3 }) };
+  const orch = new (require('events').EventEmitter)();
+  // Default OFF (no flag, no enabled option) → no task even though degradation exists.
+  const offNotifier = attachFleetDegradationNotifier(orch, { snapshot: degradingSnap, getSupervisor: () => supervisor });
+  assert.strictEqual(offNotifier.tick(Date.now()).created.length, 0, 'default OFF → no alert');
+  // Enabled, but the snapshot store is disabled → inert (no history to trend).
+  const disabledSnap = { enabled: () => false, degradation: () => ({ degraded: true, severity: 'high', signals: [{ name: 'tick-stall' }], points: 3 }) };
+  const onNotifier = attachFleetDegradationNotifier(orch, { enabled: true, snapshot: disabledSnap, getSupervisor: () => supervisor });
+  assert.strictEqual(onNotifier.tick(Date.now()).created.length, 0, 'inert when snapshot store disabled');
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('Fleet degradation: PAL accessor is flag-gated + pure observation', () => {
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+  const pal = require('../src/main/peripherals/peripheral-abstraction-layer');
+  assert.strictEqual(pal.getFleetDegradation().enabled, false, 'accessor gated when peripherals off');
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  process.env.LIKU_PERIPHERAL_FLEET_SNAPSHOT = '1';
+  const snap = require('../src/main/peripherals/fleet-snapshot');
+  snap.clear();
+  const d = pal.getFleetDegradation();
+  assert.strictEqual(d.enabled, true);
+  assert.strictEqual(d.degraded, false, 'no history → not degraded (pure observation)');
+  snap.clear();
+  delete process.env.LIKU_PERIPHERAL_FLEET_SNAPSHOT;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('Long-horizon: multi-day proposal dedups one open proposal per window', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  delete process.env.LIKU_CLUSTER_DIR;
+  const advisor = require('../src/main/peripherals/power-schedule-advisor');
+  advisor.clear();
+  const start = new Date(2026, 0, 5, 0, 0, 0).getTime();
+  const samples = makeMultiDaySamples(14, start, 17, 20, 500, 100);
+  const now = start + 14 * 86400000;
+  const a = advisor.proposeMultiDaySchedule({ budgetW: 400, samples, horizonDays: 7, now });
+  const b = advisor.proposeMultiDaySchedule({ budgetW: 400, samples, horizonDays: 7, now });
+  assert.ok(a && b && a.id === b.id, 'the same open proposal is returned (deduped, no spam)');
+  advisor.clear();
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('Long-horizon: multi-day proposal honours excludeAnomalous (special days kept out of baseline)', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  const advisor = require('../src/main/peripherals/power-schedule-advisor');
+  advisor.clear();
+  const start = new Date(2026, 0, 5, 0, 0, 0).getTime();
+  const samples = makeMultiDaySamples(14, start, 17, 20, 500, 100);
+  const now = start + 14 * 86400000;
+  const sug = advisor.proposeMultiDaySchedule({ budgetW: 400, samples, horizonDays: 7, now, excludeAnomalous: true });
+  assert.ok(sug && sug.type === 'multi-day', 'proposal still produced with anomaly exclusion');
+  assert.strictEqual(sug.autonomousAction, false, 'still advisory');
+  advisor.clear();
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
+test('Live smoke harness: smokeEnabled honours the global LIKU_PERIPHERAL_LIVE flag', () => {
+  const smoke = require('../src/main/peripherals/live-smoke');
+  delete process.env.LIKU_PERIPHERAL_LIVE_SMOKE;
+  delete process.env.LIKU_PERIPHERAL_LIVE;
+  assert.strictEqual(smoke.smokeEnabled(), false);
+  process.env.LIKU_PERIPHERAL_LIVE = '1';
+  assert.strictEqual(smoke.smokeEnabled(), true, 'the global live flag also enables the harness');
+  delete process.env.LIKU_PERIPHERAL_LIVE;
+  process.env.LIKU_PERIPHERAL_LIVE_SMOKE = '1';
+  assert.strictEqual(smoke.smokeEnabled(), true, 'the dedicated smoke flag enables it');
+  delete process.env.LIKU_PERIPHERAL_LIVE_SMOKE;
+});
+
+test('Fleet degradation: flapping-rise + anomaly-rise signals detected; notification is read-only synthetic', () => {
+  process.env.LIKU_ENABLE_PERIPHERALS = '1';
+  process.env.LIKU_PERIPHERAL_FLEET_SNAPSHOT = '1';
+  const snap = require('../src/main/peripherals/fleet-snapshot');
+  const { buildDegradationNotification } = require('../src/main/agents/fleet-degradation-notifier');
+  snap.clear();
+  const mkObs = (flap, anomalies) => ({ at: new Date().toISOString(), mode: 'single-machine', nodeHealth: { local: { score: 0.9 }, tickHealth: { stalled: 0 } }, deescalation: { flapping: new Array(flap).fill({}), rollup: { totals: {} } }, power: { budgetW: 100, currentW: 10, overBudget: false, anomalies: 0 }, anomalies: { count: anomalies } });
+  snap.record(mkObs(0, 0)); // oldest
+  snap.record(mkObs(4, 5)); // newest → flapping +4, anomalies +5
+  const deg = snap.degradation();
+  assert.strictEqual(deg.degraded, true);
+  assert.ok(deg.signals.some((s) => s.name === 'flapping-rise'), 'flapping rise detected');
+  assert.ok(deg.signals.some((s) => s.name === 'anomaly-rise'), 'anomaly rise detected');
+  // The advisory notification never actuates and targets a read-only synthetic device.
+  const notif = buildDegradationNotification(deg);
+  assert.strictEqual(notif.autonomousAction, false);
+  assert.strictEqual(notif.device.class, 'C', 'read-only synthetic device (non-actuating)');
+  assert.ok(notif.dedupeKey.startsWith('fleet-degradation:'), 'stable dedup key');
+  snap.clear();
+  delete process.env.LIKU_PERIPHERAL_FLEET_SNAPSHOT;
+  delete process.env.LIKU_ENABLE_PERIPHERALS;
+});
+
 console.log(`\n${pass} checks passed.`);
 if (process.exitCode) { console.error('FAILED'); }
 else { console.log('OK'); }

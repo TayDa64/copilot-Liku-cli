@@ -23,6 +23,7 @@ const { attachPowerAnomalyConsumer, buildAnomalyNotification } = require('./powe
 const { attachCronScheduler } = require('./cron-scheduler');
 const { attachScheduleExpiryNotifier, buildExpiryNotification } = require('./schedule-expiry-notifier');
 const { attachSelfHealingScheduler, buildTickHealthNotification, buildFlappingNotification } = require('./self-healing-scheduler');
+const { attachFleetDegradationNotifier, buildDegradationNotification } = require('./fleet-degradation-notifier');
 const { AgentStateManager } = require('./state-manager');
 const { TraceWriter } = require('./trace-writer');
 
@@ -45,6 +46,8 @@ module.exports = {
   attachSelfHealingScheduler,
   buildTickHealthNotification,
   buildFlappingNotification,
+  attachFleetDegradationNotifier,
+  buildDegradationNotification,
   AgentStateManager,
   TraceWriter,
   

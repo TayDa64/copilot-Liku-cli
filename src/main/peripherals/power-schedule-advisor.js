@@ -370,6 +370,7 @@ function confirm(suggestionId) {
     for (const d of entry.devices) {
       _appendConfirmed({
         id: d.deviceId, fromHour: entry.fromHour, toHour: entry.toHour, maxW: d.proposedMaxW,
+        ...(Array.isArray(entry.days) && entry.days.length ? { days: entry.days } : {}),
         source: `advisor-confirmed-${entry.type || 'multi'}`, suggestionId: entry.id, confirmedAt: new Date().toISOString()
       });
     }
@@ -454,6 +455,115 @@ function proposeMultiHourSchedule(opts = {}, now = Date.now()) {
     type: 'multi-hour', fromHour, toHour, hours: runHours, budgetW, devices, occurrences: devices.length,
     confidence: runConfidence,
     reason: `coordinated ${bestLen}h cap ${fromHour}:00→${toHour}:00 (forecast band > budget ${budgetW}W, ${runConfidence} confidence)`,
+    status: 'proposed', proposed: true, requiresHuman: true, autonomousAction: false, createdAt: new Date().toISOString()
+  };
+  st.proposed[key] = suggestion;
+  _save(st);
+  _clusterMirrorProposal(key, suggestion);
+  return suggestion;
+}
+
+/**
+ * Phase 40 — LONG-HORIZON (multi-day) coordinated proposal. Uses `multiDayForecast`
+ * to find UPCOMING DAYS whose predicted draw exceeds budget; when the breach recurs
+ * across ≥ `minDays` days it proposes ONE restrict-only recurring cap on the modal
+ * peak-hour window (per-device caps summing ≤ budget). STRICTLY ADVISORY + human-
+ * gated (`autonomousAction:false`); nothing is applied until `confirm()`. Dedup one
+ * open multi-day proposal per window.
+ * @param {{ budgetW:number, samples?:object[], horizonDays?:number, minDays?:number, now?:number, excludeAnomalous?:boolean }} opts
+ * @param {number} [now]
+ * @returns {object|null}
+ */
+function proposeMultiDaySchedule(opts = {}, now = Date.now()) {
+  if (!enabled()) return null;
+  const budgetW = Number(opts.budgetW);
+  if (!Number.isFinite(budgetW) || budgetW <= 0) return null;
+  const effectiveNow = Number.isFinite(opts.now) ? opts.now : now;
+  let forecastMod; let md;
+  try {
+    forecastMod = require('./power-forecast');
+    md = forecastMod.multiDayForecast({ samples: opts.samples, horizonDays: opts.horizonDays, now: effectiveNow, excludeAnomalous: opts.excludeAnomalous });
+  } catch { return null; }
+  if (!md || !md.ok || !Array.isArray(md.days)) return null;
+  const overDays = md.days.filter((d) => d.predictedPeakW > budgetW || d.predictedMeanW > budgetW);
+  const minDays = Number.isFinite(opts.minDays) ? opts.minDays : (Number(process.env.LIKU_PERIPHERAL_SCHED_MULTIDAY_MIN_DAYS) || 3);
+  if (overDays.length < minDays) return null; // requires a recurring multi-day pattern
+  // Modal peak hour across the over-budget days.
+  const hourCounts = {};
+  for (const d of overDays) hourCounts[d.peakHour] = (hourCounts[d.peakHour] || 0) + 1;
+  const peakHour = Number(Object.entries(hourCounts).sort((a, b) => b[1] - a[1] || Number(a[0]) - Number(b[0]))[0][0]);
+  const fromHour = peakHour;
+  const toHour = (peakHour + 1) % 24;
+  const contrib = forecastMod.contributorsAtHour({ hour: peakHour, budgetW, samples: opts.samples });
+  if (!contrib || !Array.isArray(contrib.contributors) || !contrib.contributors.length || !(contrib.totalPeakW > 0)) return null;
+  const totalPeak = contrib.totalPeakW || 1;
+  const devices = contrib.contributors.map((c) => ({
+    deviceId: c.deviceId, currentPeakW: c.peakW,
+    proposedMaxW: Math.max(1, Math.round(budgetW * (c.peakW / totalPeak)))
+  }));
+  const key = `multiday:${fromHour}-${toHour}`;
+  const st = _load();
+  const existing = st.proposed[key];
+  if (existing && existing.status === 'proposed') return existing;
+  if (existing && (existing.status === 'confirmed' || existing.status === 'dismissed')) return null;
+  if (_clusterHasOpenProposal(key, now)) return null;
+  const suggestion = {
+    id: `multiday-sched-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
+    type: 'multi-day', fromHour, toHour, budgetW, devices, occurrences: devices.length,
+    daysAffected: overDays.length, horizonDays: md.horizonDays,
+    reason: `long-horizon cap ${fromHour}:00→${toHour}:00 (forecast > budget ${budgetW}W on ${overDays.length}/${md.days.length} upcoming days)`,
+    status: 'proposed', proposed: true, requiresHuman: true, autonomousAction: false, createdAt: new Date().toISOString()
+  };
+  st.proposed[key] = suggestion;
+  _save(st);
+  _clusterMirrorProposal(key, suggestion);
+  return suggestion;
+}
+
+/**
+ * Phase 40 — WEEKLY coordinated proposal. Uses `weeklyProfile` to find the DAYS OF
+ * WEEK whose typical daily draw exceeds budget, and proposes a restrict-only cap on
+ * the peak-hour window RESTRICTED to those weekdays (`days:[...dow]`, which
+ * power-schedule.js already honours). STRICTLY ADVISORY + human-gated; nothing is
+ * applied until `confirm()`. Dedup one open weekly proposal per (days,window).
+ * @param {{ budgetW:number, samples?:object[], now?:number, excludeAnomalous?:boolean }} opts
+ * @param {number} [now]
+ * @returns {object|null}
+ */
+function proposeWeeklySchedule(opts = {}, now = Date.now()) {
+  if (!enabled()) return null;
+  const budgetW = Number(opts.budgetW);
+  if (!Number.isFinite(budgetW) || budgetW <= 0) return null;
+  let forecastMod; let profile;
+  try { forecastMod = require('./power-forecast'); profile = forecastMod.weeklyProfile({ samples: opts.samples, excludeAnomalous: opts.excludeAnomalous }); }
+  catch { return null; }
+  if (!profile || !Object.keys(profile).length) return null;
+  const overDows = Object.entries(profile)
+    .filter(([, e]) => e.peakW > budgetW || e.meanW > budgetW)
+    .map(([d]) => Number(d)).sort((a, b) => a - b);
+  if (!overDows.length) return null;
+  // Peak hour from the overall hourly baseline.
+  const hb = forecastMod.hourlyBaselines({ samples: opts.samples });
+  let peakHour = 0; let peakW = -1;
+  for (const [h, b] of Object.entries(hb)) { if (b.peak > peakW) { peakW = b.peak; peakHour = Number(h); } }
+  const fromHour = peakHour; const toHour = (peakHour + 1) % 24;
+  const contrib = forecastMod.contributorsAtHour({ hour: peakHour, budgetW, samples: opts.samples });
+  if (!contrib || !Array.isArray(contrib.contributors) || !contrib.contributors.length || !(contrib.totalPeakW > 0)) return null;
+  const totalPeak = contrib.totalPeakW || 1;
+  const devices = contrib.contributors.map((c) => ({
+    deviceId: c.deviceId, currentPeakW: c.peakW,
+    proposedMaxW: Math.max(1, Math.round(budgetW * (c.peakW / totalPeak)))
+  }));
+  const key = `weekly:${overDows.join(',')}:${fromHour}-${toHour}`;
+  const st = _load();
+  const existing = st.proposed[key];
+  if (existing && existing.status === 'proposed') return existing;
+  if (existing && (existing.status === 'confirmed' || existing.status === 'dismissed')) return null;
+  if (_clusterHasOpenProposal(key, now)) return null;
+  const suggestion = {
+    id: `weekly-sched-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
+    type: 'weekly', fromHour, toHour, days: overDows, budgetW, devices, occurrences: devices.length,
+    reason: `weekly cap ${fromHour}:00→${toHour}:00 on dow [${overDows.join(',')}] (weekly profile > budget ${budgetW}W)`,
     status: 'proposed', proposed: true, requiresHuman: true, autonomousAction: false, createdAt: new Date().toISOString()
   };
   st.proposed[key] = suggestion;
@@ -716,6 +826,7 @@ function clear() {
 module.exports = {
   FLAG, SUGGEST_FILE,
   enabled, recordAnomaly, proposeSchedules, proposeMultiDeviceSchedule, proposeMultiHourSchedule,
+  proposeMultiDaySchedule, proposeWeeklySchedule,
   createConfirmedSchedule, createConfirmedMultiSchedule, createConfirmedMultiHourSchedule,
   listConfirmedSchedules, removeConfirmedSchedule, sweepExpiredSchedules, expiringSchedules,
   listProposed, confirm, dismiss, clear

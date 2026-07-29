@@ -145,4 +145,42 @@ function trends(opts = {}) {
   };
 }
 
-module.exports = { enabled, read, record, compact, clear, trends, SNAPSHOT_FILE };
+/**
+ * Phase 40 — FLEET DEGRADATION detection over the persisted snapshot history. PURE
+ * OBSERVATION: compares the newest snapshot against the oldest within the window and
+ * reports whether key fleet signals have DECLINED past configurable thresholds
+ * (node-health dropped, flapping rose, tick stalls appeared, anomalies rose). It
+ * NEVER actuates and NEVER changes any recovery behaviour — it only describes a
+ * trend so an advisory notifier can raise a human-gated alert.
+ * @param {{ limit?:number, healthDrop?:number, flapRise?:number, anomalyRise?:number }} [opts]
+ * @returns {{ degraded:boolean, severity:string|null, signals:object[], points:number, at:string }}
+ */
+function degradation(opts = {}) {
+  const t = trends({ limit: opts.limit });
+  const at = new Date().toISOString();
+  if (!t || t.points < 2 || !t.nodeHealthScore) return { degraded: false, severity: null, signals: [], points: t ? t.points : 0, at };
+  const healthDrop = Number.isFinite(opts.healthDrop) ? opts.healthDrop
+    : (Number(process.env.LIKU_PERIPHERAL_FLEET_DEGRADE_HEALTH_DROP) || 0.2);
+  const flapRise = Number.isFinite(opts.flapRise) ? opts.flapRise
+    : (Number(process.env.LIKU_PERIPHERAL_FLEET_DEGRADE_FLAP_RISE) || 2);
+  const anomalyRise = Number.isFinite(opts.anomalyRise) ? opts.anomalyRise
+    : (Number(process.env.LIKU_PERIPHERAL_FLEET_DEGRADE_ANOMALY_RISE) || 3);
+  const signals = [];
+  // Node-health dropped by more than the threshold (delta = newest−oldest → negative = worse).
+  const hd = t.nodeHealthScore.delta;
+  if (hd != null && hd <= -Math.abs(healthDrop)) signals.push({ name: 'node-health-drop', from: t.nodeHealthScore.oldest, to: t.nodeHealthScore.latest, delta: hd });
+  // Flapping increased.
+  if (t.flapping && t.flapping.delta >= flapRise) signals.push({ name: 'flapping-rise', from: t.flapping.oldest, to: t.flapping.latest, delta: t.flapping.delta });
+  // A tick stall appeared (nodes newly stalled).
+  if (t.tickStalledNodes && t.tickStalledNodes.latest > 0 && (t.tickStalledNodes.latest - t.tickStalledNodes.oldest) >= 1) {
+    signals.push({ name: 'tick-stall', from: t.tickStalledNodes.oldest, to: t.tickStalledNodes.latest, delta: t.tickStalledNodes.latest - t.tickStalledNodes.oldest });
+  }
+  // Anomalies rose.
+  if (t.anomalies && t.anomalies.delta >= anomalyRise) signals.push({ name: 'anomaly-rise', from: t.anomalies.oldest, to: t.anomalies.latest, delta: t.anomalies.delta });
+  if (!signals.length) return { degraded: false, severity: null, signals: [], points: t.points, at };
+  // Severity: 'high' for a sharp health drop or a tick stall; else 'warning'.
+  const severe = signals.some((s) => s.name === 'tick-stall' || (s.name === 'node-health-drop' && s.delta <= -0.4));
+  return { degraded: true, severity: severe ? 'high' : 'warning', signals, points: t.points, windowFrom: t.windowFrom, windowTo: t.windowTo, at };
+}
+
+module.exports = { enabled, read, record, compact, trends, degradation, clear, SNAPSHOT_FILE };

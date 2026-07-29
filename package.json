@@ -41,6 +41,7 @@
     "regression:transcripts": "node scripts/run-transcript-regressions.js",
     "smoke:shortcuts": "node scripts/smoke-shortcuts.js",
     "smoke:chat-direct": "node scripts/smoke-chat-direct.js",
+    "smoke:live-peripherals": "node scripts/live-peripheral-smoke.js",
     "smoke:tradingview-live": "node scripts/live-tradingview-smoke.js",
     "tradingview:inspect-launch": "node scripts/inspect-tradingview-launch-capability.js",
     "tradingview:write-launch-contract": "node scripts/write-tradingview-launch-contract.js",

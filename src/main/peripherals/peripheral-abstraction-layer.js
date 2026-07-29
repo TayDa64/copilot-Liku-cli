@@ -571,6 +571,24 @@ function getMultiHourProposal(opts = {}) {
     return { enabled: true, proposal: scheduleAdvisor().proposeMultiHourSchedule({ ...opts, budgetW }) };
   } catch { return { enabled: true, proposal: null }; }
 }
+
+/** Phase 40 — propose a long-horizon (multi-day) coordinated reduce-schedule (advisory, human-gated). */
+function getMultiDayProposal(opts = {}) {
+  if (!isPeripheralsEnabled()) return { enabled: false, proposal: null };
+  try {
+    const budgetW = Number.isFinite(opts.budgetW) ? opts.budgetW : _powerBudgetW();
+    return { enabled: true, proposal: scheduleAdvisor().proposeMultiDaySchedule({ ...opts, budgetW }) };
+  } catch { return { enabled: true, proposal: null }; }
+}
+
+/** Phase 40 — propose a weekly (day-of-week restricted) coordinated reduce-schedule (advisory, human-gated). */
+function getWeeklyProposal(opts = {}) {
+  if (!isPeripheralsEnabled()) return { enabled: false, proposal: null };
+  try {
+    const budgetW = Number.isFinite(opts.budgetW) ? opts.budgetW : _powerBudgetW();
+    return { enabled: true, proposal: scheduleAdvisor().proposeWeeklySchedule({ ...opts, budgetW }) };
+  } catch { return { enabled: true, proposal: null }; }
+}
 /** Phase 25 — data-driven special/holiday day detection (advisory). */
 function getSpecialDays(opts = {}) {
   if (!isPeripheralsEnabled()) return { enabled: false, dates: [] };
@@ -1024,6 +1042,13 @@ function getFleetSnapshotTrends(opts = {}) {
   catch { return { enabled: true, points: 0, series: [] }; }
 }
 
+/** Phase 40 — detect fleet-health DEGRADATION over the persisted snapshot history (pure observation). */
+function getFleetDegradation(opts = {}) {
+  if (!isPeripheralsEnabled()) return { enabled: false, degraded: false, signals: [] };
+  try { return { enabled: true, ...require('./fleet-snapshot').degradation(opts) }; }
+  catch { return { enabled: true, degraded: false, signals: [] }; }
+}
+
 /** Phase 22 — mint a PER-ACTION (least-privilege) capability token for a device. */
 function issueActionToken(id, action, opts = {}) {
   if (!isPeripheralsEnabled()) return { enabled: false };
@@ -1379,6 +1404,7 @@ module.exports = {
   getFleetObservability,
   getFleetSnapshot,
   getFleetSnapshotTrends,
+  getFleetDegradation,
   getLockClusterTrends,
   issueActionToken,
   verifyDeviceToken,
@@ -1390,6 +1416,8 @@ module.exports = {
   getMultiDayForecast,
   getWeeklyProfile,
   getMultiHourProposal,
+  getMultiDayProposal,
+  getWeeklyProposal,
   getSpecialDays,
   sweepCluster,
   getClusterAnomalies,
