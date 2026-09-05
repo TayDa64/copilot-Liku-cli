@@ -3,9 +3,11 @@ function createProviderOrchestrator(dependencies) {
     aiProviders,
     apiKeys,
     callAnthropic,
+    callCerebras,
     callCopilot,
     callOllama,
     callOpenAI,
+    callXai,
     getCurrentCopilotModel,
     getCurrentProvider,
     loadCopilotToken,
@@ -97,8 +99,13 @@ function createProviderOrchestrator(dependencies) {
       case 'anthropic':
         return callAnthropic(messages, requestOptions);
       case 'ollama':
-      default:
         return callOllama(messages, requestOptions);
+      case 'cerebras':
+        return callCerebras(messages, effectiveModel, requestOptions);
+      case 'xai':
+        return callXai(messages, effectiveModel, requestOptions);
+      default:
+        throw new Error(`Unknown provider: ${provider}`);
     }
   }
 
@@ -115,21 +122,31 @@ function createProviderOrchestrator(dependencies) {
       case 'anthropic':
         if (!apiKeys.anthropic) throw new Error('Anthropic API key not set.');
         return;
-      default:
+      case 'cerebras':
+        if (!apiKeys.cerebras) throw new Error('Cerebras API key not set.');
         return;
+      case 'xai':
+        if (!apiKeys.xai) throw new Error('xAI API key not set.');
+        return;
+      case 'ollama':
+        return;
+      default:
+        throw new Error(`Unknown provider: ${provider}`);
     }
   }
 
   function normalizeProviderResult(provider, rawResult, effectiveModel) {
-    if (provider === 'copilot' && rawResult && typeof rawResult === 'object' && !Array.isArray(rawResult)) {
+    if (rawResult && typeof rawResult === 'object' && !Array.isArray(rawResult)) {
+      const providerMetadata = {};
+      if (rawResult.endpointHost !== undefined) providerMetadata.endpointHost = rawResult.endpointHost || null;
+      if (rawResult.actualModelId !== undefined) providerMetadata.actualModelId = rawResult.actualModelId || null;
+      if (rawResult.usage !== undefined) providerMetadata.usage = rawResult.usage || null;
+      if (rawResult.latencyMs !== undefined) providerMetadata.latencyMs = rawResult.latencyMs;
       return {
         response: typeof rawResult.content === 'string' ? rawResult.content : '',
         effectiveModel: rawResult.effectiveModel || effectiveModel,
         requestedModel: rawResult.requestedModel || effectiveModel,
-        providerMetadata: {
-          endpointHost: rawResult.endpointHost || null,
-          actualModelId: rawResult.actualModelId || null
-        }
+        providerMetadata
       };
     }
 
@@ -199,7 +216,12 @@ function createProviderOrchestrator(dependencies) {
     let effectiveModel = getCurrentCopilotModel();
     let requestedCopilotModel = requestedModel || effectiveModel;
     const currentProvider = getCurrentProvider();
-    const fallbackChain = [currentProvider, ...providerFallbackOrder.filter((provider) => provider !== currentProvider)];
+    const optionalProviders = new Set(['cerebras', 'xai']);
+    const availableFallbackOrder = [
+      ...providerFallbackOrder.filter((provider) => aiProviders[provider] || !optionalProviders.has(provider)),
+      ...Object.keys(aiProviders).filter((provider) => !providerFallbackOrder.includes(provider))
+    ];
+    const fallbackChain = [currentProvider, ...availableFallbackOrder.filter((provider) => provider !== currentProvider)];
     let primaryError = null;
     let lastError = null;
     let usedProvider = currentProvider;

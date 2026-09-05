@@ -35,6 +35,7 @@ let clearedVisual = false;
 let resetBrowser = false;
 let clearedSessionIntent = false;
 let clearedChatContinuity = false;
+const commandAiProviders = { copilot: {}, openai: {}, anthropic: {}, ollama: {} };
 
 const sessionIntentState = {
   currentRepo: { repoName: 'copilot-liku-cli' },
@@ -54,7 +55,16 @@ const chatContinuityState = {
 };
 
 const handler = createCommandHandler({
-  aiProviders: { copilot: {}, openai: {}, anthropic: {}, ollama: {} },
+  aiProviders: commandAiProviders,
+  providerModelCatalog: {
+    cerebras: [
+      { id: 'gpt-oss-120b', name: 'GPT-OSS 120B', capabilities: { chat: true, reasoning: true } }
+    ],
+    xai: [
+      { id: 'grok-4.6', name: 'Grok 4.6', capabilities: { chat: true, reasoning: true, planning: true } },
+      { id: 'grok-4.20-0309-non-reasoning', name: 'Grok 4.20 Non-Reasoning', capabilities: { chat: true, reasoning: false } }
+    ]
+  },
   captureVisualContext: () => Promise.resolve({ type: 'system', message: 'captured' }),
   clearVisualContext: () => {
     clearedVisual = true;
@@ -120,6 +130,9 @@ const handler = createCommandHandler({
     hasCopilotKey: true,
     hasOpenAIKey: false,
     hasAnthropicKey: false,
+    hasCerebrasKey: !!commandAiProviders.cerebras?.keySet,
+    hasXaiKey: !!commandAiProviders.xai?.keySet,
+    availableProviders: Object.keys(commandAiProviders),
     historyLength: 7,
     visualContextCount: 2
   }),
@@ -140,7 +153,17 @@ const handler = createCommandHandler({
   clearSessionIntentState: () => {
     clearedSessionIntent = true;
   },
-  setApiKey: () => true,
+  setApiKey: (provider) => {
+    if (provider === 'cerebras') {
+      commandAiProviders.cerebras = { model: 'gpt-oss-120b', keySet: true };
+      return true;
+    }
+    if (provider === 'xai') {
+      commandAiProviders.xai = { model: 'grok-4.6', keySet: true };
+      return true;
+    }
+    return ['copilot', 'openai', 'anthropic'].includes(provider);
+  },
   setCopilotModel: (model) => {
     if (!['gpt-4.1', 'gpt-4o', 'gpt-4o-mini', 'gpt-5.2'].includes(model)) {
       return false;
@@ -149,7 +172,7 @@ const handler = createCommandHandler({
     return true;
   },
   setProvider: (provider) => {
-    if (!['copilot', 'openai', 'anthropic', 'ollama'].includes(provider)) {
+    if (!commandAiProviders[provider]) {
       return false;
     }
     currentProvider = provider;
@@ -277,6 +300,30 @@ test('status command preserves status text shape', () => {
   assert.ok(result.message.includes('Runtime endpoint: api.githubcopilot.com'));
   assert.ok(result.message.includes('History: 7 messages'));
   assert.ok(result.message.includes('Visual: 2 captures'));
+});
+
+test('setkey activates optional providers without exposing secrets', () => {
+  const setKey = handler.handleCommand('/setkey xai test-secret');
+  assert.strictEqual(setKey.type, 'system');
+  assert.ok(setKey.message.includes('API key set for xai.'));
+  assert.ok(!setKey.message.includes('test-secret'));
+
+  const provider = handler.handleCommand('/provider xai');
+  assert.strictEqual(provider.type, 'system');
+  assert.ok(provider.message.includes('Switched to xai provider.'));
+});
+
+test('model command lists active optional provider catalog', () => {
+  const result = handler.handleCommand('/model');
+  assert.strictEqual(result.type, 'info');
+  assert.ok(result.message.includes('Current xai model: grok-4.6'));
+  assert.ok(result.message.includes('grok-4.20-0309-non-reasoning'));
+});
+
+test('status command reports configured optional provider keys', () => {
+  const result = handler.handleCommand('/status');
+  assert.strictEqual(result.type, 'info');
+  assert.ok(result.message.includes('xAI: Key set'));
 });
 
 test('run_command safety keeps read-only inspection commands low-risk', () => {

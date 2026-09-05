@@ -19,6 +19,7 @@ function createCommandHandler(dependencies) {
     logoutCopilot,
     modelRegistry,
     preferSessionCopilotModelChanges,
+    providerModelCatalog = {},
     resetBrowserSessionState,
     clearSessionIntentState,
     getSessionIntentState,
@@ -117,6 +118,7 @@ function createCommandHandler(dependencies) {
       if (!grouped.has(key)) grouped.set(key, []);
       grouped.get(key).push(model);
     }
+
     for (const [label, entries] of grouped.entries()) {
       sections.push(`${label}:`);
       for (const model of entries) {
@@ -125,6 +127,31 @@ function createCommandHandler(dependencies) {
       sections.push('');
     }
     return sections.join('\n').trim();
+  }
+
+  function formatProviderModelList(provider) {
+    const models = providerModelCatalog[provider] || [];
+    if (!models.length) return '';
+    return models.map((model) => {
+      const caps = model.capabilities || {};
+      const labels = [];
+      if (caps.reasoning) labels.push('reasoning');
+      if (caps.planning) labels.push('planning');
+      return `  ${model.id} - ${model.name}${labels.length ? ` [${labels.join(', ')}]` : ''}`;
+    }).join('\n');
+  }
+
+  function setProviderModel(provider, modelId) {
+    const models = providerModelCatalog[provider] || [];
+    const model = models.find((entry) => entry.id === modelId);
+    const config = aiProviders[provider];
+    if (!model || !config) return null;
+    config.model = model.id;
+    config.chatModel = model.id;
+    config.reasoningModel = model.id;
+    config.automationModel = model.id;
+    config.visionModel = model.id;
+    return model;
   }
 
   function applyCopilotModelChange(model) {
@@ -262,11 +289,20 @@ function createCommandHandler(dependencies) {
 
       case '/model':
         if (parts.length > 1) {
+          const activeProvider = getCurrentProvider();
+          const providerModels = providerModelCatalog[activeProvider] || [];
           const models = getDisplayModels();
           let requested = null;
           if (parts[1] === '--set') {
             requested = parts.slice(2).join(' ');
           } else if (parts[1] === '--current' || parts[1] === 'current') {
+            if (providerModels.length) {
+              const configured = aiProviders[activeProvider]?.model || providerModels[0].id;
+              return {
+                type: 'info',
+                message: `Current ${activeProvider} model: ${configured}`
+              };
+            }
             const currentModel = getCurrentCopilotModel();
             const current = modelRegistry()[currentModel];
             return {
@@ -275,6 +311,20 @@ function createCommandHandler(dependencies) {
             };
           } else {
             requested = parts.slice(1).join(' ');
+          }
+
+          if (providerModels.length) {
+            const model = setProviderModel(activeProvider, requested);
+            if (model) {
+              return {
+                type: 'system',
+                message: `Switched ${activeProvider} model to ${model.name} (${model.id})`
+              };
+            }
+            return {
+              type: 'error',
+              message: `Unknown ${activeProvider} model. Available models:\n${formatProviderModelList(activeProvider)}`
+            };
           }
 
           const shortcutModel = resolveModelShortcut(requested, models);
@@ -294,6 +344,15 @@ function createCommandHandler(dependencies) {
           };
         }
 
+        if ((providerModelCatalog[getCurrentProvider()] || []).length) {
+          const provider = getCurrentProvider();
+          const configured = aiProviders[provider]?.model || providerModelCatalog[provider][0].id;
+          return {
+            type: 'info',
+            message: `Current ${provider} model: ${configured}\n\nAvailable ${provider} models:\n${formatProviderModelList(provider)}\n\nUse /model <id> to switch.`
+          };
+        }
+
         const models = getDisplayModels();
         const list = formatGroupedModelList(models);
         const currentModel = getCurrentCopilotModel();
@@ -308,9 +367,10 @@ function createCommandHandler(dependencies) {
         const status = getStatus();
         const runtimeModelLabel = status.runtimeModelName || 'not yet validated';
         const runtimeHostLabel = status.runtimeEndpointHost || 'not yet validated';
+        const availableProviders = status.availableProviders || Object.keys(aiProviders);
         return {
           type: 'info',
-          message: `Provider: ${status.provider}\nConfigured model: ${status.configuredModelName || modelRegistry()[getCurrentCopilotModel()]?.name || getCurrentCopilotModel()} (${status.configuredModel || getCurrentCopilotModel()})\nRequested model: ${status.requestedModel || status.configuredModel || getCurrentCopilotModel()}\nRuntime model: ${runtimeModelLabel}${status.runtimeModel ? ` (${status.runtimeModel})` : ''}\nRuntime endpoint: ${runtimeHostLabel}\nCopilot: ${status.hasCopilotKey ? 'Authenticated' : 'Not authenticated'}\nOpenAI: ${status.hasOpenAIKey ? 'Key set' : 'No key'}\nAnthropic: ${status.hasAnthropicKey ? 'Key set' : 'No key'}\nHistory: ${status.historyLength} messages\nVisual: ${status.visualContextCount} captures`
+          message: `Provider: ${status.provider}\nConfigured model: ${status.configuredModelName || modelRegistry()[getCurrentCopilotModel()]?.name || getCurrentCopilotModel()} (${status.configuredModel || getCurrentCopilotModel()})\nRequested model: ${status.requestedModel || status.configuredModel || getCurrentCopilotModel()}\nRuntime model: ${runtimeModelLabel}${status.runtimeModel ? ` (${status.runtimeModel})` : ''}\nRuntime endpoint: ${runtimeHostLabel}\nCopilot: ${status.hasCopilotKey ? 'Authenticated' : 'Not authenticated'}\nOpenAI: ${status.hasOpenAIKey ? 'Key set' : 'No key'}\nAnthropic: ${status.hasAnthropicKey ? 'Key set' : 'No key'}${availableProviders.includes('cerebras') ? `\nCerebras: ${status.hasCerebrasKey ? 'Key set' : 'unset'}` : ''}${availableProviders.includes('xai') ? `\nxAI: ${status.hasXaiKey ? 'Key set' : 'unset'}` : ''}\nHistory: ${status.historyLength} messages\nVisual: ${status.visualContextCount} captures`
         };
       }
 
@@ -322,7 +382,7 @@ function createCommandHandler(dependencies) {
 /logout - Remove GitHub Copilot authentication
 /model [name] - List or set Copilot model
 /sequence [on|off] - (CLI chat) step-by-step execution prompts
-/provider [name] - Get/set AI provider (copilot, openai, anthropic, ollama)
+/provider [name] - Get/set AI provider (${Object.keys(aiProviders).join(', ')})
 /setkey <provider> <key> - Set API key
 /status - Show authentication status
 /github ... - GitHub inspection plus reviewed preview creation via shared typed adapters

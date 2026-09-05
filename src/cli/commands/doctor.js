@@ -6,6 +6,10 @@
 const path = require('path');
 const { success, error, info, highlight, dim } = require('../util/output');
 const { resolveProjectIdentity, validateProjectIdentity } = require('../../shared/project-identity');
+const {
+  createProviderRegistry,
+  OPTIONAL_PROVIDER_ENV
+} = require('../../main/ai-service/providers/registry');
 
 const PROJECT_ROOT = path.resolve(__dirname, '../../..');
 const UI_MODULE = path.resolve(__dirname, '../../main/ui-automation');
@@ -18,6 +22,31 @@ function safeJsonStringify(value) {
   } catch {
     return null;
   }
+}
+
+function buildProviderDiagnostics(env = process.env) {
+  const registry = createProviderRegistry(env);
+  return Object.keys(registry.AI_PROVIDERS).map((provider) => {
+    const optionalConfig = OPTIONAL_PROVIDER_ENV[provider] || null;
+    const envVars = provider === 'copilot'
+      ? ['GH_TOKEN', 'GITHUB_TOKEN']
+      : provider === 'openai'
+        ? ['OPENAI_API_KEY']
+        : provider === 'anthropic'
+          ? ['ANTHROPIC_API_KEY']
+          : optionalConfig
+            ? [optionalConfig.key]
+            : [];
+    const keySet = provider === 'ollama'
+      ? true
+      : envVars.some((name) => !!env[name]);
+    return {
+      provider,
+      configured: provider === 'ollama' ? 'local' : (keySet ? 'set' : 'unset'),
+      env: envVars,
+      optional: !!optionalConfig
+    };
+  });
 }
 
 async function withConsoleSilenced(enabled, fn) {
@@ -912,6 +941,8 @@ async function run(args, options) {
     arch: process.arch,
     execPath: process.execPath,
   };
+  const providerDiagnostics = buildProviderDiagnostics(process.env);
+  const hasOptionalProviderDiagnostics = providerDiagnostics.some((entry) => entry.optional);
 
   const requestText = args.length > 0 ? args.join(' ') : null;
   const requestHints = requestText ? parseRequestHints(requestText) : null;
@@ -972,6 +1003,7 @@ async function run(args, options) {
     checks,
     checksSummary,
     env: envInfo,
+    ...(hasOptionalProviderDiagnostics ? { aiProviders: providerDiagnostics } : {}),
     repoIdentity: projectIdentity,
     projectGuard,
     request: requestText ? { text: requestText, hints: requestHints } : null,
@@ -1022,6 +1054,13 @@ async function run(args, options) {
       projectGuard.errors.forEach((entry) => console.log(`  - ${entry}`));
     } else if (projectGuard.expected.projectRoot || projectGuard.expected.repo) {
       console.log(`${highlight('Project guard:')} pass`);
+    }
+
+    if (hasOptionalProviderDiagnostics) {
+      console.log(`\n${highlight('AI providers:')}`);
+      providerDiagnostics.forEach((entry) => {
+        console.log(`  ${entry.provider}: ${entry.configured}`);
+      });
     }
 
     console.log(`\n${highlight('Active window:')}`);
@@ -1083,4 +1122,4 @@ async function run(args, options) {
   return report;
 }
 
-module.exports = { run };
+module.exports = { run, buildProviderDiagnostics };
