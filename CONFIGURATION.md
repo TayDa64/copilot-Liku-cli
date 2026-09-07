@@ -192,8 +192,19 @@ export LIKU_TRANSPORT_FABRIC=1     # route the in-process agent handoff through 
 - **Transport neutrality:** worker semantics are not coupled to TCP/HTTP/2/3/QUIC. Provider APIs remain HTTPS / OpenAI-compatible, and **agents never open streams**.
 - **Transport grants no authority.** A handle's `invoke()` only calls the injected function: agent handoffs still flow through Supervisor → fabric → scheduler → escalation, and model calls still flow through `requestWithFallback` (route + budget + telemetry). The manager never reads an API key from `caps` to POST around policy, and only Supervisor / ai-service / fabric may hold it.
 
+### Transport Measurement Harness (Lab Only)
 
+The **transport bench** records latency / bytes / error class for comparable request shapes over *injected* adapters labeled `https-provider`, `http2`, and `http3`. It is **off by default** and is **not a production transport switch**. Bench kinds are not production kinds: `TransportManager.select('http3')` still throws `unsupported-transport`.
 
+```bash
+export LIKU_TRANSPORT_BENCH=1      # enable the lab harness
+node scripts/bench-transport.js    # N mocked round-trips per kind; writes ~/.liku/bench/transport-bench.json
+```
+
+- **Harness only.** It does not add `http2` / `http3` to `listKinds()`, does not make `isSupported('http3') === true`, and does not open vendor APIs (`api.x.ai`, `api.cerebras.ai`, `api.openai.com`). Default adapters are in-process stubs (`unsupported-in-process` for reserved labels).
+- **Persistence:** `~/.liku/bench/transport-bench.json` (dir `0o700`, file `0o600`). Tests must use `LIKU_HOME_OVERRIDE`. Records are allowlisted (`ts`, `kind`, `n`, `ok`, `fail`, `p50Ms`, `p95Ms`, `bytes`, `errorClasses`) — no URLs with keys, no Authorization headers, no message bodies.
+- **Optional iteration count:** `LIKU_TRANSPORT_BENCH_N` (default 8).
+- A faster bench row is not a cutover. Adaptive policy is a later phase and still requires an explicit flag.
 
 ### Status and Diagnostics
 
@@ -374,4 +385,6 @@ Policy enforcement validates action plans against both negative and positive pol
 | `LIKU_MAX_PARALLEL_PER_PROVIDER` | Scheduler cap: max in flight per provider | 1 |
 | `LIKU_MAX_PARALLEL_PER_ROLE` | Scheduler cap: max in flight per role | 2 |
 | `LIKU_TRANSPORT_FABRIC` | Route worker dispatch through the transport manager (inprocess / https-provider adapters) | off |
+| `LIKU_TRANSPORT_BENCH` | Run the HTTP/2 vs HTTP/3 measurement harness (injected stubs; not a production switch) | off |
+| `LIKU_TRANSPORT_BENCH_N` | Bench iterations per kind (default 8) | 8 |
 | `NODE_ENV` | Development/production mode | — |
