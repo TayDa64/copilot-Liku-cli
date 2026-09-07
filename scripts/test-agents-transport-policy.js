@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
-// Phase 51: adaptive transport policy table. Isolated temp LIKU_HOME.
-// Advisory only. No WAN. Does not expand production select() kinds.
+// Phase 51 / 51.1: adaptive transport policy table + Supervisor APPLY pin.
+// Isolated temp LIKU_HOME. Advisory only. No WAN.
 
 const os = require('os');
 const fs = require('fs');
@@ -14,6 +14,7 @@ process.env.LIKU_HOME_OVERRIDE = path.join(tempRoot, '.liku');
 const policy = require(path.join(__dirname, '..', 'src', 'main', 'agents', 'transport-policy.js'));
 const transport = require(path.join(__dirname, '..', 'src', 'main', 'agents', 'transport-fabric.js'));
 const { createTransportManager } = transport;
+const { SupervisorAgent } = require(path.join(__dirname, '..', 'src', 'main', 'agents', 'supervisor.js'));
 
 const FLAG_KEYS = [
   'LIKU_TRANSPORT_POLICY', 'LIKU_TRANSPORT_POLICY_APPLY',
@@ -225,6 +226,37 @@ test('policy module never calls select()', () => {
   }
 });
 
+test('Supervisor APPLY off: consult returns null (policy module stays lazy)', () => {
+  delete process.env.LIKU_TRANSPORT_POLICY;
+  delete process.env.LIKU_TRANSPORT_POLICY_APPLY;
+  const sup = new SupervisorAgent({});
+  assert.strictEqual(sup._maybeRecommendTransport('agent-handoff'), null);
+});
+
+test('Supervisor APPLY on: agent-handoff pins inprocess, never http3/quic', () => {
+  process.env.LIKU_TRANSPORT_POLICY = '1';
+  process.env.LIKU_TRANSPORT_POLICY_APPLY = '1';
+  delete process.env.LIKU_QUIC_WORKER_LAB;
+  const sup = new SupervisorAgent({});
+  const rec = sup._maybeRecommendTransport('agent-handoff');
+  assert.ok(rec);
+  assert.strictEqual(rec.applied, true);
+  assert.strictEqual(rec.kind, 'inprocess');
+  const mgr = createTransportManager({ env: process.env });
+  assert.strictEqual(mgr.isSupported(rec.kind), true);
+  assert.throws(() => mgr.select({ kind: 'http3' }), (err) => err && err.code === 'unsupported-transport');
+  assert.throws(() => mgr.select({ kind: 'quic' }), (err) => err && err.code === 'unsupported-transport');
+});
+
+test('Supervisor APPLY + lab: agent-handoff still inprocess (quic not compatible)', () => {
+  process.env.LIKU_TRANSPORT_POLICY = '1';
+  process.env.LIKU_TRANSPORT_POLICY_APPLY = '1';
+  process.env.LIKU_QUIC_WORKER_LAB = '1';
+  const sup = new SupervisorAgent({});
+  const rec = sup._maybeRecommendTransport('agent-handoff');
+  assert.strictEqual(rec.kind, 'inprocess');
+});
+
 test('writes stay under LIKU_HOME_OVERRIDE (no real-home pollution)', () => {
   const rec = policy.recommendTransport({
     workload: 'agent-handoff',
@@ -238,7 +270,7 @@ test('writes stay under LIKU_HOME_OVERRIDE (no real-home pollution)', () => {
 
 process.on('exit', () => {
   try { fs.rmSync(tempRoot, { recursive: true, force: true }); } catch {}
-  if (failures === 0) console.log('\nAll Phase 51 transport policy checks passed.');
+  if (failures === 0) console.log('\nAll Phase 51.1 transport policy / APPLY checks passed.');
 });
 
 runAll();
