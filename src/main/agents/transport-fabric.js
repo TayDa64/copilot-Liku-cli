@@ -8,9 +8,10 @@
  *   - https-provider: today's OpenAI-compatible request path (an injected function
  *                     that MUST be requestWithFallback — never a second HTTP client).
  *
- * Reserved kinds (http2 | http3 | quic | ipc) are NOT built and fail closed:
- * selecting one throws `unsupported-transport`. There is no bakeoff, no QUIC, no
- * IPC socket, no HTTP/3 here — those are later phases.
+ * Reserved kinds (http2 | http3 | quic | ipc) fail closed by default:
+ * selecting one throws `unsupported-transport`. Phase 50 adds a lab-only
+ * loopback stand-in for `quic` when LIKU_QUIC_WORKER_LAB=1. That is not a
+ * production QUIC stack and never speaks to vendor APIs.
  *
  * NON-NEGOTIABLE: transport is not a privileged pipe. A handle's invoke() only
  * calls the injected function; it can NOT skip budget, routing, escalation,
@@ -30,6 +31,10 @@ function isEnabledFlag(value) {
 
 function isTransportFabricEnabled(env = process.env) {
   return isEnabledFlag(env.LIKU_TRANSPORT_FABRIC);
+}
+
+function isQuicWorkerLabEnabled(env = process.env) {
+  return isEnabledFlag(env.LIKU_QUIC_WORKER_LAB);
 }
 
 // The https-provider adapter only accepts inference-shaped work — it must never
@@ -53,20 +58,38 @@ class TransportManager {
     this._env = options.env || process.env;
     this._invokeInProcess = typeof options.invokeInProcess === 'function' ? options.invokeInProcess : null;
     this._invokeHttpsProvider = typeof options.invokeHttpsProvider === 'function' ? options.invokeHttpsProvider : null;
+    this._invokeQuicLab = typeof options.invokeQuicLab === 'function' ? options.invokeQuicLab : null;
   }
 
   isSupported(kind) {
-    return IMPLEMENTED_KINDS.includes(String(kind || '').trim().toLowerCase());
+    const requested = String(kind || '').trim().toLowerCase();
+    if (IMPLEMENTED_KINDS.includes(requested)) return true;
+    return requested === 'quic' && isQuicWorkerLabEnabled(this._env);
   }
 
   listKinds() {
-    return IMPLEMENTED_KINDS.slice();
+    const kinds = IMPLEMENTED_KINDS.slice();
+    if (isQuicWorkerLabEnabled(this._env)) kinds.push('quic');
+    return kinds;
   }
 
   // caps is advisory only. It is NEVER read for credentials — the injected paths
   // own auth/routing/budget. Reserved/unknown kinds fail closed (no silent fall).
   select({ kind, caps } = {}) {
     const requested = kind == null || kind === '' ? 'inprocess' : String(kind).trim().toLowerCase();
+
+    if (requested === 'quic') {
+      if (!isQuicWorkerLabEnabled(this._env)) {
+        throw unsupportedTransportError(requested);
+      }
+      // Lazy load so the lab module stays off the default Supervisor graph.
+      const lab = require('./quic-lab');
+      return lab.createQuicLabTransport({
+        env: this._env,
+        caps,
+        invokeFrame: this._invokeQuicLab || undefined
+      });
+    }
 
     if (!IMPLEMENTED_KINDS.includes(requested)) {
       throw unsupportedTransportError(requested);
@@ -107,6 +130,7 @@ module.exports = {
   IMPLEMENTED_KINDS,
   RESERVED_KINDS,
   isTransportFabricEnabled,
+  isQuicWorkerLabEnabled,
   isInferenceShapedPayload,
   TransportManager,
   createTransportManager
