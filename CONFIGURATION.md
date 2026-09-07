@@ -87,6 +87,33 @@ The flag only *activates* the routing table — it does **not** by itself enable
 
 Unknown roles, disabled providers, and unknown model ids for a provider are rejected. Routing metadata is recorded on the AI result's `providerMetadata.route`; it never enters the model's system-prompt context.
 
+### Inference Budget Governor & Telemetry
+
+When the inference fabric is on, each inference call passes through a **fail-closed budget governor** and (optionally) appends a durable **telemetry** record. Both are inert when `LIKU_INFERENCE_FABRIC` is off — no spend accounting, no files written.
+
+**Budget caps** (all optional; defaults apply only when the fabric is on):
+
+| Scope | Env variable | Default |
+| :--- | :--- | :--- |
+| Session estimated USD | `LIKU_INFERENCE_BUDGET_USD` | `0.50` |
+| Session tokens (in + out) | `LIKU_INFERENCE_BUDGET_TOKENS` | `250000` |
+| Calls per role (per process) | `LIKU_INFERENCE_MAX_CALLS_PER_ROLE` | `20` |
+
+Over-cap calls are **not dispatched** — the request is blocked before any network I/O and a structured `Budget exceeded: <reason>` error is surfaced (`reason` is one of `usd-cap`, `token-cap`, `iteration-cap`). The ledger is in-process only (caps reset per process); durable spend history lives in telemetry. Missing usage on a response counts one call toward the iteration cap but never invents token numbers.
+
+**Rate table:** cost estimates come from an in-module price table (`providers/rates.js`). The bundled rates are **illustrative — verify against provider pricing before trusting spend**. Override by pointing `LIKU_INFERENCE_RATES_JSON` at a JSON file shaped like `{ "<provider>": { "<model>": { "inputPerMillion": N, "outputPerMillion": N } } }`. An unknown rate yields `estimatedUsd: null` (never `0` pretending free).
+
+**Telemetry:** one JSONL line per completed / failed / blocked call at `~/.liku/inference/inference.jsonl` (file mode `0o600`, dir `0o700`). Records carry only scalar metadata — provider, model, role, route reason, token counts, latency, estimated USD, success/blocked flags — never API keys, prompt text, file contents, or screenshots. Disable file writes while keeping the fabric on with `LIKU_INFERENCE_TELEMETRY=0`.
+
+**Analytics (read-only):**
+
+```
+liku analytics inference          # Counts, tokens, estimated cost, latency, breakdown by provider/role
+liku analytics inference --json   # Machine-readable summary
+liku analytics inference --raw    # Dump raw JSONL records
+/status                           # Shows an Inference block when the fabric is on
+```
+
 ### Status and Diagnostics
 
 ```
@@ -251,4 +278,9 @@ Policy enforcement validates action plans against both negative and positive pol
 | `CEREBRAS_API_KEY` / `LIKU_ENABLE_CEREBRAS` | Enable/authenticate Cerebras | — |
 | `XAI_API_KEY` / `LIKU_ENABLE_XAI` | Enable/authenticate xAI | — |
 | `LIKU_INFERENCE_FABRIC` | Enable flag-gated role routing policy (`/route`) | off |
+| `LIKU_INFERENCE_TELEMETRY` | Toggle inference telemetry writes while fabric on | on |
+| `LIKU_INFERENCE_BUDGET_USD` | Session estimated-USD spend cap | `0.50` |
+| `LIKU_INFERENCE_BUDGET_TOKENS` | Session token cap (in + out) | `250000` |
+| `LIKU_INFERENCE_MAX_CALLS_PER_ROLE` | Per-role call cap (per process) | `20` |
+| `LIKU_INFERENCE_RATES_JSON` | Path to a rate-table override JSON | — |
 | `NODE_ENV` | Development/production mode | — |

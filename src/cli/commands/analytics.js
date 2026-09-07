@@ -19,6 +19,10 @@ async function run(args, flags) {
     return { success: true };
   }
 
+  if (args[0] === 'inference') {
+    return runInference(args.slice(1), flags);
+  }
+
   const telemetry = getTelemetryWriter();
   const days = Math.max(1, parseInt(flags.days, 10) || 1);
   const raw = !!flags.raw;
@@ -126,12 +130,64 @@ ${highlight('USAGE:')}
   liku analytics --days 7     Summary for last 7 days
   liku analytics --raw        Dump raw telemetry entries
   liku analytics --json       Output as JSON
+  liku analytics inference    Inference routing/budget telemetry summary
 
 ${highlight('OPTIONS:')}
   --days <n>    Number of days to include (default: 1)
   --raw         Print raw JSONL entries
   --json        Machine-readable JSON output
 `);
+}
+
+// Phase 43: read-only inference telemetry slice.
+function runInference(_args, flags) {
+  let analytics;
+  try {
+    analytics = require('../../main/ai-service').getInferenceAnalytics();
+  } catch (e) {
+    error(`Could not load inference analytics: ${e.message}`);
+    return { success: false };
+  }
+
+  if (flags.json) {
+    log(JSON.stringify(analytics, null, 2));
+    return { success: true, analytics };
+  }
+
+  if (flags.raw) {
+    try {
+      const records = require('../../main/ai-service/providers/inference-telemetry')
+        .createInferenceTelemetry({ env: process.env }).readRecords();
+      for (const r of records) log(JSON.stringify(r));
+      return { success: true, count: records.length };
+    } catch (e) {
+      error(`Could not read inference records: ${e.message}`);
+      return { success: false };
+    }
+  }
+
+  const latencyLabel = analytics.latency && analytics.latency.p50 !== undefined
+    ? `p50 ${analytics.latency.p50}ms · p95 ${analytics.latency.p95}ms`
+    : `avg ${analytics.latency ? analytics.latency.avg : null}ms`;
+
+  console.log(`\n${bold('Liku Inference Analytics')} ${dim(`(fabric ${analytics.fabricEnabled ? 'ON' : 'OFF'}, telemetry ${analytics.telemetryEnabled ? 'ON' : 'OFF'})`)}\n`);
+  console.log(`${highlight('Calls:')} ${analytics.calls}  ${dim('success:')} ${analytics.successes}  ${dim('blocked:')} ${analytics.blocked}`);
+  console.log(`${highlight('Tokens:')} ${analytics.tokensIn} in / ${analytics.tokensOut} out`);
+  console.log(`${highlight('Estimated cost:')} $${analytics.estimatedUsd.toFixed(4)}`);
+  console.log(`${highlight('Latency:')} ${latencyLabel}`);
+
+  const providers = Object.entries(analytics.byProvider || {}).sort((a, b) => b[1] - a[1]);
+  if (providers.length) {
+    console.log(`\n${highlight('By provider:')}`);
+    for (const [p, n] of providers) console.log(`  ${n.toString().padStart(4)} × ${p}`);
+  }
+  const roles = Object.entries(analytics.byRole || {}).sort((a, b) => b[1] - a[1]);
+  if (roles.length) {
+    console.log(`\n${highlight('By role:')}`);
+    for (const [r, n] of roles) console.log(`  ${n.toString().padStart(4)} × ${r}`);
+  }
+  console.log();
+  return { success: true, analytics };
 }
 
 module.exports = { run, showHelp };

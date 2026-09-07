@@ -14,7 +14,9 @@ function createProviderOrchestrator(dependencies) {
     modelRegistry,
     providerFallbackOrder,
     resolveCopilotModelKey,
-    resolveRoute
+    resolveRoute,
+    budgetGovernor,
+    inferenceTelemetry
   } = dependencies;
 
   const { getPhaseParams } = require('./phase-params');
@@ -234,6 +236,36 @@ function createProviderOrchestrator(dependencies) {
     }
     let requestedCopilotModel = requestedModel || effectiveModel;
     const currentProvider = routeApplied ? routeDecision.provider : getCurrentProvider();
+    const role = routingContext.role || null;
+    const routeReason = routeDecision ? routeDecision.reason : null;
+
+    // Phase 43: flag-gated budget governor. Fail closed — over-budget calls never
+    // dispatch. When fabric is off the governor allows with reason 'fabric-disabled'.
+    let budgetDecision = null;
+    const budgetActive = () => budgetDecision && budgetDecision.reason !== 'fabric-disabled';
+    if (budgetGovernor) {
+      budgetDecision = budgetGovernor.evaluateBudget({ role, provider: currentProvider, model: effectiveModel });
+      if (!budgetDecision.allowed) {
+        if (inferenceTelemetry) {
+          inferenceTelemetry.record({
+            provider: currentProvider,
+            model: effectiveModel,
+            role,
+            routeReason,
+            success: false,
+            budgetAllowed: false,
+            blockedReason: budgetDecision.reason,
+            usedProvider: null
+          });
+        }
+        const budgetError = new Error(`Budget exceeded: ${budgetDecision.reason}`);
+        budgetError.code = 'BUDGET_EXCEEDED';
+        budgetError.budget = { allowed: false, reason: budgetDecision.reason, remaining: budgetDecision.remaining || null };
+        throw budgetError;
+      }
+      budgetGovernor.commitCall({ role });
+    }
+
     const optionalProviders = new Set(['cerebras', 'xai']);
     const availableFallbackOrder = [
       ...providerFallbackOrder.filter((provider) => aiProviders[provider] || !optionalProviders.has(provider)),
@@ -284,6 +316,35 @@ function createProviderOrchestrator(dependencies) {
           };
         }
         usedProvider = provider;
+        if (budgetActive()) {
+          providerMetadata.budget = { allowed: true, reason: budgetDecision.reason };
+        }
+        // Phase 43: fold usage into the ledger and append one telemetry record.
+        {
+          const usage = providerMetadata.usage || null;
+          const inputTokens = usage && Number.isFinite(usage.prompt_tokens) ? usage.prompt_tokens : null;
+          const outputTokens = usage && Number.isFinite(usage.completion_tokens) ? usage.completion_tokens : null;
+          let estimatedUsd = null;
+          if (budgetGovernor) {
+            const recorded = budgetGovernor.recordUsage({ provider: usedProvider, model: effectiveModel, inputTokens, outputTokens });
+            estimatedUsd = recorded ? recorded.estimatedUsd : null;
+          }
+          if (inferenceTelemetry) {
+            inferenceTelemetry.record({
+              provider: usedProvider,
+              model: effectiveModel,
+              role,
+              routeReason,
+              inputTokens,
+              outputTokens,
+              latencyMs: Number.isFinite(providerMetadata.latencyMs) ? providerMetadata.latencyMs : null,
+              estimatedUsd,
+              success: true,
+              budgetAllowed: true,
+              usedProvider
+            });
+          }
+        }
         if (usedProvider !== currentProvider) {
           console.log(`[AI] Fallback: ${currentProvider} failed, succeeded with ${usedProvider}`);
         }
@@ -301,6 +362,17 @@ function createProviderOrchestrator(dependencies) {
     }
 
     if (!response) {
+      if (inferenceTelemetry) {
+        inferenceTelemetry.record({
+          provider: currentProvider,
+          model: effectiveModel,
+          role,
+          routeReason,
+          success: false,
+          budgetAllowed: true,
+          usedProvider: null
+        });
+      }
       throw primaryError || lastError || new Error('All AI providers failed.');
     }
 

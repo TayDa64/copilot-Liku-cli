@@ -70,6 +70,8 @@ const {
 } = require('./ai-service/providers/registry');
 const { createProviderOrchestrator } = require('./ai-service/providers/orchestration');
 const { createRoutingPolicy } = require('./ai-service/providers/routing');
+const { createBudgetGovernor } = require('./ai-service/providers/budget');
+const { createInferenceTelemetry } = require('./ai-service/providers/inference-telemetry');
 const {
   callOpenAICompatibleChatCompletion
 } = require('./ai-service/providers/openai-compatible');
@@ -1756,7 +1758,8 @@ function callCerebras(messages, effectiveModel, requestOptions) {
     apiKey: apiKeys.cerebras,
     messages,
     effectiveModel,
-    requestOptions
+    requestOptions,
+    allowedIds: (PROVIDER_MODEL_CATALOG.cerebras || []).map((entry) => entry.id)
   });
 }
 
@@ -1770,7 +1773,8 @@ function callXai(messages, effectiveModel, requestOptions) {
     apiKey: apiKeys.xai,
     messages,
     effectiveModel,
-    requestOptions
+    requestOptions,
+    allowedIds: (PROVIDER_MODEL_CATALOG.xai || []).map((entry) => entry.id)
   });
 }
 
@@ -2016,6 +2020,10 @@ const routingPolicy = createRoutingPolicy({
   providerModelCatalog: PROVIDER_MODEL_CATALOG
 });
 
+// Phase 43: flag-gated budget governor + durable inference telemetry.
+const budgetGovernor = createBudgetGovernor({ env: process.env });
+const inferenceTelemetry = createInferenceTelemetry({ env: process.env });
+
 const providerOrchestrator = createProviderOrchestrator({
   aiProviders: AI_PROVIDERS,
   apiKeys,
@@ -2031,7 +2039,9 @@ const providerOrchestrator = createProviderOrchestrator({
   modelRegistry,
   providerFallbackOrder: PROVIDER_FALLBACK_ORDER,
   resolveCopilotModelKey,
-  resolveRoute: routingPolicy.resolveRoute
+  resolveRoute: routingPolicy.resolveRoute,
+  budgetGovernor,
+  inferenceTelemetry
 });
 
 const {
@@ -2610,6 +2620,7 @@ async function sendMessage(userMessage, options = {}) {
       error: error.message,
       provider: getCurrentProvider(),
       model: resolveCopilotModelKey(model),
+      ...(error && error.code === 'BUDGET_EXCEEDED' ? { budget: error.budget } : {}),
       selection: selectionProvenance
     };
   }
@@ -3071,7 +3082,22 @@ function getStatus() {
     visualContextCount: visualContextStore.getVisualContextCount(),
     browserSessionState: getBrowserSessionState(),
     availableProviders,
+    ...(routingPolicy.isFabricEnabled() ? { inference: getInferenceAnalytics() } : {}),
     copilotModels: getCopilotModels()
+  };
+}
+
+/**
+ * Phase 43: read-only inference analytics slice (counts, tokens, estimated USD,
+ * latency, and breakdowns by provider/role). Safe to call any time; returns zeros
+ * when no records exist.
+ */
+function getInferenceAnalytics() {
+  return {
+    fabricEnabled: routingPolicy.isFabricEnabled(),
+    telemetryEnabled: inferenceTelemetry.isEnabled(),
+    ledger: budgetGovernor.getLedger(),
+    ...inferenceTelemetry.getAnalytics()
   };
 }
 
@@ -12030,6 +12056,7 @@ module.exports = {
   sendMessage,
   handleCommand,
   getStatus,
+  getInferenceAnalytics,
   startCopilotOAuth,
   setOAuthCallback,
   loadCopilotToken,

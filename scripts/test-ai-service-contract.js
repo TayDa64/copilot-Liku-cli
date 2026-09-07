@@ -36,6 +36,7 @@ const EXPECTED_EXPORTS = [
   'getReflectionModel',
   'getSessionIntentState',
   'getStatus',
+  'getInferenceAnalytics',
   'getToolDefinitions',
   'getUIWatcher',
   'gridToPixels',

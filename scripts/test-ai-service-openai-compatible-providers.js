@@ -7,7 +7,6 @@ const path = require('path');
 const {
   callOpenAICompatibleChatCompletion
 } = require(path.join(__dirname, '..', 'src', 'main', 'ai-service', 'providers', 'openai-compatible.js'));
-
 function test(name, fn) {
   Promise.resolve()
     .then(fn)
@@ -113,4 +112,46 @@ test('OpenAI-compatible client rejects missing API keys before transport dispatc
     /Cerebras API key not set/
   );
   assert.strictEqual(mock.calls.length, 0);
+});
+
+test('unrouted call stays byte-compatible: payload.model === config.model', async () => {
+  const mock = createMockRequest({ body: { choices: [{ message: { content: 'ok' } }] } });
+  await callOpenAICompatibleChatCompletion({
+    provider: 'xAI',
+    config: { baseUrl: 'api.x.ai', path: '/v1/chat/completions', model: 'grok-4.6' },
+    apiKey: 'xai-key',
+    messages: [{ role: 'user', content: 'hi' }],
+    effectiveModel: 'gpt-4o', // unrelated key → default
+    allowedIds: ['grok-4.6', 'grok-4.5'],
+    request: mock.request
+  });
+  assert.strictEqual(JSON.parse(mock.calls[0].body).model, 'grok-4.6');
+});
+
+test('routed catalog model id is sent on the wire', async () => {
+  const mock = createMockRequest({ body: { choices: [{ message: { content: 'ok' } }] } });
+  await callOpenAICompatibleChatCompletion({
+    provider: 'xAI',
+    config: { baseUrl: 'api.x.ai', path: '/v1/chat/completions', model: 'grok-4.6' },
+    apiKey: 'xai-key',
+    messages: [{ role: 'user', content: 'hi' }],
+    effectiveModel: 'grok-4.5',
+    allowedIds: ['grok-4.6', 'grok-4.5'],
+    request: mock.request
+  });
+  assert.strictEqual(JSON.parse(mock.calls[0].body).model, 'grok-4.5');
+});
+
+test('unknown model id fails closed to the provider default', async () => {
+  const mock = createMockRequest({ body: { choices: [{ message: { content: 'ok' } }] } });
+  await callOpenAICompatibleChatCompletion({
+    provider: 'xAI',
+    config: { baseUrl: 'api.x.ai', path: '/v1/chat/completions', model: 'grok-4.6' },
+    apiKey: 'xai-key',
+    messages: [{ role: 'user', content: 'hi' }],
+    effectiveModel: 'grok-9-does-not-exist',
+    allowedIds: ['grok-4.6', 'grok-4.5'],
+    request: mock.request
+  });
+  assert.strictEqual(JSON.parse(mock.calls[0].body).model, 'grok-4.6');
 });

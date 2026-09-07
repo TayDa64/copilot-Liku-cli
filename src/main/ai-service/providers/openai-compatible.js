@@ -1,8 +1,15 @@
 const https = require('https');
 
-function selectModel(config, effectiveModel) {
+function selectModel(config, effectiveModel, allowedIds) {
   const candidate = String(effectiveModel || '').trim();
-  if (candidate && candidate === config.model) {
+  if (!candidate) {
+    return config.model;
+  }
+  if (candidate === config.model) {
+    return candidate;
+  }
+  // Routed catalog ids are honored on the wire; unknown ids fail closed to the default.
+  if (Array.isArray(allowedIds) && allowedIds.includes(candidate)) {
     return candidate;
   }
   return config.model;
@@ -20,6 +27,7 @@ function callOpenAICompatibleChatCompletion({
   messages,
   effectiveModel,
   requestOptions,
+  allowedIds,
   request = https.request,
   now = () => Date.now()
 }) {
@@ -29,7 +37,7 @@ function callOpenAICompatibleChatCompletion({
 
   return new Promise((resolve, reject) => {
     const startedAt = now();
-    const model = selectModel(config, effectiveModel);
+    const model = selectModel(config, effectiveModel, allowedIds);
     const data = JSON.stringify({
       model,
       messages,
@@ -89,5 +97,6 @@ function callOpenAICompatibleChatCompletion({
 }
 
 module.exports = {
-  callOpenAICompatibleChatCompletion
+  callOpenAICompatibleChatCompletion,
+  selectModel
 };
