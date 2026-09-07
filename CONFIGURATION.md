@@ -48,6 +48,45 @@ Models are grouped by capability. Use `/model` to see the live inventory:
 
 Capability reroutes are surfaced visibly when a chosen model cannot handle the current request type.
 
+### Role Routing Policy (Inference Fabric)
+
+A flag-gated policy can assign a provider/model to agent work **by role** (Supervisor, Builder, etc.) without hardcoding vendors into the agents. It is **off by default**; when off, provider/model behavior is identical to the standard Copilot path.
+
+Enable with:
+
+```bash
+export LIKU_INFERENCE_FABRIC=1   # accepts 1 | true | yes | on
+```
+
+The flag only *activates* the routing table — it does **not** by itself enable optional providers. Cerebras/xAI still require their Phase 41 visibility (an API key or `LIKU_ENABLE_CEREBRAS` / `LIKU_ENABLE_XAI`). If a role's target provider is not enabled, routing falls back to the current provider (no error).
+
+**Default routing table** (role → provider / model):
+
+| Role | Default provider | Default model |
+| :--- | :--- | :--- |
+| `supervisor` | xai | catalog default (`grok-4.6`) |
+| `architect` | xai | catalog default (`grok-4.6`) |
+| `researcher` | cerebras | `gpt-oss-120b` |
+| `builder` | cerebras | `gpt-oss-120b` |
+| `verifier` | cerebras | `gpt-oss-120b` |
+| `diagnostician` | cerebras | `gpt-oss-120b` |
+| `producer` | current provider | current model |
+| `vision` | current provider | current model |
+| unset / unknown | current provider | current model |
+
+**Resolution order:** fabric flag off → current provider/model · explicit `/provider` (or per-call provider) → wins over the table · explicit `/model` for that provider · session `/route` override for the role · default table · if the selected provider is not enabled → current provider. An explicit user `/provider` selection is always honored over the table.
+
+**`/route` command:**
+
+```
+/route                          # Show flag state, default table, session overrides, provider enablement
+/route builder xai/grok-4.6     # Session override for a role (provider[/model])
+/route builder default          # Clear the override for one role
+/route reset                    # Clear all overrides
+```
+
+Unknown roles, disabled providers, and unknown model ids for a provider are rejected. Routing metadata is recorded on the AI result's `providerMetadata.route`; it never enters the model's system-prompt context.
+
 ### Status and Diagnostics
 
 ```
@@ -209,4 +248,7 @@ Policy enforcement validates action plans against both negative and positive pol
 | `OPENAI_API_KEY` | OpenAI provider key | — |
 | `ANTHROPIC_API_KEY` | Anthropic provider key | — |
 | `COPILOT_PROVIDER` | Active provider | `copilot` |
+| `CEREBRAS_API_KEY` / `LIKU_ENABLE_CEREBRAS` | Enable/authenticate Cerebras | — |
+| `XAI_API_KEY` / `LIKU_ENABLE_XAI` | Enable/authenticate xAI | — |
+| `LIKU_INFERENCE_FABRIC` | Enable flag-gated role routing policy (`/route`) | off |
 | `NODE_ENV` | Development/production mode | — |

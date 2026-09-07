@@ -29,7 +29,9 @@ function createAIServiceAdapter() {
       // Adapter method: agents call chat(), we call sendMessage()
       chat: async (message, options = {}) => {
         const result = await aiServiceModule.sendMessage(message, {
-          includeVisualContext: options.includeVisual || false
+          includeVisualContext: options.includeVisual || false,
+          model: options.model || null,
+          role: options.role || null
         });
         
         if (!result.success) {

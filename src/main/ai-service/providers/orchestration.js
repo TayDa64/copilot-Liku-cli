@@ -13,7 +13,8 @@ function createProviderOrchestrator(dependencies) {
     loadCopilotToken,
     modelRegistry,
     providerFallbackOrder,
-    resolveCopilotModelKey
+    resolveCopilotModelKey,
+    resolveRoute
   } = dependencies;
 
   const { getPhaseParams } = require('./phase-params');
@@ -43,7 +44,9 @@ function createProviderOrchestrator(dependencies) {
         requiresTools: !!includeVisualContextOrOptions.requiresTools,
         explicitRequestedModel: includeVisualContextOrOptions.explicitRequestedModel !== false,
         tags: Array.isArray(includeVisualContextOrOptions.tags) ? includeVisualContextOrOptions.tags : [],
-        phase: includeVisualContextOrOptions.phase || null
+        phase: includeVisualContextOrOptions.phase || null,
+        role: includeVisualContextOrOptions.role || null,
+        explicitProvider: includeVisualContextOrOptions.explicitProvider || null
       };
     }
 
@@ -54,7 +57,9 @@ function createProviderOrchestrator(dependencies) {
       requiresTools: false,
       explicitRequestedModel: true,
       tags: [],
-      phase: null
+      phase: null,
+      role: null,
+      explicitProvider: null
     };
   }
 
@@ -213,9 +218,22 @@ function createProviderOrchestrator(dependencies) {
 
   async function requestWithFallback(messages, requestedModel, includeVisualContextOrOptions) {
     const routingContext = normalizeRoutingContext(includeVisualContextOrOptions);
+    let routeDecision = null;
+    if (typeof resolveRoute === 'function') {
+      routeDecision = resolveRoute({
+        role: routingContext.role,
+        routingContext,
+        explicitProvider: routingContext.explicitProvider,
+        explicitModel: requestedModel || null
+      });
+    }
+    const routeApplied = !!(routeDecision && routeDecision.policyApplied);
     let effectiveModel = getCurrentCopilotModel();
+    if (routeApplied && routeDecision.provider !== 'copilot' && routeDecision.model) {
+      effectiveModel = routeDecision.model;
+    }
     let requestedCopilotModel = requestedModel || effectiveModel;
-    const currentProvider = getCurrentProvider();
+    const currentProvider = routeApplied ? routeDecision.provider : getCurrentProvider();
     const optionalProviders = new Set(['cerebras', 'xai']);
     const availableFallbackOrder = [
       ...providerFallbackOrder.filter((provider) => aiProviders[provider] || !optionalProviders.has(provider)),
@@ -257,6 +275,14 @@ function createProviderOrchestrator(dependencies) {
           ...(result.providerMetadata || {}),
           routing
         };
+        if (routeApplied) {
+          providerMetadata.route = {
+            provider: routeDecision.provider,
+            model: routeDecision.model,
+            reason: routeDecision.reason,
+            policyApplied: routeDecision.policyApplied
+          };
+        }
         usedProvider = provider;
         if (usedProvider !== currentProvider) {
           console.log(`[AI] Fallback: ${currentProvider} failed, succeeded with ${usedProvider}`);

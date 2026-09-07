@@ -2723,7 +2723,8 @@ function setupIPC() {
           const result = await aiService.sendMessage(message, {
             includeVisualContext: false,
             maxContinuations: options.maxContinuations || 2,
-            model: options.model || null
+            model: options.model || null,
+            role: options.role || null
           });
           if (result.success) {
             return {

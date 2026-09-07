@@ -69,6 +69,7 @@ const {
   createProviderRegistry
 } = require('./ai-service/providers/registry');
 const { createProviderOrchestrator } = require('./ai-service/providers/orchestration');
+const { createRoutingPolicy } = require('./ai-service/providers/routing');
 const {
   callOpenAICompatibleChatCompletion
 } = require('./ai-service/providers/openai-compatible');
@@ -675,6 +676,7 @@ const {
   PROVIDER_MODEL_CATALOG,
   apiKeys,
   getCurrentProvider,
+  isProviderExplicit,
   setApiKey: setProviderApiKey,
   setProvider: setActiveProvider
 } = providerRegistry;
@@ -1994,6 +1996,26 @@ registerTradingViewPineLifecycleHooks({
 // Provider fallback priority order
 const PROVIDER_FALLBACK_ORDER = ['copilot', 'openai', 'anthropic', 'ollama', 'cerebras', 'xai'];
 
+// Phase 42: flag-gated role routing policy. Inert unless LIKU_INFERENCE_FABRIC is on.
+function getProviderDefaultModelForRouting(provider) {
+  if (provider === 'copilot') return getCurrentCopilotModel();
+  return AI_PROVIDERS[provider]?.model || getCurrentCopilotModel();
+}
+
+function getCurrentModelForRouting() {
+  return getProviderDefaultModelForRouting(getCurrentProvider());
+}
+
+const routingPolicy = createRoutingPolicy({
+  env: process.env,
+  getCurrentProvider,
+  getCurrentModel: getCurrentModelForRouting,
+  isProviderEnabled: (provider) => !!AI_PROVIDERS[provider],
+  isProviderExplicit,
+  getProviderDefaultModel: getProviderDefaultModelForRouting,
+  providerModelCatalog: PROVIDER_MODEL_CATALOG
+});
+
 const providerOrchestrator = createProviderOrchestrator({
   aiProviders: AI_PROVIDERS,
   apiKeys,
@@ -2008,7 +2030,8 @@ const providerOrchestrator = createProviderOrchestrator({
   loadCopilotToken,
   modelRegistry,
   providerFallbackOrder: PROVIDER_FALLBACK_ORDER,
-  resolveCopilotModelKey
+  resolveCopilotModelKey,
+  resolveRoute: routingPolicy.resolveRoute
 });
 
 const {
@@ -2037,7 +2060,8 @@ async function sendMessage(userMessage, options = {}) {
     maxContinuations = 2,
     model = null,
     enforceActions = true,
-    extraSystemMessages = []
+    extraSystemMessages = [],
+    role = null
   } = options;
 
   const parsedTags = parseInlineIntentTags(userMessage);
@@ -2235,7 +2259,8 @@ async function sendMessage(userMessage, options = {}) {
       preferPlanning: tagSet.has('plan') || tagSet.has('vs code'),
       requiresTools: looksLikeAutomationRequest(enhancedMessage),
       tags: parsedTags.tags,
-      phase: 'execution'
+      phase: 'execution',
+      role
     });
     let response = providerResult.response;
     let effectiveModel = providerResult.effectiveModel;
@@ -2598,6 +2623,71 @@ const {
 } = preferenceParser;
 
 /**
+ * Phase 42: /route command — inspect and override the role routing policy.
+ */
+function handleRouteCommand(parts) {
+  const providerEnabled = (provider) => !!provider && !!AI_PROVIDERS[provider];
+  const modelLabel = (entry) => entry.model || '(provider default)';
+
+  const sub = parts[1] ? String(parts[1]).toLowerCase() : null;
+
+  if (!sub) {
+    const table = routingPolicy.getDefaultTable();
+    const overrides = routingPolicy.getRouteOverrides();
+    const lines = [];
+    lines.push(`Inference fabric: ${routingPolicy.isFabricEnabled() ? 'ON' : 'OFF'} (LIKU_INFERENCE_FABRIC)`);
+    lines.push('');
+    lines.push('Default routing table (role → provider/model):');
+    for (const [role, entry] of Object.entries(table)) {
+      if (!entry.provider) {
+        lines.push(`  ${role} → (current provider)`);
+        continue;
+      }
+      const status = providerEnabled(entry.provider) ? 'enabled' : 'not enabled';
+      lines.push(`  ${role} → ${entry.provider}/${modelLabel(entry)} [${status}]`);
+    }
+    const overrideRoles = Object.keys(overrides);
+    lines.push('');
+    if (overrideRoles.length) {
+      lines.push('Session overrides:');
+      for (const role of overrideRoles) {
+        const entry = overrides[role];
+        const status = providerEnabled(entry.provider) ? 'enabled' : 'not enabled';
+        lines.push(`  ${role} → ${entry.provider}/${modelLabel(entry)} [${status}]`);
+      }
+    } else {
+      lines.push('Session overrides: none');
+    }
+    lines.push('');
+    lines.push('Usage: /route <role> <provider>[/<model>] | /route <role> default | /route reset');
+    return { type: 'info', message: lines.join('\n') };
+  }
+
+  if (sub === 'reset') {
+    routingPolicy.resetRouteOverrides();
+    return { type: 'system', message: 'Route overrides cleared.' };
+  }
+
+  const role = sub;
+  const target = parts[2] ? String(parts[2]) : null;
+  if (!target) {
+    return { type: 'error', message: 'Usage: /route <role> <provider>[/<model>] | /route <role> default | /route reset' };
+  }
+
+  if (target.toLowerCase() === 'default') {
+    routingPolicy.clearRouteOverride(role);
+    return { type: 'system', message: `Route override for ${role} cleared.` };
+  }
+
+  const [provider, model] = target.split('/');
+  const result = routingPolicy.setRouteOverride(role, provider, model || null);
+  if (!result.ok) {
+    return { type: 'error', message: result.error };
+  }
+  return { type: 'system', message: `Route override set: ${result.role} → ${result.provider}/${result.model}` };
+}
+
+/**
  * Handle slash commands
  */
 function handleCommand(command) {
@@ -2627,6 +2717,9 @@ function handleCommand(command) {
         }
       }
       return { type: 'error', message: 'Usage: /setkey <provider> <key>' };
+
+    case '/route':
+      return handleRouteCommand(parts);
 
     case '/clear':
       historyStore.clearConversationHistory();

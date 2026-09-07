@@ -124,6 +124,7 @@ class BaseAgent extends EventEmitter {
         systemPrompt,
         history: this.conversationHistory,
         model: options.model,
+        role: this.role,
         ...options
       }),
       new Promise((_, reject) =>

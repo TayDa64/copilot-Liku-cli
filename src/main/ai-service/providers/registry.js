@@ -84,6 +84,15 @@ const OPTIONAL_PROVIDER_ENV = {
   }
 };
 
+// Providers whose keys a user may set via /setkey. Excludes the managed
+// copilotSession token so /setkey cannot overwrite the exchanged session key.
+const USER_SETTABLE_PROVIDERS = new Set([
+  'copilot',
+  'openai',
+  'anthropic',
+  ...Object.keys(OPTIONAL_AI_PROVIDERS)
+]);
+
 const AI_PROVIDERS = {
   ...CORE_AI_PROVIDERS,
   ...OPTIONAL_AI_PROVIDERS
@@ -112,6 +121,7 @@ function createEnabledProviders(env, apiKeys) {
 
 function createProviderRegistry(env = process.env) {
   let currentProvider = 'copilot';
+  let providerExplicit = false;
   const apiKeys = {
     copilot: env.GH_TOKEN || env.GITHUB_TOKEN || '',
     copilotSession: '',
@@ -126,15 +136,23 @@ function createProviderRegistry(env = process.env) {
     return currentProvider;
   }
 
+  function isProviderExplicit() {
+    return providerExplicit;
+  }
+
   function setProvider(provider) {
     if (!enabledProviders[provider]) {
       return false;
     }
     currentProvider = provider;
+    providerExplicit = true;
     return true;
   }
 
   function setApiKey(provider, key) {
+    if (!USER_SETTABLE_PROVIDERS.has(provider)) {
+      return false;
+    }
     if (!Object.prototype.hasOwnProperty.call(apiKeys, provider)) {
       return false;
     }
@@ -150,6 +168,7 @@ function createProviderRegistry(env = process.env) {
     PROVIDER_MODEL_CATALOG,
     apiKeys,
     getCurrentProvider,
+    isProviderExplicit,
     setApiKey,
     setProvider
   };
@@ -161,5 +180,6 @@ module.exports = {
   OPTIONAL_AI_PROVIDERS,
   OPTIONAL_PROVIDER_ENV,
   PROVIDER_MODEL_CATALOG,
+  USER_SETTABLE_PROVIDERS,
   createProviderRegistry
 };

@@ -3,8 +3,9 @@
 const assert = require('assert');
 const path = require('path');
 
-const { createProviderRegistry } = require(path.join(__dirname, '..', 'src', 'main', 'ai-service', 'providers', 'registry.js'));
-
+const {
+  createProviderRegistry
+} = require(path.join(__dirname, '..', 'src', 'main', 'ai-service', 'providers', 'registry.js'));
 function test(name, fn) {
   try {
     fn();
@@ -68,4 +69,24 @@ test('setApiKey activates optional providers for the session', () => {
   assert.ok(isolated.AI_PROVIDERS.xai);
   assert.strictEqual(isolated.setProvider('cerebras'), true);
   assert.strictEqual(isolated.setProvider('xai'), true);
+});
+
+test('setApiKey rejects the managed copilotSession token (allowlist)', () => {
+  const isolated = createProviderRegistry({ GH_TOKEN: 'gh' });
+  assert.strictEqual(isolated.apiKeys.copilotSession, '');
+  assert.strictEqual(isolated.setApiKey('copilotSession', 'stolen'), false);
+  assert.strictEqual(isolated.apiKeys.copilotSession, '');
+});
+
+test('setApiKey rejects unknown / non-user provider names', () => {
+  const isolated = createProviderRegistry({});
+  assert.strictEqual(isolated.setApiKey('ollama', 'x'), false);
+  assert.strictEqual(isolated.setApiKey('nonexistent', 'x'), false);
+});
+
+test('setProvider marks explicit provider selection', () => {
+  const isolated = createProviderRegistry({ OPENAI_API_KEY: 'k' });
+  assert.strictEqual(isolated.isProviderExplicit(), false);
+  assert.strictEqual(isolated.setProvider('openai'), true);
+  assert.strictEqual(isolated.isProviderExplicit(), true);
 });
