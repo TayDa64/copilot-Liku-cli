@@ -114,6 +114,20 @@ liku analytics inference --raw    # Dump raw JSONL records
 /status                           # Shows an Inference block when the fabric is on
 ```
 
+### Agent Task Contracts
+
+On the multi-agent **coding** path, the Supervisor can attach a machine-readable **TaskContract** to each subtask before handing off to Builder / Verifier / Researcher, and workers return a compressed **TaskResult** instead of a raw chat transcript. This keeps the Supervisor's follow-up context small and structured. It is **off by default**; when off, the coding handoff strings and raw result objects are byte-identical to before.
+
+```bash
+export LIKU_TASK_CONTRACTS=1          # enable contracts on the coding path
+export LIKU_PERSIST_TASK_CONTRACTS=1  # optional: persist contracts to ~/.liku/task-contracts.json
+```
+
+- A **TaskContract** is a hard-bounded envelope: `taskId`, `parentTaskId`, `role`, `objective`, `scope`/`forbidden`/`constraints`/`successCriteria`, `verification` (`tests`|`diff-review`|`none`), `risk`, advisory `providerPolicy`/`budgetHint`, and `cancellation: { requested }`. It **never** carries file contents, diffs, or transcripts. Every field is capped and the whole object serializes to ≤ 4 KiB.
+- A **TaskResult** is the worker's bounded report: `status`, `findings`, `files`, `evidence` (test names, not logs), `recommendation`, `confidence`.
+- Contracts carry independently-schedulable fields, but the runner stays **sequential** in this release. `supervisor.requestCancel(taskId)` marks a not-yet-dispatched subtask skipped before its handoff.
+- The peripheral inbox (`~/.liku/supervisor-tasks.json`) is unchanged — coding contracts persist to a **separate** `~/.liku/task-contracts.json` (max 20, flag-gated). This flag only affects the coding path; PAL peripheral-task semantics are untouched.
+
 ### Status and Diagnostics
 
 ```
@@ -283,4 +297,6 @@ Policy enforcement validates action plans against both negative and positive pol
 | `LIKU_INFERENCE_BUDGET_TOKENS` | Session token cap (in + out) | `250000` |
 | `LIKU_INFERENCE_MAX_CALLS_PER_ROLE` | Per-role call cap (per process) | `20` |
 | `LIKU_INFERENCE_RATES_JSON` | Path to a rate-table override JSON | — |
+| `LIKU_TASK_CONTRACTS` | Enable Supervisor coding TaskContracts + compressed worker results | off |
+| `LIKU_PERSIST_TASK_CONTRACTS` | Persist coding contracts to `~/.liku/task-contracts.json` | off |
 | `NODE_ENV` | Development/production mode | — |

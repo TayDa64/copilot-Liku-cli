@@ -13,6 +13,7 @@
  */
 
 const { BaseAgent, AgentRole, AgentCapabilities } = require('./base-agent');
+const taskContracts = require('./task-contract');
 
 /**
  * Parse a comma-separated severity allow-list into a normalized Set. Used to
@@ -191,6 +192,9 @@ Always structure your response as:
       // Step 4: Execute plan (handoffs to Builder/Verifier)
       const results = await this.executePlan(this.decomposedTasks, context);
       
+      // Phase 44: optionally persist coding contracts to a SEPARATE store.
+      this._maybePersistContracts();
+
       // Step 5: Aggregate and return
       return this.aggregateResults(results, context);
       
@@ -289,26 +293,91 @@ Model Capabilities: ${this.modelMetadata?.capabilities?.join(', ') || 'standard'
 
   async decomposeTasks(plan) {
     const tasks = [];
-    
+    const contractsOn = taskContracts.isEnabled();
+
     for (let i = 0; i < plan.steps.length; i++) {
       const step = plan.steps[i];
-      tasks.push({
+      const task = {
         id: `subtask-${i + 1}`,
         step: i + 1,
         description: step.description,
         targetAgent: step.agent,
         status: 'pending',
         dependencies: i > 0 ? [`subtask-${i}`] : []
-      });
+      };
+      // Phase 44: attach a machine-readable contract on the coding path (flag on).
+      if (contractsOn) {
+        task.contract = taskContracts.createTaskContract({
+          taskId: task.id,
+          parentTaskId: plan.planId || null,
+          role: task.targetAgent,
+          objective: step.description,
+          constraints: Array.isArray(this.assumptions) ? this.assumptions.slice(0, 4) : [],
+          verification: task.targetAgent === AgentRole.VERIFIER
+            ? 'tests'
+            : (task.targetAgent === AgentRole.BUILDER ? 'diff-review' : 'none'),
+          risk: 'low',
+          providerPolicy: this.modelMetadata
+            ? { provider: this.modelMetadata.provider, model: this.modelMetadata.modelId }
+            : null
+        });
+      }
+      tasks.push(task);
     }
-    
+
     return tasks;
+  }
+
+  /**
+   * Phase 44: request cancellation of a not-yet-dispatched coding subtask. Flips
+   * the in-memory contract flag; executePlan marks it skipped before the next
+   * handoff. No transport cancel, no in-flight HTTPS abort in this phase.
+   */
+  requestCancel(taskId) {
+    const task = (this.decomposedTasks || []).find((t) => t.id === taskId);
+    if (!task) return false;
+    if (task.contract && task.contract.cancellation) {
+      task.contract.cancellation.requested = true;
+    }
+    task._cancelRequested = true;
+    return true;
+  }
+
+  /**
+   * Phase 44: best-effort persistence of coding contracts to a SEPARATE store
+   * (~/.liku/task-contracts.json), never the peripheral inbox. Flag-gated
+   * (LIKU_PERSIST_TASK_CONTRACTS) and fully non-fatal.
+   * @private
+   */
+  _maybePersistContracts() {
+    try {
+      if (!taskContracts.isPersistEnabled()) return;
+      const store = this._contractStore || require('./task-contract-store');
+      const tasks = (this.decomposedTasks || [])
+        .filter((t) => t && t.contract)
+        .map((t) => ({ taskId: t.id, status: t.status, contract: t.contract }));
+      if (tasks.length) store.save(tasks);
+    } catch { /* persistence is best-effort */ }
   }
 
   async executePlan(tasks, context) {
     const results = [];
-    
+    const contractsOn = taskContracts.isEnabled();
+
     for (const task of tasks) {
+      // Phase 44: honor a cancellation request before the next handoff (flag on).
+      if (contractsOn && (task._cancelRequested || task.contract?.cancellation?.requested)) {
+        task.status = 'skipped';
+        results.push({
+          taskId: task.id,
+          agent: task.targetAgent,
+          success: false,
+          skipped: true,
+          cancelled: true
+        });
+        continue;
+      }
+
       // Check if dependencies are satisfied
       const depsComplete = task.dependencies.every(depId => {
         const dep = results.find(r => r.taskId === depId);
@@ -328,25 +397,17 @@ Model Capabilities: ${this.modelMetadata?.capabilities?.join(', ') || 'standard'
       task.status = 'in-progress';
       
       if (task.targetAgent === AgentRole.BUILDER) {
-        const result = await this.handoffToBuilder(
-          { ...context, taskId: task.id },
+        const workerReturn = await this.handoffToBuilder(
+          { ...context, taskId: task.id, ...(contractsOn ? { contract: task.contract } : {}) },
           `Implement: ${task.description}`
         );
-        results.push({
-          taskId: task.id,
-          agent: AgentRole.BUILDER,
-          ...result
-        });
+        results.push(this._buildResultEntry(task, AgentRole.BUILDER, workerReturn, contractsOn));
       } else if (task.targetAgent === AgentRole.VERIFIER) {
-        const result = await this.handoffToVerifier(
-          { ...context, taskId: task.id },
+        const workerReturn = await this.handoffToVerifier(
+          { ...context, taskId: task.id, ...(contractsOn ? { contract: task.contract } : {}) },
           `Verify: ${task.description}`
         );
-        results.push({
-          taskId: task.id,
-          agent: AgentRole.VERIFIER,
-          ...result
-        });
+        results.push(this._buildResultEntry(task, AgentRole.VERIFIER, workerReturn, contractsOn));
       } else {
         // Handle internally
         results.push({
@@ -361,6 +422,25 @@ Model Capabilities: ${this.modelMetadata?.capabilities?.join(', ') || 'standard'
     }
     
     return results;
+  }
+
+  /**
+   * Phase 44: build a Supervisor result entry. Flag on → compress the worker
+   * return into a bounded TaskResult (no raw transcripts/diffs on the aggregate).
+   * Flag off → preserve the Phase 43 raw spread for byte-compatibility.
+   * @private
+   */
+  _buildResultEntry(task, agent, workerReturn, contractsOn) {
+    if (!contractsOn) {
+      return { taskId: task.id, agent, ...workerReturn };
+    }
+    const taskResult = taskContracts.taskResultFromWorkerReturn(task.id, agent, workerReturn);
+    return {
+      taskId: task.id,
+      agent,
+      success: !!(workerReturn && workerReturn.success),
+      taskResult
+    };
   }
 
   aggregateResults(results, context) {
