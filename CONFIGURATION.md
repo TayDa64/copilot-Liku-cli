@@ -143,6 +143,20 @@ export LIKU_INDEPENDENT_VERIFIER=1  # route Verifier to a different provider tha
 - **Independent Verifier:** when enabled and the Builder's used provider is known, the Verifier's request routes to the first other enabled provider (order: xai, cerebras, openai, anthropic, copilot). If none exists, the table route is kept with reason `no-alternate-provider`. The Verifier stays read-only.
 - Escalation applies only to the coding path — peripheral tasks are never retried.
 
+### Execution Fabric (In-Process)
+
+The **Execution Fabric** is a thin interface over the Supervisor coding path. Its only implementation in this release is the **in-process adapter**: it wraps the same sequential `executePlan` loop (Phase 44 cancel-before-dispatch, Phase 45 classify/retry) and records a bounded, sanitized snapshot per subtask. It is **off by default**; when off, the coding path is byte-identical to Phase 45 and no fabric object is ever allocated.
+
+```bash
+export LIKU_EXECUTION_FABRIC=1     # route coding subtasks through the in-process fabric
+```
+
+- **This phase is interfaces + an in-process adapter only.** It does **not** run tasks in parallel, does **not** spawn workers or processes, and does **not** add HTTP/QUIC/HTTP-3 transport. PAL (peripheral) semantics are untouched.
+- **Task states** (closed set): `queued`, `running`, `succeeded`, `failed`, `blocked`, `skipped`, `cancelled`. **Events** (closed set): `task.queued`, `task.started`, `task.completed`, `task.failed`, `task.blocked`, `task.skipped`, `task.cancelled`. Fabric events stay local to the fabric object and are not persisted.
+- **Cancellation is pre-dispatch only** (same guarantee as Phase 44 `requestCancel`): `cancel(taskId)` succeeds and marks a subtask `cancelled` **only while it is still `queued`**. A task that has already started returns `false` and runs to completion — the fabric cannot abort in-flight provider I/O.
+- **Snapshots are bounded and sanitized:** each recorded task keeps only `taskId`, `role`, `state`, its contract, and an allowlisted result (`kind`, `version`, `taskId`, `status`, `recommendation`, `confidence`, and capped `findings`/`files`/`evidence`). Transcripts, diffs, and rationale are **never** stored. `list()` is capped at 20 (oldest evicted).
+
+
 ### Status and Diagnostics
 
 ```
@@ -316,4 +330,5 @@ Policy enforcement validates action plans against both negative and positive pol
 | `LIKU_PERSIST_TASK_CONTRACTS` | Persist coding contracts to `~/.liku/task-contracts.json` | off |
 | `LIKU_ESCALATION` | Enable observable-signal escalation on the coding path | off |
 | `LIKU_INDEPENDENT_VERIFIER` | Route Verifier to a different provider than Builder | off |
+| `LIKU_EXECUTION_FABRIC` | Route coding subtasks through the in-process Execution Fabric | off |
 | `NODE_ENV` | Development/production mode | — |

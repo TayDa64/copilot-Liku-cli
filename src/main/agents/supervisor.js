@@ -16,6 +16,7 @@ const { BaseAgent, AgentRole, AgentCapabilities } = require('./base-agent');
 const taskContracts = require('./task-contract');
 const escalation = require('./escalation');
 const { classifySignal } = require('./escalation-signals');
+const executionFabric = require('./execution-fabric');
 
 /**
  * Parse a comma-separated severity allow-list into a normalized Set. Used to
@@ -404,7 +405,7 @@ Model Capabilities: ${this.modelMetadata?.capabilities?.join(', ') || 'standard'
       
       if (task.targetAgent === AgentRole.BUILDER) {
         const baseContext = { ...context, taskId: task.id, ...(contractsOn ? { contract: task.contract } : {}) };
-        const outcome = await this._runCodingHandoff(task, AgentRole.BUILDER, `Implement: ${task.description}`, baseContext, {
+        const outcome = await this._runCoding(task, AgentRole.BUILDER, `Implement: ${task.description}`, baseContext, {
           escalationOn,
           contractsOn,
           enabledProviders,
@@ -427,7 +428,7 @@ Model Capabilities: ${this.modelMetadata?.capabilities?.join(', ') || 'standard'
         }
         // A prior Builder subtask succeeding is required to classify verifier-disagree.
         const builderSucceeded = results.some((r) => r.agent === AgentRole.BUILDER && r.success);
-        const outcome = await this._runCodingHandoff(task, AgentRole.VERIFIER, `Verify: ${task.description}`, baseContext, {
+        const outcome = await this._runCoding(task, AgentRole.VERIFIER, `Verify: ${task.description}`, baseContext, {
           escalationOn,
           contractsOn,
           enabledProviders,
@@ -451,6 +452,56 @@ Model Capabilities: ${this.modelMetadata?.capabilities?.join(', ') || 'standard'
     }
     
     return results;
+  }
+
+  /**
+   * Phase 46: lazily create the in-process Execution Fabric ONLY when the flag is
+   * on. Off → no fabric object is ever allocated on the coding path.
+   */
+  getExecutionFabric() {
+    if (!executionFabric.isExecutionFabricEnabled()) return null;
+    if (!this._executionFabric) {
+      this._executionFabric = executionFabric.createInProcessExecutionFabric({ supervisor: this });
+    }
+    return this._executionFabric;
+  }
+
+  /**
+   * Phase 46: run a coding subtask. When the fabric flag is on, dispatch through
+   * the fabric (which wraps the SAME sequential handoff/escalation loop and records
+   * a bounded snapshot); otherwise call the loop directly (Phase 45 byte-compatible).
+   * @private
+   */
+  async _runCoding(task, agent, message, baseContext, options = {}) {
+    const fabric = this.getExecutionFabric();
+    if (!fabric) {
+      return this._runCodingHandoff(task, agent, message, baseContext, options);
+    }
+
+    let capturedOutcome = null;
+    const { done } = fabric.submit({
+      taskId: task.id,
+      role: agent,
+      contract: task.contract || null,
+      run: async () => {
+        capturedOutcome = await this._runCodingHandoff(task, agent, message, baseContext, options);
+        const taskResult = capturedOutcome.entry.taskResult || null;
+        const lastEscalation = Array.isArray(task.escalation) && task.escalation.length
+          ? task.escalation[task.escalation.length - 1]
+          : null;
+        return {
+          status: taskResult ? taskResult.status : (capturedOutcome.entry.success ? 'success' : 'failure'),
+          result: taskResult,
+          signal: lastEscalation ? lastEscalation.signal : null,
+          rung: lastEscalation ? lastEscalation.rung : null
+        };
+      }
+    });
+    await done;
+    if (!capturedOutcome) {
+      return { entry: { taskId: task.id, agent, success: false, skipped: true, cancelled: true }, usedProvider: null };
+    }
+    return capturedOutcome;
   }
 
   /**
