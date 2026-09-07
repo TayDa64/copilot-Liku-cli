@@ -17,6 +17,7 @@ const taskContracts = require('./task-contract');
 const escalation = require('./escalation');
 const { classifySignal } = require('./escalation-signals');
 const executionFabric = require('./execution-fabric');
+const executionScheduler = require('./execution-scheduler');
 
 /**
  * Parse a comma-separated severity allow-list into a normalized Set. Used to
@@ -297,17 +298,25 @@ Model Capabilities: ${this.modelMetadata?.capabilities?.join(', ') || 'standard'
   async decomposeTasks(plan) {
     const tasks = [];
     const contractsOn = taskContracts.isEnabled();
+    // Phase 47: independence is DECLARED, never inferred. Even with the scheduler on
+    // we default-chain (verifier after its builder); a step only becomes parallel-
+    // eligible when it explicitly sets `independent: true`. Prose is never parsed.
+    const schedulerOn = executionScheduler.isParallelSchedulerEnabled() && executionFabric.isExecutionFabricEnabled();
 
     for (let i = 0; i < plan.steps.length; i++) {
       const step = plan.steps[i];
+      const declaredIndependent = schedulerOn && step.independent === true;
       const task = {
         id: `subtask-${i + 1}`,
         step: i + 1,
         description: step.description,
         targetAgent: step.agent,
         status: 'pending',
-        dependencies: i > 0 ? [`subtask-${i}`] : []
+        dependencies: declaredIndependent ? [] : (i > 0 ? [`subtask-${i}`] : [])
       };
+      if (step.serial === true) {
+        task.serial = true;
+      }
       // Phase 44: attach a machine-readable contract on the coding path (flag on).
       if (contractsOn) {
         task.contract = taskContracts.createTaskContract({
@@ -370,6 +379,18 @@ Model Capabilities: ${this.modelMetadata?.capabilities?.join(', ') || 'standard'
     const independentVerifierOn = escalation.isIndependentVerifierEnabled();
     const enabledProviders = this._getEnabledProviders();
     let lastBuilderProvider = null;
+
+    // Phase 47: when the parallel scheduler AND the execution fabric are both on,
+    // hand the whole decomposed list to the scheduler (declared-independence only)
+    // instead of the sequential loop. Exactly one runner dispatches — never both.
+    if (executionScheduler.isParallelSchedulerEnabled() && executionFabric.isExecutionFabricEnabled()) {
+      return this._executePlanViaScheduler(tasks, context, {
+        contractsOn,
+        escalationOn,
+        independentVerifierOn,
+        enabledProviders
+      });
+    }
 
     for (const task of tasks) {
       // Phase 44: honor a cancellation request before the next handoff (flag on).
@@ -452,6 +473,87 @@ Model Capabilities: ${this.modelMetadata?.capabilities?.join(', ') || 'standard'
     }
     
     return results;
+  }
+
+  /**
+   * Phase 47: run the decomposed plan through the parallel scheduler. The scheduler
+   * owns fabric.submit + caps + dependency gating; each task's actual handoff still
+   * flows through _runCodingHandoff (Phase 45 escalation, shared budget governor).
+   * Returns the same aggregated results[] shape the sequential loop produces.
+   * @private
+   */
+  async _executePlanViaScheduler(tasks, context, options = {}) {
+    const fabric = this.getExecutionFabric();
+    const runTask = this._buildSchedulerRunTask(context, options);
+    const scheduler = executionScheduler.createExecutionScheduler({ fabric, runTask });
+    const results = await scheduler.schedule(tasks);
+    for (const task of tasks) {
+      const entry = results.find((r) => r && r.taskId === task.id);
+      if (!entry) continue;
+      task.status = entry.skipped ? 'skipped' : (entry.success ? 'completed' : 'failed');
+    }
+    return results;
+  }
+
+  /**
+   * Phase 47: build the per-task runner the scheduler wraps in fabric.submit. It
+   * reproduces the Builder/Verifier branch of the sequential loop (baseContext,
+   * optional independent-verifier provider pick) and delegates to _runCodingHandoff.
+   * It does NOT submit to the fabric itself — the scheduler owns dispatch.
+   * @private
+   */
+  _buildSchedulerRunTask(context, options = {}) {
+    const { contractsOn, escalationOn, independentVerifierOn, enabledProviders } = options;
+    return async (task, ctx = {}) => {
+      const agent = task.targetAgent;
+
+      if (agent !== AgentRole.BUILDER && agent !== AgentRole.VERIFIER) {
+        return {
+          entry: { taskId: task.id, agent: AgentRole.SUPERVISOR, success: true, note: 'Handled by supervisor' },
+          usedProvider: null,
+          status: 'success',
+          result: null,
+          signal: null,
+          rung: null
+        };
+      }
+
+      const baseContext = { ...context, taskId: task.id, ...(contractsOn ? { contract: task.contract } : {}) };
+      let verifierProviderReason = null;
+      if (agent === AgentRole.VERIFIER && independentVerifierOn && ctx.lastBuilderProvider) {
+        const alternate = escalation.pickAlternateProvider(ctx.lastBuilderProvider, enabledProviders);
+        if (alternate) {
+          baseContext.explicitProvider = alternate;
+          verifierProviderReason = 'independent-verifier';
+        } else {
+          verifierProviderReason = 'no-alternate-provider';
+        }
+      }
+
+      const message = agent === AgentRole.BUILDER ? `Implement: ${task.description}` : `Verify: ${task.description}`;
+      const outcome = await this._runCodingHandoff(task, agent, message, baseContext, {
+        escalationOn,
+        contractsOn,
+        enabledProviders,
+        builderSucceeded: agent === AgentRole.VERIFIER ? ctx.builderSucceeded === true : false
+      });
+      if (verifierProviderReason && outcome.entry.taskResult) {
+        outcome.entry.verifierProviderReason = verifierProviderReason;
+      }
+
+      const taskResult = outcome.entry.taskResult || null;
+      const lastEscalation = Array.isArray(task.escalation) && task.escalation.length
+        ? task.escalation[task.escalation.length - 1]
+        : null;
+      return {
+        entry: outcome.entry,
+        usedProvider: outcome.usedProvider || null,
+        status: taskResult ? taskResult.status : (outcome.entry.success ? 'success' : 'failure'),
+        result: taskResult,
+        signal: lastEscalation ? lastEscalation.signal : null,
+        rung: lastEscalation ? lastEscalation.rung : null
+      };
+    };
   }
 
   /**

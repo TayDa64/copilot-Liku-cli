@@ -156,6 +156,30 @@ export LIKU_EXECUTION_FABRIC=1     # route coding subtasks through the in-proces
 - **Cancellation is pre-dispatch only** (same guarantee as Phase 44 `requestCancel`): `cancel(taskId)` succeeds and marks a subtask `cancelled` **only while it is still `queued`**. A task that has already started returns `false` and runs to completion — the fabric cannot abort in-flight provider I/O.
 - **Snapshots are bounded and sanitized:** each recorded task keeps only `taskId`, `role`, `state`, its contract, and an allowlisted result (`kind`, `version`, `taskId`, `status`, `recommendation`, `confidence`, and capped `findings`/`files`/`evidence`). Transcripts, diffs, and rationale are **never** stored. `list()` is capped at 20 (oldest evicted).
 
+### Parallel Scheduler (Declared Independence Only)
+
+The **Parallel Scheduler** sits on top of the Execution Fabric and may run **Supervisor-declared independent** coding subtasks concurrently, under hard caps. It requires **both** flags; when either is off the sequential `executePlan` loop is the only runner and behavior is byte-identical to Phase 46.
+
+```bash
+export LIKU_EXECUTION_FABRIC=1     # required
+export LIKU_PARALLEL_SCHEDULER=1   # route the decomposed plan through the scheduler
+```
+
+- **Independence is DECLARED, never inferred.** A step is parallel-eligible only when it explicitly sets `independent: true` (structured field) — prose like "also"/"meanwhile" is never parsed. By default the plan still chains (Verifier waits for its Builder). A step may also set `serial: true` to force it to run alone.
+- **Ready rule:** a task launches only when every dependency is in terminal **success**. A dependency that failed/blocked/cancelled/skipped fails the dependent, which is marked `skipped` with reason `dependency-failed` (same as the sequential "Dependencies not satisfied" skip).
+- **Caps** (integers ≥ 1; a value below 1 or non-numeric falls back to the default). Exceeding a cap leaves the task queued until a slot frees — no extra provider calls are made past the cap:
+
+| Env var | Default | Meaning |
+| --- | --- | --- |
+| `LIKU_MAX_PARALLEL_TASKS` | 2 | Maximum coding tasks in flight at once |
+| `LIKU_MAX_PARALLEL_PER_PROVIDER` | 1 | Maximum in flight per `explicitProvider` (unknown provider counts against `unspecified`) |
+| `LIKU_MAX_PARALLEL_PER_ROLE` | 2 | Maximum in flight per role (builder / verifier / …) |
+
+- **Same guarantees as the fabric:** cancellation is pre-dispatch only (a queued task whose cancel was requested never runs). Escalation stays **sequential inside** one `taskId` — rungs of the same task are never parallelized, and a `taskId` already running is never re-dispatched.
+- **Shared budget governor:** parallel Builder calls both flow through the same process-wide budget ledger; the first can spend the cap and the second receives a budget-exceeded signal and does **not** auto-retry past policy.
+- **In-process only.** No transport abstraction, no HTTP/2 vs HTTP/3, no QUIC, no IPC/worker pools, no work-stealing — those are later phases. `policy-violation`/`requiresHuman`/Class A peripheral work stays serial and out of this scheduler (coding path only); PAL semantics are untouched.
+
+
 
 ### Status and Diagnostics
 
@@ -331,4 +355,8 @@ Policy enforcement validates action plans against both negative and positive pol
 | `LIKU_ESCALATION` | Enable observable-signal escalation on the coding path | off |
 | `LIKU_INDEPENDENT_VERIFIER` | Route Verifier to a different provider than Builder | off |
 | `LIKU_EXECUTION_FABRIC` | Route coding subtasks through the in-process Execution Fabric | off |
+| `LIKU_PARALLEL_SCHEDULER` | Run declared-independent coding subtasks concurrently (requires `LIKU_EXECUTION_FABRIC`) | off |
+| `LIKU_MAX_PARALLEL_TASKS` | Scheduler cap: max coding tasks in flight | 2 |
+| `LIKU_MAX_PARALLEL_PER_PROVIDER` | Scheduler cap: max in flight per provider | 1 |
+| `LIKU_MAX_PARALLEL_PER_ROLE` | Scheduler cap: max in flight per role | 2 |
 | `NODE_ENV` | Development/production mode | — |
