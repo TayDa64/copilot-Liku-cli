@@ -155,3 +155,138 @@ test('structured copilot responses preserve actual runtime model metadata', asyn
   assert.strictEqual(result.requestedModel, 'gpt-5.4');
   assert.strictEqual(result.providerMetadata.endpointHost, 'api.githubcopilot.com');
 });
+
+test('callProvider rejects unknown providers', async () => {
+  const orchestrator = createProviderOrchestrator({
+    aiProviders: { copilot: { visionModel: 'gpt-4o', chatModel: 'gpt-4o' } },
+    apiKeys: { copilot: '', openai: '', anthropic: '', cerebras: '', xai: '' },
+    callAnthropic: async () => '',
+    callCerebras: async () => '',
+    callCopilot: async () => '',
+    callOllama: async () => '',
+    callOpenAI: async () => '',
+    callXai: async () => '',
+    getCurrentCopilotModel: () => 'gpt-4o',
+    getCurrentProvider: () => 'copilot',
+    loadCopilotToken: () => false,
+    modelRegistry: () => ({ 'gpt-4o': { id: 'gpt-4o', vision: true, capabilities: { chat: true, tools: true, vision: true } } }),
+    providerFallbackOrder: ['copilot'],
+    resolveCopilotModelKey: (value) => value || 'gpt-4o'
+  });
+
+  await assert.rejects(
+    () => orchestrator.callProvider('spacex', [{ role: 'user', content: 'hi' }], 'gpt-4o'),
+    /Unknown provider: spacex/
+  );
+});
+
+test('missing Cerebras key fails closed before network dispatch', async () => {
+  let dispatched = false;
+  const orchestrator = createProviderOrchestrator({
+    aiProviders: { cerebras: { model: 'gpt-oss-120b' } },
+    apiKeys: { copilot: '', openai: '', anthropic: '', cerebras: '', xai: '' },
+    callAnthropic: async () => '',
+    callCerebras: async () => {
+      dispatched = true;
+      return '';
+    },
+    callCopilot: async () => '',
+    callOllama: async () => '',
+    callOpenAI: async () => '',
+    callXai: async () => '',
+    getCurrentCopilotModel: () => 'gpt-4o',
+    getCurrentProvider: () => 'cerebras',
+    loadCopilotToken: () => false,
+    modelRegistry: () => ({ 'gpt-4o': { id: 'gpt-4o', vision: true, capabilities: { chat: true, tools: true, vision: true } } }),
+    providerFallbackOrder: ['cerebras'],
+    resolveCopilotModelKey: (value) => value || 'gpt-4o'
+  });
+
+  await assert.rejects(
+    () => orchestrator.requestWithFallback([{ role: 'user', content: 'hi' }], null, false),
+    /Cerebras API key not set/
+  );
+  assert.strictEqual(dispatched, false);
+});
+
+test('OpenAI-compatible provider results normalize usage and latency metadata', async () => {
+  const orchestrator = createProviderOrchestrator({
+    aiProviders: { xai: { model: 'grok-4.6' } },
+    apiKeys: { copilot: '', openai: '', anthropic: '', cerebras: '', xai: 'xai-key' },
+    callAnthropic: async () => '',
+    callCerebras: async () => '',
+    callCopilot: async () => '',
+    callOllama: async () => '',
+    callOpenAI: async () => '',
+    callXai: async () => ({
+      content: 'xai ok',
+      effectiveModel: 'grok-4.6',
+      requestedModel: 'grok-4.6',
+      endpointHost: 'api.x.ai',
+      actualModelId: 'grok-4.6',
+      usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 },
+      latencyMs: 42
+    }),
+    getCurrentCopilotModel: () => 'gpt-4o',
+    getCurrentProvider: () => 'xai',
+    loadCopilotToken: () => false,
+    modelRegistry: () => ({ 'gpt-4o': { id: 'gpt-4o', vision: true, capabilities: { chat: true, tools: true, vision: true } } }),
+    providerFallbackOrder: ['xai'],
+    resolveCopilotModelKey: (value) => value || 'gpt-4o'
+  });
+
+  const result = await orchestrator.requestWithFallback([{ role: 'user', content: 'hi' }], null, false);
+  assert.strictEqual(result.response, 'xai ok');
+  assert.strictEqual(result.effectiveModel, 'grok-4.6');
+  assert.strictEqual(result.requestedModel, 'grok-4.6');
+  assert.strictEqual(result.providerMetadata.endpointHost, 'api.x.ai');
+  assert.deepStrictEqual(result.providerMetadata.usage, { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 });
+  assert.strictEqual(result.providerMetadata.latencyMs, 42);
+});
+
+test('copilot remains first choice when current provider is copilot', async () => {
+  const calls = [];
+  const orchestrator = createProviderOrchestrator({
+    aiProviders: {
+      copilot: { visionModel: 'gpt-4o', chatModel: 'gpt-4o' },
+      cerebras: { model: 'gpt-oss-120b' },
+      xai: { model: 'grok-4.6' }
+    },
+    apiKeys: { copilot: 'token', openai: 'openai-key', anthropic: 'anthropic-key', cerebras: 'cerebras-key', xai: 'xai-key' },
+    callAnthropic: async () => {
+      calls.push('anthropic');
+      throw new Error('anthropic should not be called');
+    },
+    callCerebras: async () => {
+      calls.push('cerebras');
+      throw new Error('cerebras should not be called');
+    },
+    callCopilot: async () => {
+      calls.push('copilot');
+      return 'copilot ok';
+    },
+    callOllama: async () => {
+      calls.push('ollama');
+      throw new Error('ollama should not be called');
+    },
+    callOpenAI: async () => {
+      calls.push('openai');
+      throw new Error('openai should not be called');
+    },
+    callXai: async () => {
+      calls.push('xai');
+      throw new Error('xai should not be called');
+    },
+    getCurrentCopilotModel: () => 'gpt-4o',
+    getCurrentProvider: () => 'copilot',
+    loadCopilotToken: () => true,
+    modelRegistry: () => ({ 'gpt-4o': { id: 'gpt-4o', vision: true, capabilities: { chat: true, tools: true, vision: true } } }),
+    providerFallbackOrder: ['copilot', 'openai', 'anthropic', 'ollama', 'cerebras', 'xai'],
+    resolveCopilotModelKey: (value) => value || 'gpt-4o'
+  });
+
+  const result = await orchestrator.requestWithFallback([{ role: 'user', content: 'hi' }], null, false);
+  assert.strictEqual(result.response, 'copilot ok');
+  assert.strictEqual(result.usedProvider, 'copilot');
+  assert.deepStrictEqual(calls, ['copilot']);
+});

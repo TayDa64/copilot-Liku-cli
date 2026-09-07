@@ -24,6 +24,8 @@ export COPILOT_PROVIDER=copilot  # copilot | openai | anthropic | ollama
 | **OpenAI** | `OPENAI_API_KEY` | Standard OpenAI API key |
 | **Anthropic** | `ANTHROPIC_API_KEY` | Anthropic API key |
 | **Ollama** | (none) | Runs locally, no key needed |
+| **Cerebras** | `CEREBRAS_API_KEY` | OpenAI-compatible; default model `gpt-oss-120b`. Hidden until `CEREBRAS_API_KEY`, `LIKU_ENABLE_CEREBRAS=1`, or `/setkey cerebras ...` is used. |
+| **xAI** | `XAI_API_KEY` | OpenAI-compatible at `https://api.x.ai/v1`; default model `grok-4.6`. Hidden until `XAI_API_KEY`, `LIKU_ENABLE_XAI=1`, or `/setkey xai ...` is used. |
 
 Or authenticate interactively inside chat:
 ```

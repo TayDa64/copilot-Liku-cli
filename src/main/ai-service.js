@@ -70,6 +70,9 @@ const {
 } = require('./ai-service/providers/registry');
 const { createProviderOrchestrator } = require('./ai-service/providers/orchestration');
 const {
+  callOpenAICompatibleChatCompletion
+} = require('./ai-service/providers/openai-compatible');
+const {
   checkActionPolicies,
   checkNegativePolicies,
   checkCapabilityPolicies,
@@ -669,6 +672,7 @@ let sessionApiHost = null; // Populated from session token endpoints.api
 const providerRegistry = createProviderRegistry(process.env);
 const {
   AI_PROVIDERS,
+  PROVIDER_MODEL_CATALOG,
   apiKeys,
   getCurrentProvider,
   setApiKey: setProviderApiKey,
@@ -881,6 +885,7 @@ const messageBuilder = createMessageBuilder({
 
 const commandHandler = createCommandHandler({
   aiProviders: AI_PROVIDERS,
+  providerModelCatalog: PROVIDER_MODEL_CATALOG,
   captureVisualContext: () => {
     try {
       const { screenshot } = require('./ui-automation/screenshot');
@@ -1740,6 +1745,34 @@ function callOpenAI(messages, requestOptions) {
 }
 
 /**
+ * Call Cerebras API
+ */
+function callCerebras(messages, effectiveModel, requestOptions) {
+  return callOpenAICompatibleChatCompletion({
+    provider: 'Cerebras',
+    config: AI_PROVIDERS.cerebras,
+    apiKey: apiKeys.cerebras,
+    messages,
+    effectiveModel,
+    requestOptions
+  });
+}
+
+/**
+ * Call xAI API
+ */
+function callXai(messages, effectiveModel, requestOptions) {
+  return callOpenAICompatibleChatCompletion({
+    provider: 'xAI',
+    config: AI_PROVIDERS.xai,
+    apiKey: apiKeys.xai,
+    messages,
+    effectiveModel,
+    requestOptions
+  });
+}
+
+/**
  * Call Anthropic API
  */
 function callAnthropic(messages, requestOptions) {
@@ -1959,15 +1992,17 @@ registerTradingViewPineLifecycleHooks({
  * Send a message and get AI response with auto-continuation
  */
 // Provider fallback priority order
-const PROVIDER_FALLBACK_ORDER = ['copilot', 'openai', 'anthropic', 'ollama'];
+const PROVIDER_FALLBACK_ORDER = ['copilot', 'openai', 'anthropic', 'ollama', 'cerebras', 'xai'];
 
 const providerOrchestrator = createProviderOrchestrator({
   aiProviders: AI_PROVIDERS,
   apiKeys,
   callAnthropic,
+  callCerebras,
   callCopilot,
   callOllama,
   callOpenAI,
+  callXai,
   getCurrentCopilotModel,
   getCurrentProvider,
   loadCopilotToken,
@@ -2734,7 +2769,7 @@ function handleCommand(command) {
       const runtimeHostLabel = status.runtimeEndpointHost || 'not yet validated';
       return {
         type: 'info',
-        message: `Provider: ${status.provider}\nConfigured model: ${status.configuredModelName} (${status.configuredModel})\nRequested model: ${status.requestedModel}\nRuntime model: ${runtimeModelLabel}${status.runtimeModel ? ` (${status.runtimeModel})` : ''}\nRuntime endpoint: ${runtimeHostLabel}\nCopilot: ${status.hasCopilotKey ? 'Authenticated' : 'Not authenticated'}\nOpenAI: ${status.hasOpenAIKey ? 'Key set' : 'No key'}\nAnthropic: ${status.hasAnthropicKey ? 'Key set' : 'No key'}\nHistory: ${status.historyLength} messages\nVisual: ${status.visualContextCount} captures`
+        message: `Provider: ${status.provider}\nConfigured model: ${status.configuredModelName} (${status.configuredModel})\nRequested model: ${status.requestedModel}\nRuntime model: ${runtimeModelLabel}${status.runtimeModel ? ` (${status.runtimeModel})` : ''}\nRuntime endpoint: ${runtimeHostLabel}\nCopilot: ${status.hasCopilotKey ? 'Authenticated' : 'Not authenticated'}\nOpenAI: ${status.hasOpenAIKey ? 'Key set' : 'No key'}\nAnthropic: ${status.hasAnthropicKey ? 'Key set' : 'No key'}${status.availableProviders.includes('cerebras') ? `\nCerebras: ${status.hasCerebrasKey ? 'Key set' : 'unset'}` : ''}${status.availableProviders.includes('xai') ? `\nxAI: ${status.hasXaiKey ? 'Key set' : 'unset'}` : ''}\nHistory: ${status.historyLength} messages\nVisual: ${status.visualContextCount} captures`
       };
 
     case '/state':
@@ -2899,15 +2934,32 @@ function setOAuthCallback(callback) {
  */
 function getStatus() {
   const registry = modelRegistry();
-  const configuredModel = getCurrentCopilotModel();
+  const provider = getCurrentProvider();
+  const providerCatalog = PROVIDER_MODEL_CATALOG[provider] || [];
+  const providerConfiguredModel = AI_PROVIDERS[provider]?.model || null;
+  const configuredModel = providerCatalog.length ? providerConfiguredModel : getCurrentCopilotModel();
+  const configuredModelName = providerCatalog.find((model) => model.id === configuredModel)?.name
+    || registry[configuredModel]?.name
+    || configuredModel;
+  const availableProviders = Object.keys(AI_PROVIDERS);
+  const optionalProviderStatus = {};
+  if (availableProviders.includes('cerebras')) {
+    optionalProviderStatus.hasCerebrasKey = !!apiKeys.cerebras;
+  }
+  if (availableProviders.includes('xai')) {
+    optionalProviderStatus.hasXaiKey = !!apiKeys.xai;
+  }
+  if (availableProviders.includes('cerebras') || availableProviders.includes('xai')) {
+    optionalProviderStatus.providerModels = PROVIDER_MODEL_CATALOG;
+  }
   const runtime = getRuntimeSelection();
   return {
-    provider: getCurrentProvider(),
+    provider,
     model: configuredModel,
-    modelName: registry[configuredModel]?.name || configuredModel,
+    modelName: configuredModelName,
     configuredModel,
-    configuredModelName: registry[configuredModel]?.name || configuredModel,
-    requestedModel: runtime.requestedModel || configuredModel,
+    configuredModelName,
+    requestedModel: providerCatalog.length ? configuredModel : (runtime.requestedModel || configuredModel),
     runtimeModel: runtime.runtimeModel,
     runtimeModelName: runtime.runtimeModel ? (registry[runtime.runtimeModel]?.name || runtime.runtimeModel) : null,
     runtimeEndpointHost: runtime.endpointHost,
@@ -2916,13 +2968,16 @@ function getStatus() {
     hasCopilotKey: !!apiKeys.copilot,
     hasApiKey: getCurrentProvider() === 'copilot' ? !!apiKeys.copilot : 
            getCurrentProvider() === 'openai' ? !!apiKeys.openai :
-           getCurrentProvider() === 'anthropic' ? !!apiKeys.anthropic : true,
+           getCurrentProvider() === 'anthropic' ? !!apiKeys.anthropic :
+           getCurrentProvider() === 'cerebras' ? !!apiKeys.cerebras :
+           getCurrentProvider() === 'xai' ? !!apiKeys.xai : true,
     hasOpenAIKey: !!apiKeys.openai,
     hasAnthropicKey: !!apiKeys.anthropic,
+    ...optionalProviderStatus,
     historyLength: historyStore.getHistoryLength(),
     visualContextCount: visualContextStore.getVisualContextCount(),
     browserSessionState: getBrowserSessionState(),
-    availableProviders: Object.keys(AI_PROVIDERS),
+    availableProviders,
     copilotModels: getCopilotModels()
   };
 }

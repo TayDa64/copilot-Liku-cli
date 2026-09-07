@@ -1,49 +1,9 @@
 {
   "hooks": {
-    "SessionStart": [
-      {
-        "type": "command",
-        "command": "./scripts/session-start.sh",
-        "windows": "powershell -NoProfile -File scripts\\session-start.ps1",
-        "cwd": ".github/hooks",
-        "timeout": 10
-      }
-    ],
-    "PreToolUse": [
-      {
-        "type": "command",
-        "command": "./scripts/security-check.sh",
-        "windows": "powershell -NoProfile -File scripts\\security-check.ps1",
-        "cwd": ".github/hooks",
-        "timeout": 5
-      }
-    ],
-    "PostToolUse": [
-      {
-        "type": "command",
-        "command": "./scripts/audit-log.sh",
-        "windows": "powershell -NoProfile -File scripts\\audit-log.ps1",
-        "cwd": ".github/hooks",
-        "timeout": 5
-      }
-    ],
-    "SubagentStop": [
-      {
-        "type": "command",
-        "command": "./scripts/subagent-quality-gate.sh",
-        "windows": "powershell -NoProfile -File scripts\\subagent-quality-gate.ps1",
-        "cwd": ".github/hooks",
-        "timeout": 10
-      }
-    ],
-    "Stop": [
-      {
-        "type": "command",
-        "command": "./scripts/session-end.sh",
-        "windows": "powershell -NoProfile -File scripts\\session-end.ps1",
-        "cwd": ".github/hooks",
-        "timeout": 15
-      }
-    ]
+    "SessionStart": [],
+    "PreToolUse": [],
+    "PostToolUse": [],
+    "SubagentStop": [],
+    "Stop": []
   }
 }

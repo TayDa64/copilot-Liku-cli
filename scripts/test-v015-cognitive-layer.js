@@ -646,11 +646,15 @@ console.log('\n--- Phase 6: Safety Hardening ---\n');
   assert(orchSrc.includes('callOpenAI(messages, requestOptions)'), 'callProvider passes requestOptions to OpenAI');
   assert(orchSrc.includes('callAnthropic(messages, requestOptions)'), 'callProvider passes requestOptions to Anthropic');
   assert(orchSrc.includes('callOllama(messages, requestOptions)'), 'callProvider passes requestOptions to Ollama');
+  assert(orchSrc.includes('callCerebras(messages, effectiveModel, requestOptions)'), 'callProvider passes requestOptions to Cerebras');
+  assert(orchSrc.includes('callXai(messages, effectiveModel, requestOptions)'), 'callProvider passes requestOptions to xAI');
 
   const aiSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'ai-service.js'), 'utf8');
   assert(aiSrc.includes('function callOpenAI(messages, requestOptions)'), 'callOpenAI accepts requestOptions');
   assert(aiSrc.includes('function callAnthropic(messages, requestOptions)'), 'callAnthropic accepts requestOptions');
   assert(aiSrc.includes('function callOllama(messages, requestOptions)'), 'callOllama accepts requestOptions');
+  assert(aiSrc.includes('function callCerebras(messages, effectiveModel, requestOptions)'), 'callCerebras accepts requestOptions');
+  assert(aiSrc.includes('function callXai(messages, effectiveModel, requestOptions)'), 'callXai accepts requestOptions');
   assert(aiSrc.includes('requestOptions.temperature'), 'Provider functions use requestOptions.temperature');
 }
 
