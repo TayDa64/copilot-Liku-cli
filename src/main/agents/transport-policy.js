@@ -96,6 +96,11 @@ function defaultBenchPath(home = LIKU_HOME) {
   return path.join(home, 'bench', 'transport-bench.json');
 }
 
+function consultTransportPolicy(workload, env = process.env) {
+  if (!isTransportPolicyEnabled(env) || !isTransportPolicyApplyEnabled(env)) return null;
+  return recommendTransport({ workload, env });
+}
+
 function recommendTransport(options = {}) {
   const env = options.env || process.env;
   const home = options.home || LIKU_HOME;
@@ -160,6 +165,7 @@ module.exports = {
   isTransportPolicyEnabled,
   isTransportPolicyApplyEnabled,
   recommendTransport,
+  consultTransportPolicy,
   compatibleKinds,
   supportedKinds,
   defaultBenchPath
