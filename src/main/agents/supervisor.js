@@ -493,7 +493,11 @@ Model Capabilities: ${this.modelMetadata?.capabilities?.join(', ') || 'standard'
     let runTask = baseRunTask;
     const transport = this._getTransportManager();
     if (transport) {
-      const handle = transport.select({ kind: 'inprocess' });
+      const recommended = this._maybeRecommendTransport('agent-handoff');
+      const kind = recommended && recommended.applied && transport.isSupported(recommended.kind)
+        ? recommended.kind
+        : 'inprocess';
+      const handle = transport.select({ kind });
       runTask = (task, ctx) => handle.invoke({ task, ctx });
     }
     const scheduler = executionScheduler.createExecutionScheduler({ fabric, runTask });
@@ -523,7 +527,17 @@ Model Capabilities: ${this.modelMetadata?.capabilities?.join(', ') || 'standard'
     }
     return this._transportManager;
   }
-
+  _maybeRecommendTransport(workload) {
+    const env = process.env;
+    const on = (v) => /^(1|true|yes|on)$/i.test(String(v || '').trim());
+    if (!on(env.LIKU_TRANSPORT_POLICY) || !on(env.LIKU_TRANSPORT_POLICY_APPLY)) return null;
+    try {
+      const policy = require('./transport-policy');
+      return policy.consultTransportPolicy(workload, env);
+    } catch {
+      return null;
+    }
+  }
   /**
    * Phase 48: the https-provider transport adapter. It MUST reuse the existing
    * routed/budgeted requestWithFallback path — it never opens its own HTTP client.
