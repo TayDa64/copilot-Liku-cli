@@ -250,6 +250,9 @@ class AgentOrchestrator extends EventEmitter {
       context
     };
     
+    // Phase 45: expose the handoff context so the target agent's chat() can honor
+    // one-shot routing hints (escalation explicitProvider) without new plumbing.
+    targetAgent._lastHandoffContext = context;
     return targetAgent.process(task, context);
   }
 

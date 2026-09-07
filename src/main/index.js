@@ -2724,7 +2724,10 @@ function setupIPC() {
             includeVisualContext: false,
             maxContinuations: options.maxContinuations || 2,
             model: options.model || null,
-            role: options.role || null
+            role: options.role || null,
+            explicitProvider: options.explicitProvider || null,
+            escalationRung: options.escalationRung,
+            signal: options.signal || null
           });
           if (result.success) {
             return {

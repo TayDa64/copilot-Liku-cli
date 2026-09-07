@@ -2071,7 +2071,10 @@ async function sendMessage(userMessage, options = {}) {
     model = null,
     enforceActions = true,
     extraSystemMessages = [],
-    role = null
+    role = null,
+    explicitProvider = null,
+    escalationRung,
+    signal = null
   } = options;
 
   const parsedTags = parseInlineIntentTags(userMessage);
@@ -2270,7 +2273,10 @@ async function sendMessage(userMessage, options = {}) {
       requiresTools: looksLikeAutomationRequest(enhancedMessage),
       tags: parsedTags.tags,
       phase: 'execution',
-      role
+      role,
+      explicitProvider,
+      escalationRung,
+      signal
     });
     let response = providerResult.response;
     let effectiveModel = providerResult.effectiveModel;

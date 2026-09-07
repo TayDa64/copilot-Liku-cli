@@ -14,6 +14,8 @@
 
 const { BaseAgent, AgentRole, AgentCapabilities } = require('./base-agent');
 const taskContracts = require('./task-contract');
+const escalation = require('./escalation');
+const { classifySignal } = require('./escalation-signals');
 
 /**
  * Parse a comma-separated severity allow-list into a normalized Set. Used to
@@ -363,6 +365,10 @@ Model Capabilities: ${this.modelMetadata?.capabilities?.join(', ') || 'standard'
   async executePlan(tasks, context) {
     const results = [];
     const contractsOn = taskContracts.isEnabled();
+    const escalationOn = escalation.isEscalationEnabled();
+    const independentVerifierOn = escalation.isIndependentVerifierEnabled();
+    const enabledProviders = this._getEnabledProviders();
+    let lastBuilderProvider = null;
 
     for (const task of tasks) {
       // Phase 44: honor a cancellation request before the next handoff (flag on).
@@ -397,17 +403,40 @@ Model Capabilities: ${this.modelMetadata?.capabilities?.join(', ') || 'standard'
       task.status = 'in-progress';
       
       if (task.targetAgent === AgentRole.BUILDER) {
-        const workerReturn = await this.handoffToBuilder(
-          { ...context, taskId: task.id, ...(contractsOn ? { contract: task.contract } : {}) },
-          `Implement: ${task.description}`
-        );
-        results.push(this._buildResultEntry(task, AgentRole.BUILDER, workerReturn, contractsOn));
+        const baseContext = { ...context, taskId: task.id, ...(contractsOn ? { contract: task.contract } : {}) };
+        const outcome = await this._runCodingHandoff(task, AgentRole.BUILDER, `Implement: ${task.description}`, baseContext, {
+          escalationOn,
+          contractsOn,
+          enabledProviders,
+          builderSucceeded: false
+        });
+        lastBuilderProvider = outcome.usedProvider || lastBuilderProvider;
+        results.push(outcome.entry);
       } else if (task.targetAgent === AgentRole.VERIFIER) {
-        const workerReturn = await this.handoffToVerifier(
-          { ...context, taskId: task.id, ...(contractsOn ? { contract: task.contract } : {}) },
-          `Verify: ${task.description}`
-        );
-        results.push(this._buildResultEntry(task, AgentRole.VERIFIER, workerReturn, contractsOn));
+        const baseContext = { ...context, taskId: task.id, ...(contractsOn ? { contract: task.contract } : {}) };
+        // Phase 45: optional independent verifier — route Verifier to a different
+        // enabled provider than the Builder used (read-only, no PAL).
+        if (independentVerifierOn && lastBuilderProvider) {
+          const alternate = escalation.pickAlternateProvider(lastBuilderProvider, enabledProviders);
+          if (alternate) {
+            baseContext.explicitProvider = alternate;
+            task.verifierProviderPick = { explicitProvider: alternate, reason: 'independent-verifier' };
+          } else {
+            task.verifierProviderPick = { explicitProvider: null, reason: 'no-alternate-provider' };
+          }
+        }
+        // A prior Builder subtask succeeding is required to classify verifier-disagree.
+        const builderSucceeded = results.some((r) => r.agent === AgentRole.BUILDER && r.success);
+        const outcome = await this._runCodingHandoff(task, AgentRole.VERIFIER, `Verify: ${task.description}`, baseContext, {
+          escalationOn,
+          contractsOn,
+          enabledProviders,
+          builderSucceeded
+        });
+        if (task.verifierProviderPick && task.verifierProviderPick.reason && outcome.entry.taskResult) {
+          outcome.entry.verifierProviderReason = task.verifierProviderPick.reason;
+        }
+        results.push(outcome.entry);
       } else {
         // Handle internally
         results.push({
@@ -422,6 +451,121 @@ Model Capabilities: ${this.modelMetadata?.capabilities?.join(', ') || 'standard'
     }
     
     return results;
+  }
+
+  /**
+   * Phase 45: run one coding handoff, then (flag on) classify the observable
+   * outcome and retry the SAME subtask at the next ladder rung until success,
+   * a stop signal (policy/budget/human), or the 2-retry cap. Sequential only.
+   * @private
+   */
+  async _runCodingHandoff(task, agent, message, baseContext, options = {}) {
+    const { escalationOn, contractsOn, enabledProviders, builderSucceeded } = options;
+    const handoff = (ctx) => (agent === AgentRole.BUILDER
+      ? this.handoffToBuilder(ctx, message)
+      : this.handoffToVerifier(ctx, message));
+
+    let handoffContext = { ...baseContext };
+    let workerReturn = await handoff(handoffContext);
+    let entry = this._buildResultEntry(task, agent, workerReturn, contractsOn);
+    let usedProvider = this._resolveUsedProvider(workerReturn, agent);
+
+    if (!escalationOn) {
+      return { entry, usedProvider };
+    }
+
+    const requiredFiles = Array.isArray(task.contract?.scope) ? task.contract.scope : [];
+    const taskResultFor = (e) => e.taskResult || taskContracts.taskResultFromWorkerReturn(task.id, agent, workerReturn);
+    let classification = classifySignal({
+      taskResult: taskResultFor(entry),
+      error: workerReturn && workerReturn.error,
+      providerMetadata: workerReturn && workerReturn.providerMetadata,
+      budget: workerReturn && workerReturn.budget,
+      requiredFiles,
+      builderSucceeded
+    });
+    this._recordEscalationAttempt(task, 0, classification.signal, usedProvider);
+
+    let rung = 0;
+    let retries = 0;
+    let priorSignal = classification.signal;
+    let stopReason = null;
+    while (
+      classification.escalate
+      && classification.retryable
+      && retries < Math.min(escalation.MAX_AUTOMATIC_RETRIES, classification.cap)
+    ) {
+      const step = escalation.nextRung({ currentRung: rung, signal: classification.signal, enabledProviders, usedProvider });
+      if (step.stop) { stopReason = step.reason; break; }
+      rung = step.rung;
+      retries += 1;
+      handoffContext = {
+        ...handoffContext,
+        ...(step.explicitProvider ? { explicitProvider: step.explicitProvider } : {}),
+        ...(step.explicitModel ? { explicitModel: step.explicitModel } : {}),
+        escalationRung: rung,
+        escalationSignal: classification.signal
+      };
+      workerReturn = await handoff(handoffContext);
+      entry = this._buildResultEntry(task, agent, workerReturn, contractsOn);
+      usedProvider = this._resolveUsedProvider(workerReturn, agent) || step.explicitProvider || usedProvider;
+      classification = classifySignal({
+        taskResult: taskResultFor(entry),
+        error: workerReturn && workerReturn.error,
+        providerMetadata: workerReturn && workerReturn.providerMetadata,
+        budget: workerReturn && workerReturn.budget,
+        requiredFiles,
+        builderSucceeded,
+        priorSignal
+      });
+      this._recordEscalationAttempt(task, rung, classification.signal, step.explicitProvider || usedProvider);
+      priorSignal = classification.signal;
+    }
+
+    // Any unresolved terminal state on the coding path is surfaced for a human;
+    // we never keep spending past the ladder / cap / policy / budget stop.
+    if (classification.signal !== 'success') {
+      const taskResult = entry.taskResult || taskContracts.taskResultFromWorkerReturn(task.id, agent, workerReturn);
+      taskResult.status = 'blocked';
+      taskResult.recommendation = 'human review';
+      entry.taskResult = taskResult;
+      entry.success = false;
+      entry.escalationStopped = classification.human ? classification.signal : (stopReason || 'unresolved');
+    }
+
+    return { entry, usedProvider };
+  }
+
+  /** Record one escalation attempt on the task (bounded). @private */
+  _recordEscalationAttempt(task, rung, signal, provider) {
+    if (!Array.isArray(task.escalation)) task.escalation = [];
+    if (task.escalation.length >= 8) return;
+    task.escalation.push({ rung, signal, provider: provider || null, at: new Date().toISOString() });
+  }
+
+  /** Resolve the provider a worker actually used for its handoff. @private */
+  _resolveUsedProvider(workerReturn, agentRole) {
+    if (workerReturn && (workerReturn.usedProvider || workerReturn.provider)) {
+      return workerReturn.usedProvider || workerReturn.provider;
+    }
+    const pm = workerReturn && workerReturn.providerMetadata;
+    if (pm && pm.route && pm.route.provider) return pm.route.provider;
+    try {
+      const agent = this.orchestrator && this.orchestrator.getAgent ? this.orchestrator.getAgent(agentRole) : null;
+      if (agent && agent.lastUsedProvider) return agent.lastUsedProvider;
+    } catch { /* best-effort */ }
+    return null;
+  }
+
+  /** Providers currently enabled/visible (Phase 41 rules) via the AI facade. @private */
+  _getEnabledProviders() {
+    try {
+      const status = this.aiService && typeof this.aiService.getStatus === 'function'
+        ? this.aiService.getStatus()
+        : null;
+      if (status && Array.isArray(status.availableProviders)) return status.availableProviders;
+    } catch { /* best-effort */ }
+    return [];
   }
 
   /**

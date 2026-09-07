@@ -48,7 +48,9 @@ function createProviderOrchestrator(dependencies) {
         tags: Array.isArray(includeVisualContextOrOptions.tags) ? includeVisualContextOrOptions.tags : [],
         phase: includeVisualContextOrOptions.phase || null,
         role: includeVisualContextOrOptions.role || null,
-        explicitProvider: includeVisualContextOrOptions.explicitProvider || null
+        explicitProvider: includeVisualContextOrOptions.explicitProvider || null,
+        escalationRung: includeVisualContextOrOptions.escalationRung,
+        signal: includeVisualContextOrOptions.signal || null
       };
     }
 
@@ -61,7 +63,9 @@ function createProviderOrchestrator(dependencies) {
       tags: [],
       phase: null,
       role: null,
-      explicitProvider: null
+      explicitProvider: null,
+      escalationRung: undefined,
+      signal: null
     };
   }
 
@@ -341,7 +345,9 @@ function createProviderOrchestrator(dependencies) {
               estimatedUsd,
               success: true,
               budgetAllowed: true,
-              usedProvider
+              usedProvider,
+              signal: routingContext.signal || null,
+              escalationRung: Number.isFinite(Number(routingContext.escalationRung)) ? Number(routingContext.escalationRung) : undefined
             });
           }
         }

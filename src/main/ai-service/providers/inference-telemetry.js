@@ -106,6 +106,13 @@ function createInferenceTelemetry(dependencies = {}) {
       if (rec.blockedReason) {
         line.blockedReason = rec.blockedReason;
       }
+      // Phase 45: observable-signal escalation fields (only when present).
+      if (rec.signal) {
+        line.signal = String(rec.signal);
+      }
+      if (Number.isFinite(Number(rec.escalationRung))) {
+        line.escalationRung = Number(rec.escalationRung);
+      }
       fs.appendFileSync(filePath, JSON.stringify(line) + '\n', { encoding: 'utf8', mode: 0o600 });
       try { fs.chmodSync(filePath, 0o600); } catch {}
       return line;

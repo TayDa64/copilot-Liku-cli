@@ -128,6 +128,21 @@ export LIKU_PERSIST_TASK_CONTRACTS=1  # optional: persist contracts to ~/.liku/t
 - Contracts carry independently-schedulable fields, but the runner stays **sequential** in this release. `supervisor.requestCancel(taskId)` marks a not-yet-dispatched subtask skipped before its handoff.
 - The peripheral inbox (`~/.liku/supervisor-tasks.json`) is unchanged — coding contracts persist to a **separate** `~/.liku/task-contracts.json` (max 20, flag-gated). This flag only affects the coding path; PAL peripheral-task semantics are untouched.
 
+### Observable-Signal Escalation & Independent Verifier
+
+The Supervisor coding path can retry a failing subtask by climbing a capability **ladder** — but only in response to **observable signals** (test failures, schema errors, provider errors), never model self-confidence. Both features are **off by default** and require the inference fabric to be on; when off, the single-pass Phase 44 behavior is unchanged.
+
+```bash
+export LIKU_ESCALATION=1            # retry failing coding subtasks up the ladder
+export LIKU_INDEPENDENT_VERIFIER=1  # route Verifier to a different provider than Builder
+```
+
+- **Signals** (closed set): `success`, `tests-failed`, `schema-invalid`, `files-missing`, `verifier-disagree`, `repeated-failure`, `timeout`, `budget-exceeded`, `policy-violation`, `provider-error`, `unknown-failure`.
+- **Retry ladder:** rung 0 current route → rung 1 same provider retry → rung 2 stronger planner (prefers xAI if enabled) → rung 3 other enabled core provider → rung 4 human (stop). Rungs whose provider is not enabled are skipped.
+- **Hard limits:** at most **2** automatic retries per task per process; the same recurring signal escalates to a human sooner (`repeated-failure`). `policy-violation` and `budget-exceeded` **never** auto-retry — they stop immediately and surface a blocked `TaskResult` with recommendation `human review`. Every retry still passes through the budget governor.
+- **Independent Verifier:** when enabled and the Builder's used provider is known, the Verifier's request routes to the first other enabled provider (order: xai, cerebras, openai, anthropic, copilot). If none exists, the table route is kept with reason `no-alternate-provider`. The Verifier stays read-only.
+- Escalation applies only to the coding path — peripheral tasks are never retried.
+
 ### Status and Diagnostics
 
 ```
@@ -299,4 +314,6 @@ Policy enforcement validates action plans against both negative and positive pol
 | `LIKU_INFERENCE_RATES_JSON` | Path to a rate-table override JSON | — |
 | `LIKU_TASK_CONTRACTS` | Enable Supervisor coding TaskContracts + compressed worker results | off |
 | `LIKU_PERSIST_TASK_CONTRACTS` | Persist coding contracts to `~/.liku/task-contracts.json` | off |
+| `LIKU_ESCALATION` | Enable observable-signal escalation on the coding path | off |
+| `LIKU_INDEPENDENT_VERIFIER` | Route Verifier to a different provider than Builder | off |
 | `NODE_ENV` | Development/production mode | — |

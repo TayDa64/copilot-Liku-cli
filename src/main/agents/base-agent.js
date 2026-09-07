@@ -119,18 +119,33 @@ class BaseAgent extends EventEmitter {
     const systemPrompt = this.getSystemPrompt();
     const CHAT_TIMEOUT_MS = 60000;
 
+    // Phase 45: one-shot routing hints carried on the handoff context (escalation).
+    const routingHints = this._lastHandoffContext && typeof this._lastHandoffContext === 'object'
+      ? this._lastHandoffContext
+      : {};
+
     const response = await Promise.race([
       this.aiService.chat(message, {
         systemPrompt,
         history: this.conversationHistory,
         model: options.model,
         role: this.role,
+        ...(routingHints.explicitProvider ? { explicitProvider: routingHints.explicitProvider } : {}),
+        ...(routingHints.explicitModel ? { explicitModel: routingHints.explicitModel } : {}),
+        ...(routingHints.escalationRung !== undefined ? { escalationRung: routingHints.escalationRung } : {}),
+        ...(routingHints.escalationSignal ? { signal: routingHints.escalationSignal } : {}),
         ...options
       }),
       new Promise((_, reject) =>
         setTimeout(() => reject(new Error(`AI chat timed out after ${CHAT_TIMEOUT_MS / 1000}s`)), CHAT_TIMEOUT_MS)
       )
     ]);
+
+    // Track the provider actually used so the Supervisor can pick an alternate
+    // for an independent Verifier (Phase 45).
+    if (response && response.provider) {
+      this.lastUsedProvider = response.provider;
+    }
 
     // Add response to history
     this.conversationHistory.push({
