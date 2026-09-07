@@ -179,6 +179,20 @@ export LIKU_PARALLEL_SCHEDULER=1   # route the decomposed plan through the sched
 - **Shared budget governor:** parallel Builder calls both flow through the same process-wide budget ledger; the first can spend the cap and the second receives a budget-exceeded signal and does **not** auto-retry past policy.
 - **In-process only.** No transport abstraction, no HTTP/2 vs HTTP/3, no QUIC, no IPC/worker pools, no work-stealing — those are later phases. `policy-violation`/`requiresHuman`/Class A peripheral work stays serial and out of this scheduler (coding path only); PAL semantics are untouched.
 
+### Transport Fabric (Interface + In-Process / HTTPS Adapters)
+
+The **Transport Fabric** lets Execution Fabric workers ask a `TransportManager` for a handle instead of being hard-wired to "call a JS function in this process." It is **off by default**; when off no manager is constructed and call sites are byte-identical to Phase 47.
+
+```bash
+export LIKU_TRANSPORT_FABRIC=1     # route the in-process agent handoff through the transport manager
+```
+
+- **Two implemented kinds:** `inprocess` (today's agent handoff / `runTask`) and `https-provider` (today's OpenAI-compatible request path — Cerebras/xAI/OpenAI). `select()` with no kind returns `inprocess` for agent work; `https-provider` accepts only inference-shaped payloads (`{ messages, provider, model }`).
+- **Reserved kinds are NOT built:** `http2`, `http3`, `quic`, `ipc`. Selecting one fails closed with `unsupported-transport` — there is never a silent fall-through to a reserved kind, no QUIC, no HTTP/3, no IPC socket, no bakeoff.
+- **Transport neutrality:** worker semantics are not coupled to TCP/HTTP/2/3/QUIC. Provider APIs remain HTTPS / OpenAI-compatible, and **agents never open streams**.
+- **Transport grants no authority.** A handle's `invoke()` only calls the injected function: agent handoffs still flow through Supervisor → fabric → scheduler → escalation, and model calls still flow through `requestWithFallback` (route + budget + telemetry). The manager never reads an API key from `caps` to POST around policy, and only Supervisor / ai-service / fabric may hold it.
+
+
 
 
 ### Status and Diagnostics
@@ -359,4 +373,5 @@ Policy enforcement validates action plans against both negative and positive pol
 | `LIKU_MAX_PARALLEL_TASKS` | Scheduler cap: max coding tasks in flight | 2 |
 | `LIKU_MAX_PARALLEL_PER_PROVIDER` | Scheduler cap: max in flight per provider | 1 |
 | `LIKU_MAX_PARALLEL_PER_ROLE` | Scheduler cap: max in flight per role | 2 |
+| `LIKU_TRANSPORT_FABRIC` | Route worker dispatch through the transport manager (inprocess / https-provider adapters) | off |
 | `NODE_ENV` | Development/production mode | — |

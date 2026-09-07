@@ -18,6 +18,7 @@ const escalation = require('./escalation');
 const { classifySignal } = require('./escalation-signals');
 const executionFabric = require('./execution-fabric');
 const executionScheduler = require('./execution-scheduler');
+const transportFabric = require('./transport-fabric');
 
 /**
  * Parse a comma-separated severity allow-list into a normalized Set. Used to
@@ -484,7 +485,17 @@ Model Capabilities: ${this.modelMetadata?.capabilities?.join(', ') || 'standard'
    */
   async _executePlanViaScheduler(tasks, context, options = {}) {
     const fabric = this.getExecutionFabric();
-    const runTask = this._buildSchedulerRunTask(context, options);
+    const baseRunTask = this._buildSchedulerRunTask(context, options);
+    // Phase 48: when the transport fabric is on, route the in-process agent handoff
+    // through TransportManager.select({ kind: 'inprocess' }).invoke(...). The handle
+    // only calls the same runTask — it grants no authority and skips no policy.
+    this._activeSchedulerRunTask = baseRunTask;
+    let runTask = baseRunTask;
+    const transport = this._getTransportManager();
+    if (transport) {
+      const handle = transport.select({ kind: 'inprocess' });
+      runTask = (task, ctx) => handle.invoke({ task, ctx });
+    }
     const scheduler = executionScheduler.createExecutionScheduler({ fabric, runTask });
     const results = await scheduler.schedule(tasks);
     for (const task of tasks) {
@@ -493,6 +504,40 @@ Model Capabilities: ${this.modelMetadata?.capabilities?.join(', ') || 'standard'
       task.status = entry.skipped ? 'skipped' : (entry.success ? 'completed' : 'failed');
     }
     return results;
+  }
+
+  /**
+   * Phase 48: lazily build the TransportManager ONLY when LIKU_TRANSPORT_FABRIC is
+   * on. The in-process adapter calls the active scheduler runTask; the https-provider
+   * adapter routes to requestWithFallback (route + budget + telemetry) — never a
+   * second HTTP client, never around policy.
+   * @private
+   */
+  _getTransportManager() {
+    if (!transportFabric.isTransportFabricEnabled()) return null;
+    if (!this._transportManager) {
+      this._transportManager = transportFabric.createTransportManager({
+        invokeInProcess: (payload) => this._activeSchedulerRunTask(payload.task, payload.ctx),
+        invokeHttpsProvider: (payload) => this._invokeHttpsProviderTransport(payload)
+      });
+    }
+    return this._transportManager;
+  }
+
+  /**
+   * Phase 48: the https-provider transport adapter. It MUST reuse the existing
+   * routed/budgeted requestWithFallback path — it never opens its own HTTP client.
+   * @private
+   */
+  _invokeHttpsProviderTransport(payload = {}) {
+    const svc = this.aiService;
+    if (svc && typeof svc.requestWithFallback === 'function') {
+      return svc.requestWithFallback(payload.messages, payload.model, {
+        ...(payload.options || {}),
+        ...(payload.provider ? { provider: payload.provider } : {})
+      });
+    }
+    throw new Error('https-provider transport is not wired to requestWithFallback');
   }
 
   /**
