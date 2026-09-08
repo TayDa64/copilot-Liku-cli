@@ -1,5 +1,8 @@
 # GPT Workspace Report
 
+> ⚠️ **Historical document — not the phase clock.** For the current phase clock
+> (HEAD, version, phases 40–51), see [PROJECT_STATUS.md](PROJECT_STATUS.md).
+
 > **Historical snapshot**: This report was generated early in the project and many of the issues described have since been resolved. For current project status, see [PROJECT_STATUS.md](PROJECT_STATUS.md).
 
 ## Current State & Issues

@@ -1,5 +1,9 @@
 # v0.0.14 Implementation Plan — Application & Floating Window Awareness
 
+> ⚠️ **Historical document — not the phase clock.** Snapshot: 2026-03-17.
+> Preserved for history; describes a superseded plan. For the current phase clock
+> (HEAD, version, phases 40–51), see [PROJECT_STATUS.md](PROJECT_STATUS.md).
+
 > Generated: 2026-03-17  
 > Based on: Deep codebase analysis of system-automation.js, ai-service.js, ui-watcher.js, window/manager.js, system-prompt.js  
 > Status: **Ready for implementation**

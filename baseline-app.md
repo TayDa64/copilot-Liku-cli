@@ -1,5 +1,8 @@
 # Copilot CLI Baseline Application - Implementation Roadmap
 
+> ⚠️ **Historical document — not the phase clock.** For the current phase clock
+> (HEAD, version, phases 40–51), see [PROJECT_STATUS.md](PROJECT_STATUS.md).
+
 > **Historical document**: This roadmap was created during the early baseline phase. Many items listed as blockers or missing features have since been implemented. For current status, see [PROJECT_STATUS.md](PROJECT_STATUS.md) and [IMPLEMENTATION_SUMMARY.md](IMPLEMENTATION_SUMMARY.md).
 
 ## Vision: Local Agentic Desktop Assistant

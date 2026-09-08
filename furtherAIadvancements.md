@@ -1,5 +1,10 @@
 # Further AI Advancements — v0.0.15+ Implementation Plan
 
+> ⚠️ **Historical document — not the phase clock.** Preserved for history; the
+> phase numbers below are the March 2026 cognitive-layer plan, not the current
+> fabric clock. For the current phase clock (HEAD, version, phases 40–51), see
+> [PROJECT_STATUS.md](PROJECT_STATUS.md).
+
 > **Status**: Phases 0–9 COMPLETE, N1-N6 roadmap MOSTLY COMPLETE — 2026-03-12 (commit `fde64b0`)
 > **Prior art**: [advancingFeatures.md](advancingFeatures.md) covers vision/overlay/coordinate hardening (Phases 0–4). This document covers the **cognitive layer** that sits above that substrate.
 > **Test coverage**: 310 cognitive + 29 regression = 339 assertions, 0 failures across 15+ suites.

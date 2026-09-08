@@ -1,5 +1,9 @@
 # Advancing Features (PDF-grounded Implementation Plan)
 
+> ⚠️ **Historical document — not the phase clock.** Preserved for history; may
+> describe superseded plans. For the current phase clock (HEAD, version, phases
+> 40–51), see [PROJECT_STATUS.md](PROJECT_STATUS.md).
+
 ## Coordinate Contract (Phase 1 — enforced)
 
 All coordinates crossing an IPC boundary follow this contract:

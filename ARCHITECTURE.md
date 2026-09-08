@@ -12,6 +12,47 @@ This application implements an Electron-based headless agent system with an ultr
 4. **Secure**: Context isolation, no Node integration in renderers, CSP headers
 5. **Extensible**: Clean IPC message schema with multi-provider AI service and agent orchestration
 
+## Source of Truth — Pillars and Fabrics (September 2026)
+
+> For the live phase clock, HEAD, and package version, see
+> [PROJECT_STATUS.md](PROJECT_STATUS.md). For flags, see
+> [CONFIGURATION.md](CONFIGURATION.md). This section is the conceptual map; those
+> files are the source of truth for "what is current."
+
+Liku's product surface is **three pillars**:
+
+1. **Cognitive Substrate** — `SystemContextManager`, Agentic Memory (A-MEM),
+   the semantic skill router, RLVR telemetry/reflection, and the dynamic-tool
+   sandbox. Default context fragment size is **262 BPE**.
+2. **Multi-Agent Intelligence** — a Supervisor plus worker roles; the peripheral
+   monitor → alert → task flow; fairness and self-heal ticks.
+3. **Peripheral Abstraction Layer (PAL)** — mock + MQTT + Serial + BLE + Zigbee +
+   ROS2 + Matter foundations; pairing; the device-capability profile; power /
+   forecast / anomaly signals; cluster leases (Phases 25–40).
+
+The overlay / UIA inspect surface is a **coordinate grid** for targeting and
+inspection. It is **not** a fourth pillar and **not** a perception runtime.
+
+Under the hood, four conceptual **engineering fabrics** describe how work is
+dispatched. They are conceptual layers, not four new `src/` trees:
+
+| Fabric | Phases | What it is |
+| --- | --- | --- |
+| **Agent** | existing `src/main/agents` | roles, handoff, task contracts, PAL tasks (not relocated) |
+| **Inference** | 41–45 | OpenAI-compatible providers, `/route`, budget, telemetry, TaskContract, escalation |
+| **Execution** | 46–47 | in-process fabric + declared-independence scheduler |
+| **Transport** | 48–51 | interface + bench + loopback lab + advisory policy table |
+
+**Transport neutrality.** Worker semantics are not coupled to TCP / HTTP/2 /
+HTTP/3 / QUIC. Provider APIs remain HTTPS / OpenAI-compatible. **Transport grants
+no authority** — a handle's `invoke()` only calls the injected function; it cannot
+skip budget, routing, escalation, confirm rails, or PAL, and it never reads an API
+key from `caps` to POST around policy. **Agents never open transport streams.**
+Reserved kinds (`http2`/`http3`/`quic`/`ipc`) fail closed with
+`unsupported-transport`; the QUIC worker lab is a loopback stand-in, not a
+production QUIC/HTTP-3 stack. See [CONFIGURATION.md](CONFIGURATION.md) for the
+flags and [PROJECT_STATUS.md](PROJECT_STATUS.md) for the phase clock and residuals.
+
 ## Multi-Agent Orchestration
 
 The repo's custom-agent layer uses a trigger-based coordinator-worker model under [.github/agents](.github/agents).

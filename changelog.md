@@ -1,3 +1,35 @@
+## Unreleased — Ambient Intelligence + Fabrics (2026-09-08)
+
+Living-clock summary through **Phase 51** (HEAD `8e495e4`, package `0.0.16`). See
+`PROJECT_STATUS.md` for the authoritative phase clock and honest residuals, and
+`CONFIGURATION.md` for the flags. No runtime behavior changed in this entry — it
+documents work already on `main`.
+
+### Peripheral Abstraction Layer (Phases 25–40)
+
+- PAL foundations exist on `main`: mock + MQTT + Serial + BLE + Zigbee + ROS2 +
+  Matter transports; device pairing; the device-capability profile (DCP); power /
+  forecast / anomaly signals; and cluster leases. Phase 40 (`2794d012`) closed out
+  the PAL forecast work.
+
+### Inference · Execution · Transport fabrics (Phases 41–51)
+
+- **41** (PR #29 `5754dfac` + `268e2614`) — Cerebras + xAI OpenAI-compatible providers.
+- **42** (`e0953e6`) — `routing.js`, the `/route` command, and `LIKU_INFERENCE_FABRIC`.
+- **43** (`dc713aa`) — inference budget governor, `~/.liku/inference/inference.jsonl`, `liku analytics inference`.
+- **44** (`0d93c14`) — TaskContract + compressed worker reports.
+- **45** (`22c5388`) — escalation ladder + independent verifier.
+- **46** (`03925b6`) — in-process Execution Fabric.
+- **47** (`3a48f54`) — parallel scheduler (declared independence only).
+- **48** (`ac9d919`) — Transport interface: `inprocess` + `https-provider`; reserved kinds fail closed.
+- **49** (PR #30 `7c8bc899`) — transport bench (`LIKU_TRANSPORT_BENCH`); bench kinds ≠ production kinds.
+- **50** (PR #31 `0d871af0`) — QUIC worker lab loopback stand-in (`LIKU_QUIC_WORKER_LAB`).
+- **51** (PR #32 `8e495e4e`) — advisory transport policy table (`LIKU_TRANSPORT_POLICY` / `LIKU_TRANSPORT_POLICY_APPLY`).
+
+All fabric flags default **OFF**. `select('http3')` still throws; `select('quic')`
+throws unless the lab flag is set; the policy table is advisory and never calls
+`select()`. The default cognitive fragment stays **262 BPE**.
+
 ## v0.0.14 — 2026-03-17
 
 ### App Launch Robustness & Window Awareness Planning

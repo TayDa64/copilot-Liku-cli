@@ -47,6 +47,24 @@ Compared with a plain chat CLI, Liku adds:
 
 ---
 
+## Current architecture (SoT)
+
+Liku's product surface is **three pillars** — **Cognitive Substrate**,
+**Multi-Agent Intelligence**, and the **Peripheral Abstraction Layer (PAL)** —
+supported by **four conceptual fabrics**: **Agent**, **Inference**, **Execution**,
+and **Transport**. The overlay / UIA inspect surface is a coordinate grid, not a
+fourth pillar.
+
+Current HEAD is **Phase 51** (package `0.0.16`). All Inference / Execution /
+Transport flags default **OFF**, and the default cognitive fragment is **262 BPE**.
+
+For details see [PROJECT_STATUS.md](PROJECT_STATUS.md) (the living phase clock),
+[ARCHITECTURE.md](ARCHITECTURE.md) (long-form architecture),
+[CONFIGURATION.md](CONFIGURATION.md) (flags), and the
+[project wiki](https://github.com/TayDa64/copilot-Liku-cli/wiki).
+
+---
+
 ## Current status
 
 ### Stable core surfaces

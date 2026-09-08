@@ -1,134 +1,138 @@
-# Project Status
+# Project Status — Living Clock
 
-## Current State
-- Status: active development on `main`
-- Published package version: `0.0.13`
-- Latest tagged version: `0.0.14` (2026-03-07)
-- Unreleased work: v0.0.15 Cognitive Layer (Phases 0–14, 2026-03-12)
-- Latest local commits:
-  - `fde64b0` - feat: implement N1-N6 next-stage roadmap
-  - `8aefc19` - Phase 9: Design-level hardening (Gemini audit)
-  - `f1fa1a6` - Phase 8: audit-driven fixes
-  - `bc27d62` - feat: cognitive layer phases 6-7
-  - `9c335d4` - chore: ignore .tmp-hook-check test artifacts
-  - `461ce31` - feat: cognitive layer phases 0–5
+> **This file is the phase clock.** When any other document disagrees with this
+> one about "what is current," this file wins. Older status snapshots are kept
+> for history and are banner-marked as historical; they are not the clock.
 
-## Delivered Since Last Publish
+- **Snapshot date:** 8 September 2026
+- **HEAD:** `8e495e4` — `feat(agents): adaptive transport policy table (Phase 51)`
+- **Package version:** `0.0.16`
+- **Branch of record:** `main`
+- **Phase clock:** stopped at **Phase 51**. The next implementation slice is
+  human-gated — there is **no Phase 52 by inertia**.
 
-### v0.0.15 Cognitive Layer (Unreleased — 2026-03-12)
+---
 
-**Phase 9: Design-Level Hardening** (commit `8aefc19`)
-- BPE token counting via `js-tiktoken` (cl100k_base) replaces character heuristics.
-- Tool proposal→approve→register flow with `tools/proposed/` quarantine directory.
-- Process-isolated sandbox via `child_process.fork()` replaces in-process `vm.createContext`.
-- `message-builder.js` accepts explicit `skillsContext`/`memoryContext` params.
-- CLI `liku tools proposals` and `liku tools reject` subcommands.
+## What Liku is (three product pillars)
 
-**Phase 8: Audit-Driven Fixes** (commit `f1fa1a6`)
-- Telemetry schema fix: `recordAutoRunOutcome` uses proper `writeTelemetry({ task, phase, outcome })`.
-- Skill index staleness pruning via `fs.existsSync` on load.
-- Word-boundary regex for keyword matching (prevents false positives).
-- AWM PreToolUse gate + PostToolUse audit hook for reflection passes.
-- Hook import fix + trace writer signature fix in ai-service.js.
+Liku is a CommonJS Node/Electron CLI runtime — an ambient-intelligence layer for
+the desktop. Its product surface is three pillars. These are stable and are **not**
+collapsed into the four engineering "fabrics" below.
 
-**Phase 7: Next-Level Enhancements** (commit `bc27d62`)
-- AWM procedural memory extraction from successful multi-step sequences → auto-skill registration.
-- PostToolUse hook wiring for dynamic tools with audit-log.ps1.
-- Unapproved tools filtered from API definitions (model only sees callable tools).
-- CLI subcommands: `liku memory`, `liku skills`, `liku tools`.
-- Telemetry summary analytics API (`getTelemetrySummary`).
+1. **Cognitive Substrate** — `SystemContextManager`, Agentic Memory (A-MEM), the
+   semantic skill router, RLVR telemetry/reflection, and the dynamic-tool
+   sandbox. Default context fragment size is **262 BPE** (an invariant — do not
+   "improve" it silently).
+2. **Multi-Agent Intelligence** — a Supervisor plus worker roles (researcher /
+   architect / builder / verifier / diagnostician / vision operator); the
+   peripheral monitor → alert → task flow; fairness and self-heal ticks.
+3. **Peripheral Abstraction Layer (PAL)** — mock + MQTT + Serial + BLE + Zigbee +
+   ROS2 + Matter foundations; pairing; the device-capability profile (DCP);
+   power / forecast / anomaly signals; cluster leases. Landed across Phases 25–40.
 
-**Phase 6: Safety Hardening** (commit `bc27d62`)
-- PreToolUse hook enforcement via `hook-runner.js`.
-- Bounded reflection loop (max 2 iterations).
-- Session failure count decay on success.
-- Phase params forwarded to all providers (OpenAI/Anthropic/Ollama).
-- Memory LRU pruning at 500 notes; telemetry log rotation at 10MB.
+The overlay / UIA inspect surface is a **coordinate grid** for targeting and
+inspection. It is **not** a fourth pillar and **not** a perception runtime.
 
-**Phases 0–5: Core Cognitive Layer** (commit `461ce31`)
-- Structured `~/.liku/` home directory with copy-based migration.
-- Agentic Memory (A-MEM): CRUD, Zettelkasten linking, keyword relevance, token-budgeted injection.
-- RLVR Telemetry: structured logging, reflection trigger, phase-aware temperature params.
-- Dynamic Tool Generation: VM sandbox, approval gate, security hooks.
-- Semantic Skill Router: keyword matching, usage tracking, budget control.
-- Deeper Integration: system prompt awareness, slash commands, policy wiring.
+---
 
-**Test coverage**: 310 cognitive + 29 regression = **339 assertions**, 0 failures, 15+ suites.
+## Four engineering fabrics (conceptual, not four new `src/` trees)
 
-### N1-N6 Next-Stage Roadmap (commit `fde64b0`)
+| Fabric | Phases | What it is | What it is **not** |
+| --- | --- | --- | --- |
+| **Agent** | existing `src/main/agents` | roles, handoff, task contracts, PAL tasks | not relocated |
+| **Inference** | 41–45 | OpenAI-compatible providers, `/route`, budget, telemetry, TaskContract, escalation | not a "model OS" |
+| **Execution** | 46–47 | in-process fabric + declared-independence scheduler | not a worker pool |
+| **Transport** | 48–51 | interface + bench + loopback lab + advisory policy table | not HTTP/3, not production QUIC, not a cutover |
 
-- **N3 — E2E Smoke Test** (Phase 10): Full pipeline test for dynamic tools — propose, quarantine, approve, fork-execute, verify result, telemetry audit. 17 assertions.
-- **N1-T2 — TF-IDF Skill Routing** (Phase 11): Pure JS cosine similarity scoring alongside keyword matching. Zero new dependencies. 16 assertions.
-- **N4 — Session Persistence** (Phase 12): `saveSessionNote()` writes episodic memory note on chat exit, capturing user message keywords for future retrieval.
-- **N6 — Cross-Model Reflection** (Phase 13): `/rmodel` command routes reflection passes to a reasoning model (o1/o3-mini) instead of default chat model. 12 assertions.
-- **N5 — Analytics CLI** (Phase 14): `liku analytics [--days N] [--raw]` reads telemetry JSONL and displays success rates, top tasks, phase breakdown, common failures.
+---
 
-### Capability-Based Model Routing (Unreleased)
-- Replaced the old vision-only model distinction with a richer capability matrix.
-- Grouped Copilot models into `Agentic Vision`, `Reasoning / Planning`, and `Standard Chat`.
-- Surfaced explicit reroute notices instead of silent model swaps.
-- Added `(plan)` routing to the supervisor in non-destructive plan-only mode.
-- Added live UI target prevalidation before coordinate clicks.
-- Hardened Windows process enumeration (inaccessible `StartTime` no longer crashes).
+## Phase clock (40–51)
 
-## Delivered in This Session
+| Phase | Commit | What landed |
+| --- | --- | --- |
+| 40 | `2794d012` | PAL / forecast close-out |
+| 41 | PR #29 `5754dfac` + `268e2614` | Cerebras + xAI OpenAI-compatible providers |
+| 42 | `e0953e6` | `routing.js`, `/route`, `LIKU_INFERENCE_FABRIC` |
+| 43 | `dc713aa` | Budget + `~/.liku/inference/inference.jsonl` + `liku analytics inference` |
+| 44 | `0d93c14` | TaskContract + compressed worker reports |
+| 45 | `22c5388` | Escalation ladder + independent verifier |
+| 46 | `03925b6` | In-process Execution Fabric |
+| 47 | `3a48f54` | Parallel scheduler (declared independence only) |
+| 48 | `ac9d919` | Transport interface: `inprocess` + `https-provider`; reserved kinds fail closed |
+| 49 | PR #30 `7c8bc899` | Transport bench (`LIKU_TRANSPORT_BENCH`). Bench kinds ≠ production kinds |
+| 50 | PR #31 `0d871af0` | QUIC lab loopback stand-in (`LIKU_QUIC_WORKER_LAB`) |
+| 51 | PR #32 `8e495e4e` | Advisory transport policy table (`LIKU_TRANSPORT_POLICY` / `_APPLY`) |
 
-### TradingView Automation Driver Hardening
-- Added an automation-ready TradingView launcher contract flow for live Pine/CDP validation, including packaged AppUserModelId activation support for the official Windows MSIX install.
-- Added launch capability, launch contract, launch executor, and launch profile validation coverage plus an opt-in relaunch path for the live smoke harness.
-- Updated TradingView validation docs to reflect the packaged-launch route, wrapper contract usage, and current Tranche 0 status.
-- Closed Tranche 0 with deterministic low-level helper parity fixtures and a parity artifact lane; also corrected `typeText` SendKeys escaping so the fixture captures the intended helper contract instead of a broken special-character path.
-- Closed Tranches 1-4 against the current source seams: host-backed window/focus/clipboard routing, watcher/focus-lock hardening, semantic quick-search/Pine readback/write paths, and conservative same-surface sequencing/proof support.
-- Kept Tranche 5 as the remaining rollout lane for fallback-trigger trending, default-on decisions, and legacy cleanup after stable evidence.
+Earlier PAL phases (25–40) and the March 2026 cognitive-layer work are covered in
+the changelog and in banner-marked historical docs.
 
-### TradingView Validation Documentation Hardening
-- Documented that `test-windows-observation-flow.js` is characterization coverage, not a full real-world proof of `liku chat` behavior.
-- Added guidance for investigating unexpected VS Code Accessibility View popups during live chat-path testing.
-- Added explicit live-validation requirements for TradingView quick-search clearing, focus-lock, and stale highlighted query failures.
+---
 
-### Multi-Agent Enforcement Hardening
-- Added deterministic worker artifact persistence under `.github/hooks/artifacts/`.
-- Updated hook enforcement so read-only workers can write only to their artifact path, not arbitrary repo files.
-- Added local proof harnesses for allow/deny/quality-gate behavior.
+## Invariants (do not weaken in prose or code)
 
-### AI Service Facade Refactor
-- Extracted system prompt generation, message assembly, slash-command handling, provider registry/model registry helpers, and provider orchestration behind the `src/main/ai-service.js` compatibility facade.
-- Preserved compatibility markers in the facade for source-sensitive regression tests while reducing internal coupling.
+- **Docs ↔ code parity:** commit messages on `main` outrank stale markdown. If a
+  doc says `0.0.13` or "the March 2026 cognitive layer is current," the doc is the
+  bug, not the code.
+- **Default cognitive fragment is 262 BPE.**
+- **Proposal → confirm rails stay closed.** High-risk / critical actions and
+  dynamic-tool proposals flow through the existing confirmation / policy paths.
+  No fabric grants new actuation authority.
+- **Transport grants no authority.** A transport handle's `invoke()` only calls
+  the injected function; it cannot skip budget, routing, escalation, confirm
+  rails, or PAL. **Agents never open transport streams.**
+- **Bench kinds ≠ production kinds.** A faster bench row is not a cutover.
+- **Lab quic ≠ QUIC.** The QUIC worker lab is a loopback framed-TCP stand-in; it
+  is not a QUIC/HTTP-3 stack and never speaks to vendor APIs.
+- **Reserved transport kinds fail closed.** `select('http3')` throws
+  `unsupported-transport`; `select('quic')` throws unless `LIKU_QUIC_WORKER_LAB=1`.
+- **TradingView live/unknown DOM / Depth-of-Market order entry stays fail-closed**
+  behind advisory-only rails.
+- **PAL peripheral-task store semantics are unchanged.**
 
-### Verification Coverage
-- Added targeted characterization tests for contract stability, command handling, provider orchestration, registry state, policy enforcement, preference parsing, and runtime state seams.
-- Confirmed fresh local passes for provider orchestration, contract, feature, and bug-fix suites.
-- Added/identified deterministic tranche-closure lanes: `test:automation-host`, `test:tradingview-runtime`, `test:tradingview-launch`, and `test:tradingview-modernization`.
+---
 
-## Recently Stabilized
+## Honest residuals (designed, not landed on `main`)
 
-### Reliability and Continuity
-- Browser continuity state remains integrated into prompt steering and `/status` output.
-- `/clear` continues to reset continuity and history state together.
+- **Supervisor APPLY pin.** A `_maybeRecommendTransport` hook inside
+  `_executePlanViaScheduler` is *designed*, but on current `main` the coding-path
+  scheduler still calls `TransportManager.select({ kind: 'inprocess' })` directly.
+  `transport-policy.recommendTransport()` is advisory-only and is **not** wired
+  into the Supervisor. Treat the pin as optional future work, not as shipped.
+- **`select('http3')` still throws** `unsupported-transport`.
+- **`select('quic')` still throws** unless `LIKU_QUIC_WORKER_LAB=1`, and even then
+  only the loopback lab stand-in is returned.
+- **`LIKU_TRANSPORT_POLICY_APPLY=1` without the lab does not enable `quic`.** The
+  policy table can only recommend a currently-legal kind under the active flags.
+- **`test-bug-fixes.js` TradingView `SendInput` assertion** is a pre-existing
+  Windows-only characterization check. It is not "broken" and is not touched here.
 
-### Deterministic Execution Behavior
-- Multi-block action parsing and deterministic browser rewrites remain in place.
-- Policy regeneration and non-action guardrails remain active during the modularization work.
+---
 
-## Operational Health
-- No static diagnostics errors on modified implementation files after updates.
-- Fresh provider-seam verification completed with successful contract and regression checks.
-- TradingView modernization docs now treat Tranches 0-4 as the closed baseline and reserve future planning for Tranche 5 rollout/cleanup or new feature slices.
+## Fabric clock stopped after Phase 51
 
-## Core Runtime Areas
-- `src/main/ai-service.js`: compatibility facade, orchestration, cognitive feedback loop (AWM + RLVR).
-- `src/main/ai-service/`: extracted prompt, context, command, registry, orchestration, and phase-params modules.
-- `src/main/memory/`: agentic memory store, memory linker, semantic skill router.
-- `src/main/telemetry/`: telemetry writer (with rotation + summary), reflection trigger.
-- `src/main/tools/`: dynamic tool sandbox, validator, registry, hook runner.
-- `src/main/system-automation.js`: action parsing/execution with PreToolUse + PostToolUse hooks.
-- `src/cli/commands/`: CLI commands including memory, skills, tools subcommands.
-- `src/shared/liku-home.js`: centralized `~/.liku/` home directory management.
+The four fabrics are at a deliberate stopping point. Any next slice is
+**human-gated** and named, not numbered by inertia. Candidate slices (not
+scheduled here):
 
-## Near-Term Priorities
-1. Auto-registration for hook-approved tools (Phase 3c — sandbox test + hook gate).
-2. Optional Ollama embeddings for skill routing (N1-T3 — replaces TF-IDF when local model available).
-3. Continue shrinking `src/main/ai-service.js` while preserving the compatibility facade.
+- wire the Supervisor APPLY pin,
+- open a new plenum for real out-of-process execution or a real QUIC/HTTP-3
+  transport,
+- resume PAL / overlay / TradingView backlogs.
 
-## Notes
-This file supersedes older "implementation complete" snapshots that described the project as an initial Electron-only deliverable. The current system is a broader CLI + automation runtime with ongoing reliability hardening.
+---
+
+## Historical context
+
+For the March 2026 cognitive-layer build-out (Phases 0–14, v0.0.15 era) and the
+earlier Electron-only snapshots, see `changelog.md` and the banner-marked
+historical files (`IMPLEMENTATION_SUMMARY.md`, `FINAL_SUMMARY.txt`,
+`baseline-app.md`, `PLAN-v0.0.14-window-awareness.md`, and others). That history
+is preserved and remains accurate as history — it is **not** the current clock.
+
+## Pointers
+
+- Long-form architecture: `ARCHITECTURE.md`
+- Flags and configuration: `CONFIGURATION.md`
+- Release history: `changelog.md`
+- Agent routing / hook topology: `docs/AGENT_ORCHESTRATION.md`
+- Wiki: <https://github.com/TayDa64/copilot-Liku-cli/wiki>

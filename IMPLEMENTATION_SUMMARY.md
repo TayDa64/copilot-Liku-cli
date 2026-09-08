@@ -1,5 +1,10 @@
 # Implementation Summary
 
+> ⚠️ **Historical document — not the phase clock.** Snapshot: 2026-04-05.
+> Preserved for history; may describe superseded architecture or status. For the
+> current phase clock (HEAD, version, phases 40–51), see
+> [PROJECT_STATUS.md](PROJECT_STATUS.md).
+
 ## Scope
 This summary reflects the current state of `copilot-liku-cli` as of 2026-04-05, including the model capability separation, planning-mode routing, automation hardening, and the new inspect/proof/trace reliability slice.
 

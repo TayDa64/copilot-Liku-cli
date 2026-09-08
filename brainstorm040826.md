@@ -1,5 +1,10 @@
 # Brainstorm 04/08/26 — Code-Grounded Task File for Awareness, Compartmentalization, Provenance, and Proof
 
+> ⚠️ **Historical document — not the phase clock.** Snapshot: 2026-04-08. This is
+> an awareness / compartmentalization brainstorm, not the PAL phase clock. For the
+> current phase clock (HEAD, version, phases 40–51), see
+> [PROJECT_STATUS.md](PROJECT_STATUS.md).
+
 > Status: Ready for implementation planning and subagent execution  
 > Generated from: direct code inspection + parallel subagent diagnosis on 2026-04-08  
 > Primary trigger: Liku drifting into TradingView/Pine behavior while running inside the MUSE repo in VS Code, plus unsafe/ambiguous risky confirmation semantics

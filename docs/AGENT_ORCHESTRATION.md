@@ -4,6 +4,15 @@
 
 This document describes the repo's custom multi-agent workflow outside of the raw `.agent.md` files. It explains which role should run when, what each role is allowed to do, and how the hook layer enforces that contract at runtime.
 
+> **Fabrics note (SoT).** The `.github/agents` hook topology described here is
+> unchanged by the Inference / Execution / Transport fabrics (Phases 41–51). Those
+> flags wrap the **coding path** only: they influence how a subtask is dispatched,
+> not the routing/role contract below. PAL peripheral tasks stay on the peripheral
+> store, and **agents never open transport streams** — a transport handle only
+> calls the injected function and grants no new authority. See
+> [../PROJECT_STATUS.md](../PROJECT_STATUS.md) for the phase clock and
+> [../CONFIGURATION.md](../CONFIGURATION.md) for the flags (all default OFF).
+
 ## Topology
 
 The orchestration system is centered on a single coordinator:

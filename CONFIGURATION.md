@@ -206,6 +206,51 @@ node scripts/bench-transport.js    # N mocked round-trips per kind; writes ~/.li
 - **Optional iteration count:** `LIKU_TRANSPORT_BENCH_N` (default 8).
 - A faster bench row is not a cutover. Adaptive policy is a later phase and still requires an explicit flag.
 
+### QUIC Worker Lab (Liku↔Liku stand-in)
+
+The **QUIC worker lab** (Phase 50) is a Liku↔Liku loopback stand-in for a future
+QUIC / HTTP-3 worker channel. It exchanges length-prefixed JSON frames over
+`127.0.0.1` TCP. It is **off by default** and is **not production QUIC** — there is
+no UDP, no `msquic`/`quiche`, and no new npm dependency.
+
+```bash
+export LIKU_QUIC_WORKER_LAB=1     # allow TransportManager.select({ kind: 'quic' }) to return the lab stand-in
+```
+
+- **Flag off → the lab module is never required** by Supervisor / ai-service, and
+  `TransportManager.select({ kind: 'quic' })` throws `unsupported-transport`.
+- **Lab quic ≠ QUIC.** The handle reports `lab: true` / `standIn: 'loopback-framed-tcp'`.
+- **Loopback only.** The lab binds and connects to `127.0.0.1` / `localhost` / `::1`;
+  any non-loopback target is rejected.
+- **Payload allowlist:** `control`, `cancel`, `telemetry`, `ping`. Inference-shaped
+  payloads (anything with `messages`) and vendor hosts (`api.x.ai`,
+  `api.cerebras.ai`, `api.openai.com`, `api.anthropic.com`) are rejected.
+
+### Adaptive Transport Policy (Table Only)
+
+The **adaptive transport policy** (Phase 51) is an **advisory table**. It maps a
+workload to a *recommended* transport kind, optionally informed by the bench file.
+It **never calls `TransportManager.select()`**, never opens a socket, never spends
+budget, and never reads `caps.apiKey`. It is **off by default** (the module is
+lazily required).
+
+```bash
+export LIKU_TRANSPORT_POLICY=1        # enable recommendations
+export LIKU_TRANSPORT_POLICY_APPLY=1  # allow applied:true, but only for an already-supported kind
+```
+
+- **Recommendations are always legal kinds.** The returned `kind` is always a
+  currently-legal kind under the active flags. Reserved kinds (`http2`/`http3`) may
+  appear in `reason` text only.
+- **`APPLY` cannot conjure a transport.** `LIKU_TRANSPORT_POLICY_APPLY=1` may set
+  `applied: true` **only if** the recommended kind is both supported and
+  compatible. `APPLY` without `LIKU_QUIC_WORKER_LAB=1` does **not** enable `quic`.
+- **Missing bench file is safe.** If `~/.liku/bench/transport-bench.json` is absent
+  the table returns `reason: 'bench-missing'` and falls back to the default kind.
+- **Not wired into the Supervisor.** On current `main` the coding-path scheduler
+  still calls `select({ kind: 'inprocess' })` directly; `recommendTransport()` is
+  advisory only. See `PROJECT_STATUS.md` for the residual APPLY-pin note.
+
 ### Status and Diagnostics
 
 ```
@@ -387,4 +432,7 @@ Policy enforcement validates action plans against both negative and positive pol
 | `LIKU_TRANSPORT_FABRIC` | Route worker dispatch through the transport manager (inprocess / https-provider adapters) | off |
 | `LIKU_TRANSPORT_BENCH` | Run the HTTP/2 vs HTTP/3 measurement harness (injected stubs; not a production switch) | off |
 | `LIKU_TRANSPORT_BENCH_N` | Bench iterations per kind (default 8) | 8 |
+| `LIKU_QUIC_WORKER_LAB` | Allow `select({ kind: 'quic' })` to return the loopback lab stand-in (not production QUIC) | off |
+| `LIKU_TRANSPORT_POLICY` | Enable the advisory transport policy table (never calls `select()`) | off |
+| `LIKU_TRANSPORT_POLICY_APPLY` | Allow `applied: true`, but only for an already-supported/compatible kind | off |
 | `NODE_ENV` | Development/production mode | — |

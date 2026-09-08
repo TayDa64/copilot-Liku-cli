@@ -1,5 +1,9 @@
 # Gaming With AI (Copilot-Liku) — Implementation Plan
 
+> ⚠️ **Historical document — not the phase clock.** Forward-looking brainstorm,
+> not shipped status. For the current phase clock (HEAD, version, phases 40–51),
+> see [PROJECT_STATUS.md](PROJECT_STATUS.md).
+
 > **Forward-looking brainstorm**: This document explores gaming-oriented AI workflows using Liku's verification primitives.
 
 
