@@ -110,16 +110,22 @@ the changelog and in banner-marked historical docs.
   policy table can only recommend a currently-legal kind under the active flags.
 - **`test-bug-fixes.js` TradingView `SendInput` assertion** is a pre-existing
   Windows-only characterization check. It is not "broken" and is not touched here.
+- **Out-of-process lab is real; QUIC is not.** `LIKU_OOP_WORKER` (default off)
+  forks a second Node process for a caller-declared op (`identity`, `ping`,
+  `sleep`, `fail`). The child does not inherit API keys. The planner cannot set
+  `task.oop`. The coding-model handoff stays in-process unless that field was
+  set by an in-process caller. `node:quic` is not available and no native QUIC
+  dependency was added. `select('http3')` still throws.
 
 ---
 
 ## Fabric clock stopped after Phase 51
 
 The four fabrics are at a deliberate stopping point. Any next slice is
-**human-gated** and named, not numbered by inertia. The APPLY pin above is the
-remediation, not a new phase. Still not scheduled:
+**human-gated** and named, not numbered by inertia. The out-of-process lab above
+is the process-boundary slice, not a production QUIC transport. Still not scheduled:
 
-- a real out-of-process execution fabric or a real QUIC/HTTP-3 transport,
+- a real QUIC/HTTP-3 transport,
 - PAL / overlay / TradingView backlogs.
 
 ---

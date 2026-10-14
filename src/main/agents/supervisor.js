@@ -727,12 +727,56 @@ Model Capabilities: ${this.modelMetadata?.capabilities?.join(', ') || 'standard'
   }
 
   /**
+   * Out-of-process lab. Only when LIKU_OOP_WORKER is on AND the in-process caller
+   * set task.oop. The planner cannot set that field. The model handoff is skipped.
+   * @private
+   */
+  async _runDeclaredOop(task, agent) {
+    const oop = require('./oop-worker');
+    try {
+      const outcome = await oop.runIsolated({
+        op: task.oop && task.oop.op,
+        taskId: task.id,
+        payload: task.oop && task.oop.payload
+      });
+      return {
+        entry: {
+          taskId: task.id,
+          agent,
+          success: outcome.ok === true,
+          oop: {
+            op: outcome.op || null,
+            pid: outcome.pid || null,
+            ppid: outcome.ppid || null,
+            code: outcome.code || null
+          }
+        },
+        usedProvider: null
+      };
+    } catch (error) {
+      return {
+        entry: {
+          taskId: task.id,
+          agent,
+          success: false,
+          error: (error && error.code) || 'oop-failed'
+        },
+        usedProvider: null
+      };
+    }
+  }
+
+  /**
    * Phase 46: run a coding subtask. When the fabric flag is on, dispatch through
    * the fabric (which wraps the SAME sequential handoff/escalation loop and records
    * a bounded snapshot); otherwise call the loop directly (Phase 45 byte-compatible).
+   * A declared task.oop runs out of process only when LIKU_OOP_WORKER is on.
    * @private
    */
   async _runCoding(task, agent, message, baseContext, options = {}) {
+    if (task && task.oop && typeof task.oop === 'object' && isEnabledFlag(process.env.LIKU_OOP_WORKER)) {
+      return this._runDeclaredOop(task, agent);
+    }
     const fabric = this.getExecutionFabric();
     if (!fabric) {
       return this._runCodingHandoff(task, agent, message, baseContext, options);
