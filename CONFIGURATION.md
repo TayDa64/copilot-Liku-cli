@@ -166,6 +166,7 @@ export LIKU_PARALLEL_SCHEDULER=1   # route the decomposed plan through the sched
 ```
 
 - **Independence is DECLARED, never inferred.** A step is parallel-eligible only when it explicitly sets `independent: true` (structured field) — prose like "also"/"meanwhile" is never parsed. By default the plan still chains (Verifier waits for its Builder). A step may also set `serial: true` to force it to run alone.
+- **Live plans stay prose unless `LIKU_STRUCTURED_PLAN=1`.** That flag asks `createPlan` for a JSON array. `independent` counts only when it is the boolean `true`. A string `"true"`, or the words "in parallel" inside `description`, do not. Invalid JSON falls back to the numbered-list parser, which never sets the flag. Default off: even a JSON reply is parsed as prose.
 - **Ready rule:** a task launches only when every dependency is in terminal **success**. A dependency that failed/blocked/cancelled/skipped fails the dependent, which is marked `skipped` with reason `dependency-failed` (same as the sequential "Dependencies not satisfied" skip).
 - **Caps** (integers ≥ 1; a value below 1 or non-numeric falls back to the default). Exceeding a cap leaves the task queued until a slot frees — no extra provider calls are made past the cap:
 
@@ -431,6 +432,7 @@ Policy enforcement validates action plans against both negative and positive pol
 | `LIKU_INDEPENDENT_VERIFIER` | Route Verifier to a different provider than Builder | off |
 | `LIKU_EXECUTION_FABRIC` | Route coding subtasks through the in-process Execution Fabric | off |
 | `LIKU_PARALLEL_SCHEDULER` | Run declared-independent coding subtasks concurrently (requires `LIKU_EXECUTION_FABRIC`) | off |
+| `LIKU_STRUCTURED_PLAN` | `createPlan` may accept a JSON step array; only boolean `independent: true` declares independence | off |
 | `LIKU_MAX_PARALLEL_TASKS` | Scheduler cap: max coding tasks in flight | 2 |
 | `LIKU_MAX_PARALLEL_PER_PROVIDER` | Scheduler cap: max in flight per provider | 1 |
 | `LIKU_MAX_PARALLEL_PER_ROLE` | Scheduler cap: max in flight per role | 2 |

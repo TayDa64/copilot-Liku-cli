@@ -37,6 +37,8 @@ The default cognitive fragment stays **262 BPE**.
   module stays off the Supervisor require graph.
 - `parseSteps` keeps `independent: true` only when a structured step object sets
   that boolean. Prose is not parsed for independence.
+- `LIKU_STRUCTURED_PLAN` (default off) lets `createPlan` accept a JSON step array.
+  Only boolean `true` declares independence. Invalid JSON falls back to numbered prose.
 
 ## v0.0.14 — 2026-03-17
 
