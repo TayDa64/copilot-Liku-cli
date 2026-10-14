@@ -100,7 +100,9 @@ the changelog and in banner-marked historical docs.
   Flags off: it is not on the Supervisor require graph, and the select is unchanged.
   This pin cannot select `http3`, `quic`, or `https-provider` for a coding handoff.
 - **Declared independence is still not inferred from prose.** A structured step
-  object may set `independent: true`. Words like "in parallel" do not.
+  object may set `independent: true`. Words like "in parallel" do not. The live
+  planner emits that object only when `LIKU_STRUCTURED_PLAN=1` (default off).
+  Invalid JSON falls back to numbered prose, which never sets the flag.
 - **`select('http3')` still throws** `unsupported-transport`.
 - **`select('quic')` still throws** unless `LIKU_QUIC_WORKER_LAB=1`, and even then
   only the loopback lab stand-in is returned.

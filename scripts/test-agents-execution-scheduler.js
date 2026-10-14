@@ -20,7 +20,8 @@ const { AgentRole } = require(path.join(__dirname, '..', 'src', 'main', 'agents'
 const FLAG_KEYS = [
   'LIKU_PARALLEL_SCHEDULER', 'LIKU_EXECUTION_FABRIC', 'LIKU_INFERENCE_FABRIC',
   'LIKU_TASK_CONTRACTS', 'LIKU_ESCALATION', 'LIKU_INDEPENDENT_VERIFIER',
-  'LIKU_MAX_PARALLEL_TASKS', 'LIKU_MAX_PARALLEL_PER_PROVIDER', 'LIKU_MAX_PARALLEL_PER_ROLE'
+  'LIKU_MAX_PARALLEL_TASKS', 'LIKU_MAX_PARALLEL_PER_PROVIDER', 'LIKU_MAX_PARALLEL_PER_ROLE',
+  'LIKU_STRUCTURED_PLAN'
 ];
 
 let failures = 0;
@@ -341,6 +342,41 @@ test('prose does not declare independence; a structured step object may', () => 
   ]);
   assert.strictEqual(structured[0].independent, true);
   assert.strictEqual(structured[1].independent, undefined, 'only boolean true is a declaration');
+});
+
+test('LIKU_STRUCTURED_PLAN off: JSON independence is ignored', async () => {
+  delete process.env.LIKU_STRUCTURED_PLAN;
+  const { sup } = makeSupervisor();
+  sup.chat = async () => ({
+    text: '[{"description":"implement A in parallel","agent":"builder","independent":true}]'
+  });
+  const plan = await sup.createPlan({ analysis: 'x' });
+  assert.strictEqual(plan.steps.length, 0, 'flag off must not parse a JSON array as a plan');
+});
+
+test('LIKU_STRUCTURED_PLAN on: boolean true is the only declaration', async () => {
+  process.env.LIKU_STRUCTURED_PLAN = '1';
+  const { sup } = makeSupervisor();
+  sup.chat = async () => ({
+    text: '```json\n[{"description":"implement A in parallel","agent":"Builder","independent":true},{"description":"verify A","agent":"verifier","independent":"true"},{"description":"verify the build","agent":"builder","independent":false}]\n```'
+  });
+  const plan = await sup.createPlan({ analysis: 'x' });
+  assert.strictEqual(plan.steps.length, 3);
+  assert.strictEqual(plan.steps[0].agent, 'builder');
+  assert.strictEqual(plan.steps[0].independent, true);
+  assert.strictEqual(plan.steps[1].agent, 'verifier');
+  assert.strictEqual(plan.steps[1].independent, undefined);
+  assert.strictEqual(plan.steps[2].agent, 'builder', 'agent field wins; description keywords do not');
+  assert.strictEqual(plan.steps[2].independent, undefined);
+});
+
+test('LIKU_STRUCTURED_PLAN on: invalid JSON falls back to prose and stays chained', async () => {
+  process.env.LIKU_STRUCTURED_PLAN = '1';
+  const { sup } = makeSupervisor();
+  sup.chat = async () => ({ text: '1. implement the parser in parallel\n2. verify the parser' });
+  const plan = await sup.createPlan({ analysis: 'x' });
+  assert.ok(plan.steps.length >= 2);
+  assert.ok(plan.steps.every((step) => step.independent !== true));
 });
 
 test('escalation stays sequential inside one taskId (rungs not parallelized)', async () => {

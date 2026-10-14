@@ -20,6 +20,38 @@ const executionFabric = require('./execution-fabric');
 const executionScheduler = require('./execution-scheduler');
 const transportFabric = require('./transport-fabric');
 
+function isEnabledFlag(value) {
+  return /^(1|true|yes|on)$/i.test(String(value || '').trim());
+}
+
+function isStructuredPlanEnabled(env = process.env) {
+  return isEnabledFlag(env.LIKU_STRUCTURED_PLAN);
+}
+
+const KNOWN_AGENTS = new Set(Object.values(AgentRole));
+const MAX_STRUCTURED_STEPS = 8;
+
+function canonicalAgent(agent) {
+  if (typeof agent !== 'string') return AgentRole.SUPERVISOR;
+  const raw = agent.trim().toLowerCase();
+  return KNOWN_AGENTS.has(raw) ? raw : AgentRole.SUPERVISOR;
+}
+
+function extractJsonArray(text) {
+  const raw = String(text || '').trim();
+  const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const body = fenced ? fenced[1].trim() : raw;
+  const start = body.indexOf('[');
+  const end = body.lastIndexOf(']');
+  if (start < 0 || end <= start) return null;
+  try {
+    const parsed = JSON.parse(body.slice(start, end + 1));
+    return Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Parse a comma-separated severity allow-list into a normalized Set. Used to
  * decide which severities may be auto-acknowledged. Empty by default.
@@ -232,7 +264,18 @@ Context: ${JSON.stringify(context)}`;
   }
 
   async createPlan(analysis) {
-    const prompt = `Based on this analysis, create a 2-5 step execution plan.
+    const structured = isStructuredPlanEnabled();
+    const prompt = structured
+      ? `Based on this analysis, return ONLY a JSON array of 2 to 5 step objects.
+Each object must be {"description":"...","agent":"builder"|"verifier"|"supervisor","independent":false}.
+Set "independent" to the boolean true only when that step has no dependency on any earlier step. Otherwise false.
+The description text is not a declaration. Do not wrap the array in commentary.
+
+Analysis: ${analysis.analysis}
+
+Current Model: ${this.modelMetadata?.modelId || 'unknown'}
+Model Capabilities: ${this.modelMetadata?.capabilities?.join(', ') || 'standard'}`
+      : `Based on this analysis, create a 2-5 step execution plan.
 Each step should be concrete and actionable.
 Specify whether each step needs Builder (implementation) or Verifier (validation).
 
@@ -242,11 +285,13 @@ Current Model: ${this.modelMetadata?.modelId || 'unknown'}
 Model Capabilities: ${this.modelMetadata?.capabilities?.join(', ') || 'standard'}`;
 
     const response = await this.chat(prompt);
-    
+    const text = response && response.text;
+    const steps = structured ? this._stepsFromStructuredOrProse(text) : this.parseSteps(text);
+
     return {
-      steps: this.parseSteps(response.text),
-      rawPlan: response.text,
-      assumptions: this.extractAssumptions(response.text),
+      steps,
+      rawPlan: text,
+      assumptions: this.extractAssumptions(typeof text === 'string' ? text : ''),
       modelContext: {
         modelId: this.modelMetadata?.modelId,
         provider: this.modelMetadata?.provider,
@@ -254,6 +299,21 @@ Model Capabilities: ${this.modelMetadata?.capabilities?.join(', ') || 'standard'
       },
       planId: `plan-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
     };
+  }
+
+  /**
+   * Flag-on only. A JSON array is a declaration. Anything else, including prose
+   * that says "in parallel", falls back to the numbered-list parser, which never
+   * sets independent.
+   * @private
+   */
+  _stepsFromStructuredOrProse(text) {
+    const parsed = extractJsonArray(text);
+    if (parsed) {
+      const steps = this.parseSteps(parsed.slice(0, MAX_STRUCTURED_STEPS));
+      if (steps.length) return steps;
+    }
+    return this.parseSteps(text);
   }
 
   parseSteps(planText) {
@@ -265,9 +325,10 @@ Model Capabilities: ${this.modelMetadata?.capabilities?.join(', ') || 'standard'
         if (!step || typeof step !== 'object') continue;
         const out = {
           description: step.description != null ? String(step.description) : '',
-          agent: step.agent || AgentRole.SUPERVISOR,
+          agent: canonicalAgent(step.agent),
           status: step.status || 'pending'
         };
+        if (!out.description.trim()) continue;
         if (step.independent === true) out.independent = true;
         if (step.serial === true) out.serial = true;
         steps.push(out);
