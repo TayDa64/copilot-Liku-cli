@@ -167,6 +167,20 @@ export LIKU_PARALLEL_SCHEDULER=1   # route the decomposed plan through the sched
 
 - **Independence is DECLARED, never inferred.** A step is parallel-eligible only when it explicitly sets `independent: true` (structured field) — prose like "also"/"meanwhile" is never parsed. By default the plan still chains (Verifier waits for its Builder). A step may also set `serial: true` to force it to run alone.
 - **Live plans stay prose unless `LIKU_STRUCTURED_PLAN=1`.** That flag asks `createPlan` for a JSON array. `independent` counts only when it is the boolean `true`. A string `"true"`, or the words "in parallel" inside `description`, do not. Invalid JSON falls back to the numbered-list parser, which never sets the flag. Default off: even a JSON reply is parsed as prose.
+
+### Out-of-process worker lab
+
+`LIKU_OOP_WORKER` defaults **off**. It forks a second Node process for a closed op set: `identity`, `ping`, `sleep`, `fail`. This is not QUIC and not HTTP/3. Node in this repo has no `node:quic` built-in, and no native QUIC package is added.
+
+```bash
+export LIKU_OOP_WORKER=1
+```
+
+- The child environment is a fresh allowlist (`PATH`, `HOME`, the child marker). API keys are not copied.
+- Vendor hosts and secret-shaped payload fields are rejected **before** `fork`.
+- A model plan cannot set `task.oop`. `parseSteps` does not copy that field. Only an in-process caller who already holds the task object can declare it.
+- When the flag is off, a `task.oop` field is ignored and the coding handoff stays in-process. When it is on, that declared op skips the model handoff.
+- `select('http3')` still throws. `select('quic')` still throws unless the separate QUIC lab flag is on, and that lab is still a loopback TCP stand-in.
 - **Ready rule:** a task launches only when every dependency is in terminal **success**. A dependency that failed/blocked/cancelled/skipped fails the dependent, which is marked `skipped` with reason `dependency-failed` (same as the sequential "Dependencies not satisfied" skip).
 - **Caps** (integers ≥ 1; a value below 1 or non-numeric falls back to the default). Exceeding a cap leaves the task queued until a slot frees — no extra provider calls are made past the cap:
 
@@ -442,4 +456,5 @@ Policy enforcement validates action plans against both negative and positive pol
 | `LIKU_QUIC_WORKER_LAB` | Allow `select({ kind: 'quic' })` to return the loopback lab stand-in (not production QUIC) | off |
 | `LIKU_TRANSPORT_POLICY` | Enable the advisory transport policy table (never calls `select()`) | off |
 | `LIKU_TRANSPORT_POLICY_APPLY` | Allow `applied: true`, but only for an already-supported/compatible kind | off |
+| `LIKU_OOP_WORKER` | Run a caller-declared `task.oop` op in a second Node process (`identity`, `ping`, `sleep`, `fail` only) | off |
 | `NODE_ENV` | Development/production mode | — |

@@ -39,6 +39,9 @@ The default cognitive fragment stays **262 BPE**.
   that boolean. Prose is not parsed for independence.
 - `LIKU_STRUCTURED_PLAN` (default off) lets `createPlan` accept a JSON step array.
   Only boolean `true` declares independence. Invalid JSON falls back to numbered prose.
+- `LIKU_OOP_WORKER` (default off) forks a second Node process for a caller-declared
+  op (`identity`, `ping`, `sleep`, `fail`). Not QUIC. Secrets are not copied into
+  the child. The planner cannot set `task.oop`.
 
 ## v0.0.14 — 2026-03-17
 
