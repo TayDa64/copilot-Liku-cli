@@ -257,8 +257,26 @@ Model Capabilities: ${this.modelMetadata?.capabilities?.join(', ') || 'standard'
   }
 
   parseSteps(planText) {
+    // Structured plans may declare independence. Prose never does — words like
+    // "parallel" / "meanwhile" / "independently" are not a declaration.
+    if (Array.isArray(planText)) {
+      const steps = [];
+      for (const step of planText) {
+        if (!step || typeof step !== 'object') continue;
+        const out = {
+          description: step.description != null ? String(step.description) : '',
+          agent: step.agent || AgentRole.SUPERVISOR,
+          status: step.status || 'pending'
+        };
+        if (step.independent === true) out.independent = true;
+        if (step.serial === true) out.serial = true;
+        steps.push(out);
+      }
+      return steps;
+    }
+
     const steps = [];
-    const lines = planText.split('\n');
+    const lines = String(planText || '').split('\n');
     
     for (const line of lines) {
       const match = line.match(/^\d+\.\s*(.+)/);
@@ -493,7 +511,7 @@ Model Capabilities: ${this.modelMetadata?.capabilities?.join(', ') || 'standard'
     let runTask = baseRunTask;
     const transport = this._getTransportManager();
     if (transport) {
-      const handle = transport.select({ kind: 'inprocess' });
+      const handle = this._maybeRecommendTransport(transport);
       runTask = (task, ctx) => handle.invoke({ task, ctx });
     }
     const scheduler = executionScheduler.createExecutionScheduler({ fabric, runTask });
@@ -504,6 +522,40 @@ Model Capabilities: ${this.modelMetadata?.capabilities?.join(', ') || 'standard'
       task.status = entry.skipped ? 'skipped' : (entry.success ? 'completed' : 'failed');
     }
     return results;
+  }
+
+  /**
+   * Fail-closed APPLY pin. The coding path workload is agent-handoff, whose only
+   * compatible kind is inprocess. Policy is consulted only when BOTH
+   * LIKU_TRANSPORT_POLICY and LIKU_TRANSPORT_POLICY_APPLY are on, and the module
+   * is required only then. Off → select({ kind: 'inprocess' }) and transport-policy
+   * stays off the Supervisor require graph. Never forwards caps.apiKey. Never
+   * selects http2/http3/quic/ipc/https-provider from this path.
+   * @private
+   */
+  _maybeRecommendTransport(transport) {
+    const on = (value) => /^(1|true|yes|on)$/i.test(String(value || '').trim());
+    if (!on(process.env.LIKU_TRANSPORT_POLICY) || !on(process.env.LIKU_TRANSPORT_POLICY_APPLY)) {
+      this._lastTransportRecommendation = null;
+      return transport.select({ kind: 'inprocess' });
+    }
+    let rec = null;
+    try {
+      const tp = require('./transport-policy');
+      rec = tp.recommendTransport({
+        workload: 'agent-handoff',
+        caps: {},
+        env: process.env
+      });
+    } catch {
+      rec = null;
+    }
+    this._lastTransportRecommendation = rec;
+    if (rec && rec.kind && rec.kind !== 'inprocess') {
+      rec = { ...rec, applied: false, reason: `coding-path-refused:${rec.kind}` };
+      this._lastTransportRecommendation = rec;
+    }
+    return transport.select({ kind: 'inprocess' });
   }
 
   /**

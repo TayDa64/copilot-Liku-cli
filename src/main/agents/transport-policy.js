@@ -8,7 +8,8 @@
  *
  * LIKU_TRANSPORT_POLICY=1 enables recommendations.
  * LIKU_TRANSPORT_POLICY_APPLY=1 may set applied:true IFF the kind is supported.
- * Default OFF = Phase 50 byte-compatible (this module is lazily required).
+ * Default OFF. The Supervisor requires this module only inside
+ * `_maybeRecommendTransport` when both policy flags are on.
  */
 
 'use strict';

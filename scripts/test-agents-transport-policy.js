@@ -17,7 +17,9 @@ const { createTransportManager } = transport;
 
 const FLAG_KEYS = [
   'LIKU_TRANSPORT_POLICY', 'LIKU_TRANSPORT_POLICY_APPLY',
-  'LIKU_QUIC_WORKER_LAB', 'LIKU_TRANSPORT_FABRIC'
+  'LIKU_QUIC_WORKER_LAB', 'LIKU_TRANSPORT_FABRIC',
+  'LIKU_PARALLEL_SCHEDULER', 'LIKU_EXECUTION_FABRIC',
+  'LIKU_MAX_PARALLEL_TASKS', 'LIKU_MAX_PARALLEL_PER_PROVIDER', 'LIKU_MAX_PARALLEL_PER_ROLE'
 ];
 
 let failures = 0;
@@ -76,6 +78,55 @@ test('flags off: Supervisor require graph does not load transport-policy', () =>
   }
   walk(supervisorId);
   assert.ok(!loaded.includes(policyId), 'Supervisor must not require transport-policy.js when flags are off');
+});
+
+test('APPLY on: coding path consults policy and still selects inprocess', async () => {
+  process.env.LIKU_TRANSPORT_FABRIC = '1';
+  process.env.LIKU_PARALLEL_SCHEDULER = '1';
+  process.env.LIKU_EXECUTION_FABRIC = '1';
+  process.env.LIKU_TRANSPORT_POLICY = '1';
+  process.env.LIKU_TRANSPORT_POLICY_APPLY = '1';
+  process.env.LIKU_MAX_PARALLEL_TASKS = '2';
+  process.env.LIKU_MAX_PARALLEL_PER_PROVIDER = '2';
+  process.env.LIKU_MAX_PARALLEL_PER_ROLE = '2';
+  delete process.env.LIKU_QUIC_WORKER_LAB;
+  const { SupervisorAgent } = require(path.join(__dirname, '..', 'src', 'main', 'agents', 'supervisor.js'));
+  const { AgentRole } = require(path.join(__dirname, '..', 'src', 'main', 'agents', 'base-agent.js'));
+  const sup = new SupervisorAgent({});
+  sup.handoffToBuilder = async () => ({ success: true, usedProvider: 'copilot' });
+  const plan = { planId: 'p1', steps: [
+    { description: 'b1', agent: AgentRole.BUILDER, independent: true }
+  ] };
+  sup.decomposedTasks = await sup.decomposeTasks(plan);
+  const results = await sup.executePlan(sup.decomposedTasks, {});
+  assert.strictEqual(results[0].success, true);
+  const rec = sup._lastTransportRecommendation;
+  assert.ok(rec, 'APPLY pin recorded a recommendation');
+  assert.strictEqual(rec.workload, 'agent-handoff');
+  assert.strictEqual(rec.kind, 'inprocess');
+  assert.strictEqual(rec.applied, true);
+  assert.ok(!('apiKey' in rec));
+  const mgr = createTransportManager({ env: process.env });
+  assert.throws(() => mgr.select({ kind: 'http3' }), (err) => err && err.code === 'unsupported-transport');
+  assert.throws(() => mgr.select({ kind: 'quic' }), (err) => err && err.code === 'unsupported-transport');
+});
+
+test('APPLY off: scheduler does not consult policy', async () => {
+  process.env.LIKU_TRANSPORT_FABRIC = '1';
+  process.env.LIKU_PARALLEL_SCHEDULER = '1';
+  process.env.LIKU_EXECUTION_FABRIC = '1';
+  delete process.env.LIKU_TRANSPORT_POLICY;
+  delete process.env.LIKU_TRANSPORT_POLICY_APPLY;
+  const { SupervisorAgent } = require(path.join(__dirname, '..', 'src', 'main', 'agents', 'supervisor.js'));
+  const { AgentRole } = require(path.join(__dirname, '..', 'src', 'main', 'agents', 'base-agent.js'));
+  const sup = new SupervisorAgent({});
+  sup.handoffToBuilder = async () => ({ success: true, usedProvider: 'copilot' });
+  sup.decomposedTasks = await sup.decomposeTasks({
+    planId: 'p1',
+    steps: [{ description: 'b1', agent: AgentRole.BUILDER, independent: true }]
+  });
+  await sup.executePlan(sup.decomposedTasks, {});
+  assert.strictEqual(sup._lastTransportRecommendation, null);
 });
 
 test('bench missing: agent-handoff → inprocess, applied false, reason bench-missing', () => {

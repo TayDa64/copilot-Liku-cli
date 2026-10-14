@@ -93,11 +93,14 @@ the changelog and in banner-marked historical docs.
 
 ## Honest residuals (designed, not landed on `main`)
 
-- **Supervisor APPLY pin.** A `_maybeRecommendTransport` hook inside
-  `_executePlanViaScheduler` is *designed*, but on current `main` the coding-path
-  scheduler still calls `TransportManager.select({ kind: 'inprocess' })` directly.
-  `transport-policy.recommendTransport()` is advisory-only and is **not** wired
-  into the Supervisor. Treat the pin as optional future work, not as shipped.
+- **Supervisor APPLY pin is wired, and fail-closed.** When both
+  `LIKU_TRANSPORT_POLICY` and `LIKU_TRANSPORT_POLICY_APPLY` are on, the coding-path
+  scheduler calls `recommendTransport({ workload: 'agent-handoff' })` and then
+  `select({ kind: 'inprocess' })`. The policy module is required only in that case.
+  Flags off: it is not on the Supervisor require graph, and the select is unchanged.
+  This pin cannot select `http3`, `quic`, or `https-provider` for a coding handoff.
+- **Declared independence is still not inferred from prose.** A structured step
+  object may set `independent: true`. Words like "in parallel" do not.
 - **`select('http3')` still throws** `unsupported-transport`.
 - **`select('quic')` still throws** unless `LIKU_QUIC_WORKER_LAB=1`, and even then
   only the loopback lab stand-in is returned.
@@ -111,13 +114,11 @@ the changelog and in banner-marked historical docs.
 ## Fabric clock stopped after Phase 51
 
 The four fabrics are at a deliberate stopping point. Any next slice is
-**human-gated** and named, not numbered by inertia. Candidate slices (not
-scheduled here):
+**human-gated** and named, not numbered by inertia. The APPLY pin above is the
+remediation, not a new phase. Still not scheduled:
 
-- wire the Supervisor APPLY pin,
-- open a new plenum for real out-of-process execution or a real QUIC/HTTP-3
-  transport,
-- resume PAL / overlay / TradingView backlogs.
+- a real out-of-process execution fabric or a real QUIC/HTTP-3 transport,
+- PAL / overlay / TradingView backlogs.
 
 ---
 
