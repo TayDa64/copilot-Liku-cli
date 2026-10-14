@@ -231,25 +231,30 @@ export LIKU_QUIC_WORKER_LAB=1     # allow TransportManager.select({ kind: 'quic'
 The **adaptive transport policy** (Phase 51) is an **advisory table**. It maps a
 workload to a *recommended* transport kind, optionally informed by the bench file.
 It **never calls `TransportManager.select()`**, never opens a socket, never spends
-budget, and never reads `caps.apiKey`. It is **off by default** (the module is
-lazily required).
+budget, and never reads `caps.apiKey`. It is **off by default**. The Supervisor
+does **not** load this module unless both `LIKU_TRANSPORT_POLICY` and
+`LIKU_TRANSPORT_POLICY_APPLY` are on; then `_maybeRecommendTransport` requires it.
 
 ```bash
 export LIKU_TRANSPORT_POLICY=1        # enable recommendations
-export LIKU_TRANSPORT_POLICY_APPLY=1  # allow applied:true, but only for an already-supported kind
+export LIKU_TRANSPORT_POLICY_APPLY=1  # coding path may consult the table
 ```
 
 - **Recommendations are always legal kinds.** The returned `kind` is always a
   currently-legal kind under the active flags. Reserved kinds (`http2`/`http3`) may
-  appear in `reason` text only.
+  appear in `reason` text only. The module still never calls `select()`.
 - **`APPLY` cannot conjure a transport.** `LIKU_TRANSPORT_POLICY_APPLY=1` may set
   `applied: true` **only if** the recommended kind is both supported and
   compatible. `APPLY` without `LIKU_QUIC_WORKER_LAB=1` does **not** enable `quic`.
+- **Coding path stays `inprocess`.** When both flags are on, the scheduler consults
+  the table with workload `agent-handoff` and then calls
+  `select({ kind: 'inprocess' })`. It will not select `https-provider`, `quic`,
+  `http2`, or `http3` for that workload. Flags off: the module is not required and
+  the select is the same hardcoded `inprocess` call.
 - **Missing bench file is safe.** If `~/.liku/bench/transport-bench.json` is absent
   the table returns `reason: 'bench-missing'` and falls back to the default kind.
-- **Not wired into the Supervisor.** On current `main` the coding-path scheduler
-  still calls `select({ kind: 'inprocess' })` directly; `recommendTransport()` is
-  advisory only. See `PROJECT_STATUS.md` for the residual APPLY-pin note.
+- **Independence stays declared.** `parseSteps` copies `independent: true` only from
+  a structured step object. Prose such as "in parallel" is not a declaration.
 
 ### Status and Diagnostics
 

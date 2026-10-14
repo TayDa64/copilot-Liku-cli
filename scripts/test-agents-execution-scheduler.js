@@ -330,6 +330,19 @@ test('shared budget ledger: second parallel call is blocked, no retry past polic
   assert.strictEqual(captured.length, 2, 'no third HTTPS call — budget-exceeded never auto-retries');
 });
 
+test('prose does not declare independence; a structured step object may', () => {
+  const { sup } = makeSupervisor();
+  const prose = sup.parseSteps('1. implement A in parallel\n2. meanwhile implement B independently');
+  assert.ok(prose.length >= 2);
+  assert.ok(prose.every((step) => step.independent !== true), 'prose must not set independent');
+  const structured = sup.parseSteps([
+    { description: 'b1 meanwhile in parallel', agent: AgentRole.BUILDER, independent: true },
+    { description: 'b2', agent: AgentRole.BUILDER, independent: 'true' }
+  ]);
+  assert.strictEqual(structured[0].independent, true);
+  assert.strictEqual(structured[1].independent, undefined, 'only boolean true is a declaration');
+});
+
 test('escalation stays sequential inside one taskId (rungs not parallelized)', async () => {
   process.env.LIKU_PARALLEL_SCHEDULER = '1';
   process.env.LIKU_EXECUTION_FABRIC = '1';

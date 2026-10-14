@@ -27,8 +27,16 @@ documents work already on `main`.
 - **51** (PR #32 `8e495e4e`) — advisory transport policy table (`LIKU_TRANSPORT_POLICY` / `LIKU_TRANSPORT_POLICY_APPLY`).
 
 All fabric flags default **OFF**. `select('http3')` still throws; `select('quic')`
-throws unless the lab flag is set; the policy table is advisory and never calls
-`select()`. The default cognitive fragment stays **262 BPE**.
+throws unless the lab flag is set; `recommendTransport()` never calls `select()`.
+The default cognitive fragment stays **262 BPE**.
+
+### Post-51 remediation (not a new phase)
+
+- Coding-path APPLY pin: both policy flags on → consult `recommendTransport` for
+  `agent-handoff`, then `select({ kind: 'inprocess' })`. Flags off → the policy
+  module stays off the Supervisor require graph.
+- `parseSteps` keeps `independent: true` only when a structured step object sets
+  that boolean. Prose is not parsed for independence.
 
 ## v0.0.14 — 2026-03-17
 
